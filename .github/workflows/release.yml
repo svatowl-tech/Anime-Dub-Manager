@@ -1,0 +1,170 @@
+name: Build & Release Desktop App
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Custom Release Notes'
+        required: false
+        default: 'Automated release build.'
+
+permissions:
+  contents: write
+  packages: write
+  issues: write
+
+jobs:
+  # 1. Job to prepare or ensure the release exists and obtain version info
+  prepare_release:
+    name: Prepare GitHub Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      tag_name: ${{ steps.get_version.outputs.tag_name }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from package.json
+        id: get_version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_NAME="${{ github.ref_name }}"
+          else
+            TAG_NAME="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Target Version: ${VERSION}, Tag: ${TAG_NAME}"
+
+      - name: Create or update GitHub Release
+        id: create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.tag_name }}
+          name: "Anime Dub Manager ${{ steps.get_version.outputs.tag_name }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          body: |
+            ## 🎙️ Anime Dub Manager ${{ steps.get_version.outputs.tag_name }}
+            
+            Автоматическая сборка релиза приложения Anime Dub Manager для Windows, macOS и Linux.
+            
+            ### 📦 Доступные бинарные файлы:
+            - **Windows**: Инсталлятор `.exe` (NSIS) и Портативная версия `.exe` (x64)
+            - **macOS**: Образ `.dmg` и `.zip` архив
+            - **Linux**: Универсальный пакет `.AppImage` и пакет `.deb` (Debian/Ubuntu)
+            
+            ---
+            *Собрано автоматически через GitHub Actions CI/CD.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. Build for Windows, macOS, and Linux in parallel
+  build_binaries:
+    name: Build (${{ matrix.platform.name }})
+    needs: prepare_release
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Windows (x64)
+            os: windows-latest
+            artifact_ext: '*.exe'
+          - name: macOS (x64 / Universal)
+            os: macos-latest
+            artifact_ext: '*.dmg,*.zip'
+          - name: Linux (AppImage / DEB)
+            os: ubuntu-latest
+            artifact_ext: '*.AppImage,*.deb'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22 (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install Linux Build Dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libarchive-tools dpkg fakeroot rpm graphicsmagick icnsutils
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Generate Cross-Platform Icons
+        run: node scripts/generate-icons.cjs
+
+      - name: Cache FFmpeg Binaries
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: assets/bin
+          key: ${{ runner.os }}-ffmpeg-${{ hashFiles('scripts/download-ffmpeg.js') }}
+          restore-keys: |
+            ${{ runner.os }}-ffmpeg-
+
+      - name: Download & Setup FFmpeg Binaries
+        run: node scripts/download-ffmpeg.js
+        env:
+          NODE_ENV: production
+
+      - name: Generate App Metadata
+        run: node scripts/generate-metadata.js
+
+      - name: Prepare Sidecars & Local ML Assets
+        run: node scripts/prepare-sidecars.js
+
+      - name: Build Web Frontend (Vite)
+        run: npm run build
+
+      - name: Build Desktop Application (electron-builder)
+        run: npx electron-builder --publish never
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Upload Binaries to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare_release.outputs.tag_name }}
+          files: |
+            out/*.exe
+            out/*.dmg
+            out/*.zip
+            out/*.AppImage
+            out/*.deb
+            out/latest*.yml
+            out/latest-mac.yml
+            out/latest-linux.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Build Artifacts as CI Workflow Backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnimeDubManager-${{ matrix.platform.os }}-binaries
+          path: |
+            out/*.exe
+            out/*.dmg
+            out/*.zip
+            out/*.AppImage
+            out/*.deb
+          if-no-files-found: warn

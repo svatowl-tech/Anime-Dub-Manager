@@ -1,0 +1,78 @@
+appId: com.dubbing.app
+productName: Anime Dub Manager
+copyright: "Copyright © 2026 Svat.Owl"
+npmRebuild: false
+
+directories:
+  output: out
+  buildResources: assets
+
+extraResources:
+  - from: assets/bin
+    to: bin
+  - from: assets/models
+    to: models
+  - from: whisperlivekit
+    to: whisperlivekit
+
+files:
+  - dist/**/*
+  - electron/**/*
+  - package.json
+  - node_modules/**/*
+  - "!node_modules/*/{CHANGELOG.md,README.md,README,readme.md,readme}"
+  - "!node_modules/*/{test,__tests__,tests,powered-test,example,examples}"
+  - "!node_modules/**/*.d.ts"
+  - "!node_modules/**/*.map"
+
+publish:
+  provider: github
+  owner: SvatOwl
+  repo: anime-dub-manager
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+  icon: assets/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: "Anime Dub Manager"
+  installerIcon: assets/icon.ico
+  uninstallerIcon: assets/icon.ico
+  # Web Setup simulation via nsis configuration
+  # In electron-builder, "Web Setup" is usually just a small installer that downloads the rest, 
+  # but here we'll stick to a standard NSIS installer as requested for "Web Setup" style.
+
+portable:
+  artifactName: "${productName} Portable ${version}.${ext}"
+
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.video
+  icon: assets/icon.icns
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Video
+  icon: assets/icon.png
+  maintainer: "Svat.Owl <Svat.Owl@gmail.com>"
+
+asarUnpack:
+  - "**/node_modules/ffmpeg-static/**/*"
+  - "**/node_modules/onnxruntime-node/**/*"
+  - "**/node_modules/@xenova/transformers/**/*"
+  - "**/node_modules/youtube-dl-exec/**/*"
