@@ -12,6 +12,7 @@ import {
   applyStressToText,
   SHORTCUT_CODES,
 } from "./utils";
+import { applyGenderPrefix, getNextNumberedRole } from "./roleHelpers";
 
 export function useSubtitleEditorState(
   currentEpisode: Episode | null,
@@ -804,13 +805,17 @@ export function useSubtitleEditorState(
   };
 
   const uniqueNames = useMemo(() => {
+    // Only include roles present in the current episode (subtitles lines and current episode assignments)
+    const episodeAssignedActors = (currentEpisode?.assignments || []).map(a => a.characterName);
+    const lineActors = lines.map(l => updates[l.rawLineIndex]?.name !== undefined ? updates[l.rawLineIndex].name : l.name);
+
     return Array.from(
       new Set([
-        ...lines.map((l) => l.name).filter((n) => n && n.trim() !== ""),
-        ...projectCharacters,
+        ...lineActors.filter(n => n && n.trim() !== "" && n !== "Default"),
+        ...episodeAssignedActors.filter(n => n && n.trim() !== "" && n !== "Default")
       ]),
     ).sort();
-  }, [lines, projectCharacters]);
+  }, [lines, updates, currentEpisode?.assignments]);
 
   useEffect(() => {
     setStableNames(prev => {
@@ -844,6 +849,52 @@ export function useSubtitleEditorState(
     }
   }, [selectedLines, updates, activeLineIndex, pushStateForUndo]);
 
+  const handleApplyGenderPrefix = useCallback((gender: 'M' | 'F') => {
+    pushStateForUndo();
+    const newUpdates = { ...updates };
+
+    if (selectedLines.size > 0) {
+      selectedLines.forEach((idx) => {
+        const line = lines.find((l) => l.rawLineIndex === idx);
+        const currentName = updates[idx]?.name !== undefined ? updates[idx].name : (line?.name || '');
+        newUpdates[idx] = { ...newUpdates[idx], name: applyGenderPrefix(currentName, gender) };
+      });
+      setUpdates(newUpdates);
+    } else if (activeLineIndex !== null) {
+      const line = lines.find((l) => l.rawLineIndex === activeLineIndex);
+      const currentName = updates[activeLineIndex]?.name !== undefined ? updates[activeLineIndex].name : (line?.name || '');
+      newUpdates[activeLineIndex] = { ...newUpdates[activeLineIndex], name: applyGenderPrefix(currentName, gender) };
+      setUpdates(newUpdates);
+    } else if (massName) {
+      setMassName(applyGenderPrefix(massName, gender));
+    }
+  }, [selectedLines, activeLineIndex, lines, updates, massName, pushStateForUndo]);
+
+  const handleApplyNextNumber = useCallback(() => {
+    pushStateForUndo();
+    const allRolesInEp = lines.map((l) => updates[l.rawLineIndex]?.name !== undefined ? updates[l.rawLineIndex].name : l.name);
+    const newUpdates = { ...updates };
+
+    if (selectedLines.size > 0) {
+      selectedLines.forEach((idx) => {
+        const line = lines.find((l) => l.rawLineIndex === idx);
+        const currentName = updates[idx]?.name !== undefined ? updates[idx].name : (line?.name || '');
+        const nextNumbered = getNextNumberedRole(currentName, allRolesInEp);
+        newUpdates[idx] = { ...newUpdates[idx], name: nextNumbered };
+        allRolesInEp.push(nextNumbered);
+      });
+      setUpdates(newUpdates);
+    } else if (activeLineIndex !== null) {
+      const line = lines.find((l) => l.rawLineIndex === activeLineIndex);
+      const currentName = updates[activeLineIndex]?.name !== undefined ? updates[activeLineIndex].name : (line?.name || '');
+      const nextNumbered = getNextNumberedRole(currentName, allRolesInEp);
+      newUpdates[activeLineIndex] = { ...newUpdates[activeLineIndex], name: nextNumbered };
+      setUpdates(newUpdates);
+    } else if (massName) {
+      setMassName(getNextNumberedRole(massName, allRolesInEp));
+    }
+  }, [selectedLines, activeLineIndex, lines, updates, massName, pushStateForUndo]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -852,6 +903,30 @@ export function useSubtitleEditorState(
         target.tagName === 'TEXTAREA' || 
         target.isContentEditable
       ) {
+        return;
+      }
+
+      // Hotkey 1: 'М' (Male prefix '(М)')
+      // Supports Cyrillic 'М' / 'м' and Latin 'M' / 'm' / KeyM
+      const keyLower = e.key.toLowerCase();
+      if (!e.ctrlKey && !e.metaKey && (keyLower === 'м' || keyLower === 'm' || keyLower === 'v' || e.code === 'KeyM')) {
+        e.preventDefault();
+        handleApplyGenderPrefix('M');
+        return;
+      }
+
+      // Hotkey 2: 'Ж' (Female prefix '(Ж)')
+      // Supports Cyrillic 'Ж' / 'ж' and Latin 'W' / 'w' / 'F' / 'f' / KeyJ / Semicolon
+      if (!e.ctrlKey && !e.metaKey && (keyLower === 'ж' || keyLower === 'w' || keyLower === 'f' || e.code === 'KeyJ' || e.code === 'KeyW' || e.code === 'Semicolon')) {
+        e.preventDefault();
+        handleApplyGenderPrefix('F');
+        return;
+      }
+
+      // Hotkey 3: '№' / '#' / 'N' (Incremental numbering)
+      if (!e.ctrlKey && !e.metaKey && (e.key === '№' || e.key === '#' || (e.code === 'Digit3' && e.shiftKey) || keyLower === 'n')) {
+        e.preventDefault();
+        handleApplyNextNumber();
         return;
       }
 
@@ -866,7 +941,7 @@ export function useSubtitleEditorState(
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [stableNames, handleQuickAssign]);
+  }, [stableNames, handleQuickAssign, handleApplyGenderPrefix, handleApplyNextNumber]);
 
   const handleApplyAliases = () => {
     if (!currentEpisode?.project?.characterAliases) return;
@@ -1021,6 +1096,8 @@ export function useSubtitleEditorState(
     handleShiftTime,
     confirmShiftTime,
     handleQuickAssign,
+    handleApplyGenderPrefix,
+    handleApplyNextNumber,
     handleApplyAliases,
     handleApplyStresses,
     handlePlayFromTime,

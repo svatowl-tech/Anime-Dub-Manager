@@ -19,6 +19,9 @@ permissions:
   packages: write
   issues: write
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+
 jobs:
   # 1. Job to prepare or ensure the release exists and obtain version info
   prepare_release:
@@ -27,7 +30,6 @@ jobs:
     outputs:
       version: ${{ steps.get_version.outputs.version }}
       tag_name: ${{ steps.get_version.outputs.tag_name }}
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -56,6 +58,7 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          make_latest: true
           body: |
             ## 🎙️ Anime Dub Manager ${{ steps.get_version.outputs.tag_name }}
             
@@ -82,13 +85,24 @@ jobs:
         platform:
           - name: Windows (x64)
             os: windows-latest
-            artifact_ext: '*.exe'
+            release_files: |
+              out/*.exe
+              out/latest.yml
+            artifact_name: AnimeDubManager-Windows-binaries
           - name: macOS (x64 / Universal)
             os: macos-latest
-            artifact_ext: '*.dmg,*.zip'
+            release_files: |
+              out/*.dmg
+              out/*.zip
+              out/latest-mac.yml
+            artifact_name: AnimeDubManager-macOS-binaries
           - name: Linux (AppImage / DEB)
             os: ubuntu-latest
-            artifact_ext: '*.AppImage,*.deb'
+            release_files: |
+              out/*.AppImage
+              out/*.deb
+              out/latest-linux.yml
+            artifact_name: AnimeDubManager-Linux-binaries
 
     steps:
       - name: Checkout repository
@@ -145,22 +159,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare_release.outputs.tag_name }}
-          files: |
-            out/*.exe
-            out/*.dmg
-            out/*.zip
-            out/*.AppImage
-            out/*.deb
-            out/latest*.yml
-            out/latest-mac.yml
-            out/latest-linux.yml
+          files: ${{ matrix.platform.release_files }}
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload Build Artifacts as CI Workflow Backup
         uses: actions/upload-artifact@v4
         with:
-          name: AnimeDubManager-${{ matrix.platform.os }}-binaries
+          name: ${{ matrix.platform.artifact_name }}
           path: |
             out/*.exe
             out/*.dmg

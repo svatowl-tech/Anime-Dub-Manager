@@ -75,6 +75,8 @@ export default function RawSubtitleEditor({
     handleShiftTime,
     confirmShiftTime,
     handleQuickAssign,
+    handleApplyGenderPrefix,
+    handleApplyNextNumber,
     handleApplyAliases,
     handleApplyStresses,
     handlePlayFromTime,
@@ -196,6 +198,8 @@ export default function RawSubtitleEditor({
         onToggleAutoApplyStresses={handleToggleAutoApplyStresses}
         onSave={handleSave}
         onQuickAssign={handleQuickAssign}
+        onApplyGenderPrefix={handleApplyGenderPrefix}
+        onApplyNextNumber={handleApplyNextNumber}
         onToggleBookmark={handleToggleBookmark}
         onJumpToBookmark={handleJumpToBookmark}
       />

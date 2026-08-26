@@ -878,32 +878,15 @@ export default function Dashboard({
         }
       }
 
-      // Transcode MKV to MP4
-      if (type === 'RAW' && ext === 'mkv') {
-        setStatus("Транскодирование MKV в MP4...");
-        const outputPath = filePath.replace(/\.mkv$/i, '.mp4');
-        const transcodeRes = await ipcSafe.invoke('transcode-video', {
-          videoPath: filePath,
-          outputPath,
-          audioStreamIndex: selectedAudioStreamIndex
-        });
-        
-        // transcode-video returns the outputPath string on success
-        if (!transcodeRes) {
-          toast.error('Ошибка транскодирования: не удалось получить путь к файлу.');
-          setIsUploading(false);
-          return;
-        }
-        finalFilePath = transcodeRes as string;
-        setTranscodingProgress(null);
-      }
+      // For MKV files, copy first then enqueue transcoding task in TaskQueue
+      const isMkv = type === 'RAW' && ext === 'mkv';
       
       // Use project title if available, otherwise fallback to ID
       const projectTitle = sanitizeFolderName(selectedProject?.title || 'Project');
       const episodeFolder = sanitizeFolderName(`Episode_${episodeToUpdate.number}`);
       const subDir = `${projectTitle}/${episodeFolder}`;
       
-      const originalExt = finalFilePath.split('.').pop() || (type === 'RAW' ? 'mp4' : 'ass');
+      const originalExt = finalFilePath.split('.').pop() || (type === 'RAW' ? (isMkv ? 'mkv' : 'mp4') : 'ass');
       const targetFileName = type === 'RAW' 
         ? (isHardsubEnabled ? `raw_video_hardsub.${originalExt}` : `raw_video.${originalExt}`) 
         : `subtitles.${originalExt}`;
@@ -915,6 +898,29 @@ export default function Dashboard({
       });
 
       if (copyRes && copyRes.path) {
+        // If it's an MKV file, enqueue background transcoding task
+        if (isMkv) {
+          const mp4OutputPath = copyRes.path.replace(/\.mkv$/i, '.mp4');
+          try {
+            await ipcSafe.invoke('enqueue-ffmpeg-task', {
+              type: 'transcode-video',
+              payload: {
+                videoPath: copyRes.path,
+                outputPath: mp4OutputPath,
+                options: { audioStreamIndex: selectedAudioStreamIndex }
+              },
+              metadata: {
+                title: `Конвертация серии ${episodeToUpdate.number} (MKV -> MP4)`,
+                episodeId: episodeToUpdate.id,
+                projectId: selectedProject?.id,
+                outputPath: mp4OutputPath
+              }
+            });
+            toast.info(`Серия ${episodeToUpdate.number}: Конвертация MKV в MP4 добавлена в очередь задач.`);
+          } catch (tqErr) {
+            console.error('Failed to enqueue transcode task:', tqErr);
+          }
+        }
         // Re-fetch latest episode state before saving to avoid overwriting fields
         let latestEp = episodeToUpdate;
         try {
@@ -1302,11 +1308,46 @@ export default function Dashboard({
 
   const handleSaveProjectDubbers = async (selectedDubbers: string[]) => {
     if (!selectedProject) return;
+    const allowedDubbers = new Set(selectedDubbers);
+
+    // Clean globalMapping
+    let cleanedGlobalMapping = selectedProject.globalMapping;
+    if (selectedProject.globalMapping) {
+      try {
+        const mapping = typeof selectedProject.globalMapping === 'string' ? JSON.parse(selectedProject.globalMapping) : selectedProject.globalMapping;
+        if (Array.isArray(mapping)) {
+          mapping.forEach((m: any) => {
+            if (m.dubberId && !allowedDubbers.has(m.dubberId)) {
+              m.dubberId = '';
+            }
+          });
+          cleanedGlobalMapping = JSON.stringify(mapping);
+        }
+      } catch (e) {
+        console.error('Error cleaning globalMapping in local state:', e);
+      }
+    }
+
+    // Clean episode assignments
+    const cleanedEpisodes = (selectedProject.episodes || []).map(ep => ({
+      ...ep,
+      assignments: (ep.assignments || []).map(a => ({
+        ...a,
+        dubberId: a.dubberId && !allowedDubbers.has(a.dubberId) ? undefined : a.dubberId,
+        substituteId: a.substituteId && !allowedDubbers.has(a.substituteId) ? undefined : a.substituteId,
+        dubber: a.dubberId && !allowedDubbers.has(a.dubberId) ? undefined : a.dubber,
+        substitute: a.substituteId && !allowedDubbers.has(a.substituteId) ? undefined : a.substitute,
+      }))
+    }));
+
     const updatedProject = {
       ...selectedProject,
-      assignedDubberIds: selectedDubbers
+      assignedDubberIds: selectedDubbers,
+      globalMapping: cleanedGlobalMapping,
+      episodes: cleanedEpisodes
     };
     await ipcSafe.invoke('save-project', updatedProject);
+    toast.success('Состав даберов обновлен. Привязки снятых даберов очищены.');
     onRefresh();
     setIsAssignDubbersModalOpen(false);
   };

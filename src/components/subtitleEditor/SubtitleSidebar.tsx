@@ -28,6 +28,8 @@ interface SubtitleSidebarProps {
   onToggleAutoApplyStresses: (val: boolean) => void;
   onSave: () => void;
   onQuickAssign: (name: string) => void;
+  onApplyGenderPrefix?: (gender: 'M' | 'F') => void;
+  onApplyNextNumber?: () => void;
   onToggleBookmark: (idx: number) => void;
   onJumpToBookmark: (idx: number) => void;
 }
@@ -56,6 +58,8 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
   onToggleAutoApplyStresses,
   onSave,
   onQuickAssign,
+  onApplyGenderPrefix,
+  onApplyNextNumber,
   onToggleBookmark,
   onJumpToBookmark,
 }) => {
@@ -89,6 +93,45 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
               className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-sm transition-colors border border-indigo-500 whitespace-nowrap cursor-pointer"
             >
               Применить ({selectedLines.size})
+            </button>
+          </div>
+        </div>
+
+        {/* Quick Tagging Shortcuts (M, Ж, №) */}
+        <div className="flex flex-col gap-1.5 p-2 bg-neutral-950/60 rounded-lg border border-neutral-800">
+          <div className="text-[11px] font-semibold text-neutral-400 flex items-center justify-between">
+            <span>Быстрая разметка персонажей:</span>
+            <span className="text-[10px] text-neutral-500 font-mono">Горячие клавиши</span>
+          </div>
+          <div className="grid grid-cols-3 gap-1.5">
+            <button
+              onClick={() => onApplyGenderPrefix && onApplyGenderPrefix('M')}
+              type="button"
+              className="flex items-center justify-between px-2.5 py-1.5 bg-blue-950/40 hover:bg-blue-900/60 text-blue-300 border border-blue-800/50 rounded-lg text-xs transition-colors cursor-pointer group"
+              title="Добавить или переключить префикс (М) [Горячая клавиша: M]"
+            >
+              <span className="font-semibold">(М) Муж</span>
+              <kbd className="text-[9px] font-mono bg-blue-900/80 px-1 py-0.5 rounded text-blue-200 border border-blue-700/50 group-hover:text-white">M</kbd>
+            </button>
+
+            <button
+              onClick={() => onApplyGenderPrefix && onApplyGenderPrefix('F')}
+              type="button"
+              className="flex items-center justify-between px-2.5 py-1.5 bg-pink-950/40 hover:bg-pink-900/60 text-pink-300 border border-pink-800/50 rounded-lg text-xs transition-colors cursor-pointer group"
+              title="Добавить или переключить префикс (Ж) [Горячая клавиша: Ж]"
+            >
+              <span className="font-semibold">(Ж) Жен</span>
+              <kbd className="text-[9px] font-mono bg-pink-900/80 px-1 py-0.5 rounded text-pink-200 border border-pink-700/50 group-hover:text-white">Ж</kbd>
+            </button>
+
+            <button
+              onClick={() => onApplyNextNumber && onApplyNextNumber()}
+              type="button"
+              className="flex items-center justify-between px-2.5 py-1.5 bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 border border-amber-800/50 rounded-lg text-xs transition-colors cursor-pointer group"
+              title="Добавить следующий номер по возрастанию [Горячая клавиша: № или #]"
+            >
+              <span className="font-semibold">№+ Номер</span>
+              <kbd className="text-[9px] font-mono bg-amber-900/80 px-1 py-0.5 rounded text-amber-200 border border-amber-700/50 group-hover:text-white">№</kbd>
             </button>
           </div>
         </div>

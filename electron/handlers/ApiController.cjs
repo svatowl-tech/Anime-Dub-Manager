@@ -5,7 +5,7 @@ const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
 const { translateText } = require('../services/translateService.cjs');
 const { searchAnime, getAnimeDetails, getAnimeCharacters, getNextEpisodeDate } = require('../services/animeApiService.cjs');
 
-function registerApiHandlers(getData, saveData) {
+function registerApiHandlers(getData, saveData, mainWindow, taskQueue) {
   ipcMain.handle('translate-text', wrapIpcHandler(async (event, { text, sourceLang, destLang }) => {
     if (!text) throw new Error('Missing text to translate');
     return await translateText(text, sourceLang, destLang);
@@ -650,6 +650,23 @@ function registerApiHandlers(getData, saveData) {
 
     activeDirectDownloads.set(dlId, state);
 
+    if (taskQueue) {
+      taskQueue.registerExternalTask(
+        dlId,
+        'anime365-download',
+        { title: `Anime365: ${fileName}`, dlId, fileName, episodeId },
+        () => {
+          const s = activeDirectDownloads.get(dlId);
+          if (s) {
+            s.status = 'cancelled';
+            if (s.ffmpegCommand && typeof s.ffmpegCommand.kill === 'function') {
+              try { s.ffmpegCommand.kill('SIGKILL'); } catch (e) {}
+            }
+          }
+        }
+      );
+    }
+
     // Запуск фоновой загрузки с динамическим переключением источников
     (async () => {
       try {
@@ -837,6 +854,15 @@ function registerApiHandlers(getData, saveData) {
 
               activeDirectDownloads.set(dlId, state);
 
+              if (taskQueue) {
+                taskQueue.updateProgress(dlId, state.progress, null, {
+                  title: `Anime365: ${fileName}`,
+                  speed: state.downloadSpeed,
+                  downloadedBytes: state.downloadedBytes,
+                  totalBytes: state.totalBytes
+                });
+              }
+
               const roundedProgress = Math.floor(state.progress / 10) * 10;
               if (roundedProgress >= lastLoggedProgress + 10) {
                 lastLoggedProgress = roundedProgress;
@@ -908,6 +934,9 @@ function registerApiHandlers(getData, saveData) {
           state.progress = 100;
           state.filePath = fullTargetFile;
           activeDirectDownloads.set(dlId, state);
+          if (taskQueue) {
+            taskQueue.completeExternalTask(dlId, { filePath: fullTargetFile, fileName });
+          }
           try {
             event.sender.send('direct-download-progress-event', state);
           } catch (sendEx) {}
@@ -920,6 +949,9 @@ function registerApiHandlers(getData, saveData) {
         state.status = 'error';
         state.error = err.message || 'Ошибка потокового скачивания';
         activeDirectDownloads.set(dlId, state);
+        if (taskQueue) {
+          taskQueue.failExternalTask(dlId, state.error);
+        }
         try {
           event.sender.send('direct-download-progress-event', state);
         } catch (sendEx) {}

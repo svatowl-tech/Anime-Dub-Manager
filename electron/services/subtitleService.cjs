@@ -1465,6 +1465,12 @@ async function mergeMultipleSubtitles(filePaths, options = {}) {
       const actorLines = actorFile.data.lines || [];
 
       baseLines.forEach((baseLine) => {
+        // If the target line already has a role assigned (not empty, not 'Default', not signs), DO NOT overwrite it!
+        const existingRole = (baseLine.name || '').trim();
+        if (existingRole && existingRole !== 'Default' && !SIGN_KEYWORDS.includes(existingRole)) {
+          return;
+        }
+
         const bStart = timeToMs(baseLine.start);
         const bEnd = timeToMs(baseLine.end);
 

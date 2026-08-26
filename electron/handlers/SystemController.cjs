@@ -639,11 +639,27 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     });
     saveTorrentsState();
 
+    if (taskQueue) {
+      taskQueue.registerExternalTask(
+        dlId,
+        'torrent-download',
+        { title: 'Загрузка торрента', dlId, torrentId },
+        () => {
+          const d = activeDownloads.get(dlId);
+          if (d) {
+            d.status = 'cancelled';
+            activeDownloads.set(dlId, d);
+            saveTorrentsState();
+          }
+        }
+      );
+    }
+
     try {
       const client = await getTorrentClient();
       
       const torrent = await getOrAddTorrent(client, torrentId, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData);
-      setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir);
+      setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir, taskQueue);
       
     } catch (err) {
       log.error(`Failed to start WebTorrent download:`, err);
@@ -653,6 +669,9 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
         state.error = err.message || String(err);
         activeDownloads.set(dlId, state);
         saveTorrentsState();
+      }
+      if (taskQueue) {
+        taskQueue.failExternalTask(dlId, err.message || String(err));
       }
     }
 
@@ -673,7 +692,7 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
   }));
 
   // Trigger loading state background
-  loadTorrentsState();
+  loadTorrentsState(taskQueue);
 }
 
 const WELL_KNOWN_TRACKERS = [
@@ -1041,7 +1060,7 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
   }
 }
 
-function setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir) {
+function setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir, taskQueue) {
   let lastProgress = -1;
   let lastProgressTime = Date.now();
   let stalledInterval = null;
@@ -1059,6 +1078,12 @@ function setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir) 
     if (state) {
       state.name = torrent.name || state.name;
       activeDownloads.set(dlId, state);
+      if (taskQueue) {
+        taskQueue.updateProgress(dlId, state.progress || 0, null, {
+          title: `Торрент: ${state.name}`,
+          filename: state.name
+        });
+      }
     }
     
     if (torrent.files) {
@@ -1121,6 +1146,15 @@ function setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir) 
       }
 
       activeDownloads.set(dlId, state);
+
+      if (taskQueue) {
+        taskQueue.updateProgress(dlId, progress, null, {
+          title: `Торрент: ${state.name}`,
+          speed: speed,
+          numPeers: peers,
+          filename: state.name
+        });
+      }
     }
   };
 
@@ -1165,6 +1199,10 @@ function setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir) 
       
       activeDownloads.set(dlId, state);
       saveTorrentsState();
+
+      if (taskQueue) {
+        taskQueue.completeExternalTask(dlId, { filePath: fullPath, fileName: state.name });
+      }
     }
   };
 
@@ -1192,6 +1230,9 @@ function setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir) 
       state.warning = null;
       activeDownloads.set(dlId, state);
       saveTorrentsState();
+      if (taskQueue) {
+        taskQueue.failExternalTask(dlId, state.error);
+      }
     }
   }, 10000);
 
@@ -1221,6 +1262,9 @@ function setupTorrentHandlers(dlId, torrentId, fileIndex, torrent, torrentsDir) 
       }
       activeDownloads.set(dlId, state);
       saveTorrentsState();
+      if (taskQueue) {
+        taskQueue.failExternalTask(dlId, state.error);
+      }
     }
   });
 
@@ -1244,7 +1288,7 @@ async function saveTorrentsState() {
   }
 }
 
-async function loadTorrentsState() {
+async function loadTorrentsState(taskQueue) {
   try {
     const p = path.join(app.getPath('userData'), 'torrents_state.json');
     const exists = await fs.access(p).then(()=>true).catch(()=>false);
@@ -1277,6 +1321,22 @@ async function loadTorrentsState() {
           error: null
         });
 
+        if (taskQueue) {
+          taskQueue.registerExternalTask(
+            d.id,
+            'torrent-download',
+            { title: 'Загрузка торрента', dlId: d.id, torrentId: d.torrentId },
+            () => {
+              const state = activeDownloads.get(d.id);
+              if (state) {
+                state.status = 'cancelled';
+                activeDownloads.set(d.id, state);
+                saveTorrentsState();
+              }
+            }
+          );
+        }
+
         // Initialize download safely inside try/catch
         try {
           const client = await getTorrentClient();
@@ -1286,7 +1346,7 @@ async function loadTorrentsState() {
           await fs.mkdir(torrentsDir, { recursive: true });
 
           const torrent = await getOrAddTorrent(client, d.torrentId, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData);
-          setupTorrentHandlers(d.id, d.torrentId, d.fileIndex, torrent, torrentsDir);
+          setupTorrentHandlers(d.id, d.torrentId, d.fileIndex, torrent, torrentsDir, taskQueue);
           
         } catch(e) {
            log.error('Failed restoring torrent download session:', e);
@@ -1300,6 +1360,9 @@ async function loadTorrentsState() {
                 state.error = msg;
               }
               activeDownloads.set(d.id, state);
+           }
+           if (taskQueue) {
+             taskQueue.failExternalTask(d.id, e.message || String(e));
            }
         }
       }

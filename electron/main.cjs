@@ -287,8 +287,30 @@ app.whenReady().then(async () => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task-progress', data);
     });
 
-    taskQueue.on('task-completed', (data) => {
+    taskQueue.on('task-completed', async (data) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task-completed', data);
+
+      // Auto-update episode rawPath when MKV transcoding finishes
+      if (data.task && data.task.type === 'transcode-video' && data.task.metadata && data.task.metadata.episodeId) {
+        try {
+          const episodes = await getData('episodes.json');
+          const epIndex = episodes.findIndex(e => e.id === data.task.metadata.episodeId);
+          if (epIndex !== -1) {
+            const outputPath = data.result || data.task.metadata.outputPath;
+            if (outputPath) {
+              episodes[epIndex].rawPath = outputPath;
+              episodes[epIndex].updatedAt = new Date().toISOString();
+              await saveData('episodes.json', episodes);
+              log.info(`[main] Auto-updated episode ${data.task.metadata.episodeId} rawPath to ${outputPath}`);
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('episode-updated', episodes[epIndex]);
+              }
+            }
+          }
+        } catch (e) {
+          log.error('Failed to update episode after transcode completion:', e);
+        }
+      }
     });
 
     taskQueue.on('task-failed', (data) => {
@@ -308,7 +330,7 @@ app.whenReady().then(async () => {
     registerExportHandlers(getData, getMainWindow, taskQueue);
     registerSubtitleHandlers(getData, saveData);
     registerSystemHandlers(getData, saveData, getMainWindow, taskQueue);
-    registerApiHandlers(getData, saveData);
+    registerApiHandlers(getData, saveData, getMainWindow, taskQueue);
     registerSyncHandlers(getData, saveData, app.getPath('userData'));
     registerYoutubeHandlers(getData, getMainWindow, taskQueue);
     registerTelegramHandlers(getData, saveData, app.getPath('userData'));

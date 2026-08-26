@@ -35,6 +35,57 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
           updatedAt: new Date().toISOString(),
           createdAt: index !== -1 && items[index].createdAt ? items[index].createdAt : (projectData.createdAt || new Date().toISOString())
         };
+
+        // Auto-clean orphaned dubbers from globalMapping and episodes if assignedDubberIds is specified
+        if (Array.isArray(dataToSave.assignedDubberIds)) {
+          const allowedDubberIds = new Set(dataToSave.assignedDubberIds);
+
+          // 1. Clean globalMapping
+          if (dataToSave.globalMapping) {
+            try {
+              const mapping = typeof dataToSave.globalMapping === 'string' ? JSON.parse(dataToSave.globalMapping) : dataToSave.globalMapping;
+              if (Array.isArray(mapping)) {
+                let mappingModified = false;
+                mapping.forEach(m => {
+                  if (m.dubberId && !allowedDubberIds.has(m.dubberId)) {
+                    m.dubberId = '';
+                    mappingModified = true;
+                  }
+                });
+                if (mappingModified) {
+                  dataToSave.globalMapping = JSON.stringify(mapping);
+                }
+              }
+            } catch (e) {
+              console.error('Error cleaning globalMapping dubbers:', e);
+            }
+          }
+
+          // 2. Clean episode assignments in episodes.json
+          try {
+            const allEpisodes = await getData('episodes.json');
+            let episodesModified = false;
+            for (const ep of allEpisodes) {
+              if (ep.projectId === item.id && Array.isArray(ep.assignments)) {
+                for (const a of ep.assignments) {
+                  if (a.dubberId && !allowedDubberIds.has(a.dubberId)) {
+                    a.dubberId = undefined;
+                    episodesModified = true;
+                  }
+                  if (a.substituteId && !allowedDubberIds.has(a.substituteId)) {
+                    a.substituteId = undefined;
+                    episodesModified = true;
+                  }
+                }
+              }
+            }
+            if (episodesModified) {
+              await saveData('episodes.json', allEpisodes);
+            }
+          } catch (e) {
+            console.error('Error cleaning episode assignments:', e);
+          }
+        }
       } else if (name === 'participant') {
         dataToSave = {
           ...(index !== -1 ? items[index] : {}),

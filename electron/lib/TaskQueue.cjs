@@ -15,6 +15,88 @@ class TaskQueue extends EventEmitter {
   }
 
   /**
+   * Register or enqueue an externally managed background job (like WebTorrent or Anime365 direct stream)
+   */
+  registerExternalTask(id, type, metadata = {}, abortHandler = null) {
+    let task = this.queue.find(t => t.id === id);
+    if (!task) {
+      task = {
+        id,
+        type,
+        metadata,
+        abortHandler,
+        status: 'running',
+        progress: 0,
+        eta: null,
+        error: null,
+        createdAt: new Date().toISOString(),
+        startedAt: new Date().toISOString(),
+        completedAt: null
+      };
+      this.queue.push(task);
+      this.activeTasks.set(id, { 
+        command: { kill: () => { if (typeof abortHandler === 'function') abortHandler(); } }, 
+        task 
+      });
+      log.info(`TaskQueue: Registered external task ${id} (${type})`);
+      this.emit('queue-updated', this.getTasksSummary());
+    } else {
+      task.metadata = { ...task.metadata, ...metadata };
+      if (abortHandler) task.abortHandler = abortHandler;
+    }
+    return id;
+  }
+
+  /**
+   * Update progress of a task in the queue
+   */
+  updateProgress(id, progress, eta = null, metadataUpdate = {}) {
+    const task = this.queue.find(t => t.id === id);
+    if (task) {
+      task.progress = Math.min(100, Math.max(0, Math.round(progress)));
+      if (eta !== undefined && eta !== null) task.eta = eta;
+      if (metadataUpdate && typeof metadataUpdate === 'object') {
+        task.metadata = { ...task.metadata, ...metadataUpdate };
+      }
+      this.emit('task-progress', { id: task.id, progress: task.progress, eta: task.eta });
+    }
+  }
+
+  /**
+   * Mark external task as completed
+   */
+  completeExternalTask(id, result = null) {
+    const task = this.queue.find(t => t.id === id);
+    if (task && task.status !== 'completed') {
+      task.status = 'completed';
+      task.progress = 100;
+      task.completedAt = new Date().toISOString();
+      this.activeTasks.delete(id);
+      log.info(`TaskQueue: External task ${id} completed.`);
+      const safeTask = { ...task };
+      delete safeTask.abortHandler;
+      delete safeTask.taskFn;
+      this.emit('task-completed', { id, result, task: safeTask });
+      this.emit('queue-updated', this.getTasksSummary());
+    }
+  }
+
+  /**
+   * Mark external task as failed
+   */
+  failExternalTask(id, errorMsg) {
+    const task = this.queue.find(t => t.id === id);
+    if (task && task.status !== 'aborted') {
+      task.status = 'failed';
+      task.error = errorMsg;
+      this.activeTasks.delete(id);
+      log.error(`TaskQueue: External task ${id} failed: ${errorMsg}`);
+      this.emit('task-failed', { id, error: errorMsg });
+      this.emit('queue-updated', this.getTasksSummary());
+    }
+  }
+
+  /**
    * Enqueue a new task
    * @param {string} type - Task type (e.g., 'render', 'mux')
    * @param {Function} taskFn - The function that executes the task. 
@@ -130,8 +212,11 @@ class TaskQueue extends EventEmitter {
     if (active) {
       log.info(`TaskQueue: Aborting active task ${taskId}`);
       active.task.status = 'aborted';
+      if (typeof active.task.abortHandler === 'function') {
+        try { active.task.abortHandler(); } catch (e) { log.warn('TaskQueue abortHandler error:', e); }
+      }
       if (active.command && typeof active.command.kill === 'function') {
-        active.command.kill('SIGKILL');
+        try { active.command.kill('SIGKILL'); } catch (e) {}
       }
       this.activeTasks.delete(taskId);
       this.emit('queue-updated', this.getTasksSummary());
