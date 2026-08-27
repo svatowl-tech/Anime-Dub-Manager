@@ -1,5 +1,5 @@
-import React from "react";
-import { Languages, Save, Loader2, Bookmark, X } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Languages, Save, Loader2, Bookmark, X, Mic2, UserCheck } from "lucide-react";
 import { Episode } from "../../types";
 import { RawSubtitleLine, SubtitleUpdates } from "./types";
 import { SHORTCUT_KEYS } from "./utils";
@@ -63,11 +63,117 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
   onToggleBookmark,
   onJumpToBookmark,
 }) => {
+  const [currentPlaybackTime, setCurrentPlaybackTime] = useState<number>(0);
+
+  // Sync playback time from video element
+  useEffect(() => {
+    const video = videoRef?.current;
+    if (!video) return;
+
+    const handleTimeUpdate = () => {
+      setCurrentPlaybackTime(video.currentTime);
+    };
+
+    video.addEventListener('timeupdate', handleTimeUpdate);
+    return () => {
+      video.removeEventListener('timeupdate', handleTimeUpdate);
+    };
+  }, [videoRef, currentEpisode?.rawPath]);
+
+  // Find active line and active speaker based on current video time
+  const currentActiveSpeaker = React.useMemo(() => {
+    // 1. Check if there's a line matching current video playback time
+    if (lines && lines.length > 0 && currentPlaybackTime > 0) {
+      const match = lines.find((line, idx) => {
+        const start = line.startSec;
+        const end = line.endSec;
+        return currentPlaybackTime >= start && currentPlaybackTime <= end;
+      });
+      if (match) {
+        const lineIdx = match.rawLineIndex ?? 0;
+        const updatedName = updates[lineIdx]?.name !== undefined ? updates[lineIdx].name : match.name;
+        const updatedText = updates[lineIdx]?.text !== undefined ? updates[lineIdx].text : match.text;
+        return {
+          name: updatedName || 'Без имени',
+          text: updatedText || '',
+          start: match.start,
+          end: match.end,
+          isExactMatch: true,
+        };
+      }
+    }
+
+    // 2. Fallback to currently selected / active subtitle line in editor
+    if (activeLineIndex !== null && lines && lines[activeLineIndex]) {
+      const line = lines[activeLineIndex];
+      const lineIdx = line.rawLineIndex ?? activeLineIndex;
+      const updatedName = updates[lineIdx]?.name !== undefined ? updates[lineIdx].name : line.name;
+      const updatedText = updates[lineIdx]?.text !== undefined ? updates[lineIdx].text : line.text;
+      return {
+        name: updatedName || 'Без имени',
+        text: updatedText || '',
+        start: line.start,
+        end: line.end,
+        isExactMatch: false,
+      };
+    }
+
+    return null;
+  }, [lines, updates, currentPlaybackTime, activeLineIndex]);
+
   return (
     <div className="w-[420px] flex flex-col shrink-0 bg-neutral-900 overflow-y-auto border-l border-neutral-800">
       {currentEpisode?.rawPath && (
-        <div className="sticky top-0 z-20 border-b border-neutral-800 bg-neutral-950 p-3 shadow-lg">
+        <div className="sticky top-0 z-20 border-b border-neutral-800 bg-neutral-950 p-3 shadow-lg space-y-2">
           <video ref={videoRef} src={currentEpisode.rawPath} controls className="w-full rounded bg-black aspect-video object-contain" />
+          
+          {/* Active Speaker Indicator under video */}
+          <div className={`p-2.5 rounded-lg border transition-all ${
+            currentActiveSpeaker
+              ? currentActiveSpeaker.isExactMatch
+                ? 'bg-indigo-950/50 border-indigo-500/40 text-indigo-100 shadow-sm'
+                : 'bg-neutral-900/90 border-neutral-800 text-neutral-300'
+              : 'bg-neutral-900/40 border-neutral-800/60 text-neutral-500'
+          }`}>
+            <div className="flex items-center justify-between text-xs mb-1">
+              <div className="flex items-center gap-1.5 font-medium">
+                <Mic2 className={`w-3.5 h-3.5 ${
+                  currentActiveSpeaker?.isExactMatch ? 'text-emerald-400 animate-pulse' : 'text-indigo-400'
+                }`} />
+                <span className="text-[11px] uppercase tracking-wider text-neutral-400">
+                  {currentActiveSpeaker?.isExactMatch ? 'Сейчас говорит:' : 'Текущая реплика:'}
+                </span>
+              </div>
+              {currentActiveSpeaker && (
+                <span className="text-[10px] font-mono text-neutral-400">
+                  {currentActiveSpeaker.start} - {currentActiveSpeaker.end}
+                </span>
+              )}
+            </div>
+
+            {currentActiveSpeaker ? (
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                    currentActiveSpeaker.name === 'Без имени' || !currentActiveSpeaker.name
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                      : 'bg-indigo-500/20 text-indigo-200 border border-indigo-500/30'
+                  }`}>
+                    {currentActiveSpeaker.name}
+                  </span>
+                </div>
+                {currentActiveSpeaker.text && (
+                  <p className="text-xs text-neutral-300 line-clamp-2 italic font-normal">
+                    "{currentActiveSpeaker.text.replace(/\\N/g, ' ')}"
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="text-[11px] text-neutral-500 italic py-0.5">
+                Нет активных субтитров в данный момент
+              </div>
+            )}
+          </div>
         </div>
       )}
       

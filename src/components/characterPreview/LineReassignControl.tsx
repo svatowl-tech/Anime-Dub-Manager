@@ -198,7 +198,7 @@ export default function LineReassignControl({
                     Персонажи не найдены. Переключитесь на «Новый персонаж».
                   </div>
                 ) : (
-                  filteredCharacters.map(char => {
+                  filteredCharacters.map((char, idx) => {
                     const isSelected = targetName === char;
                     const assign = assignments.find(a => a.characterName.toLowerCase() === char.toLowerCase());
                     const dub = participants.find(p => p.id === assign?.dubberId);
@@ -217,6 +217,11 @@ export default function LineReassignControl({
                         }`}
                       >
                         <div className="flex items-center gap-2 truncate">
+                          {idx < 9 && (
+                            <kbd className="px-1.5 py-0.2 bg-neutral-800 text-amber-300 border border-neutral-700 rounded text-[10px] font-mono font-bold shrink-0">
+                              {idx + 1}
+                            </kbd>
+                          )}
                           <span className="truncate">{char}</span>
                           {dub && (
                             <span className={`text-[10px] px-1.5 py-0.2 rounded ${

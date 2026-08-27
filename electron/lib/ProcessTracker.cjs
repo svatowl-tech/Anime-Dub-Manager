@@ -28,9 +28,9 @@ function trackProcess(child) {
       activeChildren.delete(child);
     };
 
-    child.on('exit', cleanup);
-    child.on('close', cleanup);
-    child.on('error', cleanup);
+    child.once('exit', cleanup);
+    child.once('close', cleanup);
+    child.once('error', cleanup);
   }
 }
 
@@ -50,7 +50,7 @@ function killPidTree(pid) {
   const isWin = process.platform === 'win32';
   if (isWin) {
     try {
-      execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore' });
+      execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', windowsHide: true });
       log.info(`[ProcessTracker] Executed taskkill for PID ${pid}`);
     } catch (e) {
       // Ignore if process already exited
@@ -68,6 +68,49 @@ function killPidTree(pid) {
   }
 }
 
+/**
+ * Synchronously terminate all active child processes and process trees.
+ * Safe to execute inside process.on('exit') handlers.
+ */
+function killAllTrackedProcessesSync() {
+  const pidsToKill = Array.from(activePids);
+  if (pidsToKill.length === 0 && activeChildren.size === 0) return;
+
+  log.info(`[ProcessTracker] Sync terminating ${pidsToKill.length} tracked PIDs...`);
+
+  // 1. Direct SIGKILL to all active child process handles
+  for (const child of activeChildren) {
+    try {
+      if (child && typeof child.kill === 'function') {
+        child.kill('SIGKILL');
+      }
+    } catch (e) {}
+  }
+
+  // 2. Terminate PID trees synchronously
+  const isWin = process.platform === 'win32';
+  for (const pid of pidsToKill) {
+    try {
+      if (isWin) {
+        execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', windowsHide: true });
+      } else {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch (e) {}
+        try {
+          execSync(`pkill -P ${pid} -9`, { stdio: 'ignore' });
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  activePids.clear();
+  activeChildren.clear();
+}
+
+/**
+ * Asynchronously terminate all active child processes and their process trees.
+ */
 async function killAllTrackedProcesses() {
   const count = activePids.size + activeChildren.size;
   if (count === 0) return;
@@ -119,9 +162,34 @@ async function killAllTrackedProcesses() {
   }
 }
 
+// Emergency safety hooks: guarantee termination on abnormal exit or signal
+process.on('exit', () => {
+  killAllTrackedProcessesSync();
+});
+
+process.on('SIGINT', () => {
+  log.info('[ProcessTracker] Received SIGINT signal, cleaning up child processes...');
+  killAllTrackedProcessesSync();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  log.info('[ProcessTracker] Received SIGTERM signal, cleaning up child processes...');
+  killAllTrackedProcessesSync();
+  process.exit(0);
+});
+
+process.on('SIGHUP', () => {
+  log.info('[ProcessTracker] Received SIGHUP signal, cleaning up child processes...');
+  killAllTrackedProcessesSync();
+  process.exit(0);
+});
+
 module.exports = {
   trackProcess,
   untrackProcess,
   killPidTree,
-  killAllTrackedProcesses
+  killAllTrackedProcesses,
+  killAllTrackedProcessesSync
 };
+

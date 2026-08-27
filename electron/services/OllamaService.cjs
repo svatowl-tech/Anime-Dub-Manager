@@ -4,6 +4,7 @@ const log = require('electron-log');
 const path = require('path');
 const fs = require('fs/promises');
 const os = require('os');
+const { trackProcess, untrackProcess, killPidTree } = require('../lib/ProcessTracker.cjs');
 
 class OllamaService {
   constructor() {
@@ -63,10 +64,10 @@ class OllamaService {
       try {
         log.info(`[OllamaService] Trying to start Ollama with binary: ${binPath}`);
         const proc = spawn(binPath, ['serve'], {
-          detached: true,
+          detached: false,
           stdio: 'ignore'
         });
-        proc.unref();
+        trackProcess(proc);
         this.ollamaProcess = proc;
         launched = true;
         break;
@@ -79,10 +80,10 @@ class OllamaService {
       // Try spawning generic "ollama serve"
       try {
         const proc = spawn('ollama', ['serve'], {
-          detached: true,
+          detached: false,
           stdio: 'ignore'
         });
-        proc.unref();
+        trackProcess(proc);
         this.ollamaProcess = proc;
         launched = true;
       } catch (err) {
@@ -104,6 +105,22 @@ class OllamaService {
     }
 
     throw new Error('Не удалось запустить Ollama автоматически. Пожалуйста, запустите Ollama вручную.');
+  }
+
+  /**
+   * Stops the Ollama process if it was started by this service
+   */
+  stopOllama() {
+    if (this.ollamaProcess && this.ollamaProcess.pid) {
+      log.info(`[OllamaService] Stopping Ollama process (PID: ${this.ollamaProcess.pid})...`);
+      try {
+        killPidTree(this.ollamaProcess.pid);
+        untrackProcess(this.ollamaProcess);
+      } catch (e) {
+        log.warn(`[OllamaService] Error stopping Ollama process:`, e.message);
+      }
+      this.ollamaProcess = null;
+    }
   }
 
   /**

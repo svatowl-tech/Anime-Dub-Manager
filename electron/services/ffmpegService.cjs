@@ -457,7 +457,7 @@ function takeScreenshot(videoPath, timestamp, outputPath) {
 function getVideoMetadataFallback(videoPath) {
   return new Promise((resolve, reject) => {
     const { execFile } = require('child_process');
-    execFile(ffmpegPath, ['-i', videoPath], (err, stdout, stderr) => {
+    const child = execFile(ffmpegPath, ['-i', videoPath], (err, stdout, stderr) => {
       const output = stdout + '\n' + stderr;
       const streams = [];
       const lines = output.split('\n');
@@ -475,6 +475,7 @@ function getVideoMetadataFallback(videoPath) {
       }
       resolve({ streams });
     });
+    trackProcess(child);
   });
 }
 

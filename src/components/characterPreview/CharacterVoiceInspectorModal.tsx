@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   X, User, ChevronLeft, ChevronRight, Volume2, Sparkles, Video, 
-  Upload, Check, AlertCircle, RefreshCw, ArrowRightLeft
+  Upload, Check, AlertCircle, RefreshCw, ArrowRightLeft, Keyboard, HelpCircle
 } from 'lucide-react';
 import { 
   CharacterInspectionProps, CharacterDialogueLine, VoicePlaybackSettings 
@@ -460,7 +460,25 @@ export default function CharacterVoiceInspectorModal({
     }
   };
 
-  // Key shortcuts (Escape to close, Space to play, Left/Right to step lines)
+  // Available characters for quick assignment (excluding current character)
+  const availableTargetCharacters = React.useMemo(() => {
+    const set = new Set<string>();
+    characterList.forEach(c => {
+      if (c && c.toLowerCase() !== characterName.toLowerCase()) {
+        set.add(c);
+      }
+    });
+    assignments.forEach(a => {
+      if (a.characterName && a.characterName.toLowerCase() !== characterName.toLowerCase()) {
+        set.add(a.characterName);
+      }
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [characterList, assignments, characterName]);
+
+  const [showHotkeysHelp, setShowHotkeysHelp] = useState(false);
+
+  // Key shortcuts (Escape, Space, Left/Right, 1-9 quick reassign, R replay, S snapshot to avatar, M/F gender prefix)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isOpen) return;
@@ -468,6 +486,10 @@ export default function CharacterVoiceInspectorModal({
         return;
       }
       if (e.key === 'Escape') {
+        if (showHotkeysHelp) {
+          setShowHotkeysHelp(false);
+          return;
+        }
         stopPlayback();
         onClose();
       } else if (e.key === ' ') {
@@ -479,6 +501,46 @@ export default function CharacterVoiceInspectorModal({
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         handleNextLine();
+      } else if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') {
+        e.preventDefault();
+        handleReplay();
+      } else if (e.key === 's' || e.key === 'S' || e.key === 'ы' || e.key === 'Ы') {
+        e.preventDefault();
+        if (snapshotUrl) {
+          handleSetPortrait(snapshotUrl);
+        } else {
+          toast.info('Кадр еще загружается...');
+        }
+      } else if (e.key === '?' || (e.shiftKey && e.key === '/')) {
+        e.preventDefault();
+        setShowHotkeysHelp(prev => !prev);
+      } else if (e.key >= '1' && e.key <= '9') {
+        const numIdx = parseInt(e.key, 10) - 1;
+        if (numIdx < availableTargetCharacters.length) {
+          const targetChar = availableTargetCharacters[numIdx];
+          e.preventDefault();
+          handleReassignLine(targetChar, false);
+          toast.success(`Реплика переназначена: ${targetChar} (клавиша ${e.key})`);
+        }
+      } else if (e.key === 'm' || e.key === 'M' || e.key === 'ь' || e.key === 'Ь') {
+        // Quick gender tagging for current character name if prefix is not present
+        if (!characterName.startsWith('(М) ') && !characterName.startsWith('(Ж) ')) {
+          const newName = `(М) ${characterName}`;
+          if (currentLine && onReassignLine) {
+            e.preventDefault();
+            handleReassignLine(newName, true);
+            toast.success(`Персонаж размечен как Мужской: ${newName}`);
+          }
+        }
+      } else if (e.key === 'f' || e.key === 'F' || e.key === 'а' || e.key === 'А' || e.key === 'ж' || e.key === 'Ж') {
+        if (!characterName.startsWith('(М) ') && !characterName.startsWith('(Ж) ')) {
+          const newName = `(Ж) ${characterName}`;
+          if (currentLine && onReassignLine) {
+            e.preventDefault();
+            handleReassignLine(newName, true);
+            toast.success(`Персонаж размечен как Женский: ${newName}`);
+          }
+        }
       }
     };
 
@@ -486,7 +548,11 @@ export default function CharacterVoiceInspectorModal({
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, onClose, handleTogglePlay, handlePrevLine, handleNextLine, stopPlayback]);
+  }, [
+    isOpen, onClose, handleTogglePlay, handlePrevLine, handleNextLine, handleReplay, 
+    handleSetPortrait, snapshotUrl, stopPlayback, availableTargetCharacters, 
+    characterName, currentLine, onReassignLine, showHotkeysHelp
+  ]);
 
   // Clean up on modal close
   useEffect(() => {
@@ -618,6 +684,21 @@ export default function CharacterVoiceInspectorModal({
               </div>
             )}
 
+            {/* Keyboard Shortcuts button */}
+            <button
+              type="button"
+              onClick={() => setShowHotkeysHelp(prev => !prev)}
+              title="Быстрая разметка: Горячие клавиши (?)"
+              className={`p-2 rounded-lg transition-colors flex items-center gap-1 text-xs font-medium border ${
+                showHotkeysHelp
+                  ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm'
+                  : 'bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border-neutral-800 hover:border-neutral-700'
+              }`}
+            >
+              <Keyboard className="w-4 h-4 text-amber-400" />
+              <span className="hidden sm:inline">Горячие клавиши</span>
+            </button>
+
             {/* Close button */}
             <button
               type="button"
@@ -632,6 +713,49 @@ export default function CharacterVoiceInspectorModal({
             </button>
           </div>
         </div>
+
+        {/* Hotkeys Quick Helper Overlay Banner */}
+        {showHotkeysHelp && (
+          <div className="bg-indigo-950/90 border-b border-indigo-800/80 px-4 py-3 text-xs text-indigo-100 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-inner">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <div className="flex items-center gap-1.5 font-semibold text-white">
+                <Keyboard className="w-4 h-4 text-amber-300" />
+                <span>Быстрая разметка реплик:</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-neutral-300">
+                <kbd className="px-1.5 py-0.5 bg-neutral-900 rounded border border-neutral-700 font-mono text-[10px] text-amber-300">Пробел</kbd>
+                <span>Слушать/Пауза</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-neutral-300">
+                <kbd className="px-1.5 py-0.5 bg-neutral-900 rounded border border-neutral-700 font-mono text-[10px] text-amber-300">← / →</kbd>
+                <span>Пред / След фраза</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-neutral-300">
+                <kbd className="px-1.5 py-0.5 bg-neutral-900 rounded border border-neutral-700 font-mono text-[10px] text-amber-300">R</kbd>
+                <span>Повтор фразы</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-neutral-300">
+                <kbd className="px-1.5 py-0.5 bg-neutral-900 rounded border border-neutral-700 font-mono text-[10px] text-amber-300">S</kbd>
+                <span>Кадр в аватарку</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-neutral-300">
+                <kbd className="px-1.5 py-0.5 bg-neutral-900 rounded border border-neutral-700 font-mono text-[10px] text-amber-300">1 - 9</kbd>
+                <span>Передать реплику персонажу 1..9</span>
+              </div>
+              <div className="flex items-center gap-1.5 text-neutral-300">
+                <kbd className="px-1.5 py-0.5 bg-neutral-900 rounded border border-neutral-700 font-mono text-[10px] text-amber-300">M / Ж</kbd>
+                <span>Пол персонажа (М) / (Ж)</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowHotkeysHelp(false)}
+              className="text-indigo-300 hover:text-white text-xs underline shrink-0"
+            >
+              Скрыть
+            </button>
+          </div>
+        )}
 
         {/* Video warning / Fallback notice if video not attached */}
         {!videoSrc && (

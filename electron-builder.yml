@@ -10,8 +10,6 @@ directories:
 extraResources:
   - from: assets/bin
     to: bin
-  - from: assets/models
-    to: models
   - from: whisperlivekit
     to: whisperlivekit
 
@@ -58,10 +56,19 @@ portable:
 
 mac:
   target:
-    - dmg
-    - zip
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
   category: public.app-category.video
   icon: assets/icon.icns
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null
 
 linux:
   target:

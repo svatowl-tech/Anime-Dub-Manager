@@ -1,4 +1,4 @@
-const { killAllTrackedProcesses } = require('./lib/ProcessTracker.cjs');
+const { killAllTrackedProcesses, killAllTrackedProcessesSync } = require('./lib/ProcessTracker.cjs');
 const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, session } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
@@ -70,6 +70,11 @@ const { registerTelegramHandlers, cleanupTelegramHandlers } = require('./handler
 let WhisperLiveKitService = null;
 try {
   WhisperLiveKitService = require('./services/WhisperLiveKitService.cjs');
+} catch (e) {}
+
+let OllamaService = null;
+try {
+  OllamaService = require('./services/OllamaService.cjs');
 } catch (e) {}
 
 let registerWhisperHandlers = () => {};
@@ -435,6 +440,12 @@ async function performFullShutdownCleanup() {
   } catch (e) {}
 
   try {
+    if (OllamaService && typeof OllamaService.stopOllama === 'function') {
+      OllamaService.stopOllama();
+    }
+  } catch (e) {}
+
+  try {
     await cleanupTelegramHandlers().catch(() => {});
   } catch (e) {}
 
@@ -499,11 +510,13 @@ app.on('will-quit', () => {
   try {
     cleanupSystemHandlers();
     killAllProcesses();
+    killAllTrackedProcessesSync();
   } catch (e) {}
   
   // Clean final exit to ensure no background threads or processes linger
   setTimeout(() => {
     log.info('Terminating app process cleanly.');
+    killAllTrackedProcessesSync();
     app.exit(0);
     process.exit(0);
   }, 100);
