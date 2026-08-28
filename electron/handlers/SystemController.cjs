@@ -598,8 +598,16 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
         if (torrent.ready || (torrent.files && torrent.files.length > 0)) {
           onMetadata(torrent);
         } else {
+          const onErr = (err) => {
+            if (!resolved) {
+              resolved = true;
+              cleanup();
+              reject(err || new Error('Ошибка при получении метаданных торрента'));
+            }
+          };
           torrent.once('metadata', () => onMetadata(torrent));
           torrent.once('ready', () => onMetadata(torrent));
+          torrent.once('error', onErr);
         }
         
       } catch (e) {
@@ -869,12 +877,47 @@ function parseInfoHash(id) {
   return null;
 }
 
+function purgeStaleTorrents(client, targetHash, targetId) {
+  if (!client || !Array.isArray(client.torrents)) return;
+  const hash = (targetHash || parseInfoHash(targetId) || '').toLowerCase();
+
+  for (let i = client.torrents.length - 1; i >= 0; i--) {
+    const t = client.torrents[i];
+    if (!t) {
+      client.torrents.splice(i, 1);
+      continue;
+    }
+    const tHash = (t.infoHash || '').toLowerCase();
+    const isTarget = (hash && tHash === hash) || (targetId && (t.magnetURI === targetId || tHash === String(targetId).toLowerCase()));
+
+    if (t.destroyed || (isTarget && t.destroyed)) {
+      try {
+        if (typeof t.destroy === 'function' && !t.destroyed) {
+          t.destroy({ destroyStore: false });
+        }
+      } catch (e) {}
+      client.torrents.splice(i, 1);
+      if (client._torrents && tHash && client._torrents[tHash]) {
+        delete client._torrents[tHash];
+      }
+    }
+  }
+}
+
 function findMatchingTorrent(client, targetHash, targetId) {
   if (!client || !client.torrents) return null;
   const targetLower = (targetHash || parseInfoHash(targetId) || '').toLowerCase();
 
-  for (const t of client.torrents) {
-    if (!t || t.destroyed) continue;
+  for (let i = client.torrents.length - 1; i >= 0; i--) {
+    const t = client.torrents[i];
+    if (!t) {
+      client.torrents.splice(i, 1);
+      continue;
+    }
+    if (t.destroyed) {
+      client.torrents.splice(i, 1);
+      continue;
+    }
     const tHash = (t.infoHash || '').toLowerCase();
     if (targetLower && tHash === targetLower) return t;
     if (t.magnetURI === targetId || (typeof targetId === 'string' && tHash === targetId.toLowerCase())) return t;
@@ -905,8 +948,8 @@ function findMatchingTorrent(client, targetHash, targetId) {
 const activeGetOrAddPromises = new Map();
 
 async function getOrAddTorrent(client, rawTorrentId, options, getData) {
-  if (!client) {
-    throw new Error('WebTorrent client не инициализирован');
+  if (!client || client.destroyed) {
+    throw new Error('WebTorrent client не инициализирован или был остановлен');
   }
 
   if (!rawTorrentId) {
@@ -938,14 +981,7 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
     }
 
     // Clean up any stale destroyed torrent from client internal collection
-    if (hash) {
-      try {
-        const existing = client.get(hash);
-        if (existing && existing.destroyed) {
-          try { client.remove(hash); } catch (e) {}
-        }
-      } catch (e) {}
-    }
+    purgeStaleTorrents(client, hash, torrentId);
 
     // C. Determine sourceId (use cached .torrent file if available)
     let sourceId = buildEnhancedTorrentId(torrentId);
@@ -982,14 +1018,25 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
         const match = syncErr.message.match(/([0-9a-fA-F]{40})/i);
         const resolvedHash = match ? match[1].toLowerCase() : hash;
 
-        if (resolvedHash) {
-          const found = findMatchingTorrent(client, resolvedHash, torrentId);
-          if (found && !found.destroyed) return found;
+        // 1. Check if an active living torrent exists
+        const existing = findMatchingTorrent(client, resolvedHash, torrentId);
+        if (existing && !existing.destroyed) {
+          log.info(`[getOrAddTorrent] Reusing existing healthy torrent for duplicate ${resolvedHash || torrentId}`);
+          return existing;
+        }
 
+        // 2. Otherwise purge the stale torrent and retry adding
+        if (resolvedHash) {
           try { client.remove(resolvedHash); } catch (e) {}
+        }
+        purgeStaleTorrents(client, resolvedHash, torrentId);
+
+        try {
           t = client.add(sourceId, addOptions);
-        } else {
-          throw syncErr;
+        } catch (retryErr) {
+          const finalCheck = findMatchingTorrent(client, resolvedHash, torrentId);
+          if (finalCheck && !finalCheck.destroyed) return finalCheck;
+          throw retryErr;
         }
       } else {
         throw syncErr;
@@ -1034,10 +1081,17 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
   try {
     const t = await addPromise;
     if (!t || t.destroyed) {
+      activeGetOrAddPromises.delete(normalizedRawId);
+      // Double check if client has an active instance
+      const living = findMatchingTorrent(client, parseInfoHash(normalizedRawId), normalizedRawId);
+      if (living && !living.destroyed) {
+        return living;
+      }
       throw new Error('Экземпляр торрента равен null или был удален.');
     }
     return t;
   } catch (err) {
+    activeGetOrAddPromises.delete(normalizedRawId);
     if (err && err.message) {
       if (err.message.includes('buffer[0] = 60') || err.message.includes('not a number: buffer[0] = 60')) {
         err.message = 'Сервер вернул HTML-страницу вместо торрент-файла (возможно, ссылка заблокирована, требует авторизации или защищена Cloudflare). Попробуйте скопировать Magnet-ссылку напрямую.';
@@ -1374,7 +1428,7 @@ async function loadTorrentsState(taskQueue) {
 }
 
 async function getTorrentClient() {
-  if (!torrentClientInstance) {
+  if (!torrentClientInstance || torrentClientInstance.destroyed) {
     try {
       const WebTorrentModule = await import('webtorrent');
       const WebTorrent = WebTorrentModule.default || WebTorrentModule;

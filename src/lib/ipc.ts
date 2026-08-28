@@ -56,34 +56,56 @@ export const ipcRenderer: {
       // console.warn(`IPC channel "${channel}" send called in browser environment. Using fallback.`);
     }
   },
-  on: (channel: string, callback: (...args: any[]) => void) => {
+  on: (channel: string, callback: (...args: any[]) => void): (() => void) => {
+    let cleanup: () => void;
     if (window.electronAPI && window.electronAPI.on) {
-      return window.electronAPI.on(channel, callback);
+      cleanup = window.electronAPI.on(channel, callback);
+    } else {
+      const handler = (e: any) => {
+        if (channel === 'download-progress' && e.type === 'download-progress') {
+          callback(e.detail);
+        } else if (channel === 'ffmpeg-progress' && e.type === 'ffmpeg-progress') {
+          callback(e.detail);
+        }
+      };
+      window.addEventListener(channel, handler);
+      cleanup = () => window.removeEventListener(channel, handler);
     }
-    
-    const handler = (e: any) => {
-      if (channel === 'download-progress' && e.type === 'download-progress') {
-        callback(e.detail);
-      } else if (channel === 'ffmpeg-progress' && e.type === 'ffmpeg-progress') {
-        callback(e.detail);
+
+    if (!listenerCleanups.has(channel)) {
+      listenerCleanups.set(channel, new Map());
+    }
+    listenerCleanups.get(channel)!.set(callback, cleanup);
+
+    return () => {
+      if (typeof cleanup === 'function') {
+        cleanup();
+      }
+      const channelMap = listenerCleanups.get(channel);
+      if (channelMap) {
+        channelMap.delete(callback);
+        if (channelMap.size === 0) {
+          listenerCleanups.delete(channel);
+        }
       }
     };
-
-    window.addEventListener(channel, handler);
-    // console.warn(`IPC channel "${channel}" listener registered in browser environment. Using fallback.`);
-    return () => window.removeEventListener(channel, handler);
   },
   removeListener: (channel: string, callback: (...args: any[]) => void) => {
-    // Note: In Electron environment, we should use the cleanup function returned by 'on'.
-    // This method is kept for compatibility but might not work as expected for Electron.
-    console.warn(`ipcRenderer.removeListener is deprecated. Use the cleanup function returned by ipcRenderer.on instead.`);
-    
-    const handler = (e: any) => {
-      // This is a bit hacky as we don't have the original wrapper
-    };
-    window.removeEventListener(channel, handler);
+    const channelMap = listenerCleanups.get(channel);
+    if (channelMap && channelMap.has(callback)) {
+      const cleanup = channelMap.get(callback);
+      if (typeof cleanup === 'function') {
+        cleanup();
+      }
+      channelMap.delete(callback);
+      if (channelMap.size === 0) {
+        listenerCleanups.delete(channel);
+      }
+    }
   }
 };
+
+const listenerCleanups = new Map<string, Map<Function, () => void>>();
 
 function parseMemoryAss(text: string) {
   const lines: any[] = [];

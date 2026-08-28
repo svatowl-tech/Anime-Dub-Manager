@@ -121,12 +121,12 @@ export const AssDiarizationPanel: React.FC<AssDiarizationPanelProps> = ({
       }
     };
 
-    ipcSafe.on('advanced-diarization-progress', handleProgress);
-    ipcSafe.on('diarization-step', handleProgress);
+    const cleanup1 = ipcSafe.on('advanced-diarization-progress', handleProgress);
+    const cleanup2 = ipcSafe.on('diarization-step', handleProgress);
 
     return () => {
-      ipcSafe.removeListener('advanced-diarization-progress', handleProgress);
-      ipcSafe.removeListener('diarization-step', handleProgress);
+      cleanup1();
+      cleanup2();
     };
   }, []);
 

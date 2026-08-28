@@ -11,8 +11,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   send: (channel, ...args) => ipcRenderer.send(channel, ...args),
   on: (channel, callback) => {
     const subscription = (_event, ...args) => callback(...args);
-    ipcRenderer.on(channel, subscription);
-    return () => ipcRenderer.removeListener(channel, subscription);
+    const result = ipcRenderer.on(channel, subscription);
+    if (typeof result === 'function') {
+      return result;
+    }
+    return () => ipcRenderer.off(channel, subscription);
   },
   browserPreloadPath
 });

@@ -635,7 +635,7 @@ export default function Dashboard({
   };
 
   const handleStartTorrentDownload = async (torrent: any) => {
-    if (!torrent) return;
+    if (!torrent || downloadStep === 'getting_meta') return;
     setSelectedTorrentForMeta(torrent);
     setDownloadStep('getting_meta');
     

@@ -14,20 +14,13 @@ export const ipcSafe = {
       if (response && typeof response === 'object' && 'success' in response) {
         if (!response.success) {
           const errMsg = response.error || 'Unknown IPC Error';
-          
-          console.group(`🔴 [IPC Error on channel "${channel}"]`);
-          console.error(`Message:`, errMsg);
-          if (response.stderr) console.error(`Stderr:`, response.stderr);
-          if (response.stdout) console.error(`Stdout:`, response.stdout);
-          if (response.stack) console.error(`Stack trace:`, response.stack);
-          if (response.code) console.error(`Code:`, response.code);
-          console.groupEnd();
-
           const richError = new Error(errMsg);
           (richError as any).stack = response.stack || richError.stack;
           (richError as any).stderr = response.stderr;
           (richError as any).stdout = response.stdout;
           (richError as any).code = response.code;
+          (richError as any)._isIpcError = true;
+          (richError as any)._channel = channel;
           throw richError;
         }
         return response.data;
@@ -36,7 +29,15 @@ export const ipcSafe = {
       // Fallback for handlers that haven't been wrapped yet
       return response;
     } catch (error: any) {
-      if (error && typeof error === 'object' && (error.stderr || error.stdout || error.stack)) {
+      if (error && error._isIpcError) {
+        console.group(`🔴 [IPC Error on channel "${error._channel}"]`);
+        console.error(`Message:`, error.message);
+        if (error.stderr) console.error(`Stderr:`, error.stderr);
+        if (error.stdout) console.error(`Stdout:`, error.stdout);
+        if (error.stack) console.error(`Stack trace:`, error.stack);
+        if (error.code) console.error(`Code:`, error.code);
+        console.groupEnd();
+      } else if (error && typeof error === 'object' && (error.stderr || error.stdout || error.stack)) {
         console.group(`🔴 [IPC Throw on channel "${channel}"]`);
         console.error(`Message:`, error.message);
         if (error.stderr) console.error(`Stderr:`, error.stderr);
