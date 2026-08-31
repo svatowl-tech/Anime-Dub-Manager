@@ -60,6 +60,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
   const [isGapModalOpen, setIsGapModalOpen] = useState(false);
   const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
   const [isApplyingGapFixes, setIsApplyingGapFixes] = useState(false);
+  const [gapSensitivityThreshold, setGapSensitivityThreshold] = useState<number>(3.0);
 
   const gapsByTrack = useMemo(() => {
     const map: Record<string, number> = {};
@@ -853,7 +854,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     }
   };
 
-  const handleRunGapDetection = async () => {
+  const handleRunGapDetection = async (overrideThreshold?: number) => {
     if (!currentEpisode) return;
     if (subLines.length === 0) {
       toast.error('Субтитры еще не загружены или отсутствуют в серии');
@@ -865,14 +866,21 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       return;
     }
 
+    const thresholdToUse = typeof overrideThreshold === 'number' ? overrideThreshold : gapSensitivityThreshold;
+    if (typeof overrideThreshold === 'number') {
+      setGapSensitivityThreshold(overrideThreshold);
+    }
+
     setIsAnalyzingGaps(true);
     try {
-      toast.info('Запущен интеллектуальный анализ пропусков реплик...');
+      toast.info(`Анализ пропусков (порог динамики ${thresholdToUse} дБ)...`);
       const gaps = await detectEpisodeGaps(
         currentEpisode,
         tracks,
         subLines,
-        {},
+        {
+          speechDynamicThresholdDb: thresholdToUse
+        },
         (current, total, msg) => {
           // Progress feedback
         }
@@ -1859,6 +1867,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           isApplying={isApplyingGapFixes}
           onReAnalyze={handleRunGapDetection}
           isAnalyzing={isAnalyzingGaps}
+          currentThreshold={gapSensitivityThreshold}
         />
       )}
 

@@ -2,7 +2,10 @@
  * Automatic Gap Detection Engine for Dubber Audio vs Subtitles
  * 
  * Analyzes dubber audio tracks against assigned subtitle lines to find
- * missing voiced lines (complete silence or background room noise without dialogue).
+ * missing voiced lines (complete silence or stationary background noise without dialogue).
+ * 
+ * Uses dynamic energy variation (short-time RMS delta / variance in dB) rather than
+ * static global volume, correctly identifying speech even when recorded at very low gain.
  */
 
 import { Episode, Track, SubtitleLine } from '../../types';
@@ -24,6 +27,7 @@ export interface MissingLineDetection {
   text: string;
   peakDb: number;
   rmsDb: number;
+  dynamicRangeDb: number;
   type: 'silence' | 'noise';
   typeLabel: string;
   selected: boolean;
@@ -34,23 +38,25 @@ export interface MissingLineDetection {
 
 export interface GapDetectionOptions {
   /**
-   * Peak threshold below which audio is considered pure silence (dBFS).
-   * Default: -38 dBFS
+   * Dynamic swing threshold in dB (max short-time RMS vs min short-time RMS).
+   * If audio energy fluctuates by more than this threshold within the subtitle duration,
+   * it contains speech modulation (vowels/consonants/intonation) and is NOT a gap.
+   * Default: 3.0 dB
+   */
+  speechDynamicThresholdDb?: number;
+  /**
+   * Absolute peak threshold below which audio is considered pure digital silence (dBFS).
+   * Default: -52 dBFS
    */
   silencePeakThresholdDb?: number;
   /**
-   * RMS threshold below which audio is considered pure silence (dBFS).
-   * Default: -48 dBFS
+   * Absolute RMS threshold below which audio is considered pure digital silence (dBFS).
+   * Default: -60 dBFS
    */
   silenceRmsThresholdDb?: number;
   /**
-   * Relative drop below speech level to detect missing line even with noise (dB).
-   * Default: 16 dB
-   */
-  relativeSpeechDropDb?: number;
-  /**
    * Minimum duration in seconds of a subtitle to analyze.
-   * Default: 0.2s
+   * Default: 0.15s
    */
   minDurationSec?: number;
 }
@@ -110,6 +116,115 @@ export async function decodeAudioFile(url: string): Promise<AudioBuffer> {
 }
 
 /**
+ * Computes dynamic metrics (short-time RMS frames, dynamic range, std dev, peak)
+ * across a specific time slice of an AudioBuffer.
+ */
+export function analyzeSegmentDynamics(
+  audioBuffer: AudioBuffer,
+  startSec: number,
+  endSec: number,
+  frameSizeMs: number = 40,
+  hopSizeMs: number = 20
+) {
+  const sampleRate = audioBuffer.sampleRate;
+  const numChannels = audioBuffer.numberOfChannels;
+  const totalSamples = audioBuffer.length;
+
+  // Add a small 40ms margin to capture speech attacks and tails
+  const startSample = Math.max(0, Math.floor((startSec - 0.04) * sampleRate));
+  const endSample = Math.min(totalSamples, Math.ceil((endSec + 0.04) * sampleRate));
+  const segmentLength = endSample - startSample;
+
+  if (segmentLength <= 0) {
+    return {
+      peakDb: -100,
+      rmsDb: -100,
+      dynamicRangeDb: 0,
+      peakToMinDb: 0,
+      stdDevDb: 0,
+      hasSpeechDynamics: false
+    };
+  }
+
+  const frameSamples = Math.max(16, Math.floor((frameSizeMs / 1000) * sampleRate));
+  const hopSamples = Math.max(8, Math.floor((hopSizeMs / 1000) * sampleRate));
+
+  let segMaxPeak = 0.00001;
+  let segSumSquares = 0;
+
+  // Compute overall segment peak & sum of squares
+  for (let c = 0; c < numChannels; c++) {
+    const chanData = audioBuffer.getChannelData(c);
+    for (let i = startSample; i < endSample; i++) {
+      const val = Math.abs(chanData[i]);
+      if (val > segMaxPeak) segMaxPeak = val;
+      segSumSquares += val * val;
+    }
+  }
+
+  const segRms = Math.sqrt(segSumSquares / (segmentLength * numChannels));
+  const segPeakDb = Math.round((20 * Math.log10(Math.max(0.00001, segMaxPeak))) * 10) / 10;
+  const segRmsDb = Math.round((20 * Math.log10(Math.max(0.00001, segRms))) * 10) / 10;
+
+  // Extract short-time RMS frames across the segment
+  const frameDbValues: number[] = [];
+  const primaryChannel = audioBuffer.getChannelData(0);
+
+  for (let fStart = startSample; fStart + frameSamples <= endSample; fStart += hopSamples) {
+    let frameSumSq = 0;
+    for (let i = fStart; i < fStart + frameSamples; i++) {
+      const v = primaryChannel[i];
+      frameSumSq += v * v;
+    }
+    const frameRms = Math.sqrt(frameSumSq / frameSamples);
+    const frameDb = 20 * Math.log10(Math.max(0.000001, frameRms));
+    frameDbValues.push(frameDb);
+  }
+
+  // If segment is too short for multiple frames, treat as single frame
+  if (frameDbValues.length <= 1) {
+    frameDbValues.push(segRmsDb);
+  }
+
+  // Sort frame dB values to find reliable baseline noise floor vs peak speech
+  const sorted = [...frameDbValues].sort((a, b) => a - b);
+  
+  // 10th percentile (noise floor / micro-pause level)
+  const p10Index = Math.floor(sorted.length * 0.1);
+  const minDb = sorted[p10Index] ?? sorted[0];
+
+  // 90th percentile (sustained speech peaks)
+  const p90Index = Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.9));
+  const maxDb = sorted[p90Index] ?? sorted[sorted.length - 1];
+
+  // Dynamic range within the subtitle line (in decibels)
+  const dynamicRangeDb = Math.round(Math.max(0, maxDb - minDb) * 10) / 10;
+  const peakToMinDb = Math.round(Math.max(0, segPeakDb - minDb) * 10) / 10;
+
+  // Standard deviation of energy
+  let sumDb = 0;
+  for (const v of frameDbValues) sumDb += v;
+  const meanDb = sumDb / frameDbValues.length;
+
+  let sumSqDiff = 0;
+  for (const v of frameDbValues) {
+    const diff = v - meanDb;
+    sumSqDiff += diff * diff;
+  }
+  const stdDevDb = Math.round(Math.sqrt(sumSqDiff / frameDbValues.length) * 10) / 10;
+
+  return {
+    peakDb: segPeakDb,
+    rmsDb: segRmsDb,
+    minDb: Math.round(minDb * 10) / 10,
+    maxDb: Math.round(maxDb * 10) / 10,
+    dynamicRangeDb,
+    peakToMinDb,
+    stdDevDb
+  };
+}
+
+/**
  * Main detection function to analyze dubber tracks against subtitles in an episode
  */
 export async function detectEpisodeGaps(
@@ -120,10 +235,10 @@ export async function detectEpisodeGaps(
   onProgress?: (current: number, total: number, message: string) => void
 ): Promise<MissingLineDetection[]> {
   const {
-    silencePeakThresholdDb = -36,
-    silenceRmsThresholdDb = -46,
-    relativeSpeechDropDb = 15,
-    minDurationSec = 0.2
+    speechDynamicThresholdDb = 3.0,
+    silencePeakThresholdDb = -52,
+    silenceRmsThresholdDb = -60,
+    minDurationSec = 0.15
   } = options;
 
   const results: MissingLineDetection[] = [];
@@ -180,10 +295,6 @@ export async function detectEpisodeGaps(
 
     if (!audioBuffer || audioBuffer.length === 0) continue;
 
-    const sampleRate = audioBuffer.sampleRate;
-    const numChannels = audioBuffer.numberOfChannels;
-    const totalSamples = audioBuffer.length;
-
     // Determine characters assigned to this dubber
     const assignedCharacters = new Set<string>();
     (episode.assignments || []).forEach(as => {
@@ -198,30 +309,7 @@ export async function detectEpisodeGaps(
       if (c.trim()) assignedCharacters.add(c.trim().toLowerCase());
     });
 
-    // 1. Calculate general track baseline statistics (speech RMS vs quiet noise floor)
-    let sumSquaresActive = 0;
-    let activeSampleCount = 0;
-    let maxOverallPeak = 0.0001;
-
-    const channel0 = audioBuffer.getChannelData(0);
-    const step = totalSamples > 1000000 ? Math.ceil(totalSamples / 300000) : 1;
-    const speechGate = 0.0056; // -45 dBFS
-
-    for (let i = 0; i < totalSamples; i += step) {
-      const absVal = Math.abs(channel0[i]);
-      if (absVal > maxOverallPeak) maxOverallPeak = absVal;
-      if (absVal >= speechGate) {
-        sumSquaresActive += absVal * absVal;
-        activeSampleCount++;
-      }
-    }
-
-    const trackSpeechRms = activeSampleCount > 0
-      ? Math.sqrt(sumSquaresActive / activeSampleCount)
-      : maxOverallPeak * 0.4;
-    const trackSpeechRmsDb = 20 * Math.log10(Math.max(0.00001, trackSpeechRms));
-
-    // 2. Iterate through subtitle lines matching this dubber's characters
+    // Iterate through subtitle lines matching this dubber's characters
     for (let lineIdx = 0; lineIdx < validSubLines.length; lineIdx++) {
       const line = validSubLines[lineIdx];
       const rawCharName = (line.name || '').trim();
@@ -237,36 +325,37 @@ export async function detectEpisodeGaps(
       const durationSec = endSec - startSec;
       if (durationSec < minDurationSec) continue;
 
-      // Extract segment audio samples with a small 40ms margin
-      const startSample = Math.max(0, Math.floor((startSec - 0.04) * sampleRate));
-      const endSample = Math.min(totalSamples, Math.ceil((endSec + 0.04) * sampleRate));
-      const segmentLength = endSample - startSample;
+      // Analyze dynamic range and energy fluctuation inside this line
+      const metrics = analyzeSegmentDynamics(audioBuffer, startSec, endSec);
 
-      if (segmentLength <= 0) continue;
+      // Detection Decision Logic:
+      //
+      // 1. If dynamic range is >= threshold (e.g. 3.0 dB) or peak-to-floor delta >= (threshold + 1.2 dB)
+      //    and peak is above pure silence (-52 dBFS), speech modulation is clearly present!
+      //    -> NOT a gap!
+      //
+      // 2. If it is pure digital silence (peak <= -52 dBFS and RMS <= -60 dBFS) -> GAP (type: silence).
+      //
+      // 3. If it is static background noise (e.g. room tone / preamp hiss / fan noise)
+      //    where the energy level stays practically constant (dynamic swing < threshold dB, stdDev < 1.0 dB):
+      //    -> GAP (type: noise, stationary room tone without voiced words).
+      
+      const isAbsoluteSilence = metrics.peakDb <= silencePeakThresholdDb || metrics.rmsDb <= silenceRmsThresholdDb;
+      
+      // Steady static background noise without voice:
+      // Dynamic swing is below threshold (e.g. < 3 dB, stands in place +/- 1.5 dB)
+      // and not an abnormally loud sound (peak < -24 dBFS)
+      const isStationaryNoise = 
+        metrics.dynamicRangeDb < speechDynamicThresholdDb &&
+        metrics.peakToMinDb < (speechDynamicThresholdDb + 1.2) &&
+        metrics.stdDevDb < 1.0 &&
+        metrics.peakDb < -24;
 
-      let segMaxPeak = 0.00001;
-      let segSumSquares = 0;
-
-      for (let c = 0; c < numChannels; c++) {
-        const chanData = audioBuffer.getChannelData(c);
-        for (let i = startSample; i < endSample; i++) {
-          const val = Math.abs(chanData[i]);
-          if (val > segMaxPeak) segMaxPeak = val;
-          segSumSquares += val * val;
-        }
-      }
-
-      const segRms = Math.sqrt(segSumSquares / (segmentLength * numChannels));
-      const segPeakDb = Math.round((20 * Math.log10(Math.max(0.00001, segMaxPeak))) * 10) / 10;
-      const segRmsDb = Math.round((20 * Math.log10(Math.max(0.00001, segRms))) * 10) / 10;
-
-      // Detection criteria
-      const isAbsoluteSilence = segPeakDb <= silencePeakThresholdDb || segRmsDb <= silenceRmsThresholdDb;
-      const isNoiseWithoutVoice = segPeakDb <= (silencePeakThresholdDb + 6) && segRmsDb <= (trackSpeechRmsDb - relativeSpeechDropDb);
-
-      if (isAbsoluteSilence || isNoiseWithoutVoice) {
+      if (isAbsoluteSilence || isStationaryNoise) {
         const gapType: 'silence' | 'noise' = isAbsoluteSilence ? 'silence' : 'noise';
-        const typeLabel = isAbsoluteSilence ? 'Полная тишина' : 'Фоновый шум (нет реплики)';
+        const typeLabel = isAbsoluteSilence 
+          ? '🔇 Тишина' 
+          : `〰 Статичный фон (разбег ${metrics.dynamicRangeDb} дБ)`;
         
         // Clean subtitle text for comment (remove ASS override tags like {\an8}, \N, etc.)
         const cleanedText = line.text
@@ -299,8 +388,9 @@ export async function detectEpisodeGaps(
           endFormatted: formatTimecode(endSec),
           durationSec: Math.round(durationSec * 10) / 10,
           text: cleanedText,
-          peakDb: segPeakDb,
-          rmsDb: segRmsDb,
+          peakDb: metrics.peakDb,
+          rmsDb: metrics.rmsDb,
+          dynamicRangeDb: metrics.dynamicRangeDb,
           type: gapType,
           typeLabel,
           selected: true,
@@ -377,3 +467,4 @@ export class SnippetAudioPlayer {
     }
   }
 }
+

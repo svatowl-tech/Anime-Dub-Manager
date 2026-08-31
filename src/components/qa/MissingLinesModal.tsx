@@ -24,8 +24,9 @@ interface MissingLinesModalProps {
   onApplyFixes: (selectedGaps: MissingLineDetection[]) => Promise<void>;
   onSeekMainPlayer?: (timeSec: number) => void;
   isApplying?: boolean;
-  onReAnalyze?: () => void;
+  onReAnalyze?: (dynamicThresholdDb?: number) => void;
   isAnalyzing?: boolean;
+  currentThreshold?: number;
 }
 
 export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
@@ -36,17 +37,23 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   onSeekMainPlayer,
   isApplying = false,
   onReAnalyze,
-  isAnalyzing = false
+  isAnalyzing = false,
+  currentThreshold = 3.0
 }) => {
   const [gaps, setGaps] = useState<MissingLineDetection[]>(initialGaps);
   const [selectedDubberFilter, setSelectedDubberFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [typeFilter, setTypeFilter] = useState<'all' | 'silence' | 'noise'>('all');
   const [playingGapId, setPlayingGapId] = useState<string | null>(null);
+  const [selectedSensitivity, setSelectedSensitivity] = useState<number>(currentThreshold);
 
   useEffect(() => {
     setGaps(initialGaps);
   }, [initialGaps]);
+
+  useEffect(() => {
+    setSelectedSensitivity(currentThreshold);
+  }, [currentThreshold]);
 
   // Cleanup audio playback on unmount or close
   useEffect(() => {
@@ -121,6 +128,13 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
     });
   };
 
+  const handleSensitivityChange = (newThreshold: number) => {
+    setSelectedSensitivity(newThreshold);
+    if (onReAnalyze) {
+      onReAnalyze(newThreshold);
+    }
+  };
+
   const handleSubmit = async () => {
     const selected = gaps.filter(g => g.selected);
     if (selected.length === 0) return;
@@ -146,18 +160,45 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                 </span>
               </div>
               <p className="text-xs text-neutral-400 mt-0.5">
-                Обнаружены субтитры без речевого сигнала на аудиодорожках даберов (пустота или фоновый шум)
+                Анализ динамики громкости (разбег ≥ {selectedSensitivity} дБ считается речью, статичный фон &lt; {selectedSensitivity} дБ — пропуском)
               </p>
             </div>
           </div>
           
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            {/* Sensitivity selector */}
+            <div className="flex items-center gap-1.5 bg-neutral-950/80 border border-neutral-700/70 rounded-lg px-2 py-1 text-xs">
+              <Sliders className="w-3.5 h-3.5 text-neutral-400" />
+              <span className="text-[11px] text-neutral-400 font-medium">Порог разбега:</span>
+              <div className="flex items-center gap-1">
+                {[
+                  { value: 2.0, label: '2.0 дБ (Тихий)' },
+                  { value: 3.0, label: '3.0 дБ (Стандарт)' },
+                  { value: 4.5, label: '4.5 дБ (Строгий)' }
+                ].map(opt => (
+                  <button
+                    key={opt.value}
+                    onClick={() => handleSensitivityChange(opt.value)}
+                    disabled={isAnalyzing}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                      selectedSensitivity === opt.value
+                        ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                        : 'text-neutral-400 hover:text-white hover:bg-neutral-800'
+                    }`}
+                    title={`Считать фразой, если перепад громкости внутри реплики превышает ${opt.value} дБ`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {onReAnalyze && (
               <button
-                onClick={onReAnalyze}
+                onClick={() => onReAnalyze(selectedSensitivity)}
                 disabled={isAnalyzing}
                 className="px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 transition-colors flex items-center gap-1.5 disabled:opacity-50"
-                title="Повторить сканирование аудиодорожек"
+                title="Повторить сканирование аудиодорожек с текущим порогом"
               >
                 <Sparkles className={`w-3.5 h-3.5 text-amber-400 ${isAnalyzing ? 'animate-spin' : ''}`} />
                 {isAnalyzing ? 'Анализ...' : 'Пересканировать'}
@@ -345,9 +386,12 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                                 ? 'bg-red-500/10 text-red-400 border-red-500/30'
                                 : 'bg-amber-500/10 text-amber-400 border-amber-500/30'
                             }`}
-                            title={`Пик: ${gap.peakDb} dBFS, RMS: ${gap.rmsDb} dBFS`}
+                            title={`Разбег динамики: ${gap.dynamicRangeDb} дБ, Пик: ${gap.peakDb} dBFS, RMS: ${gap.rmsDb} dBFS`}
                           >
-                            {gap.type === 'silence' ? '🔇 Тишина' : '〰 Фоновый шум'} ({gap.peakDb} dBFS)
+                            {gap.type === 'silence' 
+                              ? `🔇 Тишина (${gap.peakDb} dBFS)` 
+                              : `〰 Статичный фон (разбег ${gap.dynamicRangeDb} дБ, пик ${gap.peakDb} дБ)`
+                            }
                           </span>
 
                           {/* Play Snippet Button */}
