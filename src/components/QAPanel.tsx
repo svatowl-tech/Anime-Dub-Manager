@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Play, Pause, CheckCircle, XCircle, AlertCircle, MessageSquare, Volume2, Check, X, Activity, User, Clock, FileAudio, Send, Video, Trash2, Mic, Sparkles, Save, SkipForward, Scissors, Zap, VolumeX, Volume1, Sliders, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../lib/ipcSafe';
@@ -6,6 +6,7 @@ import { Episode, RoleAssignment, Participant, Track, SubtitleLine, Comment } fr
 import { sanitizeFolderName } from '../lib/pathUtils';
 import { TrackWaveform } from './qa/TrackWaveform';
 import { TrackSidebar } from './qa/TrackSidebar';
+import { MissingLinesModal } from './qa/MissingLinesModal';
 import { generateFixesIssuedMessage, generateStatusMessage } from '../lib/templates';
 import { getParticipants } from '../services/dbService';
 import { ExportModal } from './ExportModal';
@@ -13,6 +14,7 @@ import { ConfirmModal } from './ui/ConfirmModal';
 import { useVideoContext } from '../contexts/VideoContext';
 import { SIGN_KEYWORDS } from '../constants';
 import { analyzeAudioForPreview, NormalizationMetrics, getCachedNormalization } from '../lib/qa/audioNormalizer';
+import { detectEpisodeGaps, MissingLineDetection } from '../lib/qa/missingLinesDetector';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
 
@@ -54,6 +56,18 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     return localStorage.getItem('qa_auto_normalize') !== 'false';
   });
   const [normalizationMetrics, setNormalizationMetrics] = useState<Record<string, NormalizationMetrics>>({});
+  const [detectedGaps, setDetectedGaps] = useState<MissingLineDetection[]>([]);
+  const [isGapModalOpen, setIsGapModalOpen] = useState(false);
+  const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
+  const [isApplyingGapFixes, setIsApplyingGapFixes] = useState(false);
+
+  const gapsByTrack = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const gap of detectedGaps) {
+      map[gap.trackId] = (map[gap.trackId] || 0) + 1;
+    }
+    return map;
+  }, [detectedGaps]);
 
   const toggleAutoNormalize = useCallback(() => {
     setIsAutoNormalize(prev => {
@@ -138,6 +152,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<any>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement>>({});
+  const audioGainNodesRef = useRef<Record<string, { gain: GainNode, ctx: AudioContext }>>({});
   const [audioRefsUpdated, setAudioRefsUpdated] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -228,16 +243,24 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         const normGain = (isAutoNormalize && normalizationMetrics[id]?.status === 'ready')
           ? normalizationMetrics[id].gain
           : 1.0;
-        const volume = isMuted ? 0 : Math.min(1.0, Math.max(0, userVol * normGain));
-        audio.volume = volume;
+        
+        const gainNodeData = audioGainNodesRef.current[id];
+        if (gainNodeData) {
+          audio.volume = 1.0;
+          gainNodeData.gain.gain.value = isMuted ? 0 : Math.max(0, userVol * normGain);
+        } else {
+          const volume = isMuted ? 0 : Math.min(1.0, Math.max(0, userVol * normGain));
+          audio.volume = volume;
+        }
       }
     });
+
     if (wavesurferRef.current && selectedTrackId) {
       const userVol = volumes[selectedTrackId] ?? 0.8;
       const normGain = (isAutoNormalize && normalizationMetrics[selectedTrackId]?.status === 'ready')
         ? normalizationMetrics[selectedTrackId].gain
         : 1.0;
-      const volume = isMuted ? 0 : Math.min(1.0, Math.max(0, userVol * normGain));
+      const volume = isMuted ? 0 : Math.max(0, userVol * normGain);
       wavesurferRef.current.setVolume(volume);
     }
   }, [volumes, isMuted, selectedTrackId, isAutoNormalize, normalizationMetrics, audioRefsUpdated]);
@@ -245,13 +268,19 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
   // Clean up audio elements on unmount or track change
   useEffect(() => {
     return () => {
-      Object.values(audioRefs.current).forEach(audio => {
+      Object.keys(audioRefs.current).forEach(id => {
+        const audio = audioRefs.current[id];
         if (audio instanceof HTMLAudioElement) {
           audio.pause();
           audio.src = '';
         }
+        const gainData = audioGainNodesRef.current[id];
+        if (gainData) {
+          gainData.ctx.close().catch(() => {});
+        }
       });
       audioRefs.current = {};
+      audioGainNodesRef.current = {};
       setAudioRefsUpdated(prev => prev + 1);
     };
   }, [currentEpisode?.id]);
@@ -290,6 +319,21 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         const audio = new Audio(audioUrl);
         audio.volume = volumes[track.id] ?? 0.8;
         audioRefs.current[track.id] = audio;
+        
+        try {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioContextClass) {
+            const ctx = new AudioContextClass();
+            const source = ctx.createMediaElementSource(audio);
+            const gain = ctx.createGain();
+            source.connect(gain);
+            gain.connect(ctx.destination);
+            audioGainNodesRef.current[track.id] = { gain, ctx };
+          }
+        } catch (e) {
+          console.warn('Web Audio gain init failed for track', track.id, e);
+        }
+        
         updated = true;
       } else if (selectedFile && selectedFile.path && audioRefs.current[track.id]) {
         let audioUrl = selectedFile.path;
@@ -809,6 +853,138 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     }
   };
 
+  const handleRunGapDetection = async () => {
+    if (!currentEpisode) return;
+    if (subLines.length === 0) {
+      toast.error('Субтитры еще не загружены или отсутствуют в серии');
+      return;
+    }
+    const dubberTracks = tracks.filter(t => t.id !== 'original' && t.files.length > 0);
+    if (dubberTracks.length === 0) {
+      toast.error('Нет загруженных аудиодорожек даберов для анализа');
+      return;
+    }
+
+    setIsAnalyzingGaps(true);
+    try {
+      toast.info('Запущен интеллектуальный анализ пропусков реплик...');
+      const gaps = await detectEpisodeGaps(
+        currentEpisode,
+        tracks,
+        subLines,
+        {},
+        (current, total, msg) => {
+          // Progress feedback
+        }
+      );
+
+      setDetectedGaps(gaps);
+      setIsGapModalOpen(true);
+
+      if (gaps.length === 0) {
+        toast.success('✨ Пропусков не обнаружено! Все реплики озвучены.');
+      } else {
+        toast.warning(`Обнаружено ${gaps.length} подозрительных пропусков реплик!`);
+      }
+    } catch (e: any) {
+      console.error('Gap detection failed:', e);
+      toast.error(`Ошибка анализа пропусков: ${e?.message || e}`);
+    } finally {
+      setIsAnalyzingGaps(false);
+    }
+  };
+
+  const handleApplyGapFixes = async (selectedGaps: MissingLineDetection[]) => {
+    if (!currentEpisode || selectedGaps.length === 0) return;
+
+    setIsApplyingGapFixes(true);
+    try {
+      const commentsByTrackId: Record<string, Comment[]> = {};
+      const commentsByAssignmentId: Record<string, Comment[]> = {};
+
+      selectedGaps.forEach(gap => {
+        const comment: Comment = {
+          id: Math.random().toString(36).substr(2, 9),
+          text: gap.comment || `Пропуск реплики [${gap.startFormatted}]: "${gap.text}"`,
+          timestamp: gap.startSec,
+          author: 'Куратор (Авто)',
+          subId: gap.subId
+        };
+
+        if (!commentsByTrackId[gap.trackId]) {
+          commentsByTrackId[gap.trackId] = [];
+        }
+        commentsByTrackId[gap.trackId].push(comment);
+
+        if (gap.assignmentId) {
+          if (!commentsByAssignmentId[gap.assignmentId]) {
+            commentsByAssignmentId[gap.assignmentId] = [];
+          }
+          commentsByAssignmentId[gap.assignmentId].push(comment);
+        }
+      });
+
+      // Update local tracks state
+      const updatedTracks = tracks.map(t => {
+        const newComments = commentsByTrackId[t.id];
+        if (newComments && newComments.length > 0) {
+          return {
+            ...t,
+            comments: [...t.comments, ...newComments],
+            status: 'fixes_needed' as const
+          };
+        }
+        return t;
+      });
+      setTracks(updatedTracks);
+
+      // Update assignments in DB
+      const updatedAssignments = currentEpisode.assignments?.map(a => {
+        const assignedId = a.substituteId || a.dubberId;
+        const newAssComments = commentsByAssignmentId[a.id] || (
+          commentsByTrackId[assignedId || '']?.filter(c => {
+            const gap = selectedGaps.find(g => g.subId === c.subId);
+            return gap && gap.characterName.toLowerCase() === a.characterName.toLowerCase();
+          })
+        ) || [];
+
+        if (newAssComments.length > 0) {
+          let existingComments: Comment[] = [];
+          try {
+            existingComments = JSON.parse(a.comments || '[]');
+          } catch (e) {}
+
+          return {
+            ...a,
+            comments: JSON.stringify([...existingComments, ...newAssComments]),
+            status: 'FIXES_NEEDED'
+          };
+        }
+        return a;
+      }) || [];
+
+      await ipcSafe.invoke('save-episode', {
+        ...currentEpisode,
+        assignments: updatedAssignments,
+        status: currentEpisode.status === 'FINISHED' ? 'FINISHED' : 'FIXES'
+      });
+
+      onRefresh();
+      toast.success(`Успешно сформировано ${selectedGaps.length} фиксов!`);
+      setIsGapModalOpen(false);
+
+      // Automatically open the generated fixes message ready to be sent
+      setTimeout(() => {
+        handleGenerateFixesMessage();
+      }, 300);
+    } catch (e: any) {
+      console.error('Failed to apply gap fixes:', e);
+      toast.error(`Ошибка при сохранении фиксов: ${e?.message || e}`);
+    } finally {
+      setIsApplyingGapFixes(false);
+    }
+  };
+
   const handleGenerateReminderMessage = () => {
     if (!currentEpisode) return;
     const msg = generateStatusMessage(currentEpisode, participants);
@@ -1140,6 +1316,10 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           isAutoNormalize={isAutoNormalize}
           onToggleAutoNormalize={toggleAutoNormalize}
           normalizationMetrics={normalizationMetrics}
+          onOpenGapDetection={handleRunGapDetection}
+          isAnalyzingGaps={isAnalyzingGaps}
+          detectedGapsCount={detectedGaps.length}
+          gapsByTrack={gapsByTrack}
         />
 
       {/* Main Content - Player & Comments */}
@@ -1613,7 +1793,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
                         });
                       }}
                       onPlayPause={togglePlay}
-                      volume={track.id === 'original' ? 0 : (isMuted || mutedTracks.has(track.id) ? 0 : Math.min(1.0, Math.max(0, (volumes[track.id] ?? 0.8) * ((isAutoNormalize && normalizationMetrics[track.id]?.status === 'ready') ? normalizationMetrics[track.id].gain : 1.0))))}
+                      volume={track.id === 'original' ? 0 : (isMuted || mutedTracks.has(track.id) ? 0 : Math.max(0, (volumes[track.id] ?? 0.8) * ((isAutoNormalize && normalizationMetrics[track.id]?.status === 'ready') ? normalizationMetrics[track.id].gain : 1.0)))}
                       isMuted={isMuted || mutedTracks.has(track.id)}
                       onRegionClick={(region) => {
                         setCommentModal({ isOpen: true, region });
@@ -1653,6 +1833,33 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Missing Lines / Gaps Review Modal */}
+      {isGapModalOpen && (
+        <MissingLinesModal
+          isOpen={isGapModalOpen}
+          onClose={() => setIsGapModalOpen(false)}
+          gaps={detectedGaps}
+          onApplyFixes={handleApplyGapFixes}
+          onSeekMainPlayer={(timeSec) => {
+            setCurrentTime(timeSec);
+            if (videoRef.current) {
+              videoRef.current.currentTime = timeSec;
+            }
+            if (wavesurferRef.current) {
+              wavesurferRef.current.setTime(timeSec);
+            }
+            Object.values(audioRefs.current).forEach(audio => {
+              if (audio instanceof HTMLAudioElement) {
+                audio.currentTime = timeSec;
+              }
+            });
+          }}
+          isApplying={isApplyingGapFixes}
+          onReAnalyze={handleRunGapDetection}
+          isAnalyzing={isAnalyzingGaps}
+        />
       )}
 
       {/* Export Modal */}

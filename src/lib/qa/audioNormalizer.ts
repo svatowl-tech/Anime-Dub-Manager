@@ -21,8 +21,8 @@ const normalizationCache = new Map<string, NormalizationMetrics>();
 // Target parameters for comfortable voiceover QA listening
 const TARGET_SPEECH_RMS = 0.125; // ~ -18 dBFS (standard dialogue target)
 const TARGET_MAX_PEAK = 0.92;    // ~ -0.7 dBFS (prevents digital clipping)
-const MAX_BOOST_GAIN = 4.0;      // Max +12 dB boost (avoids amplifying noise floor)
-const MIN_CUT_GAIN = 0.25;       // Max -12 dB cut
+const MAX_BOOST_GAIN = 31.62;     // Max +30 dB boost (was +12 dB)
+const MIN_CUT_GAIN = 0.0316;      // Max -30 dB cut (was -12 dB)
 
 /**
  * Decodes audio from an URL / file path and analyzes peak & speech RMS to compute optimal preview gain.

@@ -190,11 +190,43 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
     };
   }, [track.id]);
 
+  const gainNodeRef = useRef<{ gain: GainNode, ctx: AudioContext } | null>(null);
+
   useEffect(() => {
     if (wavesurferRef.current) {
-      wavesurferRef.current.setVolume(isMuted ? 0 : volume);
+      const media = wavesurferRef.current.getMediaElement();
+      if (media && !gainNodeRef.current) {
+        try {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+          if (AudioContextClass) {
+            const ctx = new AudioContextClass();
+            const source = ctx.createMediaElementSource(media);
+            const gain = ctx.createGain();
+            source.connect(gain);
+            gain.connect(ctx.destination);
+            gainNodeRef.current = { gain, ctx };
+          }
+        } catch (e) {
+          console.warn('TrackWaveform Web Audio gain init failed', e);
+        }
+      }
+
+      if (gainNodeRef.current) {
+        wavesurferRef.current.setVolume(1.0);
+        gainNodeRef.current.gain.gain.value = isMuted ? 0 : volume;
+      } else {
+        wavesurferRef.current.setVolume(isMuted ? 0 : Math.min(1.0, volume));
+      }
     }
   }, [volume, isMuted]);
+
+  useEffect(() => {
+    return () => {
+      if (gainNodeRef.current) {
+        gainNodeRef.current.ctx.close().catch(() => {});
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (wavesurferRef.current) {
