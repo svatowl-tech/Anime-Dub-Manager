@@ -10,6 +10,7 @@
 
 import { Episode, Track, SubtitleLine } from '../../types';
 import { SIGN_KEYWORDS } from '../../constants';
+import { getSharedAudioContext, ensureAudioContextResumed } from './sharedAudioContext';
 
 export interface MissingLineDetection {
   id: string;
@@ -100,17 +101,23 @@ export async function decodeAudioFile(url: string): Promise<AudioBuffer> {
   }
   const arrayBuffer = await response.arrayBuffer();
 
+  const OfflineCtx = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
   const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-  if (!AudioCtx) {
+  if (!OfflineCtx && !AudioCtx) {
     throw new Error('Web Audio API не поддерживается данным браузером');
   }
 
-  const audioCtx = new AudioCtx();
-  try {
-    return await audioCtx.decodeAudioData(arrayBuffer);
-  } finally {
-    if (audioCtx.state !== 'closed') {
-      audioCtx.close().catch(() => {});
+  if (OfflineCtx) {
+    const offlineCtx = new OfflineCtx(1, 44100, 44100);
+    return await offlineCtx.decodeAudioData(arrayBuffer);
+  } else {
+    const tempCtx = new AudioCtx();
+    try {
+      return await tempCtx.decodeAudioData(arrayBuffer);
+    } finally {
+      if (tempCtx.state !== 'closed') {
+        tempCtx.close().catch(() => {});
+      }
     }
   }
 }
@@ -411,7 +418,6 @@ export async function detectEpisodeGaps(
  * Plays an isolated audio snippet from startSec to endSec
  */
 export class SnippetAudioPlayer {
-  private static activeCtx: AudioContext | null = null;
   private static activeSource: AudioBufferSourceNode | null = null;
   private static onStopCallback: (() => void) | null = null;
 
@@ -423,17 +429,17 @@ export class SnippetAudioPlayer {
   ): void {
     this.stop();
 
-    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioCtx) return;
+    const ctx = getSharedAudioContext();
+    if (!ctx) return;
+    ensureAudioContextResumed();
 
-    this.activeCtx = new AudioCtx();
-    this.activeSource = this.activeCtx.createBufferSource();
+    this.activeSource = ctx.createBufferSource();
     this.activeSource.buffer = buffer;
 
-    const gainNode = this.activeCtx.createGain();
+    const gainNode = ctx.createGain();
     gainNode.gain.value = 1.0;
     this.activeSource.connect(gainNode);
-    gainNode.connect(this.activeCtx.destination);
+    gainNode.connect(ctx.destination);
 
     const duration = Math.max(0.1, endSec - startSec);
     this.onStopCallback = onEnded || null;
@@ -456,10 +462,6 @@ export class SnippetAudioPlayer {
         this.activeSource.disconnect();
       } catch (e) {}
       this.activeSource = null;
-    }
-    if (this.activeCtx && this.activeCtx.state !== 'closed') {
-      this.activeCtx.close().catch(() => {});
-      this.activeCtx = null;
     }
     if (this.onStopCallback) {
       this.onStopCallback();

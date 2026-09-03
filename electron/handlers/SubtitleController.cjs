@@ -11,7 +11,8 @@ const {
   autoFixSubtitles,
   shiftSubtitlesTime,
   exportCharacterSubtitles,
-  mergeMultipleSubtitles
+  mergeMultipleSubtitles,
+  removeHonorificsFromSubtitles
 } = require('../services/subtitleService.cjs');
 
 function registerSubtitleHandlers(getData) {
@@ -21,9 +22,15 @@ function registerSubtitleHandlers(getData) {
     }
     return await mergeMultipleSubtitles(filePaths, options);
   }));
-  ipcMain.handle('auto-fix-subtitles', wrapIpcHandler(async (event, { filePath }) => {
+
+  ipcMain.handle('auto-fix-subtitles', wrapIpcHandler(async (event, { filePath, options }) => {
     if (!filePath) throw new Error('Missing file path');
-    return await autoFixSubtitles(filePath);
+    return await autoFixSubtitles(filePath, options || {});
+  }));
+
+  ipcMain.handle('remove-honorifics-subtitles', wrapIpcHandler(async (event, { filePath, options }) => {
+    if (!filePath) throw new Error('Missing file path');
+    return await removeHonorificsFromSubtitles(filePath, options || {});
   }));
 
   ipcMain.handle('shift-subtitles-time', wrapIpcHandler(async (event, { filePath, offsetMs, selectedLineIds }) => {

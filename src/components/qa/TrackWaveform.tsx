@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import { Track, SubtitleLine } from '../../types';
+import { getSharedAudioContext, ensureAudioContextResumed } from '../../lib/qa/sharedAudioContext';
 
 function generateSyntheticPeaks(lines: SubtitleLine[], duration: number) {
   const pointsPerSecond = 10;
@@ -43,12 +44,18 @@ interface TrackWaveformProps {
   isMuted: boolean;
   onRegionClick: (region: any) => void;
   onSeek?: (time: number) => void;
+  onWaveSurferReady?: (ws: WaveSurfer | null) => void;
 }
 
-export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeUpdate, onPlayPause, volume, isMuted, onRegionClick, onSeek }: TrackWaveformProps) => {
+export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeUpdate, onPlayPause, volume, isMuted, onRegionClick, onSeek, onWaveSurferReady }: TrackWaveformProps) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<any>(null);
+  const isPlayingRef = useRef(isPlaying);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -63,6 +70,10 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
       height: 80,
       normalize: true,
     });
+
+    if (onWaveSurferReady) {
+      onWaveSurferReady(wavesurferRef.current);
+    }
 
     regionsRef.current = wavesurferRef.current.registerPlugin(RegionsPlugin.create());
 
@@ -151,10 +162,10 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
     });
 
     wavesurferRef.current.on('play', () => {
-      if (!isPlaying) onPlayPause();
+      if (!isPlayingRef.current) onPlayPause();
     });
     wavesurferRef.current.on('pause', () => {
-      if (isPlaying) onPlayPause();
+      if (isPlayingRef.current) onPlayPause();
     });
 
     let isUnmounted = false;
@@ -163,7 +174,7 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
     wavesurferRef.current.on('ready', () => {
       if (isUnmounted) return;
       wavesurferRef.current?.setTime(currentTime);
-      if (isPlaying) {
+      if (isPlayingRef.current) {
         wavesurferRef.current?.play().catch(() => {});
       }
       subLines.forEach(line => {
@@ -186,28 +197,30 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
 
     return () => {
       isUnmounted = true;
+      if (onWaveSurferReady) {
+        onWaveSurferReady(null);
+      }
       wavesurferRef.current?.destroy();
     };
   }, [track.id]);
 
-  const gainNodeRef = useRef<{ gain: GainNode, ctx: AudioContext } | null>(null);
+  const gainNodeRef = useRef<{ gain: GainNode } | null>(null);
 
   useEffect(() => {
     if (wavesurferRef.current) {
       const media = wavesurferRef.current.getMediaElement();
       if (media && !gainNodeRef.current) {
         try {
-          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-          if (AudioContextClass) {
-            const ctx = new AudioContextClass();
+          const ctx = getSharedAudioContext();
+          if (ctx) {
             const source = ctx.createMediaElementSource(media);
             const gain = ctx.createGain();
             source.connect(gain);
             gain.connect(ctx.destination);
-            gainNodeRef.current = { gain, ctx };
+            gainNodeRef.current = { gain };
           }
         } catch (e) {
-          console.warn('TrackWaveform Web Audio gain init failed', e);
+          console.warn('TrackWaveform Web Audio gain init notice:', e);
         }
       }
 
@@ -221,16 +234,9 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
   }, [volume, isMuted]);
 
   useEffect(() => {
-    return () => {
-      if (gainNodeRef.current) {
-        gainNodeRef.current.ctx.close().catch(() => {});
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (wavesurferRef.current) {
       if (isPlaying) {
+        ensureAudioContextResumed();
         wavesurferRef.current.play().catch(e => {
           if (e?.name !== 'AbortError') console.error(e);
         });
@@ -241,10 +247,15 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
   }, [isPlaying]);
 
   useEffect(() => {
-    if (wavesurferRef.current && Math.abs(wavesurferRef.current.getCurrentTime() - currentTime) > 0.1) {
-      wavesurferRef.current.setTime(currentTime);
+    if (wavesurferRef.current) {
+      const wsTime = wavesurferRef.current.getCurrentTime();
+      const diff = Math.abs(wsTime - currentTime);
+      // Avoid seeking mid-play unless drift is substantial (> 0.45s) or paused (> 0.05s)
+      if (diff > (isPlaying ? 0.45 : 0.05)) {
+        wavesurferRef.current.setTime(currentTime);
+      }
     }
-  }, [currentTime]);
+  }, [currentTime, isPlaying]);
 
   return <div ref={containerRef} className="w-full" />;
 };

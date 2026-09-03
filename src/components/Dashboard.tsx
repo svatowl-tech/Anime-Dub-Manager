@@ -9,6 +9,7 @@ import { getNextEpisodeDate } from '../services/animeService';
 import { ExportModal } from './ExportModal';
 import { ConfirmModal } from './ui/ConfirmModal';
 import CreateProjectModal from './dashboard/CreateProjectModal';
+import ProjectSettingsModal from './dashboard/ProjectSettingsModal';
 import CreateEpisodeModal from './dashboard/CreateEpisodeModal';
 import CharacterManagementModal from './dashboard/CharacterManagementModal';
 import AssignDubbersModal from './dashboard/AssignDubbersModal';
@@ -118,6 +119,7 @@ export default function Dashboard({
   const [selectedAudioIndex, setSelectedAudioIndex] = useState<number | undefined>();
   const [isMultiSubMergeModalOpen, setIsMultiSubMergeModalOpen] = useState(false);
   const [multiMergeInitialFiles, setMultiMergeInitialFiles] = useState<SubFileItem[]>([]);
+  const [multiMergeTargetEpisodeId, setMultiMergeTargetEpisodeId] = useState<string | undefined>(undefined);
   const [torrentMkvDetected, setTorrentMkvDetected] = useState<{
     episodeNumber: number;
     filePath: string;
@@ -1139,6 +1141,7 @@ export default function Dashboard({
       }
 
       setMultiMergeInitialFiles(extracted);
+      setMultiMergeTargetEpisodeId(episodeId);
       setIsSubtitleSelectModalOpen(false);
       setPendingMkvUpload(null);
       setSubtitleTracks([]);
@@ -2371,214 +2374,14 @@ export default function Dashboard({
       />
 
       {/* Project Settings Modal */}
-      {isProjectSettingsModalOpen && projects.find(p => p.id === selectedProjectId) && (
-        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/80">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden pointer-events-auto">
-            <div className="p-6 border-b border-neutral-800 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Settings2 className="w-5 h-5 text-indigo-400" />
-                <h2 className="text-xl font-semibold text-white">Настройки проекта</h2>
-              </div>
-              <button onClick={() => setIsProjectSettingsModalOpen(false)} className="text-neutral-400 hover:text-white">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            
-            <div className="p-8 space-y-8">
-              {(() => {
-                const project = projects.find(p => p.id === selectedProjectId)!;
-                return (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div className="space-y-6">
-                      <div>
-                        <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">Эмодзи проекта</label>
-                        <div className="relative">
-                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-500">✨</span>
-                          <input
-                            type="text"
-                            value={project.emoji || ''}
-                            onChange={async (e) => {
-                              await ipcSafe.invoke('save-project', { 
-                                ...project, 
-                                emoji: e.target.value 
-                              });
-                              onRefresh();
-                            }}
-                            className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                            placeholder="❤️, 📢..."
-                          />
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">Тип и Сезон (напр. TV1)</label>
-                        <div className="relative">
-                          <Globe className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-                          <input
-                            type="text"
-                            value={project.typeAndSeason || ''}
-                            onChange={async (e) => {
-                              await ipcSafe.invoke('save-project', { 
-                                ...project, 
-                                typeAndSeason: e.target.value 
-                              });
-                              onRefresh();
-                            }}
-                            className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                            placeholder="TV1, Movie, OVA..."
-                          />
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <div>
-                          <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">Дедлайн серии</label>
-                          <div className="relative">
-                            <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-                            <input
-                              type="date"
-                              value={currentEpisode?.deadline ? new Date(currentEpisode.deadline).toISOString().split('T')[0] : ''}
-                              onChange={async (e) => {
-                                if (currentEpisode) {
-                                  await ipcSafe.invoke('save-episode', { ...currentEpisode, deadline: e.target.value });
-                                  onRefresh();
-                                }
-                              }}
-                              className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                            />
-                          </div>
-                        </div>
-                        <div>
-                          <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">
-                            Дедлайн фиксов <span className="text-neutral-500 font-normal lowercase">(по умолчанию: +1 день)</span>
-                          </label>
-                          <div className="relative">
-                            <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-                            <input
-                              type="date"
-                              value={currentEpisode?.fixesDeadline ? new Date(currentEpisode.fixesDeadline).toISOString().split('T')[0] : ''}
-                              onChange={async (e) => {
-                                if (currentEpisode) {
-                                  await ipcSafe.invoke('save-episode', { ...currentEpisode, fixesDeadline: e.target.value || undefined });
-                                  onRefresh();
-                                }
-                              }}
-                              className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                      <div>
-                        <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">Всего серий</label>
-                        <div className="relative">
-                          <Hash className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-                          <input
-                            type="number"
-                            value={project.totalEpisodes}
-                            onChange={async (e) => {
-                              await ipcSafe.invoke('save-project', { 
-                                ...project, 
-                                totalEpisodes: parseInt(e.target.value) 
-                              });
-                              onRefresh();
-                            }}
-                            className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                          />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="space-y-6">
-                      {/* Telegram Integration Section */}
-                      <div className="bg-sky-950/30 border border-sky-800/50 p-4 rounded-2xl space-y-3">
-                        <div className="flex items-center gap-2">
-                          <MessageSquare className="w-4 h-4 text-sky-400" />
-                          <span className="text-xs font-bold text-sky-300 uppercase tracking-wider">Telegram-Чаты Проекта</span>
-                        </div>
-                        <p className="text-[11px] text-neutral-400">
-                          Настройте раздельные чаты для выгрузки серий и работы с командой актеров:
-                        </p>
-
-                        <div>
-                          <label className="block text-[11px] font-semibold text-neutral-300 mb-1">
-                            📢 Канал публикации серий (Релизы):
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="@akaneproject_channel или ID"
-                            value={project.tgReleaseChannelId || ''}
-                            onChange={async (e) => {
-                              await ipcSafe.invoke('save-project', { 
-                                ...project, 
-                                tgReleaseChannelId: e.target.value 
-                              });
-                              onRefresh();
-                            }}
-                            className="w-full bg-black border border-neutral-800 rounded-xl py-2 px-3 text-xs text-white font-mono focus:border-sky-500 outline-none"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-[11px] font-semibold text-neutral-300 mb-1">
-                            💬 Рабочий чат команды (Сдача дорог, фиксы):
-                          </label>
-                          <input
-                            type="text"
-                            placeholder="@akaneproject_team или ID"
-                            value={project.tgWorkGroupId || ''}
-                            onChange={async (e) => {
-                              await ipcSafe.invoke('save-project', { 
-                                ...project, 
-                                tgWorkGroupId: e.target.value 
-                              });
-                              onRefresh();
-                            }}
-                            className="w-full bg-black border border-neutral-800 rounded-xl py-2 px-3 text-xs text-white font-mono focus:border-sky-500 outline-none"
-                          />
-                        </div>
-                      </div>
-
-                      <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">Ссылки на платформы</label>
-                      <div className="grid grid-cols-1 gap-3">
-                        {(() => {
-                          const defaultLinks = { anime365: '', tg: '', kodik: '', vk: '', shikimori: '' };
-                          const parsed = JSON.parse(project.links || '{}');
-                          const links = { ...defaultLinks, ...parsed };
-                          return Object.entries(links).map(([key, value], idx) => (
-                            <div key={(key || 'link') + idx} className="relative">
-                              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-neutral-600 uppercase w-16">{key}</span>
-                              <input
-                                type="text"
-                                placeholder="URL..."
-                                value={value as string}
-                                onChange={async (e) => {
-                                  const updatedLinks = { ...links, [key]: e.target.value };
-                                  await ipcSafe.invoke('save-project', { 
-                                    ...project, 
-                                    links: JSON.stringify(updatedLinks) 
-                                  });
-                                  onRefresh();
-                                }}
-                                className="w-full bg-black border border-neutral-800 rounded-xl py-2.5 pl-20 pr-4 text-xs text-white focus:ring-1 focus:ring-indigo-500 outline-none transition-all"
-                              />
-                            </div>
-                          ));
-                        })()}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            <div className="p-6 border-t border-neutral-800 flex justify-end">
-              <button 
-                onClick={() => setIsProjectSettingsModalOpen(false)}
-                className="px-8 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold transition-all shadow-lg shadow-indigo-500/20"
-              >
-                Готово
-              </button>
-            </div>
-          </div>
-        </div>
+      {isProjectSettingsModalOpen && selectedProject && (
+        <ProjectSettingsModal
+          isOpen={isProjectSettingsModalOpen}
+          onClose={() => setIsProjectSettingsModalOpen(false)}
+          project={selectedProject}
+          currentEpisode={currentEpisode}
+          onSave={onRefresh}
+        />
       )}
       {currentEpisode && (
         <ExportModal 
@@ -2677,7 +2480,7 @@ export default function Dashboard({
             setAudioTracks([]);
             setPendingMkvUpload({
               filePath: torrentMkvDetected.filePath,
-              type: 'SUB',
+              type: 'RAW',
               episodeId: torrentMkvDetected.targetEpisode?.id || currentEpisode?.id
             });
             setTorrentMkvDetected(null);
@@ -3375,8 +3178,10 @@ export default function Dashboard({
         onClose={() => {
           setIsMultiSubMergeModalOpen(false);
           setMultiMergeInitialFiles([]);
+          setMultiMergeTargetEpisodeId(undefined);
         }}
         currentEpisode={currentEpisode}
+        targetEpisodeId={multiMergeTargetEpisodeId}
         onRefresh={onRefresh}
         initialFiles={multiMergeInitialFiles}
       />

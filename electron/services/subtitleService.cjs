@@ -103,7 +103,126 @@ function msToTime(ms) {
   return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${cs.toString().padStart(2, '0')}`;
 }
 
-async function autoFixSubtitles(assFilePath) {
+const SUFFIXES_CYRILLIC_PATTERN = 'кун|куна|куну|куном|куне|куны|кунов|тян|тянки|тянку|тянке|тянкой|тяночка|тяночке|тяночку|сан|сана|сану|саном|сане|сама|самы|саме|саму|самой|сенсей|сенсея|сенсею|сенсеем|сенсее|сенсеи|сэнсэй|сэнсэя|сэнсэю|сэнсэем|сэнсэе|сэнсэи|семпай|семпая|семпаю|семпаем|семпае|семпаи|сэмпай|сэмпая|сэмпаю|сэмпаем|сэмпае|сэмпаи|доно|дону|доном|доне|тан|чи|ти|тяма|кохай|аники';
+const SUFFIXES_LATIN_PATTERN = 'kun|chan|san|sama|sensei|senpai|dono|tan|chi|chama|kohai|aniki';
+const RELATIVES_CYRILLIC_PATTERN = 'они-сан|они-чан|оне-сан|оне-сама|ни-сан|нии-сан|нии-чама';
+const RELATIVES_LATIN_PATTERN = 'oni-san|oni-chan|one-san|one-sama|nii-san|nii-chama';
+const STANDALONE_CYRILLIC_PATTERN = 'сэнсэй|сенсей|сэмпай|семпай|они-сан|они-чан|оне-сан|оне-сама|ни-сан|нии-сан';
+const STANDALONE_LATIN_PATTERN = 'sensei|senpai';
+const RU_BOUND = '(?![а-яА-ЯёЁ])';
+
+function cleanSegmentTextCjs(segment, opts = {}) {
+  if (!segment) return segment;
+
+  let text = segment;
+  const wasCapitalizedAtStart = /^[А-ЯA-Z]/.test(text.trim());
+
+  if (opts.removeRelatives !== false) {
+    text = text.replace(new RegExp(`(-+)(${RELATIVES_CYRILLIC_PATTERN})${RU_BOUND}`, 'gi'), '');
+    if (opts.removeLatin !== false) {
+      text = text.replace(new RegExp(`(-+)(${RELATIVES_LATIN_PATTERN})\\b`, 'gi'), '');
+    }
+  }
+
+  if (opts.removeSuffixes !== false) {
+    text = text.replace(new RegExp(`(-+)(${SUFFIXES_CYRILLIC_PATTERN})${RU_BOUND}`, 'gi'), '');
+    if (opts.removeLatin !== false) {
+      text = text.replace(new RegExp(`(-+)(${SUFFIXES_LATIN_PATTERN})\\b`, 'gi'), '');
+    }
+  }
+
+  if (opts.removeSpaced !== false) {
+    text = text.replace(new RegExp(`(?<=[А-ЯA-Z][а-яa-z]*)\\s+(${SUFFIXES_CYRILLIC_PATTERN})${RU_BOUND}`, 'g'), '');
+    if (opts.removeLatin !== false) {
+      text = text.replace(new RegExp(`(?<=[A-Z][a-z]*)\\s+(${SUFFIXES_LATIN_PATTERN})\\b`, 'g'), '');
+    }
+  }
+
+  if (opts.removeStandalone !== false) {
+    const standStart = new RegExp(`^(\\s*)(${STANDALONE_CYRILLIC_PATTERN}${opts.removeLatin !== false ? `|${STANDALONE_LATIN_PATTERN}` : ''})([\\s,!?.-]+)`, 'gi');
+    text = text.replace(standStart, '$1');
+
+    const standEnd = new RegExp(`([\\s,!?.-]+)(${STANDALONE_CYRILLIC_PATTERN}${opts.removeLatin !== false ? `|${STANDALONE_LATIN_PATTERN}` : ''})${RU_BOUND}`, 'gi');
+    text = text.replace(standEnd, (match, p1) => {
+      const leadingPunct = (p1 || '').replace(/\s+/g, '');
+      if (/[!?.]/.test(leadingPunct)) return leadingPunct;
+      return '';
+    });
+  }
+
+  text = text
+    .replace(/\s+,/g, ',')
+    .replace(/\s+\./g, '.')
+    .replace(/\s+\!/g, '!')
+    .replace(/\s+\?/g, '?')
+    .replace(/,\s*,/g, ',')
+    .replace(/,\s*\./g, '.')
+    .replace(/,\s*\!/g, '!')
+    .replace(/,\s*\?/g, '?')
+    .replace(/^\s*[,.-]+\s*/, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  if (wasCapitalizedAtStart && text.length > 0 && /^[а-яa-z]/.test(text)) {
+    text = text.charAt(0).toUpperCase() + text.slice(1);
+  }
+
+  return text;
+}
+
+function filterHonorificsFromAssTextCjs(assText, options = {}) {
+  if (!assText) return { cleanedText: assText, modified: false };
+  const tokenRegex = /(\{[^}]+\}|\\N|\\n)/g;
+  const parts = assText.split(tokenRegex);
+
+  let isModified = false;
+  const processedParts = parts.map(part => {
+    if (!part || part.startsWith('{') || part === '\\N' || part === '\\n') {
+      return part;
+    }
+    const cleaned = cleanSegmentTextCjs(part, options);
+    if (cleaned !== part) isModified = true;
+    return cleaned;
+  });
+
+  const finalResult = processedParts.join('');
+  return {
+    cleanedText: finalResult,
+    modified: isModified || finalResult !== assText
+  };
+}
+
+async function removeHonorificsFromSubtitles(assFilePath, options = {}) {
+  log.info(`[SubtitleService] Removing Japanese honorifics from: ${assFilePath}`);
+  const data = await getRawSubtitles(assFilePath);
+  let lines = data.lines || [];
+  let changedCount = 0;
+  let updates = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const { cleanedText, modified } = filterHonorificsFromAssTextCjs(line.text || '', options);
+    if (modified) {
+      changedCount++;
+      updates.push({
+        rawLineIndex: line.rawLineIndex,
+        text: cleanedText
+      });
+    }
+  }
+
+  if (updates.length > 0) {
+    await saveRawSubtitles(assFilePath, updates, false);
+  }
+
+  log.info(`[SubtitleService] Removed honorifics in ${changedCount} lines for ${assFilePath}`);
+  return {
+    success: true,
+    changedCount
+  };
+}
+
+async function autoFixSubtitles(assFilePath, options = {}) {
   log.info(`[SubtitleService] Starting auto-fix for subtitles: ${assFilePath}`);
   const startTime = Date.now();
   const data = await getRawSubtitles(assFilePath);
@@ -112,6 +231,7 @@ async function autoFixSubtitles(assFilePath) {
   let removedCount = 0;
   let overlappingCount = 0;
   let spaceCount = 0;
+  let honorificsCount = 0;
   let updates = [];
 
   // Track valid lines to fix overlapping later
@@ -128,8 +248,19 @@ async function autoFixSubtitles(assFilePath) {
       continue;
     }
 
-    // 2. Fix double spaces (ignoring ASS tags for simplicity or fixing inside text)
     let needsUpdate = false;
+
+    // Optional: Honorifics removal
+    if (options.removeHonorifics) {
+      const { cleanedText, modified } = filterHonorificsFromAssTextCjs(line.text || '', options.honorificOptions || {});
+      if (modified) {
+        line.text = cleanedText;
+        needsUpdate = true;
+        honorificsCount++;
+      }
+    }
+
+    // 2. Fix double spaces
     if (line.text && line.text.includes('  ')) {
       const oldText = line.text;
       line.text = line.text.replace(/ {2,}/g, ' ');
@@ -170,12 +301,13 @@ async function autoFixSubtitles(assFilePath) {
     await saveRawSubtitles(assFilePath, updates, false);
   }
   
-  log.info(`[SubtitleService] Auto-fix completed in ${Date.now() - startTime}ms: removed ${removedCount} empty lines, fixed ${spaceCount} spaces, resolved ${overlappingCount} overlaps.`);
+  log.info(`[SubtitleService] Auto-fix completed in ${Date.now() - startTime}ms: removed ${removedCount} empty lines, fixed ${spaceCount} spaces, resolved ${overlappingCount} overlaps, cleaned ${honorificsCount} honorifics.`);
   return {
     success: true,
     removedCount,
     overlappingCount,
-    spaceCount
+    spaceCount,
+    honorificsCount
   };
 }
 
@@ -1544,6 +1676,8 @@ module.exports = {
   timeToSeconds,
   autoFixSubtitles,
   shiftSubtitlesTime,
-  exportCharacterSubtitles
+  exportCharacterSubtitles,
+  removeHonorificsFromSubtitles,
+  filterHonorificsFromAssTextCjs
 };
 

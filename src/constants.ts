@@ -4,7 +4,14 @@ export const SIGN_KEYWORDS = [
   "SIGNS", "Signs", "signs", 
   "SIGN", "Sign", "sign", 
   "TEXT", "Text", "text", 
-  "ТЕКСТ", "Текст", '"текст"'
+  "ТЕКСТ", "Текст", '"текст"',
+  "CAPTION", "Caption", "caption",
+  "CAPTIONS", "Captions", "captions",
+  "TITLE", "Title", "title",
+  "TITLES", "Titles", "titles",
+  "INFO", "Info", "info",
+  "LOGO", "Logo", "logo",
+  "CREDIT", "Credit", "credits"
 ];
 
 export const GROUP_KEYWORDS = ["гуры", "все"];

@@ -13,6 +13,7 @@ import {
   SHORTCUT_CODES,
 } from "./utils";
 import { applyGenderPrefix, getNextNumberedRole } from "./roleHelpers";
+import { bulkFilterHonorifics, HonorificsOptions } from "../../lib/honorificsFilter";
 
 export function useSubtitleEditorState(
   currentEpisode: Episode | null,
@@ -24,6 +25,7 @@ export function useSubtitleEditorState(
   const [status, setStatus] = useState("");
   const [updates, setUpdates] = useState<SubtitleUpdates>({});
   const [isMultiSubMergeModalOpen, setIsMultiSubMergeModalOpen] = useState(false);
+  const [showHonorificsModal, setShowHonorificsModal] = useState(false);
   
   const [autoApplyAliases, setAutoApplyAliases] = useState(() => {
     return localStorage.getItem('sub_editor_auto_aliases') !== 'false';
@@ -757,6 +759,34 @@ export function useSubtitleEditorState(
     }
   };
 
+  const handleRemoveHonorifics = async (options: HonorificsOptions) => {
+    if (!lines || lines.length === 0) return;
+    pushStateForUndo();
+    setLoading(true);
+    setStatus("Фильтрация обращений...");
+    try {
+      const { updatedLines, changedCount } = bulkFilterHonorifics(lines, options);
+      setLines(updatedLines);
+      
+      if (currentEpisode?.subPath) {
+        await ipcSafe.invoke('remove-honorifics-subtitles', {
+          filePath: currentEpisode.subPath,
+          options
+        });
+      }
+      toast.success(`Успешно очищено ${changedCount} реплик от японских обращений`);
+      setStatus(`Удалены обращения в ${changedCount} репликах.`);
+      setShowHonorificsModal(false);
+      onRefresh();
+    } catch (err: any) {
+      console.error("Error removing honorifics:", err);
+      toast.error("Ошибка при удалении обращений");
+      setStatus("Ошибка при удалении обращений.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleShiftTime = () => {
     if (!currentEpisode?.subPath) return;
     setShiftAmountMs('');
@@ -958,6 +988,32 @@ export function useSubtitleEditorState(
     setUpdates(newUpdates);
   };
 
+  const handleConvertCaptionsToSigns = (charName?: string) => {
+    pushStateForUndo();
+    const targetName = "НАДПИСЬ";
+    const signKeys = charName ? [charName.toLowerCase()] : ["caption", "captions", "sign", "signs", "title", "text"];
+    const newUpdates = { ...updates };
+    let count = 0;
+
+    lines.forEach((line) => {
+      const index = line.rawLineIndex;
+      const currentName = (updates[index]?.name || line.name || '').trim();
+      const currentLower = currentName.toLowerCase();
+
+      if (currentName && currentName !== targetName && signKeys.some(k => currentLower === k || currentLower.includes(k))) {
+        newUpdates[index] = { ...newUpdates[index], name: targetName };
+        count++;
+      }
+    });
+
+    setUpdates(newUpdates);
+    if (count > 0) {
+      toast.success(`Перенаправлено ${count} реплик в "${targetName}"`);
+    } else {
+      toast.info(`Реплики персонажей вида ${charName || 'caption'} не найдены.`);
+    }
+  };
+
   const handleApplyStresses = () => {
     try {
       const rawStresses = currentEpisode?.project?.nameStresses || '{}';
@@ -1071,6 +1127,9 @@ export function useSubtitleEditorState(
     totalDuration,
     isMultiSubMergeModalOpen,
     setIsMultiSubMergeModalOpen,
+    showHonorificsModal,
+    setShowHonorificsModal,
+    handleRemoveHonorifics,
     autoApplyAliases,
     autoApplyStresses,
     handleToggleAutoApplyAliases,
@@ -1099,6 +1158,7 @@ export function useSubtitleEditorState(
     handleApplyGenderPrefix,
     handleApplyNextNumber,
     handleApplyAliases,
+    handleConvertCaptionsToSigns,
     handleApplyStresses,
     handlePlayFromTime,
     isSignLine,

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Languages, Save, Loader2, Bookmark, X, Mic2, UserCheck } from "lucide-react";
+import { Languages, Save, Loader2, Bookmark, X, Mic2, UserCheck, Tag } from "lucide-react";
 import { Episode } from "../../types";
 import { RawSubtitleLine, SubtitleUpdates } from "./types";
 import { SHORTCUT_KEYS } from "./utils";
@@ -23,6 +23,7 @@ interface SubtitleSidebarProps {
   onMassTransliterate: () => void;
   onMassPolivanovToHepburn: () => void;
   onApplyAliases: () => void;
+  onConvertCaptionsToSigns?: (charName?: string) => void;
   onApplyStresses: () => void;
   onToggleAutoApplyAliases: (val: boolean) => void;
   onToggleAutoApplyStresses: (val: boolean) => void;
@@ -53,6 +54,7 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
   onMassTransliterate,
   onMassPolivanovToHepburn,
   onApplyAliases,
+  onConvertCaptionsToSigns,
   onApplyStresses,
   onToggleAutoApplyAliases,
   onToggleAutoApplyStresses,
@@ -274,6 +276,16 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
               Применить алиасы из словаря
             </button>
           )}
+
+          <button
+            onClick={() => onConvertCaptionsToSigns && onConvertCaptionsToSigns()}
+            disabled={loading || saving || lines.length === 0}
+            className="col-span-2 flex items-center justify-center gap-2 bg-amber-500/10 hover:bg-amber-500/20 disabled:opacity-50 text-amber-300 px-3 py-2 rounded-lg text-xs font-medium transition-colors border border-amber-500/30 cursor-pointer"
+            title="Назначить реплики с именами 'caption', 'title', 'sign' как НАДПИСЬ"
+          >
+            <Tag className="w-3.5 h-3.5 text-amber-400" />
+            Перенаправить caption → НАДПИСЬ
+          </button>
           
           {currentEpisode?.project?.nameStresses && (
             <button

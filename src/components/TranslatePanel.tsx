@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Languages, FileText, Loader2, RefreshCw, Save, Edit3, Check, X, AlertCircle, ChevronDown, BrainCircuit, Eye, EyeOff, Trash2, Plus, Copy, Scissors } from "lucide-react";
+import { Languages, FileText, Loader2, RefreshCw, Save, Edit3, Check, X, AlertCircle, ChevronDown, BrainCircuit, Eye, EyeOff, Trash2, Plus, Copy, Scissors, Sparkles } from "lucide-react";
 import { ipcSafe } from "../lib/ipcSafe";
 import { Episode } from "../types";
 import { BATCH_SIZE, SIGN_KEYWORDS } from "../constants";
+import { bulkFilterHonorifics, DEFAULT_HONORIFICS_OPTIONS } from "../lib/honorificsFilter";
 
 interface TranslatePanelProps {
   currentEpisode: Episode | null;
@@ -197,6 +198,7 @@ export default function TranslatePanel({ currentEpisode }: TranslatePanelProps) 
   const [editEnd, setEditEnd] = useState("");
   const [aiProvider, setAiProvider] = useState<string>("google");
   const [allowProfanity, setAllowProfanity] = useState(true);
+  const [filterHonorifics, setFilterHonorifics] = useState(true);
   const [showSigns, setShowSigns] = useState(false);
   const [ollamaStatus, setOllamaStatus] = useState<'unchecked' | 'running' | 'error'>('unchecked');
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
@@ -426,8 +428,14 @@ export default function TranslatePanel({ currentEpisode }: TranslatePanelProps) 
         }
       }
 
-      setTranslatedLines(newTranslatedLines);
-      setStatus("Перевод завершен!");
+      if (filterHonorifics) {
+        const { updatedLines, changedCount } = bulkFilterHonorifics(newTranslatedLines, DEFAULT_HONORIFICS_OPTIONS);
+        setTranslatedLines(updatedLines);
+        setStatus(`Перевод завершен! Авто-удалено обращений в ${changedCount} репликах.`);
+      } else {
+        setTranslatedLines(newTranslatedLines);
+        setStatus("Перевод завершен!");
+      }
     } catch (error: any) {
       console.error("Translation error:", error);
       setStatus(`Ошибка: ${error.message}`);
@@ -703,9 +711,36 @@ export default function TranslatePanel({ currentEpisode }: TranslatePanelProps) 
                   <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${allowProfanity ? 'left-7' : 'left-1'}`} />
                 </button>
               </div>
+
+              <div className="flex items-center justify-between p-3 bg-neutral-950 border border-neutral-800 rounded-xl">
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold text-white">Японские обращения</span>
+                  <span className="text-[10px] text-neutral-500 italic">Фильтровать -кун, -тян, -сан, -сенсей</span>
+                </div>
+                <button
+                  onClick={() => setFilterHonorifics(!filterHonorifics)}
+                  className={`w-12 h-6 rounded-full transition-all relative ${filterHonorifics ? 'bg-indigo-600' : 'bg-neutral-800'}`}
+                >
+                  <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${filterHonorifics ? 'left-7' : 'left-1'}`} />
+                </button>
+              </div>
             </div>
             
             <div className="pt-4 space-y-3">
+              <button
+                onClick={() => {
+                  const { updatedLines, changedCount } = bulkFilterHonorifics(translatedLines, DEFAULT_HONORIFICS_OPTIONS);
+                  setTranslatedLines(updatedLines);
+                  setStatus(`Удалены обращения в ${changedCount} репликах.`);
+                }}
+                disabled={isProcessing || translatedLines.length === 0}
+                className="w-full px-4 py-2.5 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-indigo-300 rounded-xl font-medium text-xs transition-all flex items-center justify-center gap-2 border border-neutral-700"
+                title="Очистить все текущие реплики от японских обращений (-кун, -тян, -сан, -сама, -сэнсэй...)"
+              >
+                <Sparkles className="w-4 h-4 text-indigo-400" />
+                Фильтровать обращения в списке
+              </button>
+
               <button
                 onClick={() => setShowSigns(!showSigns)}
                 className={`w-full px-4 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-3 border ${

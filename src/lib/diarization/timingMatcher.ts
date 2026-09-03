@@ -2,9 +2,9 @@ import { SubtitleLine } from '../../types';
 import { TimingMatchStats } from '../../types/diarization';
 
 export const SIGN_KEYWORDS = [
-  'sign', 'text', 'title', 'signs', 'titles', 
+  'sign', 'text', 'title', 'signs', 'titles', 'caption', 'captions',
   'надпись', 'текст', 'титр', 'титры', 'заставка', 
-  'экран', 'перевод', 'примечание', 'note'
+  'экран', 'перевод', 'примечание', 'note', 'info', 'credit'
 ];
 
 /**

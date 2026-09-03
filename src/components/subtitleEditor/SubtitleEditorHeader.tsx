@@ -1,5 +1,5 @@
 import React from "react";
-import { Loader2, Wrench, Clock, Layers, Undo, Redo, RefreshCcw, Eye, EyeOff, AlertCircle } from "lucide-react";
+import { Loader2, Wrench, Clock, Layers, Undo, Redo, RefreshCcw, Eye, EyeOff, AlertCircle, Sparkles } from "lucide-react";
 
 interface SubtitleEditorHeaderProps {
   loading: boolean;
@@ -12,6 +12,7 @@ interface SubtitleEditorHeaderProps {
   showSigns: boolean;
   onRefresh: () => void;
   onAutoFix: () => void;
+  onOpenHonorificsModal: () => void;
   onShiftTime: () => void;
   onOpenMergeModal: () => void;
   onUndo: () => void;
@@ -31,6 +32,7 @@ export const SubtitleEditorHeader: React.FC<SubtitleEditorHeaderProps> = ({
   showSigns,
   onRefresh,
   onAutoFix,
+  onOpenHonorificsModal,
   onShiftTime,
   onOpenMergeModal,
   onUndo,
@@ -58,6 +60,15 @@ export const SubtitleEditorHeader: React.FC<SubtitleEditorHeaderProps> = ({
         >
           <Wrench className="w-3.5 h-3.5 text-blue-400" />
           Авто-Фикс
+        </button>
+        <button
+          onClick={onOpenHonorificsModal}
+          disabled={loading || saving}
+          title="Удаление японских обращений (-кун, -тян, -сан, -сама, -сэнсэй, -сэмпай...)"
+          className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded-lg text-xs transition-colors border border-neutral-700 flex items-center gap-2 cursor-pointer disabled:opacity-50"
+        >
+          <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+          Фильтр обращений
         </button>
         <button
           onClick={onShiftTime}

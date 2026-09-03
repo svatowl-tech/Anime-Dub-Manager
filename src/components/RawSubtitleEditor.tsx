@@ -3,6 +3,7 @@ import { Edit3 } from "lucide-react";
 import { Episode } from "../types";
 import SubtitleTimeline from "./AssEditor/SubtitleTimeline";
 import MultiSubtitleMergeModal from "./MultiSubtitleMergeModal";
+import { HonorificsFilterModal } from "./subtitleEditor/HonorificsFilterModal";
 import { useSubtitleEditorState } from "./subtitleEditor/useSubtitleEditorState";
 import { SubtitleEditorHeader } from "./subtitleEditor/SubtitleEditorHeader";
 import { SubtitleLineList } from "./subtitleEditor/SubtitleLineList";
@@ -50,6 +51,9 @@ export default function RawSubtitleEditor({
     totalDuration,
     isMultiSubMergeModalOpen,
     setIsMultiSubMergeModalOpen,
+    showHonorificsModal,
+    setShowHonorificsModal,
+    handleRemoveHonorifics,
     autoApplyAliases,
     autoApplyStresses,
     handleToggleAutoApplyAliases,
@@ -78,6 +82,7 @@ export default function RawSubtitleEditor({
     handleApplyGenderPrefix,
     handleApplyNextNumber,
     handleApplyAliases,
+    handleConvertCaptionsToSigns,
     handleApplyStresses,
     handlePlayFromTime,
     isSignLine,
@@ -107,6 +112,7 @@ export default function RawSubtitleEditor({
           showSigns={showSigns}
           onRefresh={loadRawSubtitles}
           onAutoFix={handleAutoFix}
+          onOpenHonorificsModal={() => setShowHonorificsModal(true)}
           onShiftTime={handleShiftTime}
           onOpenMergeModal={() => setIsMultiSubMergeModalOpen(true)}
           onUndo={handleUndo}
@@ -193,6 +199,7 @@ export default function RawSubtitleEditor({
         onMassTransliterate={handleMassTransliterate}
         onMassPolivanovToHepburn={handleMassPolivanovToHepburn}
         onApplyAliases={handleApplyAliases}
+        onConvertCaptionsToSigns={handleConvertCaptionsToSigns}
         onApplyStresses={handleApplyStresses}
         onToggleAutoApplyAliases={handleToggleAutoApplyAliases}
         onToggleAutoApplyStresses={handleToggleAutoApplyStresses}
@@ -210,6 +217,14 @@ export default function RawSubtitleEditor({
         onChangeShiftAmount={setShiftAmountMs}
         onConfirm={confirmShiftTime}
         onClose={() => setShowShiftModal(false)}
+      />
+
+      <HonorificsFilterModal
+        isOpen={showHonorificsModal}
+        onClose={() => setShowHonorificsModal(false)}
+        onApply={handleRemoveHonorifics}
+        subtitles={lines}
+        isProcessing={loading}
       />
 
       <MultiSubtitleMergeModal

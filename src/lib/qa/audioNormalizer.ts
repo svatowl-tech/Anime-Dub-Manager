@@ -59,19 +59,25 @@ export async function analyzeAudioForPreview(
 
     const arrayBuffer = await response.arrayBuffer();
     
-    // Use OfflineAudioContext or standard AudioContext for decoding
+    // Use OfflineAudioContext for zero-footprint decoding
+    const OfflineCtx = window.OfflineAudioContext || (window as any).webkitOfflineAudioContext;
     const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioCtx) {
+    if (!OfflineCtx && !AudioCtx) {
       throw new Error('Web Audio API not supported');
     }
 
-    const audioCtx = new AudioCtx();
     let audioBuffer: AudioBuffer;
-    try {
-      audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-    } finally {
-      if (audioCtx.state !== 'closed') {
-        audioCtx.close().catch(() => {});
+    if (OfflineCtx) {
+      const offlineCtx = new OfflineCtx(1, 44100, 44100);
+      audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
+    } else {
+      const tempCtx = new AudioCtx();
+      try {
+        audioBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+      } finally {
+        if (tempCtx.state !== 'closed') {
+          tempCtx.close().catch(() => {});
+        }
       }
     }
 

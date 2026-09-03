@@ -4,6 +4,7 @@ import { ipcSafe } from '../lib/ipcSafe';
 import { Episode } from '../types';
 import { toast } from 'sonner';
 import { MkvTrackInfo, formatTrackDisplayName, formatLanguageLabel } from '../lib/mkvSubtitleExtractor';
+import { sanitizeFolderName } from '../lib/pathUtils';
 
 export interface SubFileItem {
   id: string;
@@ -19,6 +20,7 @@ export interface MultiSubtitleMergeModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentEpisode: Episode | null;
+  targetEpisodeId?: string;
   onRefresh: () => void;
   initialFiles?: SubFileItem[];
   initialVideoPath?: string;
@@ -28,12 +30,14 @@ export default function MultiSubtitleMergeModal({
   isOpen,
   onClose,
   currentEpisode,
+  targetEpisodeId,
   onRefresh,
   initialFiles = [],
   initialVideoPath
 }: MultiSubtitleMergeModalProps) {
   const [files, setFiles] = useState<SubFileItem[]>([]);
   const [mode, setMode] = useState<'component' | 'combine' | 'smart'>('component');
+
   
   // Component mode selections
   const [textSourceIndex, setTextSourceIndex] = useState<number>(0);
@@ -277,8 +281,23 @@ export default function MultiSubtitleMergeModal({
 
     setIsProcessing(true);
     try {
-      const projectTitle = currentEpisode.project?.title || 'Project';
-      const episodeFolder = `Episode_${currentEpisode.number}`;
+      const epIdToUse = targetEpisodeId || currentEpisode.id;
+      let latestEp = currentEpisode;
+      try {
+        const allProjects = await ipcSafe.invoke('get-projects');
+        if (Array.isArray(allProjects)) {
+          for (const p of allProjects) {
+            const found = p.episodes?.find((e: any) => e.id === epIdToUse);
+            if (found) {
+              latestEp = found;
+              break;
+            }
+          }
+        }
+      } catch (e) {}
+
+      const projectTitle = sanitizeFolderName(latestEp.project?.title || currentEpisode.project?.title || 'Project');
+      const episodeFolder = sanitizeFolderName(`Episode_${latestEp.number}`);
       const subDir = `${projectTitle}/${episodeFolder}`;
       const targetFileName = `subtitles.ass`;
 
@@ -303,25 +322,15 @@ export default function MultiSubtitleMergeModal({
         });
 
         if (copyRes && copyRes.path) {
-          let latestEp = currentEpisode;
-          try {
-            const allProjects = await ipcSafe.invoke('get-projects');
-            if (Array.isArray(allProjects)) {
-              for (const p of allProjects) {
-                const found = p.episodes?.find((e: any) => e.id === currentEpisode.id);
-                if (found) {
-                  latestEp = found;
-                  break;
-                }
-              }
-            }
-          } catch (e) {}
-
           const updateData: any = {
             ...latestEp,
             subPath: copyRes.path,
             updatedAt: new Date().toISOString()
           };
+
+          if (latestEp.rawPath && updateData.subPath) {
+            updateData.status = 'ROLES';
+          }
 
           // Automatically extract actors & lines for mapping
           try {
@@ -356,7 +365,7 @@ export default function MultiSubtitleMergeModal({
           }
 
           await ipcSafe.invoke('save-episode', updateData);
-          toast.success('Объединенные субтитры успешно прикреплены к серии!');
+          toast.success(`Серия ${latestEp.number}: Объединенные субтитры успешно прикреплены!`);
           
           await cleanupTempFiles(files, [mergeRes.outputPath]);
           setFiles([]);

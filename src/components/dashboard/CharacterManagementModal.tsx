@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Plus, Image as ImageIcon, Link as LinkIcon, Sparkles } from 'lucide-react';
+import { X, Plus, Image as ImageIcon, Link as LinkIcon, Sparkles, Tag, FileText } from 'lucide-react';
 import { Project, Participant } from '../../types';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { toast } from 'sonner';
@@ -224,6 +224,119 @@ export default function CharacterManagementModal({ isOpen, onClose, selectedProj
     }
   };
 
+  // Assign a character (e.g. "caption") as "НАДПИСЬ"
+  const handleAssignAsSign = async (charName: string) => {
+    if (!selectedProject || !charName) return;
+    const targetName = "НАДПИСЬ";
+    if (charName === targetName) {
+      toast.info(`Персонаж "${charName}" уже является надписью.`);
+      return;
+    }
+
+    try {
+      // 1. Update project characterAliases
+      const updatedAliases = { ...aliases };
+      updatedAliases[charName] = targetName;
+      Object.keys(updatedAliases).forEach(k => {
+        if (updatedAliases[k] === charName) {
+          updatedAliases[k] = targetName;
+        }
+      });
+
+      // 2. Ensure "НАДПИСЬ" exists in globalMapping
+      let updatedMapping = [...mapping];
+      if (!updatedMapping.some(m => m.characterName === targetName)) {
+        updatedMapping.push({ characterName: targetName, dubberId: '' });
+      }
+
+      // 3. Save project
+      await ipcSafe.invoke('save-project', {
+        ...selectedProject,
+        characterAliases: JSON.stringify(updatedAliases),
+        globalMapping: JSON.stringify(updatedMapping)
+      });
+
+      // 4. Update episode assignments across project
+      if (selectedProject.episodes && selectedProject.episodes.length > 0) {
+        for (const ep of selectedProject.episodes) {
+          let epChanged = false;
+          if (ep.assignments && ep.assignments.length > 0) {
+            const charAssignments = ep.assignments.filter(a => a.characterName === charName);
+            if (charAssignments.length > 0) {
+              epChanged = true;
+              let updatedAssignments = ep.assignments.filter(a => a.characterName !== charName);
+              const alreadyHasSign = updatedAssignments.some(a => a.characterName === targetName);
+              if (!alreadyHasSign) {
+                updatedAssignments.push({
+                  id: Math.random().toString(36).substring(2, 11),
+                  episodeId: ep.id,
+                  characterName: targetName,
+                  dubberId: '',
+                  status: 'PENDING'
+                });
+              }
+              ep.assignments = updatedAssignments;
+            }
+          }
+
+          if (epChanged) {
+            await ipcSafe.invoke('save-episode', ep);
+          }
+
+          // 5. Replace speaker names in actual subtitle files
+          if (ep.subPath) {
+            try {
+              const data = await ipcSafe.invoke('get-raw-subtitles', ep.subPath);
+              if (data && data.lines) {
+                let linesUpdated = false;
+                const updatedLines = data.lines.map((l: any) => {
+                  if (l.name && l.name.trim().toLowerCase() === charName.trim().toLowerCase()) {
+                    linesUpdated = true;
+                    return { ...l, name: targetName };
+                  }
+                  return l;
+                });
+                if (linesUpdated) {
+                  await ipcSafe.invoke('save-translated-subtitles', {
+                    assFilePath: ep.subPath,
+                    translatedLines: updatedLines
+                  });
+                }
+              }
+            } catch (subErr) {
+              console.error("Error updating sub lines for sign conversion:", subErr);
+            }
+          }
+        }
+      }
+
+      toast.success(`Персонаж "${charName}" перенаправлен в "${targetName}". Все его реплики объединены под надписями.`);
+      onRefresh();
+    } catch (error) {
+      console.error("Assign as sign error:", error);
+      toast.error("Ошибка при назначении персонажа как надпись.");
+    }
+  };
+
+  // Auto detect and convert caption/sign/title characters to "НАДПИСЬ"
+  const handleAutoAssignCaptionsAsSigns = async () => {
+    if (!selectedProject) return;
+    const signKeys = ["caption", "captions", "sign", "signs", "title", "text", "титр", "титры", "инфо"];
+    const candidates = mapping.filter(m => {
+      const nameLower = m.characterName.toLowerCase();
+      return nameLower !== "надпись" && signKeys.some(k => nameLower.includes(k));
+    });
+
+    if (candidates.length === 0) {
+      toast.info("В проекте не найдено неоформленных персонажей вида 'caption', 'title' или 'sign'.");
+      return;
+    }
+
+    for (const c of candidates) {
+      await handleAssignAsSign(c.characterName);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
       <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl w-full max-w-4xl overflow-hidden max-h-[90vh] flex flex-col">
@@ -259,6 +372,16 @@ export default function CharacterManagementModal({ isOpen, onClose, selectedProj
                   title="Объединить дублирующиеся записи персонажей в списке"
                 >
                   Очистить дубликаты
+                </button>
+
+                {/* Auto-assign captions/titles as Sign */}
+                <button 
+                  onClick={handleAutoAssignCaptionsAsSigns}
+                  className="text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 px-3 py-1.5 rounded-lg border border-amber-500/30 transition-colors flex items-center gap-1.5"
+                  title="Автоматически найти 'caption', 'title', 'sign' и перенаправить их в НАДПИСЬ"
+                >
+                  <Tag className="w-3.5 h-3.5 text-amber-400" />
+                  caption → НАДПИСЬ
                 </button>
 
                 <button 
@@ -454,6 +577,18 @@ export default function CharacterManagementModal({ isOpen, onClose, selectedProj
                         </td>
                         <td className="px-4 py-3 text-right">
                           <div className="flex items-center justify-end gap-1.5">
+                            {/* Convert to Sign / Caption button */}
+                            {!char.isGroup && char.characterName.toUpperCase() !== "НАДПИСЬ" && (
+                              <button 
+                                onClick={() => handleAssignAsSign(char.characterName)}
+                                className="text-amber-400/80 hover:text-amber-300 hover:bg-amber-500/10 p-1.5 rounded border border-amber-500/20 flex items-center gap-1 transition-all"
+                                title={`Назначить реплики персонажа "${char.characterName}" как "НАДПИСЬ"`}
+                              >
+                                <Tag className="w-3.5 h-3.5 text-amber-400" />
+                                <span className="text-[10px] font-semibold">Надпись</span>
+                              </button>
+                            )}
+
                             {/* Merge Existing Character Button */}
                             {!char.isGroup && (
                               <button 

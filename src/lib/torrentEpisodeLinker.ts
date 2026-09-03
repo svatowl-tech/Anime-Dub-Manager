@@ -3,6 +3,7 @@ import { extractEpisodeNumber } from './episodeNumberExtractor';
 import { Project, Episode, RoleAssignment } from '../types';
 import { toast } from 'sonner';
 import { inspectMkvTracks, MkvTrackInfo } from './mkvSubtitleExtractor';
+import { sanitizeFolderName } from './pathUtils';
 
 export interface LinkTorrentResult {
   success: boolean;
@@ -76,30 +77,86 @@ export async function linkDownloadedTorrentFile(params: {
 
     // 4. Update episode paths based on file type
     const updatedEp: Episode = { ...targetEp, updatedAt: new Date().toISOString() };
+    const projectTitle = sanitizeFolderName(proj.title || 'Project');
+    const episodeFolder = sanitizeFolderName(`Episode_${updatedEp.number}`);
+    const subDir = `${projectTitle}/${episodeFolder}`;
 
     let detectedSubtitleTracks: MkvTrackInfo[] = [];
 
     if (isVideo) {
-      updatedEp.rawPath = filePath;
+      const targetFileName = `raw_video.${ext}`;
+      let finalVideoPath = filePath;
+
+      try {
+        const copyRes = await ipcSafe.invoke('copy-file', {
+          sourcePath: filePath,
+          targetDir: subDir,
+          fileName: targetFileName
+        });
+        if (copyRes && copyRes.path) {
+          finalVideoPath = copyRes.path;
+        }
+      } catch (copyErr) {
+        console.warn('Failed to copy torrent video to project folder, using original path:', copyErr);
+      }
+
+      updatedEp.rawPath = finalVideoPath;
       updatedEp.isHardsub = false;
 
-      // If video is MKV, inspect for embedded subtitle streams
+      // If video is MKV, inspect for embedded subtitle streams and enqueue background transcode
       if (ext === 'mkv') {
         try {
-          const { subtitles } = await inspectMkvTracks(filePath);
+          const { subtitles } = await inspectMkvTracks(finalVideoPath);
           if (subtitles && subtitles.length > 0) {
             detectedSubtitleTracks = subtitles;
           }
         } catch (e) {
           console.warn('Failed to inspect torrent MKV for subtitle tracks:', e);
         }
+
+        // Transcode MKV -> MP4 for HTML5 browser/player compatibility
+        const mp4OutputPath = finalVideoPath.replace(/\.mkv$/i, '.mp4');
+        try {
+          await ipcSafe.invoke('enqueue-ffmpeg-task', {
+            type: 'transcode-video',
+            payload: {
+              videoPath: finalVideoPath,
+              outputPath: mp4OutputPath,
+              options: {}
+            },
+            metadata: {
+              title: `Конвертация серии ${updatedEp.number} (MKV -> MP4)`,
+              episodeId: updatedEp.id,
+              projectId: proj.id,
+              outputPath: mp4OutputPath
+            }
+          });
+        } catch (tqErr) {
+          console.error('Failed to enqueue transcode task for torrent video:', tqErr);
+        }
       }
     } else if (isSubtitle) {
-      updatedEp.subPath = filePath;
+      const targetFileName = `subtitles.${ext}`;
+      let finalSubPath = filePath;
+
+      try {
+        const copyRes = await ipcSafe.invoke('copy-file', {
+          sourcePath: filePath,
+          targetDir: subDir,
+          fileName: targetFileName
+        });
+        if (copyRes && copyRes.path) {
+          finalSubPath = copyRes.path;
+        }
+      } catch (copyErr) {
+        console.warn('Failed to copy torrent subtitle to project folder, using original path:', copyErr);
+      }
+
+      updatedEp.subPath = finalSubPath;
       
       // Auto-extract characters & lines from subtitle
       try {
-        const subData = await ipcSafe.invoke('get-raw-subtitles', filePath);
+        const subData = await ipcSafe.invoke('get-raw-subtitles', finalSubPath);
         if (subData && subData.actors && Array.isArray(subData.actors)) {
           const rawActors: string[] = subData.actors;
           const lines: any[] = subData.lines || [];
@@ -109,7 +166,7 @@ export async function linkDownloadedTorrentFile(params: {
           const newAssignments: RoleAssignment[] = rawActors.map((actor: string) => {
             const actorLines = lines.filter((l: any) => l.actor === actor || l.character === actor);
             const lineCount = actorLines.length;
-            const mappedParticipantId = globalMapping[actor] || '';
+            const mappedParticipantId = typeof globalMapping === 'object' && globalMapping ? (globalMapping as any)[actor] || '' : '';
 
             return {
               id: `${updatedEp.id}-${actor}-${Date.now()}`,
@@ -154,7 +211,7 @@ export async function linkDownloadedTorrentFile(params: {
       targetEpisode: updatedEp,
       fileType,
       detectedSubtitleTracks,
-      filePath
+      filePath: updatedEp.rawPath || filePath
     };
 
   } catch (err: any) {
@@ -168,3 +225,4 @@ export async function linkDownloadedTorrentFile(params: {
     };
   }
 }
+

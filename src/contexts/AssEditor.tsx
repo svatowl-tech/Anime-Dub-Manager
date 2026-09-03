@@ -21,6 +21,7 @@ import {
   Mic,
   Video,
   Terminal,
+  Tag,
 } from "lucide-react";
 import TranslatePanel from "../components/TranslatePanel";
 import AssOcrPanel from "../components/AssOcrPanel";
@@ -1563,6 +1564,16 @@ export default function AssEditor({
                                       <Video className="w-3 h-3 text-indigo-400" />
                                       <span>Голос и кадр</span>
                                     </button>
+                                    {assignment.characterName.toUpperCase() !== "НАДПИСЬ" && (
+                                      <button
+                                        onClick={() => handleLinkAsAlias(assignment.characterName, "НАДПИСЬ")}
+                                        title="Назначить все реплики этого персонажа как НАДПИСЬ"
+                                        className="text-[10px] px-1.5 py-0.5 rounded text-amber-300 hover:text-amber-200 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Tag className="w-3 h-3 text-amber-400" />
+                                        <span>Надпись</span>
+                                      </button>
+                                    )}
                                     <button
                                       onClick={() => handleExportCharacterSubtitles(assignment.characterName)}
                                       title="Экспортировать субтитры этого персонажа"

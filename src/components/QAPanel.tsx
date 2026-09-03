@@ -15,6 +15,7 @@ import { useVideoContext } from '../contexts/VideoContext';
 import { SIGN_KEYWORDS } from '../constants';
 import { analyzeAudioForPreview, NormalizationMetrics, getCachedNormalization } from '../lib/qa/audioNormalizer';
 import { detectEpisodeGaps, MissingLineDetection } from '../lib/qa/missingLinesDetector';
+import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
 
@@ -153,31 +154,123 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
   const wavesurferRef = useRef<WaveSurfer | null>(null);
   const regionsRef = useRef<any>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement>>({});
-  const audioGainNodesRef = useRef<Record<string, { gain: GainNode, ctx: AudioContext }>>({});
+  const audioGainNodesRef = useRef<Record<string, { gain: GainNode }>>({});
   const [audioRefsUpdated, setAudioRefsUpdated] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
 
-  // Sync all audio tracks with video/master time
-  useEffect(() => {
-    if (!isPlaying) {
-      Object.values(audioRefs.current).forEach(audio => {
-        if (audio instanceof HTMLAudioElement) audio.pause();
-      });
-      return;
+  // Synchronize all secondary audio sources (HTMLAudioElement tracks & WaveSurfer) to video master time
+  const syncAudioSources = useCallback((targetTime: number, shouldPlay: boolean) => {
+    if (shouldPlay) {
+      ensureAudioContextResumed();
     }
 
     Object.values(audioRefs.current).forEach(audio => {
       if (audio instanceof HTMLAudioElement) {
-        audio.currentTime = currentTime;
-        audio.play().catch(e => {
-          if (e.name !== 'AbortError') {
-            console.error('Audio play error', e);
-          }
-        });
+        if (Math.abs(audio.currentTime - targetTime) > 0.05) {
+          audio.currentTime = targetTime;
+        }
+        audio.playbackRate = 1.0;
+        if (shouldPlay) {
+          audio.play().catch(e => {
+            if (e?.name !== 'AbortError') console.error('Audio track play error:', e);
+          });
+        } else {
+          audio.pause();
+        }
       }
     });
-  }, [isPlaying, audioRefsUpdated]);
+
+    if (wavesurferRef.current) {
+      try {
+        if (Math.abs(wavesurferRef.current.getCurrentTime() - targetTime) > 0.05) {
+          wavesurferRef.current.setTime(targetTime);
+        }
+        if (shouldPlay) {
+          wavesurferRef.current.play().catch(e => {
+            if (e?.name !== 'AbortError') console.error('WaveSurfer play error:', e);
+          });
+        } else {
+          wavesurferRef.current.pause();
+        }
+      } catch (err) {
+        // Ignored during teardown
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const time = videoRef.current?.currentTime ?? currentTime;
+    syncAudioSources(time, isPlaying);
+  }, [isPlaying, audioRefsUpdated, syncAudioSources]);
+
+  const handleVideoPlay = useCallback(() => {
+    setIsPlaying(true);
+    const time = videoRef.current?.currentTime ?? currentTime;
+    setCurrentTime(time);
+    syncAudioSources(time, true);
+  }, [currentTime, syncAudioSources]);
+
+  const handleVideoPause = useCallback(() => {
+    setIsPlaying(false);
+    const time = videoRef.current?.currentTime ?? currentTime;
+    setCurrentTime(time);
+    syncAudioSources(time, false);
+  }, [currentTime, syncAudioSources]);
+
+  const handleVideoTimeUpdate = useCallback((e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const time = e.currentTarget.currentTime;
+    setCurrentTime(time);
+
+    if (!e.currentTarget.paused) {
+      ensureAudioContextResumed();
+      Object.values(audioRefs.current).forEach(audio => {
+        if (audio instanceof HTMLAudioElement && !audio.paused) {
+          const diff = time - audio.currentTime;
+          if (Math.abs(diff) > 0.4) {
+            // Hard seek only when drift is significant (e.g. manual timeline jump)
+            audio.currentTime = time;
+            audio.playbackRate = 1.0;
+          } else if (Math.abs(diff) > 0.05) {
+            // Micro-adjust playback rate smoothly to lock onto video without flushing audio buffers or silencing phrases
+            audio.playbackRate = Math.max(0.92, Math.min(1.08, 1.0 + diff * 0.4));
+          } else {
+            audio.playbackRate = 1.0;
+          }
+        }
+      });
+
+      if (wavesurferRef.current && wavesurferRef.current.isPlaying()) {
+        const wsTime = wavesurferRef.current.getCurrentTime();
+        if (Math.abs(wsTime - time) > 0.4) {
+          wavesurferRef.current.setTime(time);
+        }
+      }
+    }
+  }, []);
+
+  const handleVideoSeeking = useCallback(() => {
+    const time = videoRef.current?.currentTime ?? currentTime;
+    setCurrentTime(time);
+    const isPaused = videoRef.current ? videoRef.current.paused : !isPlaying;
+    syncAudioSources(time, !isPaused);
+  }, [currentTime, isPlaying, syncAudioSources]);
+
+  const handleVideoEnded = useCallback(() => {
+    setIsPlaying(false);
+    const time = videoRef.current?.duration ?? currentTime;
+    setCurrentTime(time);
+    syncAudioSources(time, false);
+  }, [currentTime, syncAudioSources]);
+
+  const handleSeekToTime = useCallback((targetTime: number) => {
+    setCurrentTime(targetTime);
+    if (videoRef.current) {
+      videoRef.current.currentTime = targetTime;
+    }
+    const shouldPlay = videoRef.current ? !videoRef.current.paused : isPlaying;
+    syncAudioSources(targetTime, shouldPlay);
+  }, [isPlaying, syncAudioSources]);
 
   // Run normalization analysis for all track audio files for preview
   useEffect(() => {
@@ -277,7 +370,9 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         }
         const gainData = audioGainNodesRef.current[id];
         if (gainData) {
-          gainData.ctx.close().catch(() => {});
+          try {
+            gainData.gain.disconnect();
+          } catch (e) {}
         }
       });
       audioRefs.current = {};
@@ -322,17 +417,16 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         audioRefs.current[track.id] = audio;
         
         try {
-          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-          if (AudioContextClass) {
-            const ctx = new AudioContextClass();
+          const ctx = getSharedAudioContext();
+          if (ctx) {
             const source = ctx.createMediaElementSource(audio);
             const gain = ctx.createGain();
             source.connect(gain);
             gain.connect(ctx.destination);
-            audioGainNodesRef.current[track.id] = { gain, ctx };
+            audioGainNodesRef.current[track.id] = { gain };
           }
         } catch (e) {
-          console.warn('Web Audio gain init failed for track', track.id, e);
+          console.warn('Web Audio gain init notice for track', track.id, e);
         }
         
         updated = true;
@@ -565,42 +659,23 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
   const selectedTrack = tracks.find(t => t.id === selectedTrackId);
 
   const togglePlay = useCallback(() => {
-    const newPlaying = !isPlaying;
-    setIsPlaying(newPlaying);
-    
-    const time = wavesurferRef.current?.getCurrentTime() || 0;
-
-    if (wavesurferRef.current) {
-      if (newPlaying) {
-        wavesurferRef.current.play().catch((e: any) => {
-          if (e?.name !== 'AbortError') console.error(e);
+    const video = videoRef.current;
+    if (video) {
+      if (video.paused) {
+        video.play().catch(e => {
+          if (e?.name !== 'AbortError') console.error('Video play error:', e);
         });
       } else {
-        wavesurferRef.current.pause();
+        video.pause();
       }
+    } else {
+      setIsPlaying(prev => {
+        const next = !prev;
+        syncAudioSources(currentTime, next);
+        return next;
+      });
     }
-    
-    if (videoRef.current) {
-      if (newPlaying) {
-        videoRef.current.play().catch((e: any) => {
-          if (e?.name !== 'AbortError') console.error(e);
-        });
-      } else {
-        videoRef.current.pause();
-      }
-    }
-
-    Object.values(audioRefs.current).forEach(audio => {
-      if (audio instanceof HTMLAudioElement) {
-        if (newPlaying) {
-          audio.currentTime = time;
-          audio.play().catch(() => {});
-        } else {
-          audio.pause();
-        }
-      }
-    });
-  }, [isPlaying]);
+  }, [currentTime, syncAudioSources]);
 
   const seekToNext = useCallback(() => {
     if (subLines.length === 0) return;
@@ -814,33 +889,24 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     }
   }, [currentTime, isPlaying]);
 
-  const handlePause = () => {
-    setIsPlaying(false);
-    if (wavesurferRef.current) wavesurferRef.current.pause();
-    if (videoRef.current) videoRef.current.pause();
-    Object.values(audioRefs.current).forEach(audio => {
-      if (audio instanceof HTMLAudioElement) audio.pause();
-    });
-  };
+  const handlePause = useCallback(() => {
+    if (videoRef.current) {
+      videoRef.current.pause();
+    } else {
+      setIsPlaying(false);
+      syncAudioSources(currentTime, false);
+    }
+  }, [currentTime, syncAudioSources]);
 
-  const handleStop = () => {
+  const handleStop = useCallback(() => {
     setIsPlaying(false);
     setCurrentTime(0);
-    if (wavesurferRef.current) {
-      wavesurferRef.current.pause();
-      wavesurferRef.current.setTime(0);
-    }
     if (videoRef.current) {
       videoRef.current.pause();
       videoRef.current.currentTime = 0;
     }
-    Object.values(audioRefs.current).forEach(audio => {
-      if (audio instanceof HTMLAudioElement) {
-        audio.pause();
-        audio.currentTime = 0;
-      }
-    });
-  };
+    syncAudioSources(0, false);
+  }, [syncAudioSources]);
 
   const handleGenerateFixesMessage = () => {
     if (!currentEpisode) return;
@@ -1339,9 +1405,12 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
                 ref={videoRef}
                 src={videoUrl || undefined}
                 className="w-full h-full object-contain"
-                onTimeUpdate={(e) => {
-                  setCurrentTime(e.currentTarget.currentTime);
-                }}
+                onPlay={handleVideoPlay}
+                onPause={handleVideoPause}
+                onTimeUpdate={handleVideoTimeUpdate}
+                onSeeking={handleVideoSeeking}
+                onSeeked={handleVideoSeeking}
+                onEnded={handleVideoEnded}
                 onLoadedMetadata={(e) => {
                   setDuration(e.currentTarget.duration);
                   e.currentTarget.currentTime = currentTime;
@@ -1356,11 +1425,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
                     value={currentTime}
                     onChange={(e) => {
                       const time = parseFloat(e.target.value);
-                      setCurrentTime(time);
-                      if (videoRef.current) videoRef.current.currentTime = time;
-                      Object.values(audioRefs.current).forEach(audio => {
-                        if (audio instanceof HTMLAudioElement) audio.currentTime = time;
-                      });
+                      handleSeekToTime(time);
                     }}
                     className="w-full accent-blue-500"
                   />
@@ -1551,10 +1616,12 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
                     ref={videoRef}
                     src={videoUrl || undefined}
                     className="w-full h-full object-contain"
-                    onTimeUpdate={(e) => {
-                      // If video is master, sync others
-                      setCurrentTime(e.currentTarget.currentTime);
-                    }}
+                    onPlay={handleVideoPlay}
+                    onPause={handleVideoPause}
+                    onTimeUpdate={handleVideoTimeUpdate}
+                    onSeeking={handleVideoSeeking}
+                    onSeeked={handleVideoSeeking}
+                    onEnded={handleVideoEnded}
                     onLoadedMetadata={(e) => {
                       setDuration(e.currentTarget.duration);
                       e.currentTarget.currentTime = currentTime;
@@ -1569,8 +1636,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
                         value={currentTime}
                         onChange={(e) => {
                           const time = parseFloat(e.target.value);
-                          setCurrentTime(time);
-                          if (videoRef.current) videoRef.current.currentTime = time;
+                          handleSeekToTime(time);
                         }}
                         className="w-full accent-blue-500"
                       />
@@ -1793,18 +1859,15 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
                       isPlaying={isPlaying}
                       subLines={subLines}
                       onTimeUpdate={setCurrentTime}
-                      onSeek={(time) => {
-                        setCurrentTime(time);
-                        if (videoRef.current) videoRef.current.currentTime = time;
-                        Object.values(audioRefs.current).forEach(audio => {
-                          if (audio instanceof HTMLAudioElement) audio.currentTime = time;
-                        });
-                      }}
+                      onSeek={handleSeekToTime}
                       onPlayPause={togglePlay}
                       volume={track.id === 'original' ? 0 : (isMuted || mutedTracks.has(track.id) ? 0 : Math.max(0, (volumes[track.id] ?? 0.8) * ((isAutoNormalize && normalizationMetrics[track.id]?.status === 'ready') ? normalizationMetrics[track.id].gain : 1.0)))}
                       isMuted={isMuted || mutedTracks.has(track.id)}
                       onRegionClick={(region) => {
                         setCommentModal({ isOpen: true, region });
+                      }}
+                      onWaveSurferReady={(ws) => {
+                        wavesurferRef.current = ws;
                       }}
                     />
                   </div>
@@ -1851,18 +1914,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           gaps={detectedGaps}
           onApplyFixes={handleApplyGapFixes}
           onSeekMainPlayer={(timeSec) => {
-            setCurrentTime(timeSec);
-            if (videoRef.current) {
-              videoRef.current.currentTime = timeSec;
-            }
-            if (wavesurferRef.current) {
-              wavesurferRef.current.setTime(timeSec);
-            }
-            Object.values(audioRefs.current).forEach(audio => {
-              if (audio instanceof HTMLAudioElement) {
-                audio.currentTime = timeSec;
-              }
-            });
+            handleSeekToTime(timeSec);
           }}
           isApplying={isApplyingGapFixes}
           onReAnalyze={handleRunGapDetection}
