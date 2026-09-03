@@ -970,7 +970,7 @@ function handleIpcMock(channel: string, args: any[]): any {
         parseMode: 'html',
         headerTemplate: '✨ <b>{title_ru}</b> [{episode_number} СЕРИЯ]',
         footerTemplate: '📌 Смотреть: {site_link}\n💬 Обсуждение: {tg_group}',
-        startNoticeTemplate: '🎬 <b>СТАРТ РАБОТЫ НАД СЕРИЕЙ!</b>\n📌 <b>{project_title}</b> — Серия {episode_number}\n\n👥 <b>Состав команды:</b>\n{dubbers_list}\n\n📅 <b>Дедлайн сдачи:</b> {deadline}\n🔗 <b>Материалы:</b> {source_link}',
+        startNoticeTemplate: '🎬 <b>СТАРТ РАБОТЫ НАД СЕРИЕЙ!</b>\n📌 <b>{project_title}</b> — Серия {episode_number}\n\n👥 <b>Состав команды:</b>\n{dubbers_list}\n\n📅 <b>ДЕДЛАЙН:</b> {deadline}\n🔗 <b>Материалы:</b> {source_link}',
         reminderTemplate: '⏰ <b>НАПОМИНАНИЕ О ДЕДЛАЙНЕ!</b>\nРелиз: <b>{project_title}</b> (Серия {episode_number})\n\nКоллеги, ожидаем ваши дорожки:\n{pending_dubbers}\n\nПросьба дописать как можно скорее! 🙏',
         fixNoticeTemplate: '⚠️ <b>СПИСОК ФИКСОВ / ПРАВОК</b>\nКому: {dubber_mention}\nПроект: <b>{project_title}</b> (Серия {episode_number})\n\n{fixes_list}',
         trackReceivedTemplate: '🎙️ <b>ДОРОЖКА ПРИНЯТА!</b>\nДабер: {dubber_name}\nСерия: {episode_number}\nСтатус: ✅ Готово к сведению',

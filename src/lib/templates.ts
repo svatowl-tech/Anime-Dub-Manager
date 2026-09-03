@@ -2,12 +2,41 @@ import { Episode, Participant } from '../types';
 
 export const formatDeadline = (dateStr?: string) => {
   if (!dateStr) return 'не указан';
-  const date = new Date(dateStr);
+  const date = dateStr.includes('T') ? new Date(dateStr) : new Date(dateStr + 'T12:00:00');
+  if (isNaN(date.getTime())) return 'не указан';
   const days = ['ВС', 'ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ'];
   const day = days[date.getDay()];
   const dayOfMonth = date.getDate().toString().padStart(2, '0');
   const month = (date.getMonth() + 1).toString().padStart(2, '0');
   return `${day} ${dayOfMonth}.${month}`;
+};
+
+export const getFixesDeadlineDate = (deadlineStr?: string, fixesDeadlineStr?: string): Date | null => {
+  if (fixesDeadlineStr) {
+    const d = fixesDeadlineStr.includes('T') ? new Date(fixesDeadlineStr) : new Date(fixesDeadlineStr + 'T12:00:00');
+    if (!isNaN(d.getTime())) return d;
+  }
+  if (deadlineStr) {
+    const d = deadlineStr.includes('T') ? new Date(deadlineStr) : new Date(deadlineStr + 'T12:00:00');
+    if (!isNaN(d.getTime())) {
+      const fixesDate = new Date(d);
+      fixesDate.setDate(fixesDate.getDate() + 1);
+      return fixesDate;
+    }
+  }
+  return null;
+};
+
+export const formatFullDeadline = (deadlineStr?: string, fixesDeadlineStr?: string): string => {
+  if (!deadlineStr && !fixesDeadlineStr) return 'не указан';
+  const mainStr = formatDeadline(deadlineStr);
+  const fixesDate = getFixesDeadlineDate(deadlineStr, fixesDeadlineStr);
+  const fixesStr = fixesDate ? formatDeadline(fixesDate.toISOString()) : 'не указан';
+
+  if (mainStr === 'не указан') {
+    return `с фиксами ${fixesStr}`;
+  }
+  return `${mainStr} с фиксами ${fixesStr}`;
 };
 
 export const generateStartEpisodeMessage = (episode: Episode, participants: Participant[], yandexUrl?: string) => {
@@ -133,7 +162,7 @@ export const DEFAULT_SOUND_ENGINEER_TEMPLATE = `{emoji} Экспорт для з
 
 export const DEFAULT_FIXES_ISSUED_TEMPLATE = `{emoji} ВЫПИСАНЫ ФИКСЫ: {title}
 👾 Серия: {episodeNumber}
-📅 ДЕДЛАЙН ФИКСОВ: {deadline}
+📅 ДЕДЛАЙН ФИКСОВ: {fixesDeadline}
 ━━━━━━ ◦ ❖ ◦ ━━━━━━
 Ребята, ознакомьтесь с правками и исправьте их до дедлайна! 🎙
 
@@ -296,7 +325,14 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
     return `${d.nickname} (${mention}) — ${count} реп.`;
   }).join('\n') || '• Даберы не назначены';
 
-  vars.deadline = formatDeadline(episode.deadline);
+  const mainDeadlineStr = formatDeadline(episode.deadline);
+  const fixesDeadlineDate = getFixesDeadlineDate(episode.deadline, episode.fixesDeadline);
+  const fixesDeadlineStr = fixesDeadlineDate ? formatDeadline(fixesDeadlineDate.toISOString()) : 'не указан';
+  const fullDeadlineStr = formatFullDeadline(episode.deadline, episode.fixesDeadline);
+
+  vars.deadline = fullDeadlineStr;
+  vars.mainDeadline = mainDeadlineStr;
+  vars.fixesDeadline = fixesDeadlineStr;
   vars.yandexUrl = yandexUrl;
   vars.yandexSection = yandexUrl ? `\n📁 Исходники серии: ${yandexUrl}\n` : '';
 

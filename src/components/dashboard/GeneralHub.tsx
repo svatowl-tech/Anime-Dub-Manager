@@ -7,6 +7,7 @@ import {
 import { Project, Episode, Participant, EpisodeStatus } from '../../types';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { toast } from 'sonner';
+import { formatFullDeadline } from '../../lib/templates';
 
 interface GeneralHubProps {
   projects: Project[];
@@ -221,7 +222,7 @@ export default function GeneralHub({
       return `${day}.${month}`;
     };
 
-    const deadlineStr = ep.deadline ? formatDeadlineShort(ep.deadline) : 'не указан';
+    const deadlineStr = formatFullDeadline(ep.deadline, ep.fixesDeadline);
     
     let msg = `⏰ **Напоминание о сдаче серии!**\n`;
     msg += `🎬 Проект: **${p.emoji || '❤️'} ${p.title}**\n`;
@@ -467,7 +468,7 @@ export default function GeneralHub({
                       <div className="flex items-center gap-1.5 text-neutral-400">
                         <Calendar className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
                         <span className="truncate">
-                          Дедлайн: <strong className="text-neutral-300">{activeEp.deadline ? new Date(activeEp.deadline).toLocaleDateString('ru-RU', {day: 'numeric', month: 'short'}) : 'не указан'}</strong>
+                          Дедлайн: <strong className="text-neutral-300">{formatFullDeadline(activeEp.deadline, activeEp.fixesDeadline)}</strong>
                         </span>
                       </div>
                       <div className="flex items-center gap-1.5 text-neutral-400 justify-end">

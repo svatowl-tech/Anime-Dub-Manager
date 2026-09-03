@@ -100,6 +100,7 @@ export interface Episode {
   airingDate?: string;
   status: EpisodeStatus;
   deadline?: string;
+  fixesDeadline?: string;
   rawPath?: string;
   subPath?: string;
   isHardsub?: boolean;

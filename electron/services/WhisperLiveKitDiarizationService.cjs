@@ -1,11 +1,76 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const os = require('os');
 const log = require('electron-log');
 const { app } = require('electron');
 const { getFfmpegPath } = require('./ffmpegService.cjs');
 const { trackProcess } = require('../lib/ProcessTracker.cjs');
+
+function resolveWlkPythonPath() {
+  const candidateDirs = [];
+
+  if (process.resourcesPath) {
+    candidateDirs.push(path.join(process.resourcesPath, 'whisperlivekit'));
+    candidateDirs.push(process.resourcesPath);
+  }
+
+  const cwd = process.cwd();
+  candidateDirs.push(path.join(cwd, 'whisperlivekit'));
+  candidateDirs.push(cwd);
+
+  if (typeof app !== 'undefined' && app.getPath) {
+    try {
+      const userData = app.getPath('userData');
+      candidateDirs.push(path.join(userData, 'whisperlivekit'));
+      candidateDirs.push(path.join(userData, 'ai_env', 'whisperlivekit'));
+      candidateDirs.push(path.join(userData, 'ai_env'));
+    } catch (e) {}
+  }
+
+  if (typeof app !== 'undefined' && app.getAppPath) {
+    try {
+      const appPath = app.getAppPath();
+      if (!appPath.includes('.asar')) {
+        candidateDirs.push(path.join(appPath, 'whisperlivekit'));
+        candidateDirs.push(appPath);
+      }
+    } catch (e) {}
+  }
+
+  const validPaths = [];
+
+  for (const cand of candidateDirs) {
+    if (!cand || cand.includes('.asar')) continue;
+    try {
+      const innerWlk = path.join(cand, 'whisperlivekit');
+      if (fsSync.existsSync(innerWlk)) {
+        if (fsSync.existsSync(path.join(innerWlk, 'cli.py')) ||
+            fsSync.existsSync(path.join(innerWlk, 'basic_server.py')) ||
+            fsSync.existsSync(path.join(innerWlk, '__init__.py'))) {
+          if (!validPaths.includes(cand)) validPaths.push(cand);
+        }
+      }
+      if (fsSync.existsSync(path.join(cand, 'cli.py')) ||
+          fsSync.existsSync(path.join(cand, 'basic_server.py')) ||
+          fsSync.existsSync(path.join(cand, '__init__.py'))) {
+        const parent = path.dirname(cand);
+        if (!validPaths.includes(parent)) validPaths.push(parent);
+      }
+    } catch (e) {}
+  }
+
+  if (process.env.PYTHONPATH) {
+    process.env.PYTHONPATH.split(path.delimiter).forEach(p => {
+      if (p && !p.includes('.asar') && !validPaths.includes(p)) validPaths.push(p);
+    });
+  }
+
+  const result = validPaths.join(path.delimiter);
+  log.info(`[WhisperLiveKitDiarizationService] Physical PYTHONPATH entries: ${JSON.stringify(validPaths)}`);
+  return result;
+}
 
 class WhisperLiveKitDiarizationService {
   /**
@@ -69,17 +134,7 @@ class WhisperLiveKitDiarizationService {
         total: 100
       });
 
-      // Путь к клонированной папке whisperlivekit во фреймворке (с поддержкой packaged ресурсов)
-      const packagedWlk = process.resourcesPath ? path.join(process.resourcesPath, 'whisperlivekit') : null;
-      let wlkPath = path.join(app.getAppPath(), 'whisperlivekit');
-      if (app.isPackaged && packagedWlk) {
-        try {
-          await fs.access(packagedWlk);
-          wlkPath = packagedWlk;
-        } catch {
-          // Fallback to appPath
-        }
-      }
+      const wlkPythonPath = resolveWlkPythonPath();
 
       // Формирование аргументов запуска
       const args = [
@@ -93,7 +148,7 @@ class WhisperLiveKitDiarizationService {
       ];
 
       log.info(`[WhisperLiveKitDiarizationService] Исполняемый файл: ${pythonPath}`);
-      log.info(`[WhisperLiveKitDiarizationService] PYTHONPATH: ${wlkPath}`);
+      log.info(`[WhisperLiveKitDiarizationService] PYTHONPATH: ${wlkPythonPath}`);
       log.info(`[WhisperLiveKitDiarizationService] Аргументы: python ${args.join(' ')}`);
 
       // Детальное логирование входящего запроса
@@ -108,7 +163,7 @@ class WhisperLiveKitDiarizationService {
         const env = { 
           ...process.env, 
           PYTHONIOENCODING: 'utf-8',
-          PYTHONPATH: wlkPath
+          PYTHONPATH: wlkPythonPath
         };
 
         if (hfToken) {

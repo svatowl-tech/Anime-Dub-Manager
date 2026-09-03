@@ -21,7 +21,7 @@ import { useProjectAutoUpdate } from '../hooks/useProjectAutoUpdate';
 import { SIGN_KEYWORDS } from '../constants';
 import GettingStartedGuide from './GettingStartedGuide';
 import GeneralHub from './dashboard/GeneralHub';
-import { generateStartEpisodeMessage, generateStatusMessage, formatDeadline, generateSoundEngineerMessage } from '../lib/templates';
+import { generateStartEpisodeMessage, generateStatusMessage, formatDeadline, formatFullDeadline, generateSoundEngineerMessage } from '../lib/templates';
 import { sanitizeFolderName } from '../lib/pathUtils';
 import { calculateDeadline } from '../lib/dateUtils';
 import { TextToSubtitlesModal } from './TextToSubtitlesModal';
@@ -605,11 +605,29 @@ export default function Dashboard({
   };
 
   const handleSearchTorrents = async () => {
-    if (!torrentQuery.trim()) return;
+    const trimmed = torrentQuery.trim();
+    if (!trimmed) return;
+
+    // Direct Magnet / URL / infoHash check
+    const isDirectLink = trimmed.startsWith('magnet:?') || 
+                         trimmed.startsWith('http://') || 
+                         trimmed.startsWith('https://') || 
+                         /^[0-9a-fA-F]{40}$/.test(trimmed);
+
+    if (isDirectLink) {
+      handleStartTorrentDownload({
+        name: trimmed.length > 50 ? trimmed.slice(0, 50) + '...' : trimmed,
+        magnet: trimmed.startsWith('magnet:?') || /^[0-9a-fA-F]{40}$/.test(trimmed) ? trimmed : undefined,
+        torrent: trimmed.startsWith('http') ? trimmed : undefined,
+        link: trimmed
+      });
+      return;
+    }
+
     setIsSearchingTorrents(true);
     setTorrentResults([]);
     try {
-      let finalQuery = torrentQuery.trim();
+      let finalQuery = trimmed;
       if (torrentReleaseGroup) {
         finalQuery = `${torrentReleaseGroup} ${finalQuery}`;
       }
@@ -1964,7 +1982,7 @@ export default function Dashboard({
                     </div>
                     <div className="flex items-center gap-2">
                       <Calendar className="w-4 h-4" />
-                      <span>Дедлайн: <span className="text-red-400 font-medium">{formatDeadline(currentEpisode.deadline)}</span></span>
+                      <span>Дедлайн: <span className="text-red-400 font-medium">{formatFullDeadline(currentEpisode.deadline, currentEpisode.fixesDeadline)}</span></span>
                     </div>
                     {currentEpisode.airingDate && (
                       <div className="flex items-center gap-2">
@@ -2410,21 +2428,42 @@ export default function Dashboard({
                           />
                         </div>
                       </div>
-                      <div>
-                        <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">Дедлайн серии</label>
-                        <div className="relative">
-                          <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
-                          <input
-                            type="date"
-                            value={currentEpisode?.deadline ? new Date(currentEpisode.deadline).toISOString().split('T')[0] : ''}
-                            onChange={async (e) => {
-                              if (currentEpisode) {
-                                await ipcSafe.invoke('save-episode', { ...currentEpisode, deadline: e.target.value });
-                                onRefresh();
-                              }
-                            }}
-                            className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
-                          />
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">Дедлайн серии</label>
+                          <div className="relative">
+                            <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+                            <input
+                              type="date"
+                              value={currentEpisode?.deadline ? new Date(currentEpisode.deadline).toISOString().split('T')[0] : ''}
+                              onChange={async (e) => {
+                                if (currentEpisode) {
+                                  await ipcSafe.invoke('save-episode', { ...currentEpisode, deadline: e.target.value });
+                                  onRefresh();
+                                }
+                              }}
+                              className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-neutral-500 uppercase mb-2 ml-1">
+                            Дедлайн фиксов <span className="text-neutral-500 font-normal lowercase">(по умолчанию: +1 день)</span>
+                          </label>
+                          <div className="relative">
+                            <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-500" />
+                            <input
+                              type="date"
+                              value={currentEpisode?.fixesDeadline ? new Date(currentEpisode.fixesDeadline).toISOString().split('T')[0] : ''}
+                              onChange={async (e) => {
+                                if (currentEpisode) {
+                                  await ipcSafe.invoke('save-episode', { ...currentEpisode, fixesDeadline: e.target.value || undefined });
+                                  onRefresh();
+                                }
+                              }}
+                              className="w-full bg-black border border-neutral-800 rounded-xl py-3 pl-10 pr-4 text-white focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                            />
+                          </div>
                         </div>
                       </div>
                       <div>

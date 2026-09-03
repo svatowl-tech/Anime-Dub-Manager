@@ -37,7 +37,7 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
     currentSettings.footerTemplate || '📌 Смотреть: {site_link}\n💬 Обсуждение: {tg_group}'
   );
   const [startNoticeTemplate, setStartNoticeTemplate] = useState<string>(
-    currentSettings.startNoticeTemplate || '🎬 <b>СТАРТ РАБОТЫ НАД СЕРИЕЙ!</b>\n📌 <b>{project_title}</b> — Серия {episode_number}\n\n👥 <b>Состав команды:</b>\n{dubbers_list}\n\n📅 <b>Дедлайн сдачи:</b> {deadline}\n🔗 <b>Материалы:</b> {source_link}'
+    currentSettings.startNoticeTemplate || '🎬 <b>СТАРТ РАБОТЫ НАД СЕРИЕЙ!</b>\n📌 <b>{project_title}</b> — Серия {episode_number}\n\n👥 <b>Состав команды:</b>\n{dubbers_list}\n\n📅 <b>ДЕДЛАЙН:</b> {deadline}\n🔗 <b>Материалы:</b> {source_link}'
   );
   const [reminderTemplate, setReminderTemplate] = useState<string>(
     currentSettings.reminderTemplate || '⏰ <b>НАПОМИНАНИЕ О ДЕДЛАЙНЕ!</b>\nРелиз: <b>{project_title}</b> (Серия {episode_number})\n\nКоллеги, ожидаем ваши дорожки:\n{pending_dubbers}\n\nПросьба дописать как можно скорее! 🙏'
