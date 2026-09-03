@@ -589,23 +589,32 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
         const torrentsDir = path.join(baseDir, 'torrents_temp');
         await fs.mkdir(torrentsDir, { recursive: true });
 
+        let lastErr = null;
         let torrent = await getOrAddTorrent(client, torrentId, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(err => {
           log.warn(`[get-torrent-metadata] Primary getOrAddTorrent failed for ${torrentId}: ${err.message}`);
+          lastErr = err;
           return null;
         });
         
         if ((!torrent || torrent.destroyed) && magnet && torrentId !== magnet) {
           log.info(`[get-torrent-metadata] Retrying with magnet link: ${magnet.slice(0, 60)}...`);
-          torrent = await getOrAddTorrent(client, magnet, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(() => null);
+          torrent = await getOrAddTorrent(client, magnet, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(err => {
+            lastErr = err;
+            return null;
+          });
         }
 
         if ((!torrent || torrent.destroyed) && torrentUrl && torrentId !== torrentUrl) {
           log.info(`[get-torrent-metadata] Retrying with torrentUrl: ${torrentUrl.slice(0, 60)}...`);
-          torrent = await getOrAddTorrent(client, torrentUrl, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(() => null);
+          torrent = await getOrAddTorrent(client, torrentUrl, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(err => {
+            lastErr = err;
+            return null;
+          });
         }
 
         if (!torrent || torrent.destroyed) {
-          throw new Error('Не удалось инициализировать торрент в клиенте WebTorrent. Проверьте корректность Magnet/Torrent ссылки.');
+          const detail = lastErr?.message || 'Проверьте корректность Magnet/Torrent ссылки.';
+          throw new Error(`Не удалось инициализировать торрент в клиенте WebTorrent: ${detail}`);
         }
 
         if (torrent.ready || (torrent.files && torrent.files.length > 0)) {
