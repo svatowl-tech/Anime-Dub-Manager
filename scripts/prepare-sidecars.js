@@ -250,10 +250,89 @@ async function prepareModels() {
 }
 
 /**
- * 3. Валидация и проверка структуры WhisperLiveKit sidecar
+ * 3. Подготовка бинарного файла yt-dlp (прямое скачивание с GitHub Releases без использования GitHub REST API)
+ */
+async function prepareYtDlp() {
+  console.log('\n📹 Шаг 3: Подготовка бинарного файла yt-dlp...');
+  const isWin = os.platform() === 'win32';
+  const ytDlpFileName = isWin ? 'yt-dlp.exe' : 'yt-dlp';
+  const binDest = path.join(BIN_DIR, ytDlpFileName);
+  const nodeModulesYtDlpDir = path.join(ROOT_DIR, 'node_modules', 'youtube-dl-exec', 'bin');
+  const nodeModulesYtDlpDest = path.join(nodeModulesYtDlpDir, ytDlpFileName);
+
+  fs.mkdirSync(BIN_DIR, { recursive: true });
+  fs.mkdirSync(nodeModulesYtDlpDir, { recursive: true });
+
+  if (fs.existsSync(binDest) && fs.existsSync(nodeModulesYtDlpDest)) {
+    console.log(`  ✓ yt-dlp уже присутствует в assets/bin и node_modules`);
+    return;
+  }
+
+  if (fs.existsSync(nodeModulesYtDlpDest) && !fs.existsSync(binDest)) {
+    fs.copyFileSync(nodeModulesYtDlpDest, binDest);
+    if (!isWin) fs.chmodSync(binDest, 0o755);
+    console.log(`  ✓ yt-dlp скопирован из node_modules в assets/bin`);
+    return;
+  }
+
+  if (fs.existsSync(binDest) && !fs.existsSync(nodeModulesYtDlpDest)) {
+    fs.copyFileSync(binDest, nodeModulesYtDlpDest);
+    if (!isWin) fs.chmodSync(nodeModulesYtDlpDest, 0o755);
+    console.log(`  ✓ yt-dlp скопирован из assets/bin в node_modules`);
+    return;
+  }
+
+  // Direct GitHub release download URLs (bypasses GitHub REST API and avoids rate-limit 403 errors)
+  const primaryUrl = isWin
+    ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
+    : (os.platform() === 'darwin'
+      ? 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos'
+      : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp');
+
+  try {
+    console.log(`  [yt-dlp] Загрузка с ${primaryUrl}...`);
+    const response = await axios({
+      method: 'GET',
+      url: primaryUrl,
+      responseType: 'stream',
+      maxRedirects: 5,
+      timeout: 60000
+    });
+
+    const writer = fs.createWriteStream(binDest);
+    response.data.pipe(writer);
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    if (!isWin) fs.chmodSync(binDest, 0o755);
+    fs.copyFileSync(binDest, nodeModulesYtDlpDest);
+    if (!isWin) fs.chmodSync(nodeModulesYtDlpDest, 0o755);
+    console.log(`  ✓ yt-dlp успешно загружен и размещен в assets/bin и node_modules/youtube-dl-exec/bin`);
+  } catch (err) {
+    console.warn(`  ⚠️ Не удалось загрузить автономный yt-dlp (${err.message}). Попробуем скачать универсальный скрипт...`);
+    try {
+      const fallbackUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp';
+      const response = await axios({ method: 'GET', url: fallbackUrl, responseType: 'stream', maxRedirects: 5, timeout: 60000 });
+      const writer = fs.createWriteStream(binDest);
+      response.data.pipe(writer);
+      await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+      if (!isWin) fs.chmodSync(binDest, 0o755);
+      fs.copyFileSync(binDest, nodeModulesYtDlpDest);
+      if (!isWin) fs.chmodSync(nodeModulesYtDlpDest, 0o755);
+      console.log(`  ✓ Универсальный yt-dlp успешно загружен в bin`);
+    } catch (e2) {
+      console.warn(`  ⚠️ Ошибка резервной загрузки yt-dlp: ${e2.message}`);
+    }
+  }
+}
+
+/**
+ * 4. Валидация и проверка структуры WhisperLiveKit sidecar
  */
 function preparePythonSidecars() {
-  console.log('\n🐍 Шаг 3: Проверка и валидация Python Sidecar модулей...');
+  console.log('\n🐍 Шаг 4: Проверка и валидация Python Sidecar модулей...');
 
   const checkFile = (relPath, desc) => {
     const full = path.join(ROOT_DIR, relPath);
@@ -277,7 +356,8 @@ function preparePythonSidecars() {
     preparedAt: new Date().toISOString(),
     binaries: {
       ffmpeg: fs.existsSync(path.join(BIN_DIR, os.platform() === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')),
-      ffprobe: fs.existsSync(path.join(BIN_DIR, os.platform() === 'win32' ? 'ffprobe.exe' : 'ffprobe'))
+      ffprobe: fs.existsSync(path.join(BIN_DIR, os.platform() === 'win32' ? 'ffprobe.exe' : 'ffprobe')),
+      ytdlp: fs.existsSync(path.join(BIN_DIR, os.platform() === 'win32' ? 'yt-dlp.exe' : 'yt-dlp'))
     },
     models: {
       pyannoteSegmentation: fs.existsSync(path.join(MODELS_DIR, 'onnx-community', 'pyannote-segmentation-3.0')),
@@ -300,6 +380,7 @@ async function run() {
   try {
     await prepareBinaries();
     await prepareModels();
+    await prepareYtDlp();
     preparePythonSidecars();
     console.log('\n===========================================================');
     console.log('✅ Все сайдкары, бинарные утилиты и модели успешно подготовлены!');

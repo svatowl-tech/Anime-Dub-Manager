@@ -9,14 +9,39 @@ const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
 const { convertSrtToAss } = require('../services/subtitleService.cjs');
 const { trackProcess } = require('../lib/ProcessTracker.cjs');
 
+function getYtDlpBinaryPath() {
+  const fsSync = require('fs');
+  const candidates = [
+    ytdlConstants.YOUTUBE_DL_PATH,
+    ytdlConstants.YOUTUBE_DL_PATH ? ytdlConstants.YOUTUBE_DL_PATH.replace('app.asar', 'app.asar.unpacked') : null,
+    path.join(process.resourcesPath || '', 'bin', ytdlConstants.YOUTUBE_DL_FILE || 'yt-dlp'),
+    path.join(__dirname, '..', '..', 'assets', 'bin', ytdlConstants.YOUTUBE_DL_FILE || 'yt-dlp'),
+    app && typeof app.getAppPath === 'function' ? path.join(app.getAppPath(), 'assets', 'bin', ytdlConstants.YOUTUBE_DL_FILE || 'yt-dlp') : null
+  ];
+
+  for (const p of candidates) {
+    if (p && fsSync.existsSync(p)) {
+      try {
+        if (process.platform !== 'win32') {
+          fsSync.chmodSync(p, 0o755);
+        }
+      } catch (_) {}
+      return p;
+    }
+  }
+
+  return ytdlConstants.YOUTUBE_DL_PATH;
+}
+
 function safeYtDlp(url, flags) {
   return new Promise((resolve, reject) => {
     // Always ignore external/local configuration files to prevent interference with our app
     flags.ignoreConfig = true;
 
     const args = [url].concat(ytdlArgs(flags));
+    const binPath = getYtDlpBinaryPath();
     
-    const child = execFile(ytdlConstants.YOUTUBE_DL_PATH, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
+    const child = execFile(binPath, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
       if (err) {
         const error = new Error(err.message || stderr || 'yt-dlp execution error');
         error.code = err.code;

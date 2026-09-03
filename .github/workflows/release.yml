@@ -21,6 +21,8 @@ permissions:
 
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
+  YOUTUBE_DL_SKIP_DOWNLOAD: "true"
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
   # 1. Job to prepare or ensure the release exists and obtain version info
@@ -122,6 +124,9 @@ jobs:
 
       - name: Install npm dependencies
         run: npm ci
+        env:
+          YOUTUBE_DL_SKIP_DOWNLOAD: "true"
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate Cross-Platform Icons
         run: node scripts/generate-icons.cjs
