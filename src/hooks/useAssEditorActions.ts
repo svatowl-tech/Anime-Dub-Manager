@@ -545,12 +545,12 @@ export const useAssEditorActions = (
     reader.readAsText(file);
   };
 
-  const handleExport = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, currentAssignments?: RoleAssignment[]) => {
+  const handleExport = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, currentAssignments?: RoleAssignment[]) => {
     if (!currentEpisode) return;
     
     try {
       const taskType = state.exportRole === 'DABBER' ? 'export-dabber-files' : 'export-sound-engineer-files';
-      const roleName = state.exportRole === 'DABBER' ? 'Даберам' : 'Звукоreжиссеру';
+      const roleName = state.exportRole === 'DABBER' ? 'Даберам' : 'Звукорежиссеру';
       const newStatus = state.exportRole === 'DABBER' ? 'RECORDING' : 'SOUND_ENGINEERING';
       
       // Use provided assignments or fallback to episode.assignments
@@ -569,7 +569,9 @@ export const useAssEditorActions = (
           episode: episodeWithAssignments, 
           targetDir, 
           skipConversion, 
-          smartExport 
+          smartExport,
+          additionalProcessing,
+          autoApplyFixes
         },
         metadata: {
           title: `Экспорт ${roleName}: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`

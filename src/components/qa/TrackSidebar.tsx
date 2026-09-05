@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, CheckCircle, Check, MessageSquare, Clock, Mic, Trash2, Sliders, Scissors, AlertTriangle } from 'lucide-react';
+import { Activity, CheckCircle, Check, MessageSquare, Clock, Mic, Trash2, Sliders, Scissors, AlertTriangle, Headphones } from 'lucide-react';
 import { STATUS_MAP } from '../../constants';
 import { Track } from '../../types';
 import { NormalizationMetrics } from '../../lib/qa/audioNormalizer';
@@ -16,6 +16,7 @@ interface TrackSidebarProps {
   onGenerateFixesMessage?: () => void;
   onGenerateReminderMessage?: () => void;
   onExportSoundEngineer?: () => void;
+  onGenerateSoundEngineerReport?: () => void;
   onBakeSubtitles?: () => void;
   isBaking?: boolean;
   bakeProgress?: number;
@@ -41,6 +42,7 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
   onGenerateFixesMessage,
   onGenerateReminderMessage,
   onExportSoundEngineer,
+  onGenerateSoundEngineerReport,
   onBakeSubtitles,
   isBaking,
   bakeProgress,
@@ -95,7 +97,7 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
         <div className="px-3 py-2 bg-amber-950/20 border-b border-amber-900/30 flex items-center justify-between">
           <div className="flex items-center gap-2 text-amber-300 text-xs">
             <Scissors className="w-3.5 h-3.5 text-amber-400" />
-            <span className="font-semibold">Проверка пропусков</span>
+            <span className="font-semibold">Контроль косяков</span>
           </div>
           <button
             onClick={onOpenGapDetection}
@@ -105,14 +107,14 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
                 ? 'bg-amber-500 hover:bg-amber-400 text-neutral-950 border-amber-400 animate-pulse'
                 : 'bg-amber-900/40 hover:bg-amber-800/60 text-amber-200 border-amber-700/50'
             }`}
-            title="Автоматический поиск пропущенных реплик по субтитрам"
+            title="Автоматический поиск пропусков, лишней речи вне сабов и конфликтов озвучки"
           >
             {isAnalyzingGaps ? (
               <span className="animate-pulse">Анализ...</span>
             ) : detectedGapsCount > 0 ? (
               <>
                 <AlertTriangle className="w-3 h-3" />
-                <span>{detectedGapsCount} проп.</span>
+                <span>{detectedGapsCount} косяк.</span>
               </>
             ) : (
               <span>Сканировать</span>
@@ -279,10 +281,18 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
           Напомнить о сдаче
         </button>
         <button 
-          onClick={onExportSoundEngineer}
-          className="w-full py-2 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-2"
+          onClick={onGenerateSoundEngineerReport}
+          className="w-full py-2 bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2"
+          title="Сформировать текстовое сообщение звукорежиссеру о найденных наездах и проблемах тайминга"
         >
-          <Mic className="w-3.5 h-3.5" />
+          <Headphones className="w-3.5 h-3.5 text-indigo-400" />
+          Отчет для звукаря
+        </button>
+        <button 
+          onClick={onExportSoundEngineer}
+          className="w-full py-2 bg-neutral-800 hover:bg-neutral-750 text-neutral-300 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-2"
+        >
+          <Mic className="w-3.5 h-3.5 text-neutral-400" />
           Экспорт для звукача
         </button>
         <button 

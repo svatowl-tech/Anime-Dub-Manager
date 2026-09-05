@@ -12,7 +12,9 @@ import {
   Users, 
   FileText,
   Lock,
-  RefreshCw
+  RefreshCw,
+  Music,
+  FileCheck
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../lib/ipcSafe';
@@ -25,6 +27,8 @@ import {
 import { TelegramTabType } from './telegram/types';
 import { TelegramWebTab } from './telegram/TelegramWebTab';
 import { TelegramAuthView } from './telegram/TelegramAuthView';
+import { TelegramTracksTab } from './telegram/TelegramTracksTab';
+import { TelegramPostVerifyTab } from './telegram/TelegramPostVerifyTab';
 import { TelegramComposerTab } from './telegram/TelegramComposerTab';
 import { TelegramAutomationsTab } from './telegram/TelegramAutomationsTab';
 import { TelegramMessengerTab } from './telegram/TelegramMessengerTab';
@@ -145,6 +149,30 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
           </button>
 
           <button
+            onClick={() => setActiveTab('tracks')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              activeTab === 'tracks'
+                ? 'bg-violet-600 text-white shadow-sm'
+                : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            <Music className="w-3.5 h-3.5" />
+            <span>Дорожки озвучки</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('verify')}
+            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
+              activeTab === 'verify'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-neutral-400 hover:text-white'
+            }`}
+          >
+            <FileCheck className="w-3.5 h-3.5" />
+            <span>Проверка постинга</span>
+          </button>
+
+          <button
             onClick={() => setActiveTab('composer')}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
               activeTab === 'composer'
@@ -220,6 +248,48 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
       {/* Main Tab Content */}
       <div className="flex-1 overflow-hidden relative flex flex-col">
         {activeTab === 'web' && <TelegramWebTab />}
+
+        {activeTab === 'tracks' && (
+          isConnected ? (
+            <TelegramTracksTab
+              currentProject={activeProject}
+              currentEpisode={currentEpisode}
+              allProjects={allProjects}
+              dialogs={dialogs}
+              onRefreshProjects={onRefreshProjects}
+            />
+          ) : (
+            <div className="flex-1 overflow-y-auto">
+              <TelegramAuthView
+                onSuccess={loadStatus}
+                savedPhone={status?.settings?.phoneNumber}
+                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
+                savedApiHash={status?.settings?.apiHash || ''}
+              />
+            </div>
+          )
+        )}
+
+        {activeTab === 'verify' && (
+          isConnected ? (
+            <TelegramPostVerifyTab
+              currentProject={activeProject}
+              currentEpisode={currentEpisode}
+              dialogs={dialogs}
+              defaultChannelId={status?.settings?.defaultChannelId || ''}
+              onRefreshProjects={onRefreshProjects}
+            />
+          ) : (
+            <div className="flex-1 overflow-y-auto">
+              <TelegramAuthView
+                onSuccess={loadStatus}
+                savedPhone={status?.settings?.phoneNumber}
+                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
+                savedApiHash={status?.settings?.apiHash || ''}
+              />
+            </div>
+          )
+        )}
 
         {activeTab === 'composer' && (
           isConnected ? (

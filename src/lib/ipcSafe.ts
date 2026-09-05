@@ -23,7 +23,7 @@ export const ipcSafe = {
           (richError as any)._channel = channel;
           throw richError;
         }
-        return response.data;
+        return response.data !== undefined ? response.data : response;
       }
       
       // Fallback for handlers that haven't been wrapped yet

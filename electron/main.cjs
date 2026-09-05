@@ -1,5 +1,5 @@
 const { killAllTrackedProcesses, killAllTrackedProcessesSync } = require('./lib/ProcessTracker.cjs');
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, session, clipboard, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const { exec } = require('child_process');
@@ -13,6 +13,14 @@ if (!gotTheLock) {
   app.quit();
   process.exit(0);
 }
+
+// Append Chromium switches for maximum browser compatibility, stealth, and video autoplay
+// Disabling AutomationControlled masks navigator.webdriver at the C++ Chromium engine level
+app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+app.commandLine.appendSwitch('disable-features', 'CrossOriginOpenerPolicy,CrossOriginEmbedderPolicy');
+app.commandLine.appendSwitch('enable-features', 'NetworkService,NetworkServiceInProcess');
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+app.commandLine.appendSwitch('disable-site-isolation-trials');
 
 // Setup safe electron-log path in userData (prevents EPERM errors in C:\Program Files\)
 try {
@@ -48,7 +56,7 @@ ipcMain.on('log-error', (event, error) => {
 const DataManager = require('./lib/DataManager.cjs');
 const TaskQueue = require('./lib/TaskQueue.cjs');
 const { initSharedOnnx } = require('./lib/onnxConfig.cjs');
-const { configureWebViewSession, handleWebContentsCreated } = require('./lib/WebViewSessionManager.cjs');
+const { configureWebViewSession, handleWebContentsCreated, openAuthModalWindow } = require('./lib/WebViewSessionManager.cjs');
 
 const { extractHardsub } = require('./services/ocrService.cjs');
 const { bakeSubtitles, transcodeToMp4, muxRelease, takeScreenshot, getVideoMetadata, extractSubtitleTrack, setCustomFfmpegPath, getActiveProcesses, killAllProcesses } = require('./services/ffmpegService.cjs');
@@ -360,6 +368,59 @@ app.whenReady().then(async () => {
   } catch (err) {
     log.error('Failed to configure webview sessions:', err);
   }
+
+  // Register Browser Engine IPC handlers for Uploader and embedded WebViews
+  ipcMain.handle('get-browser-preload-path', () => {
+    return path.join(__dirname, 'lib', 'browser-preload.cjs');
+  });
+
+  ipcMain.handle('browser-open-auth-window', async (event, { url, title }) => {
+    log.info(`[Main] Opening auth modal window for: ${url}`);
+    return await openAuthModalWindow(url, title);
+  });
+
+  ipcMain.handle('browser-clear-session-data', async () => {
+    try {
+      if (session && typeof session.fromPartition === 'function') {
+        const pubSession = session.fromPartition('persist:publisher');
+        await pubSession.clearStorageData({
+          storages: ['cookies', 'localstorage', 'caches', 'indexdb', 'serviceworkers']
+        });
+        log.info('[Main] Cleared persist:publisher session data');
+        return { success: true };
+      }
+      return { success: false, error: 'Session not available' };
+    } catch (e) {
+      log.error('[Main] Failed to clear session data:', e);
+      return { success: false, error: e.message };
+    }
+  });
+
+  ipcMain.handle('browser-copy-image-to-clipboard', async (event, imagePathOrUrl) => {
+    try {
+      if (!imagePathOrUrl) return { success: false, error: 'No image provided' };
+      
+      let img = null;
+      if (imagePathOrUrl.startsWith('http://') || imagePathOrUrl.startsWith('https://')) {
+        const res = await fetch(imagePathOrUrl);
+        const arrayBuf = await res.arrayBuffer();
+        img = nativeImage.createFromBuffer(Buffer.from(arrayBuf));
+      } else {
+        img = nativeImage.createFromPath(imagePathOrUrl);
+      }
+
+      if (img && !img.isEmpty()) {
+        clipboard.writeImage(img);
+        log.info('[Main] Successfully copied image to system clipboard');
+        return { success: true };
+      } else {
+        return { success: false, error: 'Failed to create image object' };
+      }
+    } catch (e) {
+      log.error('[Main] Failed to copy image to clipboard:', e);
+      return { success: false, error: e.message };
+    }
+  });
 
   // 4. Create application windows
   createWindow();

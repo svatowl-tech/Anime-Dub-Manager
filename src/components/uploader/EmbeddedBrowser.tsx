@@ -9,8 +9,9 @@ import { BrowserAddressBar } from './browser/BrowserAddressBar';
 import { BrowserTabContent } from './browser/BrowserTabContent';
 import { BrowserFindBar } from './browser/BrowserFindBar';
 import { CapturedMediaModal } from './browser/CapturedMediaModal';
-import { isWeb } from '../../lib/ipcSafe';
+import { isWeb, ipcSafe } from '../../lib/ipcSafe';
 import { appLogger } from '../../lib/appLogger';
+import { toast } from 'sonner';
 
 interface EmbeddedBrowserProps {
   activeUrl: string;
@@ -102,6 +103,93 @@ export const EmbeddedBrowser: React.FC<EmbeddedBrowserProps> = ({
     webviewRefs.current[tabId] = webview;
   }, [webviewRefs]);
 
+  // Inject post into active webpage input field
+  const handleInjectPost = useCallback(async () => {
+    if (!generatedPost || !generatedPost.trim()) {
+      toast.warning('Сначала сгенерируйте текст поста в левой панели');
+      return;
+    }
+
+    const webview = webviewRefs.current[activeTabId];
+    if (webview && !isWeb) {
+      if (typeof webview._admInjectPost === 'function') {
+        const ok = await webview._admInjectPost(generatedPost);
+        if (ok) {
+          toast.success('Текст поста успешно вставлен в поле на странице!');
+          return;
+        }
+      }
+    }
+
+    // Fallback: Copy to clipboard and inform user
+    try {
+      await navigator.clipboard.writeText(generatedPost);
+      toast.success('Текст поста скопирован в буфер обмена (нажмите Ctrl+V в нужном поле)');
+    } catch (e) {
+      toast.error('Не удалось скопировать текст в буфер');
+    }
+  }, [generatedPost, activeTabId, webviewRefs]);
+
+  // Copy post text directly to clipboard
+  const handleCopyPostText = useCallback(async () => {
+    if (!generatedPost || !generatedPost.trim()) {
+      toast.warning('Текст поста не сгенерирован');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(generatedPost);
+      toast.success('Текст поста скопирован в буфер обмена');
+    } catch (e) {
+      toast.error('Не удалось скопировать текст');
+    }
+  }, [generatedPost]);
+
+  // Copy cover image to system clipboard as an image (allows pressing Ctrl+V on sites to upload)
+  const handleCopyCover = useCallback(async () => {
+    const coverUrl = (currentEpisode as any)?.coverImage || currentEpisode?.project?.posterUrl || (currentEpisode as any)?.posterImage;
+    if (!coverUrl) {
+      toast.warning('Обложка серии не найдена');
+      return;
+    }
+
+    if (!isWeb) {
+      try {
+        const res = await ipcSafe.invoke('browser-copy-image-to-clipboard', coverUrl);
+        if (res && res.success) {
+          toast.success('Файл обложки скопирован как картинка! Нажмите Ctrl+V на сайте.');
+          return;
+        }
+      } catch (e) {}
+    }
+
+    // Web fallback
+    try {
+      const resp = await fetch(coverUrl);
+      const blob = await resp.blob();
+      await navigator.clipboard.write([
+        new ClipboardItem({ [blob.type]: blob })
+      ]);
+      toast.success('Изображение обложки скопировано в буфер (Ctrl+V)');
+    } catch (e) {
+      await navigator.clipboard.writeText(coverUrl);
+      toast.info('Ссылка на обложку скопирована в буфер');
+    }
+  }, [currentEpisode]);
+
+  // Open dedicated standalone auth window for difficult SSO / Cloudflare / VK ID
+  const handleOpenAuthWindow = useCallback(async (url?: string) => {
+    const target = url || activeTab?.url;
+    if (!target) return;
+    if (!isWeb) {
+      toast.info('Открывается защищенное окно авторизации...');
+      await ipcSafe.invoke('browser-open-auth-window', { url: target, title: activeTab?.title || 'Вход' });
+      reloadActiveTab();
+      toast.success('Сессия обновлена!');
+    } else {
+      window.open(target, '_blank');
+    }
+  }, [activeTab?.url, activeTab?.title, reloadActiveTab]);
+
   return (
     <div id="embedded-browser-container" className="flex-1 flex flex-col h-full bg-neutral-950 overflow-hidden relative">
       {/* 1. Multi-Tab Bar */}
@@ -138,6 +226,12 @@ export const EmbeddedBrowser: React.FC<EmbeddedBrowserProps> = ({
         onToggleFind={toggleFindOpen}
         onToggleMute={toggleMuteActiveTab}
         onOpenCapturedMedia={() => setIsCapturedMediaOpen(true)}
+        onInjectPost={handleInjectPost}
+        onCopyPostText={handleCopyPostText}
+        onCopyCover={handleCopyCover}
+        onOpenAuthWindow={() => handleOpenAuthWindow()}
+        hasGeneratedPost={!!generatedPost && generatedPost.trim().length > 0}
+        hasCover={!!((currentEpisode as any)?.coverImage || currentEpisode?.project?.posterUrl || (currentEpisode as any)?.posterImage)}
       />
 
       {/* 3. Floating Find In Page Bar */}

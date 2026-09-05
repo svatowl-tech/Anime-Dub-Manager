@@ -28,6 +28,9 @@ interface TelegramAuthViewProps {
   savedApiHash?: string;
 }
 
+const DEFAULT_TG_API_ID = '2040';
+const DEFAULT_TG_API_HASH = 'b18441a1ff607e10a989891a5462e627';
+
 export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   onSuccess,
   savedPhone = '',
@@ -40,6 +43,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   // Shared API credentials
   const [apiId, setApiId] = useState<string>(savedApiId);
   const [apiHash, setApiHash] = useState<string>(savedApiHash);
+  const [showAdvancedApiSettings, setShowAdvancedApiSettings] = useState<boolean>(false);
 
   // Phone Auth State
   const [phoneNumber, setPhoneNumber] = useState<string>(savedPhone);
@@ -64,6 +68,12 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   const [logs, setLogs] = useState<Array<{ time: string; text: string; isError?: boolean }>>([]);
 
   const qrPollIntervalRef = useRef<any>(null);
+
+  const getEffectiveCredentials = () => {
+    const effId = apiId.trim() ? Number(apiId.trim()) : Number(DEFAULT_TG_API_ID);
+    const effHash = apiHash.trim() ? apiHash.trim() : DEFAULT_TG_API_HASH;
+    return { apiId: effId, apiHash: effHash };
+  };
 
   const addLog = (text: string, isError = false) => {
     const time = new Date().toLocaleTimeString();
@@ -109,17 +119,14 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
 
   // START QR AUTH FLOW
   const handleStartQrAuth = async () => {
-    if (!apiId.trim() || !apiHash.trim()) {
-      toast.error('Введите API ID и API Hash (с my.telegram.org)');
-      return;
-    }
+    const creds = getEffectiveCredentials();
 
     setIsLoading(true);
     addLog('Инициализация сессии и генерация QR-кода авторизации MTProto...');
     try {
       const res = await ipcSafe.invoke('telegram-mtproto-start-qr', {
-        apiId: Number(apiId.trim()),
-        apiHash: apiHash.trim()
+        apiId: creds.apiId,
+        apiHash: creds.apiHash
       });
 
       if (res && res.success) {
@@ -192,9 +199,10 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   const handleRefreshQr = async () => {
     try {
       addLog('Обновление токена QR-кода...');
+      const creds = getEffectiveCredentials();
       const res = await ipcSafe.invoke('telegram-mtproto-start-qr', {
-        apiId: Number(apiId.trim()),
-        apiHash: apiHash.trim()
+        apiId: creds.apiId,
+        apiHash: creds.apiHash
       });
       if (res && res.qrDataUrl) {
         setQrDataUrl(res.qrDataUrl);
@@ -253,18 +261,16 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
       toast.error('Введите номер телефона (напр. +79991234567)');
       return;
     }
-    if (!apiId.trim() || !apiHash.trim()) {
-      toast.error('Введите API ID и API Hash (с my.telegram.org)');
-      return;
-    }
+
+    const creds = getEffectiveCredentials();
 
     setIsLoading(true);
     addLog(`Отправка запроса на получение кода для ${phoneNumber}...`);
     try {
       const res = await ipcSafe.invoke('telegram-mtproto-send-code', {
         phoneNumber: phoneNumber.trim(),
-        apiId: Number(apiId.trim()),
-        apiHash: apiHash.trim(),
+        apiId: creds.apiId,
+        apiHash: creds.apiHash,
         forceSMS
       });
 
@@ -435,36 +441,50 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-neutral-300 mb-1.5 flex items-center gap-1.5">
-                      <Key className="w-3.5 h-3.5 text-sky-400" />
-                      API ID (my.telegram.org)
-                    </label>
-                    <input
-                      type="text"
-                      value={apiId}
-                      onChange={(e) => setApiId(e.target.value)}
-                      placeholder="Например: 24512345"
-                      required
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-sky-500 focus:ring-1 focus:ring-sky-500 outline-none transition font-mono"
-                    />
-                  </div>
+                {/* Optional Advanced API Credentials Toggle */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedApiSettings(!showAdvancedApiSettings)}
+                    className="text-xs text-neutral-400 hover:text-sky-400 transition flex items-center gap-1.5 cursor-pointer py-1 font-medium"
+                  >
+                    <span>{showAdvancedApiSettings ? '▾ Скрыть настройки API Telegram' : '▸ Настройки API ID / Hash (необязательно)'}</span>
+                    <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-1.5 py-0.2 rounded">
+                      Ключи по умолчанию включены
+                    </span>
+                  </button>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-neutral-300 mb-1.5 flex items-center gap-1.5">
-                      <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
-                      API Hash (my.telegram.org)
-                    </label>
-                    <input
-                      type="password"
-                      value={apiHash}
-                      onChange={(e) => setApiHash(e.target.value)}
-                      placeholder="32-значный хэш"
-                      required
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-sky-500 focus:ring-1 focus:ring-sky-500 outline-none transition font-mono"
-                    />
-                  </div>
+                  {showAdvancedApiSettings && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 p-3 bg-neutral-950/60 rounded-xl border border-neutral-800">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-neutral-300 mb-1 flex items-center gap-1.5">
+                          <Key className="w-3 h-3 text-sky-400" />
+                          API ID
+                        </label>
+                        <input
+                          type="text"
+                          value={apiId}
+                          onChange={(e) => setApiId(e.target.value)}
+                          placeholder="2040 (по умолчанию)"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:border-sky-500 outline-none transition font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-semibold text-neutral-300 mb-1 flex items-center gap-1.5">
+                          <ShieldCheck className="w-3 h-3 text-sky-400" />
+                          API Hash
+                        </label>
+                        <input
+                          type="password"
+                          value={apiHash}
+                          onChange={(e) => setApiHash(e.target.value)}
+                          placeholder="По умолчанию встроен"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:border-sky-500 outline-none transition font-mono"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <button
@@ -622,36 +642,50 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                   />
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-neutral-300 mb-1.5 flex items-center gap-1.5">
-                      <Key className="w-3.5 h-3.5 text-sky-400" />
-                      API ID (my.telegram.org)
-                    </label>
-                    <input
-                      type="text"
-                      value={apiId}
-                      onChange={(e) => setApiId(e.target.value)}
-                      placeholder="Например: 24512345"
-                      required
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-sky-500 focus:ring-1 focus:ring-sky-500 outline-none transition font-mono"
-                    />
-                  </div>
+                {/* Optional Advanced API Credentials Toggle */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowAdvancedApiSettings(!showAdvancedApiSettings)}
+                    className="text-xs text-neutral-400 hover:text-sky-400 transition flex items-center gap-1.5 cursor-pointer py-1 font-medium"
+                  >
+                    <span>{showAdvancedApiSettings ? '▾ Скрыть настройки API Telegram' : '▸ Настройки API ID / Hash (необязательно)'}</span>
+                    <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-1.5 py-0.2 rounded">
+                      Ключи по умолчанию включены
+                    </span>
+                  </button>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-neutral-300 mb-1.5 flex items-center gap-1.5">
-                      <ShieldCheck className="w-3.5 h-3.5 text-sky-400" />
-                      API Hash (my.telegram.org)
-                    </label>
-                    <input
-                      type="password"
-                      value={apiHash}
-                      onChange={(e) => setApiHash(e.target.value)}
-                      placeholder="32-значный хэш"
-                      required
-                      className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-sky-500 focus:ring-1 focus:ring-sky-500 outline-none transition font-mono"
-                    />
-                  </div>
+                  {showAdvancedApiSettings && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 p-3 bg-neutral-950/60 rounded-xl border border-neutral-800">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-neutral-300 mb-1 flex items-center gap-1.5">
+                          <Key className="w-3 h-3 text-sky-400" />
+                          API ID
+                        </label>
+                        <input
+                          type="text"
+                          value={apiId}
+                          onChange={(e) => setApiId(e.target.value)}
+                          placeholder="2040 (по умолчанию)"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:border-sky-500 outline-none transition font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[11px] font-semibold text-neutral-300 mb-1 flex items-center gap-1.5">
+                          <ShieldCheck className="w-3 h-3 text-sky-400" />
+                          API Hash
+                        </label>
+                        <input
+                          type="password"
+                          value={apiHash}
+                          onChange={(e) => setApiHash(e.target.value)}
+                          placeholder="По умолчанию встроен"
+                          className="w-full bg-neutral-900 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:border-sky-500 outline-none transition font-mono"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 <button

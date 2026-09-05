@@ -689,6 +689,10 @@ function handleIpcMock(channel: string, args: any[]): any {
     })();
   }
 
+  if (channel === 'silence-audio-intervals') {
+    return { success: true };
+  }
+
   if (channel === 'split-subs-by-dubber') {
     return { success: true, generatedFiles: ['actor1.ass', 'actor2.ass'] };
   }

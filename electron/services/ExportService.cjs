@@ -2,7 +2,7 @@ const path = require('path');
 const fs = require('fs/promises');
 const fsSync = require('fs');
 const log = require('electron-log');
-const { bakeSubtitles, transcodeToMp4, muxRelease } = require('./ffmpegService.cjs');
+const { bakeSubtitles, transcodeToMp4, muxRelease, applyFixesToOriginalAudio } = require('./ffmpegService.cjs');
 const { splitSubsByDubber, extractSignsAss, exportFullAssWithRoles } = require('./subtitleService.cjs');
 
 /**
@@ -133,10 +133,21 @@ class ExportService {
     return { success: true, targetDir, yandexUrl: null };
   }
 
-  static async exportSoundEngineerFiles(episode, targetDir, skipConversion, smartExport, additionalProcessing, config, projectsData, participantsData, onProgress, onCommand) {
+  static async exportSoundEngineerFiles(episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress, onCommand) {
     if (!episode || !targetDir) throw new Error('Missing required parameters');
+
+    // Handle legacy signature where autoApplyFixes was omitted
+    if (typeof autoApplyFixes === 'object' && !projectsData) {
+      onCommand = onProgress;
+      onProgress = participantsData;
+      participantsData = projectsData;
+      projectsData = config;
+      config = autoApplyFixes;
+      autoApplyFixes = false;
+    }
+
     log.info(`Exporting sound engineer files for episode ${episode.number} to ${targetDir}`);
-    log.info(`Export options: skipConversion=${skipConversion}, smartExport=${smartExport}, additionalProcessing=${additionalProcessing}`);
+    log.info(`Export options: skipConversion=${skipConversion}, smartExport=${smartExport}, additionalProcessing=${additionalProcessing}, autoApplyFixes=${autoApplyFixes}`);
     await fs.mkdir(targetDir, { recursive: true });
 
     const project = (projectsData || []).find(p => p.id === episode.projectId);
@@ -252,7 +263,62 @@ class ExportService {
       const latestOriginal = original.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
       const latestFix = fixes.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
 
-      if (smartExport && latestOriginal && latestFix) {
+      if (autoApplyFixes && latestOriginal && latestFix) {
+        try {
+          const origStat = await fs.stat(latestOriginal.path);
+          const fixStat = await fs.stat(latestFix.path);
+
+          if (fixStat.size < origStat.size) {
+            // Snippet fix: auto-apply to original, zeroing out original audio at fix timings
+            const backupDir = path.join(targetDir, 'бэкап');
+            await fs.mkdir(backupDir, { recursive: true });
+
+            // Preserve originals in backup directory
+            await fs.copyFile(latestOriginal.path, path.join(backupDir, getExportName(latestOriginal, false)));
+            await fs.copyFile(latestFix.path, path.join(backupDir, getExportName(latestFix, true)));
+
+            const mainOutPath = path.join(targetDir, getExportName(latestOriginal, false));
+
+            // Determine if there are QA comments / timestamps for this dubber
+            let targetSec = undefined;
+            const dubberAssignments = (episode.assignments || []).filter(a => a.dubberId === dubberId || a.substituteId === dubberId);
+            for (const a of dubberAssignments) {
+              if (a.comments) {
+                try {
+                  const comments = JSON.parse(a.comments);
+                  if (Array.isArray(comments) && comments.length > 0 && comments[0].timestamp !== undefined) {
+                    targetSec = comments[0].timestamp;
+                  }
+                } catch (e) {}
+              }
+            }
+
+            log.info(`[autoApplyFixes] Dubber ${getNick(dubberId)}: applying fix snippet ${latestFix.path} into ${latestOriginal.path}`);
+            const result = await applyFixesToOriginalAudio(latestOriginal.path, latestFix.path, mainOutPath, { targetSec });
+
+            // Write report in backup directory
+            const reportPath = path.join(backupDir, 'ИНФО_О_ФИКСАХ.txt');
+            const intervalsText = result.intervals && result.intervals.length > 0
+              ? result.intervals.map(i => `  • ${i.startSec.toFixed(2)} сек — ${i.endSec.toFixed(2)} сек (длительность ${i.durationSec.toFixed(2)} сек)`).join('\n')
+              : '  • Сведение дорожки фикса с оригиналом\n';
+            const reportEntry = `[${new Date().toLocaleString()}] Даббер: ${getNick(dubberId)}\n` +
+              `Файл оригинала: ${path.basename(latestOriginal.path)} (${(origStat.size / (1024 * 1024)).toFixed(2)} МБ)\n` +
+              `Файл фикса: ${path.basename(latestFix.path)} (${(fixStat.size / (1024 * 1024)).toFixed(2)} МБ)\n` +
+              `Примененные фразы фиксов:\n${intervalsText}\n` +
+              `Резервные копии сохранены в этой папке («бэкап»), а готовая дорожка с вшитыми фиксами помещена в основную папку экспорта.\n` +
+              `------------------------------------------------------------\n\n`;
+            await fs.appendFile(reportPath, reportEntry).catch(() => {});
+          } else {
+            // Fix replaces entire track: dubber already did the work, export fix directly
+            log.info(`[autoApplyFixes] Dubber ${getNick(dubberId)}: fix size >= original, exporting full replacement track.`);
+            await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+          }
+        } catch (e) {
+          log.error(`Auto-apply fix error for dubber ${getNick(dubberId)}, falling back to standard copy:`, e);
+          await fs.copyFile(latestOriginal.path, path.join(targetDir, getExportName(latestOriginal, false)));
+          await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+        }
+      } else if (smartExport && latestOriginal && latestFix) {
         try {
           const origStat = await fs.stat(latestOriginal.path);
           const fixStat = await fs.stat(latestFix.path);

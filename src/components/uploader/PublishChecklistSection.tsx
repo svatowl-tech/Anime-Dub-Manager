@@ -1,5 +1,5 @@
 import React from 'react';
-import { CheckSquare, RefreshCw, Settings2, Square, ExternalLink } from 'lucide-react';
+import { CheckSquare, RefreshCw, Settings2, Square, ExternalLink, CheckCircle2 } from 'lucide-react';
 import { ChecklistItemDef } from './types';
 
 interface PublishChecklistSectionProps {
@@ -9,6 +9,7 @@ interface PublishChecklistSectionProps {
   handleSyncChecklistWithQuickLinks: () => void;
   onOpenChecklistModal: () => void;
   onSelectUrl: (url: string, label: string) => void;
+  handleMarkAllPublished?: () => void;
 }
 
 export const PublishChecklistSection: React.FC<PublishChecklistSectionProps> = ({
@@ -17,10 +18,12 @@ export const PublishChecklistSection: React.FC<PublishChecklistSectionProps> = (
   toggleChecklistItem,
   handleSyncChecklistWithQuickLinks,
   onOpenChecklistModal,
-  onSelectUrl
+  onSelectUrl,
+  handleMarkAllPublished
 }) => {
   const completedChecklistCount = checklistDefs.filter(item => checklist[item.id]).length;
   const progressPercent = checklistDefs.length > 0 ? (completedChecklistCount / checklistDefs.length) * 100 : 0;
+  const isAllDone = checklistDefs.length > 0 && completedChecklistCount === checklistDefs.length;
 
   return (
     <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-3.5 space-y-3">
@@ -59,6 +62,22 @@ export const PublishChecklistSection: React.FC<PublishChecklistSectionProps> = (
           style={{ width: `${progressPercent}%` }}
         />
       </div>
+
+      {/* Mark Everything Done Action */}
+      {handleMarkAllPublished && (
+        <button
+          onClick={handleMarkAllPublished}
+          className={`w-full py-2.5 px-3 rounded-xl text-xs font-semibold transition flex items-center justify-center gap-2 cursor-pointer shadow-md ${
+            isAllDone
+              ? 'bg-emerald-950/80 border border-emerald-500/40 text-emerald-300'
+              : 'bg-emerald-600 hover:bg-emerald-500 text-white hover:shadow-emerald-900/30'
+          }`}
+          title="Отметить все пункты выполненными и перевести серию в статус завершённой"
+        >
+          <CheckCircle2 className="w-4 h-4" />
+          <span>{isAllDone ? 'Всё выложено (Серия завершена) ✓' : '✅ Отметить: Всё выложено!'}</span>
+        </button>
+      )}
 
       {/* Items */}
       <div className="space-y-1.5 pt-1">

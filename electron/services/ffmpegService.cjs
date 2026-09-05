@@ -568,6 +568,298 @@ function extractAudioPeaks(videoPath, pointsPerSecond = 10, channelCount = 1) {
   });
 }
 
+/**
+ * Replaces specified time intervals in an audio file with silence using FFmpeg volume filter.
+ * Creates an automatic .orig_backup copy before overwriting.
+ * 
+ * @param {string} filePath Path to audio file
+ * @param {Array<{startSec: number, endSec: number}>} intervals Time ranges to silence
+ */
+function silenceAudioIntervals(filePath, intervals) {
+  return new Promise((resolve, reject) => {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return reject(new Error(`Audio file not found: ${filePath}`));
+    }
+    if (!intervals || !Array.isArray(intervals) || intervals.length === 0) {
+      return resolve({ success: true, message: 'No intervals provided' });
+    }
+
+    const ext = path.extname(filePath) || '.wav';
+    const tempOutput = path.join(path.dirname(filePath), `temp_silenced_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
+    const backupPath = `${filePath}.orig_backup`;
+
+    // Filter clauses for FFmpeg: volume=enable='between(t,start,end)':volume=0
+    const filterClauses = intervals.map(inter => {
+      const s = Math.max(0, Number(inter.startSec) || 0).toFixed(3);
+      const e = Math.max(0, Number(inter.endSec) || 0).toFixed(3);
+      return `volume=enable='between(t,${s},${e})':volume=0`;
+    }).join(',');
+
+    log.info(`[silenceAudioIntervals] Processing ${intervals.length} intervals for: ${filePath}`);
+
+    const command = ffmpeg(filePath)
+      .audioFilters(filterClauses)
+      .output(tempOutput)
+      .on('end', () => {
+        try {
+          if (!fs.existsSync(backupPath)) {
+            fs.copyFileSync(filePath, backupPath);
+          }
+          fs.copyFileSync(tempOutput, filePath);
+          try { fs.unlinkSync(tempOutput); } catch (e) {}
+          log.info(`[silenceAudioIntervals] Successfully silenced intervals in: ${filePath}`);
+          resolve({ success: true, backupPath });
+        } catch (copyErr) {
+          log.error('[silenceAudioIntervals] Failed to replace file with silenced version:', copyErr);
+          reject(copyErr);
+        }
+      })
+      .on('error', (err) => {
+        log.error('[silenceAudioIntervals] FFmpeg error:', err);
+        try {
+          if (fs.existsSync(tempOutput)) fs.unlinkSync(tempOutput);
+        } catch (e) {}
+        reject(err);
+      });
+
+    addProcess(command._getArguments ? command._getArguments().join(' ') : 'silenceAudioIntervals', command);
+    command.run();
+  });
+}
+
+/**
+ * Detects voiced/speech intervals in an audio file using FFmpeg silencedetect filter.
+ * 
+ * @param {string} filePath Path to audio file
+ * @param {object} options Optional parameters { noiseDb, minSilenceDuration }
+ * @returns {Promise<{duration: number, silences: Array<{start: number, end: number}>, speechIntervals: Array<{startSec: number, endSec: number, durationSec: number}>}>}
+ */
+function detectSpeechIntervals(filePath, options = {}) {
+  return new Promise(async (resolve, reject) => {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return reject(new Error(`Audio file not found: ${filePath}`));
+    }
+    const noiseDb = options.noiseDb !== undefined ? options.noiseDb : -38;
+    const minSilenceDuration = options.minSilenceDuration !== undefined ? options.minSilenceDuration : 0.25;
+
+    let totalDur = 0;
+    try {
+      const meta = await getVideoMetadata(filePath);
+      if (meta && meta.format && meta.format.duration) {
+        totalDur = Number(meta.format.duration);
+      }
+    } catch (metaErr) {
+      log.warn(`[detectSpeechIntervals] Could not probe duration for ${filePath}:`, metaErr.message);
+    }
+
+    const silences = [];
+    let currentSilenceStart = null;
+
+    const cmd = ffmpeg(filePath)
+      .audioFilters(`silencedetect=noise=${noiseDb}dB:d=${minSilenceDuration}`)
+      .format('null')
+      .output('-')
+      .on('stderr', (stderrChunk) => {
+        const lines = stderrChunk.split('\n');
+        for (const line of lines) {
+          const startMatch = line.match(/silence_start:\s*([0-9.]+)/);
+          if (startMatch) {
+            currentSilenceStart = parseFloat(startMatch[1]);
+          }
+          const endMatch = line.match(/silence_end:\s*([0-9.]+)/);
+          if (endMatch) {
+            const silenceEnd = parseFloat(endMatch[1]);
+            if (currentSilenceStart !== null) {
+              silences.push({ start: currentSilenceStart, end: silenceEnd });
+              currentSilenceStart = null;
+            } else {
+              silences.push({ start: 0, end: silenceEnd });
+            }
+          }
+        }
+      })
+      .on('end', () => {
+        const finalDur = totalDur || (silences.length > 0 ? silences[silences.length - 1].end : 0);
+        if (currentSilenceStart !== null && finalDur) {
+          silences.push({ start: currentSilenceStart, end: finalDur });
+        }
+
+        const rawSpeech = [];
+        if (silences.length === 0) {
+          if (finalDur > 0) {
+            rawSpeech.push({
+              startSec: 0,
+              endSec: finalDur,
+              durationSec: finalDur
+            });
+          }
+        } else {
+          let curPos = 0;
+          for (const s of silences) {
+            if (s.start - curPos > 0.08) {
+              const start = Math.max(0, curPos - 0.04);
+              const end = s.start + 0.04;
+              rawSpeech.push({
+                startSec: start,
+                endSec: end,
+                durationSec: end - start
+              });
+            }
+            curPos = s.end;
+          }
+          if (finalDur && (finalDur - curPos > 0.08)) {
+            const start = Math.max(0, curPos - 0.04);
+            const end = finalDur;
+            rawSpeech.push({
+              startSec: start,
+              endSec: end,
+              durationSec: end - start
+            });
+          }
+        }
+
+        // Merge contiguous intervals separated by small gap (< 0.25s)
+        const speechIntervals = [];
+        for (const interval of rawSpeech) {
+          if (speechIntervals.length === 0) {
+            speechIntervals.push({ ...interval });
+          } else {
+            const last = speechIntervals[speechIntervals.length - 1];
+            if (interval.startSec - last.endSec < 0.25) {
+              last.endSec = Math.max(last.endSec, interval.endSec);
+              last.durationSec = last.endSec - last.startSec;
+            } else {
+              speechIntervals.push({ ...interval });
+            }
+          }
+        }
+
+        log.info(`[detectSpeechIntervals] Found ${speechIntervals.length} voiced intervals in ${filePath}`);
+        resolve({
+          duration: finalDur,
+          silences,
+          speechIntervals
+        });
+      })
+      .on('error', (err) => {
+        log.error('[detectSpeechIntervals] Error detecting speech intervals:', err);
+        reject(err);
+      });
+
+    addProcess('detectSpeechIntervals', cmd);
+    cmd.run();
+  });
+}
+
+/**
+ * Automatically applies fixes from a snippet fix track into an original track:
+ * 1. Detects timings & boundaries of the phrase(s) in the fix file.
+ * 2. Mutes (zeros out volume) in the original track at those intervals.
+ * 3. Merges/overlays the fix track onto the original track.
+ * 
+ * @param {string} originalPath Path to original audio file
+ * @param {string} fixPath Path to fix audio file (snippet)
+ * @param {string} outputPath Target output path
+ * @param {object} options Optional target timings or noise thresholds
+ */
+async function applyFixesToOriginalAudio(originalPath, fixPath, outputPath, options = {}) {
+  if (!originalPath || !fs.existsSync(originalPath)) {
+    throw new Error(`Original audio not found: ${originalPath}`);
+  }
+  if (!fixPath || !fs.existsSync(fixPath)) {
+    throw new Error(`Fix audio not found: ${fixPath}`);
+  }
+
+  // 1. Detect speech intervals in fixPath
+  const { duration: fixDuration, speechIntervals } = await detectSpeechIntervals(fixPath, options);
+
+  if (!speechIntervals || speechIntervals.length === 0) {
+    log.warn(`[applyFixesToOriginalAudio] No speech detected in fix file ${fixPath}. Copying original.`);
+    await fs.promises.copyFile(originalPath, outputPath);
+    return { success: true, applied: false, reason: 'no_speech_detected', intervals: [] };
+  }
+
+  let targetIntervals = speechIntervals;
+  let delayMs = 0;
+
+  // If targetSec was passed and the fix was recorded from 0s as a short standalone take (< 45s)
+  if (options.targetSec !== undefined && options.targetSec > 0 && fixDuration < 45 && speechIntervals[0].startSec < 5) {
+    delayMs = Math.round(options.targetSec * 1000);
+    targetIntervals = speechIntervals.map(interval => ({
+      startSec: options.targetSec + interval.startSec,
+      endSec: options.targetSec + interval.endSec,
+      durationSec: interval.durationSec
+    }));
+  }
+
+  // Zero out the original track during all target intervals
+  const volumeClauses = targetIntervals.map(inter => {
+    const s = Math.max(0, inter.startSec).toFixed(3);
+    const e = Math.max(0, inter.endSec).toFixed(3);
+    return `between(t,${s},${e})`;
+  }).join('+');
+
+  const origMuteFilter = `volume=enable='${volumeClauses}':volume=0`;
+
+  // Determine output extension and audio codec
+  const ext = (path.extname(outputPath) || path.extname(originalPath) || '.wav').toLowerCase();
+  let audioCodec = 'pcm_s16le';
+  if (ext === '.mp3') audioCodec = 'libmp3lame';
+  else if (ext === '.flac') audioCodec = 'flac';
+  else if (ext === '.ogg') audioCodec = 'libvorbis';
+  else if (ext === '.m4a' || ext === '.aac') audioCodec = 'aac';
+
+  // Build filter chain with resample and amix
+  let fixInputFilter = `aresample=48000,aformat=channel_layouts=stereo`;
+  if (delayMs > 0) {
+    fixInputFilter = `adelay=${delayMs}|${delayMs},${fixInputFilter}`;
+  }
+
+  const filterComplex = [
+    `[0:a]aresample=48000,aformat=channel_layouts=stereo,${origMuteFilter}[orig_muted]`,
+    `[1:a]${fixInputFilter}[fix_ready]`,
+    `[orig_muted][fix_ready]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1'[out]`
+  ].join(';');
+
+  const tempOut = path.join(path.dirname(outputPath), `temp_auto_fix_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
+
+  return new Promise((resolve, reject) => {
+    const cmd = ffmpeg()
+      .input(originalPath)
+      .input(fixPath)
+      .complexFilter(filterComplex)
+      .map('[out]')
+      .audioCodec(audioCodec)
+      .output(tempOut)
+      .on('end', async () => {
+        try {
+          if (fs.existsSync(outputPath)) {
+            await fs.promises.unlink(outputPath);
+          }
+          await fs.promises.rename(tempOut, outputPath);
+          log.info(`[applyFixesToOriginalAudio] Successfully merged fix into original: ${outputPath}`);
+          resolve({
+            success: true,
+            applied: true,
+            intervals: targetIntervals,
+            outputPath
+          });
+        } catch (renameErr) {
+          log.error(`[applyFixesToOriginalAudio] Failed renaming output:`, renameErr);
+          reject(renameErr);
+        }
+      })
+      .on('error', (err) => {
+        log.error(`[applyFixesToOriginalAudio] FFmpeg error:`, err);
+        try { if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut); } catch (e) {}
+        reject(err);
+      });
+
+    addProcess('applyFixesToOriginalAudio', cmd);
+    cmd.run();
+  });
+}
+
 module.exports = {
   bakeSubtitles,
   transcodeToMp4,
@@ -576,6 +868,9 @@ module.exports = {
   getVideoMetadata,
   extractSubtitleTrack,
   extractAudioPeaks,
+  silenceAudioIntervals,
+  detectSpeechIntervals,
+  applyFixesToOriginalAudio,
   setCustomFfmpegPath,
   getActiveProcesses,
   killAllProcesses,

@@ -360,7 +360,7 @@ function AppContent() {
       </aside>
 
       {/* Main Content */}
-      <main className={`flex-1 bg-neutral-950 flex flex-col ${['subtitles', 'qa', 'telegram'].includes(activeTab) ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <main className={`flex-1 bg-neutral-950 flex flex-col ${['subtitles', 'qa', 'telegram', 'uploader'].includes(activeTab) ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {activeTab === 'dashboard' && (
           <Dashboard 
             onNavigate={handleNavigate} 

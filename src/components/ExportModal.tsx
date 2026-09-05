@@ -10,7 +10,7 @@ interface ExportModalProps {
   onClose: () => void;
   episode: Episode;
   role: 'DABBER' | 'SOUND_ENGINEER';
-  onExport: (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean) => void;
+  onExport: (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean) => void;
   isExporting?: boolean;
   progress?: number;
 }
@@ -28,6 +28,38 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [skipConversion, setSkipConversion] = useState(false);
   const [smartExport, setSmartExport] = useState(true);
   const [additionalProcessing, setAdditionalProcessing] = useState(false);
+  const [autoApplyFixes, setAutoApplyFixes] = useState(false);
+  const [snippetFixInfo, setSnippetFixInfo] = useState<{ hasSnippetFixes: boolean; count: number; loading: boolean }>({
+    hasSnippetFixes: false,
+    count: 0,
+    loading: false
+  });
+
+  useEffect(() => {
+    if (isOpen && episode && role === 'SOUND_ENGINEER' && !isWeb) {
+      setSnippetFixInfo(prev => ({ ...prev, loading: true }));
+      ipcSafe.invoke('check-snippet-fixes', { episode })
+        .then((res: any) => {
+          if (res) {
+            const hasSnippets = Boolean(res.hasSnippetFixes);
+            setSnippetFixInfo({
+              hasSnippetFixes: hasSnippets,
+              count: res.count || 0,
+              loading: false
+            });
+            setAutoApplyFixes(hasSnippets);
+          }
+        })
+        .catch(err => {
+          console.warn('Failed to check snippet fixes:', err);
+          setSnippetFixInfo({ hasSnippetFixes: false, count: 0, loading: false });
+          setAutoApplyFixes(false);
+        });
+    } else if (!isOpen) {
+      setAutoApplyFixes(false);
+      setSnippetFixInfo({ hasSnippetFixes: false, count: 0, loading: false });
+    }
+  }, [isOpen, episode, role]);
 
   useEffect(() => {
     if (isOpen && episode) {
@@ -139,35 +171,80 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         </div>
 
         {role === 'SOUND_ENGINEER' && (
-          <div className="mb-6">
-            <label className="flex items-center gap-3 cursor-pointer group">
-              <div className="relative flex items-center">
-                <input
-                  type="checkbox"
-                  checked={smartExport}
-                  onChange={(e) => setSmartExport(e.target.checked)}
-                  disabled={isExporting}
-                  className="peer sr-only"
-                />
-                <div className="w-5 h-5 border-2 border-neutral-700 rounded bg-neutral-950 peer-checked:bg-purple-600 peer-checked:border-purple-600 transition-all duration-200 group-hover:border-neutral-500" />
-                <svg
-                  className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                  strokeWidth="3"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                </svg>
-              </div>
-              <span className="text-sm text-neutral-300 group-hover:text-white transition-colors">
-                Умная сортировка дорожек (Фиксы)
-              </span>
-            </label>
-            <p className="text-[10px] text-neutral-500 mt-1 ml-8">
-              Если фикс меньше оригинала — экспортируются оба. Если фикс больше или равен — только фикс.
-            </p>
-          </div>
+          <>
+            <div className="mb-6">
+              <label className="flex items-center gap-3 cursor-pointer group">
+                <div className="relative flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={smartExport}
+                    onChange={(e) => setSmartExport(e.target.checked)}
+                    disabled={isExporting}
+                    className="peer sr-only"
+                  />
+                  <div className="w-5 h-5 border-2 border-neutral-700 rounded bg-neutral-950 peer-checked:bg-purple-600 peer-checked:border-purple-600 transition-all duration-200 group-hover:border-neutral-500" />
+                  <svg
+                    className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth="3"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <span className="text-sm text-neutral-300 group-hover:text-white transition-colors">
+                  Умная сортировка дорожек (Фиксы)
+                </span>
+              </label>
+              <p className="text-[10px] text-neutral-500 mt-1 ml-8">
+                Если фикс меньше оригинала — экспортируются оба. Если фикс больше или равен — только фикс.
+              </p>
+            </div>
+
+            <div className="mb-6">
+              <label className={`flex items-center gap-3 ${snippetFixInfo.hasSnippetFixes && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
+                <div className="relative flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={autoApplyFixes}
+                    onChange={(e) => setAutoApplyFixes(e.target.checked)}
+                    disabled={isExporting || !snippetFixInfo.hasSnippetFixes}
+                    className="peer sr-only"
+                  />
+                  <div className={`w-5 h-5 border-2 rounded bg-neutral-950 transition-all duration-200 ${snippetFixInfo.hasSnippetFixes ? 'border-neutral-700 peer-checked:bg-emerald-600 peer-checked:border-emerald-600 group-hover:border-neutral-500' : 'border-neutral-800'}`} />
+                  <svg
+                    className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth="3"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-sm transition-colors ${snippetFixInfo.hasSnippetFixes ? 'text-neutral-300 group-hover:text-white' : 'text-neutral-500'}`}>
+                    Автоматически применить фиксы
+                  </span>
+                  {snippetFixInfo.hasSnippetFixes ? (
+                    <span className="text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded">
+                      Доступно ({snippetFixInfo.count})
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-medium bg-neutral-800 text-neutral-500 px-1.5 py-0.5 rounded">
+                      Недоступно
+                    </span>
+                  )}
+                </div>
+              </label>
+              <p className="text-[10px] text-neutral-500 mt-1 ml-8">
+                {snippetFixInfo.hasSnippetFixes
+                  ? 'Определяет границы фраз в фиксах, обнуляет громкость оригинала на этих интервалах и сводит с фиксом. Оригинальные дорожки и фиксы сохраняются в папку «бэкап».'
+                  : 'Опция активна, только если размер файла фикса меньше оригинала (фрагментарный фикс). Если фикс заменяет всю дорожку целиком или фиксы отсутствуют, опция не требуется.'}
+              </p>
+            </div>
+          </>
         )}
         
         <div className="mb-6">
@@ -228,7 +305,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </button>
           {!isWeb && (
           <button 
-            onClick={() => onExport(targetDir, skipConversion, smartExport, false, additionalProcessing)} 
+            onClick={() => onExport(targetDir, skipConversion, smartExport, false, additionalProcessing, autoApplyFixes)} 
             title="Начать экспорт"
             disabled={!targetDir || isExporting}
             className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20"

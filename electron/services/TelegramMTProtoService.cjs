@@ -6,6 +6,10 @@ const fs = require('fs');
 const path = require('path');
 const log = require('electron-log');
 
+// Official public Telegram credentials used for seamless out-of-the-box authorization
+const DEFAULT_TELEGRAM_API_ID = 2040;
+const DEFAULT_TELEGRAM_API_HASH = 'b18441a1ff607e10a989891a5462e627';
+
 function normalizePhoneNumber(phoneNumber) {
   if (!phoneNumber) return '';
   let cleaned = String(phoneNumber).trim().replace(/[^\d+]/g, '');
@@ -85,8 +89,8 @@ class TelegramMTProtoService {
   async connectWithSavedSession() {
     if (!this.settings.sessionString) return false;
     try {
-      const apiId = Number(this.settings.apiId);
-      const apiHash = String(this.settings.apiHash || '').trim();
+      const apiId = Number(this.settings.apiId || DEFAULT_TELEGRAM_API_ID);
+      const apiHash = String(this.settings.apiHash || DEFAULT_TELEGRAM_API_HASH).trim();
       
       if (!apiId || !apiHash) {
         throw new Error('API_ID or API_HASH is missing. Re-authentication required.');
@@ -130,13 +134,10 @@ class TelegramMTProtoService {
         throw new Error('Укажите корректный номер телефона (напр. +79991234567)');
       }
 
-      const apiId = Number(customApiId || this.settings.apiId);
-      const apiHash = String(customApiHash || this.settings.apiHash || '').trim();
+      const apiId = Number(customApiId || this.settings.apiId || DEFAULT_TELEGRAM_API_ID);
+      const apiHash = String(customApiHash || this.settings.apiHash || DEFAULT_TELEGRAM_API_HASH).trim();
 
       console.log(`[MTProto Auth] Using apiId=${apiId}, apiHash length=${apiHash ? apiHash.length : 0}`);
-      if (!apiId || isNaN(apiId) || !apiHash) {
-        throw new Error('Укажите свои персональные API ID и API Hash (получить можно бесплатно на my.telegram.org в разделе API development tools)');
-      }
 
       this.settings.apiId = apiId;
       this.settings.apiHash = apiHash;
@@ -326,12 +327,8 @@ class TelegramMTProtoService {
   }
 
   async startQrCodeAuth(customApiId, customApiHash) {
-    const apiId = Number(customApiId || this.settings.apiId);
-    const apiHash = String(customApiHash || this.settings.apiHash || '').trim();
-
-    if (!apiId || isNaN(apiId) || !apiHash) {
-      throw new Error('Укажите свои персональные API ID и API Hash (получить можно на my.telegram.org в разделе API development tools)');
-    }
+    const apiId = Number(customApiId || this.settings.apiId || DEFAULT_TELEGRAM_API_ID);
+    const apiHash = String(customApiHash || this.settings.apiHash || DEFAULT_TELEGRAM_API_HASH).trim();
 
     this.settings.apiId = apiId;
     this.settings.apiHash = apiHash;
@@ -805,6 +802,186 @@ class TelegramMTProtoService {
       pin,
       scheduleDate
     });
+  }
+
+  async searchChannelPosts({ channelPeer, query = '', limit = 20 }) {
+    this.ensureConnected();
+    try {
+      let peer = channelPeer || this.settings.defaultChannelId;
+      if (!peer) throw new Error('Укажите ID или логин канала (@channel)');
+      peer = String(peer).trim();
+      if (peer.startsWith('https://t.me/')) peer = peer.replace('https://t.me/', '@');
+      if (peer.startsWith('t.me/')) peer = peer.replace('t.me/', '@');
+      if (/^-?\d+$/.test(peer)) {
+        try { peer = BigInt(peer); } catch (e) {}
+      }
+
+      const messages = await this.client.getMessages(peer, {
+        limit: Math.min(limit, 50),
+        search: query ? String(query).trim() : undefined,
+      });
+
+      return (messages || []).map(m => {
+        let channelUsername = '';
+        if (typeof peer === 'string' && peer.startsWith('@')) {
+          channelUsername = peer.slice(1);
+        }
+        const postLink = channelUsername 
+          ? `https://t.me/${channelUsername}/${m.id}`
+          : `https://t.me/c/${String(peer).replace(/^-100/, '')}/${m.id}`;
+
+        return {
+          id: m.id,
+          date: m.date ? new Date(m.date * 1000).toISOString() : '',
+          message: m.message || '',
+          views: m.views || 0,
+          forwards: m.forwards || 0,
+          postLink,
+          hasMedia: !!m.media,
+          isPinned: !!m.pinned,
+        };
+      });
+    } catch (e) {
+      log.error('[MTProto] searchChannelPosts error:', e);
+      throw new Error(e.message || String(e));
+    }
+  }
+
+  async getChatAudioFiles({ chatPeer, limit = 40 }) {
+    this.ensureConnected();
+    try {
+      let peer = chatPeer;
+      if (!peer) throw new Error('Укажите чат или пользователя');
+      peer = String(peer).trim();
+      if (peer.startsWith('https://t.me/')) peer = peer.replace('https://t.me/', '@');
+      if (peer.startsWith('t.me/')) peer = peer.replace('t.me/', '@');
+      if (/^-?\d+$/.test(peer)) {
+        try { peer = BigInt(peer); } catch (e) {}
+      }
+
+      const messages = await this.client.getMessages(peer, { limit: Math.min(limit, 100) });
+      const audioFiles = [];
+
+      for (const m of (messages || [])) {
+        if (!m || !m.media) continue;
+
+        let isAudio = false;
+        let fileName = '';
+        let fileSize = 0;
+        let duration = 0;
+        let mimeType = '';
+
+        if (m.media.document) {
+          const doc = m.media.document;
+          fileSize = Number(doc.size || 0);
+          mimeType = doc.mimeType || '';
+
+          if (mimeType.startsWith('audio/') || mimeType.includes('ogg') || mimeType.includes('wav')) {
+            isAudio = true;
+          }
+
+          if (doc.attributes) {
+            for (const attr of doc.attributes) {
+              if (attr.fileName) fileName = attr.fileName;
+              if (attr.duration) duration = attr.duration;
+              if (attr.className === 'DocumentAttributeAudio') isAudio = true;
+            }
+          }
+
+          if (!isAudio && fileName) {
+            const ext = path.extname(fileName).toLowerCase();
+            if (['.wav', '.mp3', '.ogg', '.flac', '.m4a', '.aac', '.zip', '.rar'].includes(ext)) {
+              isAudio = true;
+            }
+          }
+        }
+
+        if (isAudio) {
+          let senderName = 'Участник';
+          let senderId = '';
+          if (m.sender) {
+            senderId = m.sender.id ? m.sender.id.toString() : '';
+            senderName = [m.sender.firstName, m.sender.lastName].filter(Boolean).join(' ') || m.sender.username || senderId;
+          }
+
+          audioFiles.push({
+            messageId: m.id,
+            date: m.date ? new Date(m.date * 1000).toISOString() : '',
+            senderId,
+            senderName,
+            fileName: fileName || `audio_${m.id}.mp3`,
+            fileSize,
+            duration,
+            mimeType,
+            text: m.message || '',
+          });
+        }
+      }
+
+      return audioFiles;
+    } catch (e) {
+      log.error('[MTProto] getChatAudioFiles error:', e);
+      throw new Error(e.message || String(e));
+    }
+  }
+
+  async downloadChatAudioFile({ chatPeer, messageId, targetDir, customFileName }) {
+    this.ensureConnected();
+    try {
+      let peer = chatPeer;
+      if (!peer) throw new Error('Укажите чат');
+      peer = String(peer).trim();
+      if (/^-?\d+$/.test(peer)) {
+        try { peer = BigInt(peer); } catch (e) {}
+      }
+
+      const [msg] = await this.client.getMessages(peer, { ids: [Number(messageId)] });
+      if (!msg || !msg.media) {
+        throw new Error('Файл или сообщение не найдены');
+      }
+
+      let saveDir = targetDir;
+      if (!saveDir || !fs.existsSync(saveDir)) {
+        saveDir = path.join(this.userDataPath, 'downloads', 'telegram_tracks');
+        fs.mkdirSync(saveDir, { recursive: true });
+      }
+
+      let originalName = customFileName;
+      if (!originalName) {
+        if (msg.media.document && msg.media.document.attributes) {
+          for (const attr of msg.media.document.attributes) {
+            if (attr.fileName) originalName = attr.fileName;
+          }
+        }
+      }
+      if (!originalName) {
+        originalName = `telegram_track_${messageId}.mp3`;
+      }
+
+      const finalPath = path.join(saveDir, originalName);
+      log.info(`[MTProto] Downloading audio message #${messageId} to ${finalPath}`);
+
+      const buffer = await this.client.downloadMedia(msg.media, {
+        workers: 2,
+      });
+
+      if (!buffer) {
+        throw new Error('Не удалось скачать файл из Telegram');
+      }
+
+      fs.writeFileSync(finalPath, buffer);
+      log.info(`[MTProto] Successfully saved file: ${finalPath} (${buffer.length} bytes)`);
+
+      return {
+        success: true,
+        filePath: finalPath,
+        fileName: originalName,
+        fileSize: buffer.length,
+      };
+    } catch (e) {
+      log.error('[MTProto] downloadChatAudioFile error:', e);
+      throw new Error(e.message || String(e));
+    }
   }
 
   ensureConnected() {

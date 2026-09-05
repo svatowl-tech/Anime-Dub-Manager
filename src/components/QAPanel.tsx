@@ -7,14 +7,14 @@ import { sanitizeFolderName } from '../lib/pathUtils';
 import { TrackWaveform } from './qa/TrackWaveform';
 import { TrackSidebar } from './qa/TrackSidebar';
 import { MissingLinesModal } from './qa/MissingLinesModal';
-import { generateFixesIssuedMessage, generateStatusMessage } from '../lib/templates';
+import { generateFixesIssuedMessage, generateStatusMessage, generateSoundEngineerQAReport } from '../lib/templates';
 import { getParticipants } from '../services/dbService';
 import { ExportModal } from './ExportModal';
 import { ConfirmModal } from './ui/ConfirmModal';
 import { useVideoContext } from '../contexts/VideoContext';
 import { SIGN_KEYWORDS } from '../constants';
 import { analyzeAudioForPreview, NormalizationMetrics, getCachedNormalization } from '../lib/qa/audioNormalizer';
-import { detectEpisodeGaps, MissingLineDetection } from '../lib/qa/missingLinesDetector';
+import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval } from '../lib/qa/missingLinesDetector';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
@@ -939,13 +939,15 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
 
     setIsAnalyzingGaps(true);
     try {
-      toast.info(`Анализ пропусков (порог динамики ${thresholdToUse} дБ)...`);
+      toast.info(`Сканирование косяков озвучки (порог динамики ${thresholdToUse} дБ)...`);
       const gaps = await detectEpisodeGaps(
         currentEpisode,
         tracks,
         subLines,
         {
-          speechDynamicThresholdDb: thresholdToUse
+          speechDynamicThresholdDb: thresholdToUse,
+          scanUnwantedSpeech: true,
+          scanCollisions: true
         },
         (current, total, msg) => {
           // Progress feedback
@@ -955,14 +957,18 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       setDetectedGaps(gaps);
       setIsGapModalOpen(true);
 
+      const missing = gaps.filter(g => (g.defectCategory || 'missing_line') === 'missing_line').length;
+      const unwanted = gaps.filter(g => g.defectCategory === 'unwanted_speech').length;
+      const collisions = gaps.filter(g => g.defectCategory === 'actor_collision').length;
+
       if (gaps.length === 0) {
-        toast.success('✨ Пропусков не обнаружено! Все реплики озвучены.');
+        toast.success('✨ Замечаний не обнаружено! Все реплики озвучены корректно.');
       } else {
-        toast.warning(`Обнаружено ${gaps.length} подозрительных пропусков реплик!`);
+        toast.warning(`Найдено замечаний: ${gaps.length} (пропусков: ${missing}, вне сабов: ${unwanted}, конфликтов: ${collisions})`);
       }
     } catch (e: any) {
       console.error('Gap detection failed:', e);
-      toast.error(`Ошибка анализа пропусков: ${e?.message || e}`);
+      toast.error(`Ошибка анализа косяков: ${e?.message || e}`);
     } finally {
       setIsAnalyzingGaps(false);
     }
@@ -975,28 +981,213 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     try {
       const commentsByTrackId: Record<string, Comment[]> = {};
       const commentsByAssignmentId: Record<string, Comment[]> = {};
+      const intervalsToSilenceByFilePath: Record<string, { startSec: number; endSec: number }[]> = {};
+      const subUpdates: { rawLineIndex: number; name: string }[] = [];
+
+      const getFilePathForTrack = (trackId: string): string | null => {
+        const trk = tracks.find(t => t.id === trackId);
+        const fl = trk?.files.find(f => f.id === trk.selectedFileId) || trk?.files[0];
+        return fl?.path || null;
+      };
 
       selectedGaps.forEach(gap => {
-        const comment: Comment = {
-          id: Math.random().toString(36).substr(2, 9),
-          text: gap.comment || `Пропуск реплики [${gap.startFormatted}]: "${gap.text}"`,
-          timestamp: gap.startSec,
-          author: 'Куратор (Авто)',
-          subId: gap.subId
-        };
+        const category = gap.defectCategory || 'missing_line';
 
-        if (!commentsByTrackId[gap.trackId]) {
-          commentsByTrackId[gap.trackId] = [];
-        }
-        commentsByTrackId[gap.trackId].push(comment);
+        // 1. Missing line handling
+        if (category === 'missing_line') {
+          // Check if this missing line is a subtitle misattribution error reassigned to another character
+          if (gap.resolutionAction === 'reassign_character' || gap.isSubtitleError || gap.reassignedCharacterName) {
+            const targetCharName = (gap.reassignedCharacterName || gap.selectedCharacterForSub || '').trim();
+            if (targetCharName && typeof gap.lineIndex === 'number') {
+              subUpdates.push({ rawLineIndex: gap.lineIndex, name: targetCharName });
+            }
 
-        if (gap.assignmentId) {
-          if (!commentsByAssignmentId[gap.assignmentId]) {
-            commentsByAssignmentId[gap.assignmentId] = [];
+            // Find target assignment for the new character
+            const targetAssignment = currentEpisode.assignments?.find(
+              a => a.characterName.toLowerCase().trim() === targetCharName.toLowerCase()
+            );
+
+            // Find target track (by character name or by dubber/substitute ID)
+            const targetTrack = tracks.find(
+              t => t.character?.toLowerCase().trim() === targetCharName.toLowerCase() ||
+                   (targetAssignment && (t.id === targetAssignment.substituteId || t.id === targetAssignment.dubberId))
+            );
+
+            const targetTrackId = targetTrack?.id || (targetAssignment ? (targetAssignment.substituteId || targetAssignment.dubberId) : null);
+
+            const commentText = gap.comment || (
+              `[Ошибка в субтитрах] Реплика [${gap.startFormatted}]: "${gap.text}". ` +
+              `В исходных субтитрах эта фраза ошибочно числилась за персонажем ${gap.characterName}, ` +
+              `поэтому отсутствовала в вашем исходном скрипте. Пожалуйста, доозвучьте!`
+            );
+
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: commentText,
+              timestamp: gap.startSec,
+              author: 'Куратор (Сабы/Авто)',
+              subId: gap.subId
+            };
+
+            // Route the fix task to the correct dubber
+            if (targetTrackId) {
+              if (!commentsByTrackId[targetTrackId]) commentsByTrackId[targetTrackId] = [];
+              commentsByTrackId[targetTrackId].push(comment);
+            }
+
+            if (targetAssignment) {
+              if (!commentsByAssignmentId[targetAssignment.id]) commentsByAssignmentId[targetAssignment.id] = [];
+              commentsByAssignmentId[targetAssignment.id].push(comment);
+            } else if (targetCharName) {
+              const syntheticAssId = `new_ass_${targetCharName.toLowerCase()}`;
+              if (!commentsByAssignmentId[syntheticAssId]) commentsByAssignmentId[syntheticAssId] = [];
+              commentsByAssignmentId[syntheticAssId].push(comment);
+            }
+
+            // Notice: The previous dubber (gap.trackId / gap.assignmentId) gets NO fix or penalty,
+            // because they rightly didn't voice someone else's line!
+            return;
           }
-          commentsByAssignmentId[gap.assignmentId].push(comment);
+
+          const comment: Comment = {
+            id: Math.random().toString(36).substr(2, 9),
+            text: gap.comment || `Пропуск реплики [${gap.startFormatted}]: "${gap.text}"`,
+            timestamp: gap.startSec,
+            author: 'Куратор (Авто)',
+            subId: gap.subId
+          };
+
+          if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+          commentsByTrackId[gap.trackId].push(comment);
+
+          if (gap.assignmentId) {
+            if (!commentsByAssignmentId[gap.assignmentId]) commentsByAssignmentId[gap.assignmentId] = [];
+            commentsByAssignmentId[gap.assignmentId].push(comment);
+          }
+        }
+
+        // 2. Unwanted speech outside subtitles
+        else if (category === 'unwanted_speech') {
+          if (gap.resolutionAction === 'silence') {
+            if (gap.audioBuffer) {
+              silenceAudioBufferInterval(gap.audioBuffer, gap.startSec, gap.endSec);
+            }
+            const filePath = getFilePathForTrack(gap.trackId);
+            if (filePath) {
+              if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
+              intervalsToSilenceByFilePath[filePath].push({ startSec: gap.startSec, endSec: gap.endSec });
+            }
+
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: gap.comment || `Лишняя речь вне сабов [${gap.startFormatted} - ${gap.endFormatted}]: заменена тишиной`,
+              timestamp: gap.startSec,
+              author: 'Куратор (Авто)',
+              subId: gap.subId
+            };
+
+            if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+            commentsByTrackId[gap.trackId].push(comment);
+          }
+        }
+
+        // 3. Dubber collisions
+        else if (category === 'actor_collision') {
+          if (gap.resolutionAction === 'fix_subs') {
+            const targetName = gap.selectedCharacterForSub || gap.characterName;
+            if (targetName && typeof gap.lineIndex === 'number') {
+              subUpdates.push({ rawLineIndex: gap.lineIndex, name: targetName });
+            }
+          } else if (gap.resolutionAction === 'keep_first') {
+            if (gap.secondTrackId) {
+              if (gap.secondAudioBuffer) {
+                silenceAudioBufferInterval(gap.secondAudioBuffer, gap.startSec, gap.endSec);
+              }
+              const filePath = getFilePathForTrack(gap.secondTrackId);
+              if (filePath) {
+                if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
+                intervalsToSilenceByFilePath[filePath].push({ startSec: gap.startSec, endSec: gap.endSec });
+              }
+              const comment: Comment = {
+                id: Math.random().toString(36).substr(2, 9),
+                text: `Дублирование реплики #${(gap.lineIndex ?? 0) + 1} заменено тишиной (реплика отдана ${gap.dubberName})`,
+                timestamp: gap.startSec,
+                author: 'Куратор (Авто)',
+                subId: gap.subId
+              };
+              if (!commentsByTrackId[gap.secondTrackId]) commentsByTrackId[gap.secondTrackId] = [];
+              commentsByTrackId[gap.secondTrackId].push(comment);
+            }
+          } else if (gap.resolutionAction === 'keep_second') {
+            if (gap.trackId) {
+              if (gap.audioBuffer) {
+                silenceAudioBufferInterval(gap.audioBuffer, gap.startSec, gap.endSec);
+              }
+              const filePath = getFilePathForTrack(gap.trackId);
+              if (filePath) {
+                if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
+                intervalsToSilenceByFilePath[filePath].push({ startSec: gap.startSec, endSec: gap.endSec });
+              }
+              const comment: Comment = {
+                id: Math.random().toString(36).substr(2, 9),
+                text: `Дублирование реплики #${(gap.lineIndex ?? 0) + 1} заменено тишиной (реплика отдана ${gap.secondDubberName || 'второму даберу'})`,
+                timestamp: gap.startSec,
+                author: 'Куратор (Авто)',
+                subId: gap.subId
+              };
+              if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+              commentsByTrackId[gap.trackId].push(comment);
+            }
+          }
+        }
+
+        // 5. Technical Audio Artifacts (перегруз, клики, задувы, обрывы)
+        else if (category === 'audio_artifact') {
+          if (gap.resolutionAction === 'request_dubber_fix') {
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: gap.comment || `[Перезапись] Технический дефект (${gap.typeLabel || 'артефакт записи'}) [${gap.startFormatted}]: "${gap.text}"`,
+              timestamp: gap.artifactTimestampSec ?? gap.startSec,
+              author: 'Куратор (Артефакты)',
+              subId: gap.subId
+            };
+
+            if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+            commentsByTrackId[gap.trackId].push(comment);
+
+            if (gap.assignmentId) {
+              if (!commentsByAssignmentId[gap.assignmentId]) commentsByAssignmentId[gap.assignmentId] = [];
+              commentsByAssignmentId[gap.assignmentId].push(comment);
+            }
+          }
+          // Note: 'note_sound_engineer' is included in sound engineer QA report, 'ignore' is dismissed.
         }
       });
+
+      // Execute audio silencing on physical files in Electron
+      for (const [filePath, intervals] of Object.entries(intervalsToSilenceByFilePath)) {
+        try {
+          await ipcSafe.invoke('silence-audio-intervals', { filePath, intervals });
+        } catch (silenceErr) {
+          console.warn(`Could not silence audio intervals in ${filePath}:`, silenceErr);
+        }
+      }
+
+      // Execute subtitle updates if .ass file was corrected
+      if (subUpdates.length > 0 && currentEpisode.subPath) {
+        try {
+          await ipcSafe.invoke('save-raw-subtitles', {
+            filePath: currentEpisode.subPath,
+            lines: subUpdates
+          });
+          setSubLines(prev => prev.map(l => {
+            const up = subUpdates.find(u => u.rawLineIndex === l.rawLineIndex);
+            return up ? { ...l, name: up.name } : l;
+          }));
+        } catch (subErr) {
+          console.error('Failed to save corrected subtitles:', subErr);
+        }
+      }
 
       // Update local tracks state
       const updatedTracks = tracks.map(t => {
@@ -1013,11 +1204,14 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       setTracks(updatedTracks);
 
       // Update assignments in DB
-      const updatedAssignments = currentEpisode.assignments?.map(a => {
+      const updatedAssignments = (currentEpisode.assignments || []).map(a => {
         const assignedId = a.substituteId || a.dubberId;
         const newAssComments = commentsByAssignmentId[a.id] || (
           commentsByTrackId[assignedId || '']?.filter(c => {
             const gap = selectedGaps.find(g => g.subId === c.subId);
+            if (gap?.isSubtitleError || gap?.resolutionAction === 'reassign_character') {
+              return (gap.reassignedCharacterName || gap.selectedCharacterForSub || '').toLowerCase() === a.characterName.toLowerCase();
+            }
             return gap && gap.characterName.toLowerCase() === a.characterName.toLowerCase();
           })
         ) || [];
@@ -1031,11 +1225,30 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           return {
             ...a,
             comments: JSON.stringify([...existingComments, ...newAssComments]),
-            status: 'FIXES_NEEDED'
+            status: 'FIXES_NEEDED' as const
           };
         }
         return a;
-      }) || [];
+      });
+
+      // Also append any synthetic assignments for unlisted characters
+      Object.keys(commentsByAssignmentId).forEach(assKey => {
+        if (assKey.startsWith('new_ass_')) {
+          const charName = assKey.replace('new_ass_', '');
+          const exists = updatedAssignments.find(a => a.characterName.toLowerCase() === charName.toLowerCase());
+          if (!exists) {
+            updatedAssignments.push({
+              id: Math.random().toString(36).substr(2, 9),
+              episodeId: currentEpisode.id,
+              characterName: charName,
+              status: 'FIXES_NEEDED',
+              comments: JSON.stringify(commentsByAssignmentId[assKey]),
+              lineCount: 1,
+              isMain: false
+            });
+          }
+        }
+      });
 
       await ipcSafe.invoke('save-episode', {
         ...currentEpisode,
@@ -1044,13 +1257,20 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       });
 
       onRefresh();
-      toast.success(`Успешно сформировано ${selectedGaps.length} фиксов!`);
+
+      const reassignCount = selectedGaps.filter(g => g.isSubtitleError || g.resolutionAction === 'reassign_character').length;
+      if (reassignCount > 0) {
+        toast.success(`Применено! Обновлено субтитров: ${subUpdates.length}, перенаправлено доозвучек: ${reassignCount}`);
+      } else {
+        toast.success(`Успешно применены решения для ${selectedGaps.length} замечаний!`);
+      }
       setIsGapModalOpen(false);
 
-      // Automatically open the generated fixes message ready to be sent
-      setTimeout(() => {
-        handleGenerateFixesMessage();
-      }, 300);
+      if (Object.keys(commentsByTrackId).length > 0) {
+        setTimeout(() => {
+          handleGenerateFixesMessage();
+        }, 300);
+      }
     } catch (e: any) {
       console.error('Failed to apply gap fixes:', e);
       toast.error(`Ошибка при сохранении фиксов: ${e?.message || e}`);
@@ -1066,7 +1286,14 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     setIsMessageModalOpen(true);
   };
 
-  const handleExportSoundEngineer = async (targetDir: string, skipConversion: boolean, smartExport?: boolean) => {
+  const handleGenerateSoundEngineerReport = useCallback(() => {
+    if (!currentEpisode) return;
+    const msg = generateSoundEngineerQAReport(currentEpisode, detectedGaps, participants);
+    setGeneratedMessage(msg);
+    setIsMessageModalOpen(true);
+  }, [currentEpisode, detectedGaps, participants]);
+
+  const handleExportSoundEngineer = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean) => {
     if (!currentEpisode) return;
     try {
       await ipcSafe.invoke('enqueue-ffmpeg-task', {
@@ -1075,7 +1302,9 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           episode: currentEpisode,
           targetDir,
           skipConversion,
-          smartExport
+          smartExport,
+          additionalProcessing,
+          autoApplyFixes
         },
         metadata: {
           title: `Экспорт Звукорежиссеру: ${currentEpisode.project?.title || 'Проект'} - Серия ${currentEpisode.number}`
@@ -1383,6 +1612,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           onGenerateFixesMessage={handleGenerateFixesMessage}
           onGenerateReminderMessage={handleGenerateReminderMessage}
           onExportSoundEngineer={() => setIsExportModalOpen(true)}
+          onGenerateSoundEngineerReport={handleGenerateSoundEngineerReport}
           onBakeSubtitles={handleBakeSubtitles}
           isBaking={isBaking}
           bakeProgress={bakeProgress}
@@ -1912,6 +2142,8 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           isOpen={isGapModalOpen}
           onClose={() => setIsGapModalOpen(false)}
           gaps={detectedGaps}
+          episode={currentEpisode}
+          participants={participants}
           onApplyFixes={handleApplyGapFixes}
           onSeekMainPlayer={(timeSec) => {
             handleSeekToTime(timeSec);

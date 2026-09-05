@@ -17,7 +17,11 @@ import {
   Search,
   Volume2,
   VolumeX,
-  Film
+  Film,
+  Sparkles,
+  Image as ImageIcon,
+  KeyRound,
+  FileText
 } from 'lucide-react';
 import { BrowserTab, BookmarkItem, BrowserEngineType } from './types';
 import { BrowserEngineSelector } from './BrowserEngineSelector';
@@ -40,6 +44,12 @@ interface BrowserAddressBarProps {
   onToggleFind?: () => void;
   onToggleMute?: () => void;
   onOpenCapturedMedia?: () => void;
+  onInjectPost?: () => void;
+  onCopyPostText?: () => void;
+  onCopyCover?: () => void;
+  onOpenAuthWindow?: () => void;
+  hasGeneratedPost?: boolean;
+  hasCover?: boolean;
 }
 
 export const BrowserAddressBar: React.FC<BrowserAddressBarProps> = ({
@@ -59,7 +69,13 @@ export const BrowserAddressBar: React.FC<BrowserAddressBarProps> = ({
   onChangeEngine,
   onToggleFind,
   onToggleMute,
-  onOpenCapturedMedia
+  onOpenCapturedMedia,
+  onInjectPost,
+  onCopyPostText,
+  onCopyCover,
+  onOpenAuthWindow,
+  hasGeneratedPost = false,
+  hasCover = false
 }) => {
   const [inputUrl, setInputUrl] = useState<string>(activeTab?.url || '');
   const [copied, setCopied] = useState<boolean>(false);
@@ -262,37 +278,90 @@ export const BrowserAddressBar: React.FC<BrowserAddressBarProps> = ({
         </div>
       </div>
 
-      {/* Bookmarks Strip */}
-      <div className="px-3 py-1.5 bg-neutral-950/70 border-t border-neutral-800/80 flex items-center gap-1.5 overflow-x-auto text-xs no-scrollbar">
-        <span className="text-neutral-500 font-medium flex items-center gap-1 flex-shrink-0 pr-1 border-r border-neutral-800 text-[11px]">
-          <BookmarkIcon className="w-3.5 h-3.5 text-pink-400" />
-          Закладки:
-        </span>
+      {/* Bookmarks & Quick Posting Strip */}
+      <div className="px-3 py-1.5 bg-neutral-950/70 border-t border-neutral-800/80 flex items-center justify-between gap-2 overflow-x-auto text-xs no-scrollbar">
+        {/* Bookmarks list */}
+        <div className="flex items-center gap-1.5 overflow-x-auto flex-1 min-w-0">
+          <span className="text-neutral-500 font-medium flex items-center gap-1 flex-shrink-0 pr-1 border-r border-neutral-800 text-[11px]">
+            <BookmarkIcon className="w-3.5 h-3.5 text-pink-400" />
+            Закладки:
+          </span>
 
-        {bookmarks.map((bm) => (
-          <button
-            key={bm.id}
-            onClick={(e) => {
-              if (e.metaKey || e.ctrlKey || e.button === 1) {
+          {bookmarks.map((bm) => (
+            <button
+              key={bm.id}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.button === 1) {
+                  onSelectBookmark(bm, true);
+                } else {
+                  onSelectBookmark(bm, false);
+                }
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
                 onSelectBookmark(bm, true);
-              } else {
-                onSelectBookmark(bm, false);
-              }
-            }}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              onSelectBookmark(bm, true);
-            }}
-            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition flex items-center gap-1 flex-shrink-0 border cursor-pointer ${
-              activeTab?.url === bm.url
-                ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
-                : 'bg-neutral-800/80 text-neutral-300 hover:bg-neutral-800 border-neutral-700/60'
-            }`}
-            title={`${bm.name}\n(Клик: открыть в текущей вкладке, Ctrl+клик / ПКМ: в новой)`}
-          >
-            <span>{bm.name}</span>
-          </button>
-        ))}
+              }}
+              className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition flex items-center gap-1 flex-shrink-0 border cursor-pointer ${
+                activeTab?.url === bm.url
+                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                  : 'bg-neutral-800/80 text-neutral-300 hover:bg-neutral-800 border-neutral-700/60'
+              }`}
+              title={`${bm.name}\n(Клик: открыть в текущей вкладке, Ctrl+клик / ПКМ: в новой)`}
+            >
+              <span>{bm.name}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Quick Posting Actions */}
+        <div className="flex items-center gap-1.5 flex-shrink-0 border-l border-neutral-800 pl-2">
+          {onInjectPost && (
+            <button
+              onClick={onInjectPost}
+              disabled={!hasGeneratedPost}
+              className="px-2.5 py-1 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-md text-[11px] font-semibold transition flex items-center gap-1.5 shadow-sm cursor-pointer"
+              title="Автоматически вставить текст поста в активное поле ввода на открытом сайте (VK, TG, форум)"
+            >
+              <Sparkles className="w-3.5 h-3.5 text-yellow-300" />
+              <span>Вставить пост в поле</span>
+            </button>
+          )}
+
+          {onCopyPostText && (
+            <button
+              onClick={onCopyPostText}
+              disabled={!hasGeneratedPost}
+              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-neutral-200 hover:text-white rounded-md text-[11px] font-medium transition flex items-center gap-1 border border-neutral-700/60 cursor-pointer"
+              title="Скопировать готовый текст поста в буфер обмена"
+            >
+              <FileText className="w-3.5 h-3.5 text-sky-400" />
+              <span>Копировать текст</span>
+            </button>
+          )}
+
+          {onCopyCover && (
+            <button
+              onClick={onCopyCover}
+              disabled={!hasCover}
+              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-neutral-200 hover:text-white rounded-md text-[11px] font-medium transition flex items-center gap-1 border border-neutral-700/60 cursor-pointer"
+              title="Скопировать файл обложки в буфер обмена как картинку (для вставки через Ctrl+V на сайте)"
+            >
+              <ImageIcon className="w-3.5 h-3.5 text-purple-400" />
+              <span>Обложка (Ctrl+V)</span>
+            </button>
+          )}
+
+          {onOpenAuthWindow && (
+            <button
+              onClick={onOpenAuthWindow}
+              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-amber-300 hover:text-amber-200 rounded-md text-[11px] font-medium transition flex items-center gap-1 border border-amber-700/40 cursor-pointer"
+              title="Открыть отдельное окно входа (для VK ID, Google, Yandex, Cloudflare)"
+            >
+              <KeyRound className="w-3.5 h-3.5 text-amber-400" />
+              <span>Окно входа</span>
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

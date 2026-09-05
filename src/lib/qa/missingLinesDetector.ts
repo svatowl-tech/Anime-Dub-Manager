@@ -11,9 +11,46 @@
 import { Episode, Track, SubtitleLine } from '../../types';
 import { SIGN_KEYWORDS } from '../../constants';
 import { getSharedAudioContext, ensureAudioContextResumed } from './sharedAudioContext';
+import { scanTrackForArtifacts, AudioArtifactType, ArtifactSeverity } from './artifactDetector';
+
+export type DefectCategory = 
+  | 'missing_line' 
+  | 'unwanted_speech' 
+  | 'actor_collision' 
+  | 'timing_too_short' 
+  | 'timing_too_long' 
+  | 'actor_overlap'
+  | 'audio_artifact';
+
+export type DefectType = 
+  | 'silence' 
+  | 'noise' 
+  | 'unwanted_speech' 
+  | 'actor_collision' 
+  | 'timing_too_short' 
+  | 'timing_too_long' 
+  | 'actor_overlap'
+  | 'clipping'
+  | 'mouse_click'
+  | 'plosive'
+  | 'swallowed_vowel';
+
+export type DefectResolution = 
+  | 'keep' 
+  | 'silence' 
+  | 'fix_subs' 
+  | 'reassign_character'
+  | 'keep_first' 
+  | 'keep_second' 
+  | 'keep_both'
+  | 'note_sound_engineer'
+  | 'request_dubber_fix'
+  | 'ignore'
+  | 'trim_tail';
 
 export interface MissingLineDetection {
   id: string;
+  defectCategory?: DefectCategory;
   trackId: string;
   dubberName: string;
   characterName: string;
@@ -29,12 +66,64 @@ export interface MissingLineDetection {
   peakDb: number;
   rmsDb: number;
   dynamicRangeDb: number;
-  type: 'silence' | 'noise';
+  type: DefectType;
   typeLabel: string;
   selected: boolean;
   comment: string;
   audioUrl?: string;
   audioBuffer?: AudioBuffer;
+
+  // Reference original audio buffer (if available)
+  originalAudioBuffer?: AudioBuffer | null;
+
+  // Unwanted speech context
+  nearestContext?: string;
+
+  // Timing mismatch details
+  actualSpeechStartSec?: number;
+  actualSpeechEndSec?: number;
+  actualDurationSec?: number;
+  speechDurationSec?: number;
+  subDurationSec?: number;
+  timingDeltaPercent?: number; // e.g. -28% or +35%
+  tailDurationSec?: number; // hanging original tail duration in seconds
+  overflowDurationSec?: number; // speech overshooting subtitle end in seconds
+
+  // Collision & Overlap fields
+  secondTrackId?: string;
+  secondDubberName?: string;
+  secondCharacterName?: string;
+  secondAssignmentId?: string;
+  secondAudioUrl?: string;
+  secondAudioBuffer?: AudioBuffer;
+  secondPeakDb?: number;
+  secondRmsDb?: number;
+  secondDynamicRangeDb?: number;
+  secondText?: string;
+  secondLineIndex?: number;
+  secondSubId?: string;
+  overlapSec?: number; // duration of collision or speech overlap in seconds
+
+  // Technical artifact fields
+  artifactType?: AudioArtifactType;
+  artifactMetric?: string;
+  artifactSeverity?: ArtifactSeverity;
+  artifactTimestampSec?: number;
+  artifactTitle?: string;
+  artifactDescription?: string;
+  nearestSubtitleText?: string;
+
+  // Curator resolution options
+  resolutionAction?: DefectResolution;
+  selectedCharacterForSub?: string;
+  isSilenced?: boolean;
+
+  // Subtitle error / Character reassignment fields
+  isSubtitleError?: boolean;
+  reassignedCharacterName?: string;
+  reassignedDubberName?: string;
+  reassignedDubberId?: string;
+  reassignedAssignmentId?: string;
 }
 
 export interface GapDetectionOptions {
@@ -60,6 +149,34 @@ export interface GapDetectionOptions {
    * Default: 0.15s
    */
   minDurationSec?: number;
+  /**
+   * Scan for unwanted speech outside subtitles. Default: true.
+   */
+  scanUnwantedSpeech?: boolean;
+  /**
+   * Scan for dubber collision (two dubbers voicing the same subtitle). Default: true.
+   */
+  scanCollisions?: boolean;
+  /**
+   * Scan for timing mismatches (short speech / hanging original tail > 10%, or long speech > 20%). Default: true.
+   */
+  scanTimingMismatches?: boolean;
+  /**
+   * Scan for speech overlap collisions between dubbers (phrase tails colliding). Default: true.
+   */
+  scanOverlaps?: boolean;
+  /**
+   * Threshold percentage below which short speech is flagged (default: 10%).
+   */
+  shortLineThresholdPercent?: number;
+  /**
+   * Threshold percentage above which long speech is flagged (default: 20%).
+   */
+  longLineThresholdPercent?: number;
+  /**
+   * Scan for audio artifacts (clipping, mouse clicks, plosives, swallowed words/gate cutoffs). Default: true.
+   */
+  scanArtifacts?: boolean;
 }
 
 /**
@@ -123,6 +240,25 @@ export async function decodeAudioFile(url: string): Promise<AudioBuffer> {
 }
 
 /**
+ * Zeros out audio samples in an AudioBuffer in-place across all channels
+ */
+export function silenceAudioBufferInterval(
+  audioBuffer: AudioBuffer,
+  startSec: number,
+  endSec: number
+): void {
+  const sampleRate = audioBuffer.sampleRate;
+  const numChannels = audioBuffer.numberOfChannels;
+  const startSample = Math.max(0, Math.floor((startSec - 0.02) * sampleRate));
+  const endSample = Math.min(audioBuffer.length, Math.ceil((endSec + 0.02) * sampleRate));
+
+  for (let c = 0; c < numChannels; c++) {
+    const data = audioBuffer.getChannelData(c);
+    data.fill(0, startSample, endSample);
+  }
+}
+
+/**
  * Computes dynamic metrics (short-time RMS frames, dynamic range, std dev, peak)
  * across a specific time slice of an AudioBuffer.
  */
@@ -146,10 +282,11 @@ export function analyzeSegmentDynamics(
     return {
       peakDb: -100,
       rmsDb: -100,
+      minDb: -100,
+      maxDb: -100,
       dynamicRangeDb: 0,
       peakToMinDb: 0,
-      stdDevDb: 0,
-      hasSpeechDynamics: false
+      stdDevDb: 0
     };
   }
 
@@ -232,7 +369,129 @@ export function analyzeSegmentDynamics(
 }
 
 /**
- * Main detection function to analyze dubber tracks against subtitles in an episode
+ * Accurately finds speech start and end boundaries (Voice Activity Detection)
+ * in an AudioBuffer around a given subtitle timeframe.
+ */
+export function findVoicedBoundaries(
+  audioBuffer: AudioBuffer,
+  searchStartSec: number,
+  searchEndSec: number,
+  speechDynamicThresholdDb: number = 2.8,
+  minSpeechPeakDb: number = -38
+): {
+  speechStartSec: number;
+  speechEndSec: number;
+  speechDurationSec: number;
+  isVoiced: boolean;
+  peakDb: number;
+  rmsDb: number;
+} {
+  const sampleRate = audioBuffer.sampleRate;
+  const startSample = Math.max(0, Math.floor(searchStartSec * sampleRate));
+  const endSample = Math.min(audioBuffer.length, Math.ceil(searchEndSec * sampleRate));
+  
+  if (endSample <= startSample) {
+    return {
+      speechStartSec: searchStartSec,
+      speechEndSec: searchEndSec,
+      speechDurationSec: 0,
+      isVoiced: false,
+      peakDb: -100,
+      rmsDb: -100
+    };
+  }
+
+  const frameMs = 30;
+  const hopMs = 15;
+  const frameSamples = Math.max(16, Math.floor((frameMs / 1000) * sampleRate));
+  const hopSamples = Math.max(8, Math.floor((hopMs / 1000) * sampleRate));
+
+  const primaryChannel = audioBuffer.getChannelData(0);
+  const frames: { time: number; rmsDb: number; peakDb: number }[] = [];
+
+  let overallPeak = 0.00001;
+  let overallSumSq = 0;
+  let totalSamples = 0;
+
+  for (let s = startSample; s + frameSamples <= endSample; s += hopSamples) {
+    let fSumSq = 0;
+    let fPeak = 0;
+    for (let i = s; i < s + frameSamples; i++) {
+      const v = Math.abs(primaryChannel[i]);
+      if (v > fPeak) fPeak = v;
+      fSumSq += v * v;
+    }
+    const fRms = Math.sqrt(fSumSq / frameSamples);
+    const timeSec = s / sampleRate;
+    const fRmsDb = 20 * Math.log10(Math.max(0.000001, fRms));
+    const fPeakDb = 20 * Math.log10(Math.max(0.000001, fPeak));
+    frames.push({ time: timeSec, rmsDb: fRmsDb, peakDb: fPeakDb });
+
+    if (fPeak > overallPeak) overallPeak = fPeak;
+    overallSumSq += fSumSq;
+    totalSamples += frameSamples;
+  }
+
+  const overallPeakDb = Math.round((20 * Math.log10(overallPeak)) * 10) / 10;
+  const overallRmsDb = Math.round((20 * Math.log10(Math.sqrt(overallSumSq / Math.max(1, totalSamples)))) * 10) / 10;
+
+  if (frames.length < 2) {
+    return {
+      speechStartSec: searchStartSec,
+      speechEndSec: searchEndSec,
+      speechDurationSec: searchEndSec - searchStartSec,
+      isVoiced: false,
+      peakDb: overallPeakDb,
+      rmsDb: overallRmsDb
+    };
+  }
+
+  // Find baseline noise floor (15th percentile of RMS)
+  const sortedRms = [...frames].map(f => f.rmsDb).sort((a, b) => a - b);
+  const noiseFloorDb = sortedRms[Math.floor(sortedRms.length * 0.15)] ?? -60;
+  const activeThresholdDb = Math.max(noiseFloorDb + speechDynamicThresholdDb, -46);
+
+  // Filter frames containing active voice speech
+  const voicedFrames = frames.filter(f => f.rmsDb >= activeThresholdDb && f.peakDb >= minSpeechPeakDb);
+
+  if (voicedFrames.length < 2) {
+    return {
+      speechStartSec: searchStartSec,
+      speechEndSec: searchEndSec,
+      speechDurationSec: 0,
+      isVoiced: false,
+      peakDb: overallPeakDb,
+      rmsDb: overallRmsDb
+    };
+  }
+
+  const speechStart = voicedFrames[0].time;
+  const speechEnd = voicedFrames[voicedFrames.length - 1].time + (frameMs / 1000);
+  const speechDuration = Math.max(0.05, speechEnd - speechStart);
+
+  return {
+    speechStartSec: Math.round(speechStart * 100) / 100,
+    speechEndSec: Math.round(speechEnd * 100) / 100,
+    speechDurationSec: Math.round(speechDuration * 100) / 100,
+    isVoiced: true,
+    peakDb: overallPeakDb,
+    rmsDb: overallRmsDb
+  };
+}
+
+interface DecodedTrackContext {
+  track: Track;
+  audioUrl: string;
+  audioBuffer: AudioBuffer;
+  assignedCharacters: Set<string>;
+}
+
+/**
+ * Main detection function to analyze dubber tracks against subtitles in an episode.
+ * Detects:
+ * 1. Missing Lines (пропуски реплик)
+ * 2. Unwanted Speech (озвучено там, где не надо - фразы вне сабов)
+ * 3. Collisions (конфликты: два даббера озвучили одну и ту же реплику)
  */
 export async function detectEpisodeGaps(
   episode: Episode,
@@ -245,7 +504,13 @@ export async function detectEpisodeGaps(
     speechDynamicThresholdDb = 3.0,
     silencePeakThresholdDb = -52,
     silenceRmsThresholdDb = -60,
-    minDurationSec = 0.15
+    minDurationSec = 0.15,
+    scanUnwantedSpeech = true,
+    scanCollisions = true,
+    scanTimingMismatches = true,
+    scanOverlaps = true,
+    shortLineThresholdPercent = 10,
+    longLineThresholdPercent = 20
   } = options;
 
   const results: MissingLineDetection[] = [];
@@ -275,15 +540,31 @@ export async function detectEpisodeGaps(
     return !isSign && duration >= minDurationSec && (l.text || '').trim().length > 0;
   });
 
-  const totalTracks = dubberTracks.length;
-  let processedTracks = 0;
+  // Decode original track / video audio for reference if available
+  let originalAudioBuffer: AudioBuffer | null = null;
+  const originalTrack = tracks.find(t => t.id === 'original');
+  const rawFile = originalTrack?.files[0]?.path || episode.rawPath;
+  if (rawFile) {
+    try {
+      const origUrl = resolveAudioUrl(rawFile);
+      if (origUrl) {
+        originalAudioBuffer = await decodeAudioFile(origUrl);
+      }
+    } catch (e) {
+      console.warn('Original audio decode for reference skipped:', e);
+    }
+  }
 
-  for (const track of dubberTracks) {
-    processedTracks++;
+  const totalTracks = dubberTracks.length;
+  const decodedTracks: DecodedTrackContext[] = [];
+
+  // Pre-decode all dubber audio tracks
+  for (let i = 0; i < totalTracks; i++) {
+    const track = dubberTracks[i];
     onProgress?.(
-      processedTracks,
+      i + 1,
       totalTracks,
-      `Анализ дорожки [${processedTracks}/${totalTracks}]: ${track.participant}...`
+      `Загрузка и декодирование дорожки [${i + 1}/${totalTracks}]: ${track.participant}...`
     );
 
     const selectedFile = track.files.find(f => f.id === track.selectedFileId) || track.files[0];
@@ -292,31 +573,68 @@ export async function detectEpisodeGaps(
     const audioUrl = resolveAudioUrl(selectedFile.path);
     if (!audioUrl) continue;
 
-    let audioBuffer: AudioBuffer | null = null;
     try {
-      audioBuffer = await decodeAudioFile(audioUrl);
+      const audioBuffer = await decodeAudioFile(audioUrl);
+      if (audioBuffer && audioBuffer.length > 0) {
+        const assignedCharacters = new Set<string>();
+        (episode.assignments || []).forEach(as => {
+          const assignedId = as.substituteId || as.dubberId;
+          if (assignedId === track.id && as.characterName) {
+            assignedCharacters.add(as.characterName.trim().toLowerCase());
+          }
+        });
+
+        track.character.split(',').forEach(c => {
+          if (c.trim()) assignedCharacters.add(c.trim().toLowerCase());
+        });
+
+        decodedTracks.push({
+          track,
+          audioUrl,
+          audioBuffer,
+          assignedCharacters
+        });
+      }
     } catch (err) {
       console.warn(`Не удалось декодировать аудио для даббера ${track.participant}:`, err);
-      continue;
     }
+  }
 
-    if (!audioBuffer || audioBuffer.length === 0) continue;
+  if (decodedTracks.length === 0) {
+    return results;
+  }
 
-    // Determine characters assigned to this dubber
-    const assignedCharacters = new Set<string>();
-    (episode.assignments || []).forEach(as => {
-      const assignedId = as.substituteId || as.dubberId;
-      if (assignedId === track.id && as.characterName) {
-        assignedCharacters.add(as.characterName.trim().toLowerCase());
-      }
-    });
+  // Keep track of active voiced speech lines across all dubbers for timing & overlap checks
+  interface VoicedLineRecord {
+    track: Track;
+    audioBuffer: AudioBuffer;
+    audioUrl: string;
+    line: SubtitleLine;
+    lineIndex: number;
+    subId: string;
+    rawCharName: string;
+    resolvedCharName: string;
+    matchingAssignmentId?: string;
+    subStartSec: number;
+    subEndSec: number;
+    subDurationSec: number;
+    speechStartSec: number;
+    speechEndSec: number;
+    speechDurationSec: number;
+    metrics: ReturnType<typeof analyzeSegmentDynamics>;
+    cleanedText: string;
+  }
 
-    // Fallback: also include characters parsed from track.character string
-    track.character.split(',').forEach(c => {
-      if (c.trim()) assignedCharacters.add(c.trim().toLowerCase());
-    });
+  const voicedLines: VoicedLineRecord[] = [];
 
-    // Iterate through subtitle lines matching this dubber's characters
+  // =========================================================================
+  // 1. SCAN FOR MISSING LINES (ПРОПУСКИ) & TIMING MISMATCHES (РАСХОЖДЕНИЯ)
+  // =========================================================================
+  onProgress?.(totalTracks, totalTracks, 'Анализ пропусков и тайминга реплик...');
+
+  for (const trackCtx of decodedTracks) {
+    const { track, audioBuffer, audioUrl, assignedCharacters } = trackCtx;
+
     for (let lineIdx = 0; lineIdx < validSubLines.length; lineIdx++) {
       const line = validSubLines[lineIdx];
       const rawCharName = (line.name || '').trim();
@@ -332,57 +650,40 @@ export async function detectEpisodeGaps(
       const durationSec = endSec - startSec;
       if (durationSec < minDurationSec) continue;
 
-      // Analyze dynamic range and energy fluctuation inside this line
+      // Analyze dynamic range inside this subtitle line
       const metrics = analyzeSegmentDynamics(audioBuffer, startSec, endSec);
 
-      // Detection Decision Logic:
-      //
-      // 1. If dynamic range is >= threshold (e.g. 3.0 dB) or peak-to-floor delta >= (threshold + 1.2 dB)
-      //    and peak is above pure silence (-52 dBFS), speech modulation is clearly present!
-      //    -> NOT a gap!
-      //
-      // 2. If it is pure digital silence (peak <= -52 dBFS and RMS <= -60 dBFS) -> GAP (type: silence).
-      //
-      // 3. If it is static background noise (e.g. room tone / preamp hiss / fan noise)
-      //    where the energy level stays practically constant (dynamic swing < threshold dB, stdDev < 1.0 dB):
-      //    -> GAP (type: noise, stationary room tone without voiced words).
-      
       const isAbsoluteSilence = metrics.peakDb <= silencePeakThresholdDb || metrics.rmsDb <= silenceRmsThresholdDb;
-      
-      // Steady static background noise without voice:
-      // Dynamic swing is below threshold (e.g. < 3 dB, stands in place +/- 1.5 dB)
-      // and not an abnormally loud sound (peak < -24 dBFS)
       const isStationaryNoise = 
         metrics.dynamicRangeDb < speechDynamicThresholdDb &&
         metrics.peakToMinDb < (speechDynamicThresholdDb + 1.2) &&
         metrics.stdDevDb < 1.0 &&
         metrics.peakDb < -24;
 
+      const cleanedText = line.text
+        .replace(/\{[^}]+\}/g, '')
+        .replace(/\\N/gi, ' ')
+        .replace(/\\n/gi, ' ')
+        .replace(/\\h/gi, ' ')
+        .trim();
+
+      const matchingAssignment = (episode.assignments || []).find(a => {
+        const assignedId = a.substituteId || a.dubberId;
+        const char = (a.characterName || '').toLowerCase();
+        return assignedId === track.id && (char === rawCharName.toLowerCase() || char === resolvedCharName.toLowerCase());
+      });
+
       if (isAbsoluteSilence || isStationaryNoise) {
         const gapType: 'silence' | 'noise' = isAbsoluteSilence ? 'silence' : 'noise';
         const typeLabel = isAbsoluteSilence 
           ? '🔇 Тишина' 
           : `〰 Статичный фон (разбег ${metrics.dynamicRangeDb} дБ)`;
-        
-        // Clean subtitle text for comment (remove ASS override tags like {\an8}, \N, etc.)
-        const cleanedText = line.text
-          .replace(/\{[^}]+\}/g, '')
-          .replace(/\\N/gi, ' ')
-          .replace(/\\n/gi, ' ')
-          .replace(/\\h/gi, ' ')
-          .trim();
 
-        const detectionId = `${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`;
-
-        // Match assignment for this character
-        const matchingAssignment = (episode.assignments || []).find(a => {
-          const assignedId = a.substituteId || a.dubberId;
-          const char = (a.characterName || '').toLowerCase();
-          return assignedId === track.id && (char === rawCharName.toLowerCase() || char === resolvedCharName.toLowerCase());
-        });
+        const detectionId = `gap_${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`;
 
         results.push({
           id: detectionId,
+          defectCategory: 'missing_line',
           trackId: track.id,
           dubberName: track.participant,
           characterName: resolvedCharName || track.character,
@@ -404,6 +705,550 @@ export async function detectEpisodeGaps(
           comment: `Пропуск реплики [${formatTimecode(startSec)}]: "${cleanedText}"`,
           audioUrl,
           audioBuffer,
+          originalAudioBuffer,
+          resolutionAction: 'keep'
+        });
+      } else {
+        // Line is voiced. Run Voice Activity Detection around this subtitle
+        const searchStart = Math.max(0, startSec - 0.4);
+        const searchEnd = Math.min(audioBuffer.duration, endSec + 1.5);
+        const boundaries = findVoicedBoundaries(audioBuffer, searchStart, searchEnd, speechDynamicThresholdDb - 0.2);
+
+        if (boundaries.isVoiced) {
+          const voicedRecord: VoicedLineRecord = {
+            track,
+            audioBuffer,
+            audioUrl,
+            line,
+            lineIndex: line.rawLineIndex ?? lineIdx,
+            subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
+            rawCharName,
+            resolvedCharName: resolvedCharName || track.character,
+            matchingAssignmentId: matchingAssignment?.id,
+            subStartSec: startSec,
+            subEndSec: endSec,
+            subDurationSec: durationSec,
+            speechStartSec: boundaries.speechStartSec,
+            speechEndSec: boundaries.speechEndSec,
+            speechDurationSec: boundaries.speechDurationSec,
+            metrics,
+            cleanedText
+          };
+          voicedLines.push(voicedRecord);
+
+          // Check timing mismatches if enabled
+          if (scanTimingMismatches) {
+            const speechDur = boundaries.speechDurationSec;
+            const subDur = durationSec;
+
+            // 1. Line is significantly shorter than subtitle (> 10%)
+            // Leads to the original Japanese dialogue sticking out ("японский хвост остаётся")
+            const shortRatio = (subDur - speechDur) / subDur;
+            const shortThreshold = (shortLineThresholdPercent || 10) / 100;
+            const tailSec = Math.max(0, endSec - boundaries.speechEndSec);
+
+            if (shortRatio > shortThreshold && (subDur - speechDur) >= 0.35 && (tailSec >= 0.28 || shortRatio >= 0.20)) {
+              const timingDeltaPercent = -Math.round(shortRatio * 100);
+              const tailDurationSec = Math.round(tailSec * 10) / 10;
+
+              results.push({
+                id: `timing_short_${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`,
+                defectCategory: 'timing_too_short',
+                trackId: track.id,
+                dubberName: track.participant,
+                characterName: resolvedCharName || track.character,
+                assignmentId: matchingAssignment?.id,
+                lineIndex: line.rawLineIndex ?? lineIdx,
+                subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
+                startSec,
+                endSec,
+                startFormatted: formatTimecode(startSec),
+                endFormatted: formatTimecode(endSec),
+                durationSec: Math.round(durationSec * 10) / 10,
+                text: cleanedText,
+                peakDb: boundaries.peakDb,
+                rmsDb: boundaries.rmsDb,
+                dynamicRangeDb: metrics.dynamicRangeDb,
+                type: 'timing_too_short',
+                typeLabel: `⏱ Фраза короче саба на ${Math.abs(timingDeltaPercent)}%`,
+                selected: true,
+                actualSpeechStartSec: boundaries.speechStartSec,
+                actualSpeechEndSec: boundaries.speechEndSec,
+                actualDurationSec: boundaries.speechDurationSec,
+                speechDurationSec: boundaries.speechDurationSec,
+                subDurationSec: Math.round(durationSec * 10) / 10,
+                timingDeltaPercent,
+                tailDurationSec,
+                comment: `Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (речь ${boundaries.speechDurationSec}с при сабе ${durationSec.toFixed(1)}с). Японский хвост оригинала: ~${tailDurationSec}с`,
+                audioUrl,
+                audioBuffer,
+                originalAudioBuffer,
+                resolutionAction: 'note_sound_engineer'
+              });
+            }
+
+            // 2. Line is significantly longer than subtitle (> 20%)
+            // Must be compressed or trimmed so it does not collide with neighboring lines
+            const longRatio = (speechDur - subDur) / subDur;
+            const longThreshold = (longLineThresholdPercent || 20) / 100;
+            const overflowSec = Math.max(0, boundaries.speechEndSec - endSec);
+
+            if (longRatio > longThreshold && (speechDur - subDur) >= 0.35) {
+              const timingDeltaPercent = Math.round(longRatio * 100);
+              const overflowDurationSec = Math.round(overflowSec * 10) / 10;
+              const expandedEnd = Math.max(endSec, boundaries.speechEndSec);
+
+              results.push({
+                id: `timing_long_${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`,
+                defectCategory: 'timing_too_long',
+                trackId: track.id,
+                dubberName: track.participant,
+                characterName: resolvedCharName || track.character,
+                assignmentId: matchingAssignment?.id,
+                lineIndex: line.rawLineIndex ?? lineIdx,
+                subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
+                startSec,
+                endSec: expandedEnd,
+                startFormatted: formatTimecode(startSec),
+                endFormatted: formatTimecode(expandedEnd),
+                durationSec: Math.round(boundaries.speechDurationSec * 10) / 10,
+                text: cleanedText,
+                peakDb: boundaries.peakDb,
+                rmsDb: boundaries.rmsDb,
+                dynamicRangeDb: metrics.dynamicRangeDb,
+                type: 'timing_too_long',
+                typeLabel: `⏱ Фраза длиннее саба на +${timingDeltaPercent}% (>20%)`,
+                selected: true,
+                actualSpeechStartSec: boundaries.speechStartSec,
+                actualSpeechEndSec: boundaries.speechEndSec,
+                actualDurationSec: boundaries.speechDurationSec,
+                speechDurationSec: boundaries.speechDurationSec,
+                subDurationSec: Math.round(durationSec * 10) / 10,
+                timingDeltaPercent,
+                overflowDurationSec,
+                comment: `Фраза длиннее саба на +${timingDeltaPercent}% (речь ${boundaries.speechDurationSec}с при сабе ${durationSec.toFixed(1)}с, вылет на +${overflowDurationSec}с). Рекомендуется поджать тайминг звукорежиссеру`,
+                audioUrl,
+                audioBuffer,
+                originalAudioBuffer,
+                resolutionAction: 'note_sound_engineer'
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // 2. SCAN FOR UNWANTED SPEECH (ОЗВУЧЕНО ТАМ, ГДЕ НЕ НАДО / ВНЕ САБОВ)
+  // =========================================================================
+  if (scanUnwantedSpeech) {
+    onProgress?.(totalTracks, totalTracks, 'Поиск лишней озвучки вне сабов...');
+
+    for (const trackCtx of decodedTracks) {
+      const { track, audioBuffer, audioUrl, assignedCharacters } = trackCtx;
+      const duration = audioBuffer.duration;
+      if (duration <= 1.0) continue;
+
+      // Collect all subtitle intervals with generous grace margins.
+      // For this character's lines: allow 2.0s before and 2.5s after for natural tails/breaths.
+      // For any other dialogue: allow 1.2s before and 1.5s after.
+      const protectedIntervals: { start: number; end: number }[] = [];
+
+      for (const line of validSubLines) {
+        const rawCharName = (line.name || '').trim();
+        const resolvedCharName = (aliases[rawCharName] || rawCharName).trim();
+        const isThisChar = assignedCharacters.has(rawCharName.toLowerCase()) || 
+                           assignedCharacters.has(resolvedCharName.toLowerCase());
+
+        const marginPre = isThisChar ? 2.0 : 1.2;
+        const marginPost = isThisChar ? 2.5 : 1.5;
+
+        protectedIntervals.push({
+          start: Math.max(0, line.startSec - marginPre),
+          end: Math.min(duration, line.endSec + marginPost)
+        });
+      }
+
+      // Merge overlapping protected intervals
+      protectedIntervals.sort((a, b) => a.start - b.start);
+      const mergedProtected: { start: number; end: number }[] = [];
+      for (const cur of protectedIntervals) {
+        if (mergedProtected.length === 0) {
+          mergedProtected.push({ ...cur });
+        } else {
+          const last = mergedProtected[mergedProtected.length - 1];
+          if (cur.start <= last.end) {
+            last.end = Math.max(last.end, cur.end);
+          } else {
+            mergedProtected.push({ ...cur });
+          }
+        }
+      }
+
+      // Derive non-protected gaps (empty spaces far outside subtitles)
+      const candidateGaps: { start: number; end: number }[] = [];
+      let cursor = 0;
+      for (const p of mergedProtected) {
+        if (p.start - cursor >= 1.2) {
+          candidateGaps.push({ start: cursor, end: p.start });
+        }
+        cursor = Math.max(cursor, p.end);
+      }
+      if (duration - cursor >= 1.2) {
+        candidateGaps.push({ start: cursor, end: duration });
+      }
+
+      // Scan candidate gaps for isolated active speech bursts
+      for (const gap of candidateGaps) {
+        const gapDuration = gap.end - gap.start;
+        if (gapDuration < 1.0) continue;
+
+        // Sliding window across gap
+        const windowSizeSec = 0.3;
+        const hopSec = 0.15;
+        let speechActive = false;
+        let speechStart = 0;
+        let speechEnd = 0;
+
+        for (let t = gap.start; t + windowSizeSec <= gap.end; t += hopSec) {
+          const wMetrics = analyzeSegmentDynamics(audioBuffer, t, t + windowSizeSec);
+          // Active speech detection in empty space:
+          // Noticeable dynamic modulation and peak above ambient room tone
+          const isVoiced = wMetrics.peakDb > -36 && wMetrics.rmsDb > -46 && wMetrics.dynamicRangeDb >= (speechDynamicThresholdDb - 0.4);
+
+          if (isVoiced) {
+            if (!speechActive) {
+              speechActive = true;
+              speechStart = t;
+              speechEnd = t + windowSizeSec;
+            } else {
+              speechEnd = t + windowSizeSec;
+            }
+          } else {
+            if (speechActive) {
+              // Burst ended
+              const burstDuration = speechEnd - speechStart;
+              if (burstDuration >= 0.35) {
+                // Confirm full burst dynamics
+                const burstMetrics = analyzeSegmentDynamics(audioBuffer, speechStart, speechEnd);
+                if (burstMetrics.dynamicRangeDb >= speechDynamicThresholdDb && burstMetrics.peakDb > -36) {
+                  // Find context: nearest previous and next subtitle
+                  let prevSub: SubtitleLine | undefined;
+                  let nextSub: SubtitleLine | undefined;
+
+                  for (const l of validSubLines) {
+                    if (l.endSec <= speechStart) {
+                      if (!prevSub || l.endSec > prevSub.endSec) prevSub = l;
+                    }
+                    if (l.startSec >= speechEnd) {
+                      if (!nextSub || l.startSec < nextSub.startSec) nextSub = l;
+                    }
+                  }
+
+                  let contextStr = '';
+                  if (prevSub && nextSub) {
+                    contextStr = `Между сабами #${(prevSub.rawLineIndex ?? 0) + 1} (${formatTimecode(prevSub.endSec)}) и #${(nextSub.rawLineIndex ?? 0) + 1} (${formatTimecode(nextSub.startSec)})`;
+                  } else if (prevSub) {
+                    contextStr = `После саба #${(prevSub.rawLineIndex ?? 0) + 1} (${formatTimecode(prevSub.endSec)})`;
+                  } else if (nextSub) {
+                    contextStr = `Перед сабом #${(nextSub.rawLineIndex ?? 0) + 1} (${formatTimecode(nextSub.startSec)})`;
+                  } else {
+                    contextStr = `Вне таймингов субтитров`;
+                  }
+
+                  const startClean = Math.max(0, speechStart - 0.1);
+                  const endClean = Math.min(duration, speechEnd + 0.15);
+                  const durClean = Math.round((endClean - startClean) * 10) / 10;
+
+                  results.push({
+                    id: `unwanted_${track.id}_${startClean.toFixed(2)}`,
+                    defectCategory: 'unwanted_speech',
+                    trackId: track.id,
+                    dubberName: track.participant,
+                    characterName: track.character,
+                    lineIndex: prevSub ? (prevSub.rawLineIndex ?? 0) : 0,
+                    subId: prevSub?.id ? String(prevSub.id) : undefined,
+                    startSec: startClean,
+                    endSec: endClean,
+                    startFormatted: formatTimecode(startClean),
+                    endFormatted: formatTimecode(endClean),
+                    durationSec: durClean,
+                    text: `Лишняя речь вне сабов (${durClean}с)`,
+                    peakDb: burstMetrics.peakDb,
+                    rmsDb: burstMetrics.rmsDb,
+                    dynamicRangeDb: burstMetrics.dynamicRangeDb,
+                    type: 'unwanted_speech',
+                    typeLabel: '🎙 Озвучено вне сабов',
+                    selected: true,
+                    resolutionAction: 'silence', // default to silence, curator can toggle to 'keep'
+                    nearestContext: contextStr,
+                    comment: `Озвучено вне сабов [${formatTimecode(startClean)} - ${formatTimecode(endClean)}]: заменить тишиной`,
+                    audioUrl,
+                    audioBuffer,
+                    originalAudioBuffer
+                  });
+                }
+              }
+              speechActive = false;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // 3. SCAN FOR DUBBER COLLISIONS (КОНФЛИКТЫ: ДВА ДАББЕРА ОЗВУЧИЛИ ОДИН САБ)
+  // =========================================================================
+  if (scanCollisions && decodedTracks.length >= 2) {
+    onProgress?.(totalTracks, totalTracks, 'Поиск конфликтов дубляжа...');
+
+    for (let lineIdx = 0; lineIdx < validSubLines.length; lineIdx++) {
+      const line = validSubLines[lineIdx];
+      const lineStart = Math.max(0, line.startSec);
+      const lineEnd = line.endSec;
+      const lineDuration = lineEnd - lineStart;
+      if (lineDuration < minDurationSec) continue;
+
+      const rawCharName = (line.name || '').trim();
+      const resolvedCharName = (aliases[rawCharName] || rawCharName).trim();
+
+      const collidingActors: {
+        track: Track;
+        audioBuffer: AudioBuffer;
+        audioUrl: string;
+        metrics: ReturnType<typeof analyzeSegmentDynamics>;
+        isAssigned: boolean;
+      }[] = [];
+
+      for (const trackCtx of decodedTracks) {
+        const { track, audioBuffer, audioUrl, assignedCharacters } = trackCtx;
+        if (lineEnd > audioBuffer.duration + 0.5) continue;
+
+        const metrics = analyzeSegmentDynamics(
+          audioBuffer,
+          lineStart,
+          Math.min(audioBuffer.duration, lineEnd)
+        );
+
+        // Does this track contain active voiced speech on this subtitle?
+        const isVoiced = 
+          (metrics.peakDb > -38 && metrics.rmsDb > -48 && metrics.dynamicRangeDb >= speechDynamicThresholdDb) ||
+          (metrics.peakDb > -28 && metrics.dynamicRangeDb >= (speechDynamicThresholdDb - 0.5));
+
+        if (isVoiced) {
+          const isAssigned = 
+            assignedCharacters.has(rawCharName.toLowerCase()) || 
+            assignedCharacters.has(resolvedCharName.toLowerCase());
+
+          collidingActors.push({
+            track,
+            audioBuffer,
+            audioUrl,
+            metrics,
+            isAssigned
+          });
+        }
+      }
+
+      // If 2 or more distinct dubbers have active voice on this exact subtitle line
+      if (collidingActors.length >= 2) {
+        // Place the officially assigned dubber first (or the louder one if neither/both)
+        collidingActors.sort((a, b) => (b.isAssigned ? 1 : 0) - (a.isAssigned ? 1 : 0));
+
+        const actorA = collidingActors[0];
+        const actorB = collidingActors[1];
+
+        const cleanedText = line.text
+          .replace(/\{[^}]+\}/g, '')
+          .replace(/\\N/gi, ' ')
+          .replace(/\\n/gi, ' ')
+          .replace(/\\h/gi, ' ')
+          .trim();
+
+        results.push({
+          id: `collision_${line.rawLineIndex ?? lineIdx}_${lineStart.toFixed(2)}`,
+          defectCategory: 'actor_collision',
+          trackId: actorA.track.id,
+          dubberName: actorA.track.participant,
+          characterName: actorA.track.character,
+          lineIndex: line.rawLineIndex ?? lineIdx,
+          subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
+          startSec: lineStart,
+          endSec: lineEnd,
+          startFormatted: formatTimecode(lineStart),
+          endFormatted: formatTimecode(lineEnd),
+          durationSec: Math.round(lineDuration * 10) / 10,
+          text: cleanedText,
+          peakDb: actorA.metrics.peakDb,
+          rmsDb: actorA.metrics.rmsDb,
+          dynamicRangeDb: actorA.metrics.dynamicRangeDb,
+          type: 'actor_collision',
+          typeLabel: '⚡ Конфликт: озвучили вдвоём',
+          selected: true,
+          resolutionAction: 'fix_subs', // Default resolution: analyze who it belongs to, fix subs or mute
+          selectedCharacterForSub: actorA.track.character,
+          audioUrl: actorA.audioUrl,
+          audioBuffer: actorA.audioBuffer,
+          originalAudioBuffer,
+          // Second actor in collision
+          secondTrackId: actorB.track.id,
+          secondDubberName: actorB.track.participant,
+          secondCharacterName: actorB.track.character,
+          secondAudioUrl: actorB.audioUrl,
+          secondAudioBuffer: actorB.audioBuffer,
+          secondPeakDb: actorB.metrics.peakDb,
+          secondRmsDb: actorB.metrics.rmsDb,
+          secondDynamicRangeDb: actorB.metrics.dynamicRangeDb,
+          comment: `Конфликт озвучки: реплику "${cleanedText}" озвучили ${actorA.track.participant} и ${actorB.track.participant}`
+        });
+      }
+    }
+  }
+
+  // =========================================================================
+  // 4. SCAN FOR ACTOR OVERLAPS (НАЕЗД ХВОСТОВ ФРАЗ ДУБЛЕРОВ ДРУГ НА ДРУГА)
+  // =========================================================================
+  if (scanOverlaps && voicedLines.length >= 2) {
+    onProgress?.(totalTracks, totalTracks, 'Поиск наездов хвостов фраз дублеров друг на друга...');
+
+    // Sort chronologically by speechStartSec
+    const sortedVoiced = [...voicedLines].sort((a, b) => a.speechStartSec - b.speechStartSec);
+
+    for (let i = 0; i < sortedVoiced.length; i++) {
+      const itemA = sortedVoiced[i];
+
+      for (let j = i + 1; j < sortedVoiced.length; j++) {
+        const itemB = sortedVoiced[j];
+
+        // If speech B starts comfortably after speech A ended, no further overlaps for itemA
+        if (itemB.speechStartSec >= itemA.speechEndSec) {
+          break;
+        }
+
+        // Ignore same track or same subtitle (handled by collisions)
+        if (itemA.track.id === itemB.track.id || itemA.subId === itemB.subId) {
+          continue;
+        }
+
+        // Overlap timeframe
+        const overlapStart = Math.max(itemA.speechStartSec, itemB.speechStartSec);
+        const overlapEnd = Math.min(itemA.speechEndSec, itemB.speechEndSec);
+        const overlapDuration = overlapEnd - overlapStart;
+
+        // Threshold: at least 0.15s overlap
+        if (overlapDuration >= 0.15) {
+          const overlapSecRounded = Math.round(overlapDuration * 100) / 100;
+          const collisionStart = Math.max(0, overlapStart - 0.25);
+          const collisionEnd = overlapEnd + 0.25;
+
+          results.push({
+            id: `overlap_${itemA.track.id}_${itemB.track.id}_${itemA.lineIndex}_${itemB.lineIndex}_${overlapStart.toFixed(2)}`,
+            defectCategory: 'actor_overlap',
+            trackId: itemA.track.id,
+            dubberName: itemA.track.participant,
+            characterName: itemA.resolvedCharName,
+            assignmentId: itemA.matchingAssignmentId,
+            lineIndex: itemA.lineIndex,
+            subId: itemA.subId,
+            startSec: collisionStart,
+            endSec: collisionEnd,
+            startFormatted: formatTimecode(collisionStart),
+            endFormatted: formatTimecode(collisionEnd),
+            durationSec: Math.round((collisionEnd - collisionStart) * 10) / 10,
+            text: `[${itemA.track.participant}]: "${itemA.cleanedText}"`,
+            peakDb: itemA.metrics.peakDb,
+            rmsDb: itemA.metrics.rmsDb,
+            dynamicRangeDb: itemA.metrics.dynamicRangeDb,
+            type: 'actor_overlap',
+            typeLabel: `⚡ Наезд хвостом (${overlapSecRounded}с)`,
+            selected: true,
+            resolutionAction: 'note_sound_engineer',
+            audioUrl: itemA.audioUrl,
+            audioBuffer: itemA.audioBuffer,
+            originalAudioBuffer,
+            // Second actor in overlap
+            secondTrackId: itemB.track.id,
+            secondDubberName: itemB.track.participant,
+            secondCharacterName: itemB.resolvedCharName,
+            secondAssignmentId: itemB.matchingAssignmentId,
+            secondAudioUrl: itemB.audioUrl,
+            secondAudioBuffer: itemB.audioBuffer,
+            secondPeakDb: itemB.metrics.peakDb,
+            secondRmsDb: itemB.metrics.rmsDb,
+            secondDynamicRangeDb: itemB.metrics.dynamicRangeDb,
+            secondText: `[${itemB.track.participant}]: "${itemB.cleanedText}"`,
+            secondLineIndex: itemB.lineIndex,
+            secondSubId: itemB.subId,
+            overlapSec: overlapSecRounded,
+            comment: `Наезд дублеров: хвост реплики ${itemA.track.participant} (${itemA.resolvedCharName}) залез на ${overlapSecRounded}с на начало реплики ${itemB.track.participant} (${itemB.resolvedCharName}). Требуется разводка или подрезка стыка звукорежиссером.`
+          });
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // 5. SCAN FOR TECHNICAL ARTIFACTS (КЛИППИНГ, КЛИКИ, ЗАДУВЫ, ОБРЫВЫ ГЕЙТОМ)
+  // =========================================================================
+  if (options.scanArtifacts !== false) {
+    onProgress?.(totalTracks, totalTracks, 'Сканирование технических артефактов (перегруз, клики, задувы)...');
+    for (const trackCtx of decodedTracks) {
+      const { track, audioBuffer, audioUrl } = trackCtx;
+      const artifacts = scanTrackForArtifacts(audioBuffer, track, validSubLines, {
+        detectClipping: true,
+        detectClicks: true,
+        detectPlosives: true,
+        detectSwallowed: true
+      });
+
+      for (const art of artifacts) {
+        const typeLabel = 
+          art.type === 'clipping' ? 'Перегруз' :
+          art.type === 'mouse_click' ? 'Клик мыши' :
+          art.type === 'plosive' ? 'Задув (П/Б)' : 'Обрыв фразы';
+
+        // Find assignment if available
+        const matchingAssignment = (episode.assignments || []).find(a => {
+          const assignedId = a.substituteId || a.dubberId;
+          return assignedId === track.id || 
+            (a.characterName && track.character.toLowerCase().includes(a.characterName.toLowerCase()));
+        });
+
+        results.push({
+          id: art.id,
+          defectCategory: 'audio_artifact',
+          type: art.type,
+          typeLabel,
+          trackId: art.trackId,
+          dubberName: art.dubberName,
+          characterName: art.characterName,
+          assignmentId: matchingAssignment?.id,
+          lineIndex: art.lineIndex ?? -1,
+          subId: art.subId,
+          startSec: art.startSec,
+          endSec: art.endSec,
+          startFormatted: art.startFormatted,
+          endFormatted: art.endFormatted,
+          durationSec: art.durationSec,
+          text: art.nearestSubtitleText || `[Технический огрех]: ${art.title}`,
+          peakDb: art.type === 'clipping' ? 0.0 : -6.0,
+          rmsDb: -18.0,
+          dynamicRangeDb: 15.0,
+          selected: art.selected,
+          comment: art.comment,
+          audioUrl,
+          audioBuffer,
+          originalAudioBuffer,
+          resolutionAction: art.resolutionAction,
+          artifactType: art.type,
+          artifactMetric: art.metricDetails,
+          artifactSeverity: art.severity,
+          artifactTimestampSec: art.timestampSec,
+          artifactTitle: art.title,
+          artifactDescription: art.description,
+          nearestSubtitleText: art.nearestSubtitleText
         });
       }
     }
@@ -415,16 +1260,62 @@ export async function detectEpisodeGaps(
 }
 
 /**
- * Plays an isolated audio snippet from startSec to endSec
+ * Plays an isolated audio snippet or simultaneous dual mix (for overlaps and sync checks)
  */
 export class SnippetAudioPlayer {
-  private static activeSource: AudioBufferSourceNode | null = null;
+  private static activeSourceA: AudioBufferSourceNode | null = null;
+  private static activeSourceB: AudioBufferSourceNode | null = null;
   private static onStopCallback: (() => void) | null = null;
 
   public static play(
     buffer: AudioBuffer,
     startSec: number,
     endSec: number,
+    onEnded?: () => void,
+    loop: boolean = false
+  ): void {
+    this.stop();
+
+    const ctx = getSharedAudioContext();
+    if (!ctx) return;
+    ensureAudioContextResumed();
+
+    this.activeSourceA = ctx.createBufferSource();
+    this.activeSourceA.buffer = buffer;
+
+    const gainNode = ctx.createGain();
+    gainNode.gain.value = 1.0;
+    this.activeSourceA.connect(gainNode);
+    gainNode.connect(ctx.destination);
+
+    const startTime = Math.max(0, startSec - 0.05);
+    const duration = Math.max(0.1, endSec - startTime);
+
+    if (loop) {
+      this.activeSourceA.loop = true;
+      this.activeSourceA.loopStart = startTime;
+      this.activeSourceA.loopEnd = endSec + 0.05;
+    } else {
+      this.onStopCallback = onEnded || null;
+      this.activeSourceA.onended = () => {
+        if (this.onStopCallback) {
+          this.onStopCallback();
+          this.onStopCallback = null;
+        }
+        this.activeSourceA = null;
+      };
+    }
+
+    this.activeSourceA.start(0, startTime, loop ? undefined : (duration + 0.1));
+  }
+
+  public static playMix(
+    bufferA: AudioBuffer,
+    bufferB: AudioBuffer,
+    startSec: number,
+    endSec: number,
+    gainA: number = 1.0,
+    gainB: number = 1.0,
     onEnded?: () => void
   ): void {
     this.stop();
@@ -433,35 +1324,59 @@ export class SnippetAudioPlayer {
     if (!ctx) return;
     ensureAudioContextResumed();
 
-    this.activeSource = ctx.createBufferSource();
-    this.activeSource.buffer = buffer;
-
-    const gainNode = ctx.createGain();
-    gainNode.gain.value = 1.0;
-    this.activeSource.connect(gainNode);
-    gainNode.connect(ctx.destination);
-
     const duration = Math.max(0.1, endSec - startSec);
+    const startTime = Math.max(0, startSec - 0.05);
+
+    this.activeSourceA = ctx.createBufferSource();
+    this.activeSourceA.buffer = bufferA;
+    const gainNodeA = ctx.createGain();
+    gainNodeA.gain.value = gainA;
+    this.activeSourceA.connect(gainNodeA);
+    gainNodeA.connect(ctx.destination);
+
+    this.activeSourceB = ctx.createBufferSource();
+    this.activeSourceB.buffer = bufferB;
+    const gainNodeB = ctx.createGain();
+    gainNodeB.gain.value = gainB;
+    this.activeSourceB.connect(gainNodeB);
+    gainNodeB.connect(ctx.destination);
+
     this.onStopCallback = onEnded || null;
 
-    this.activeSource.onended = () => {
-      if (this.onStopCallback) {
-        this.onStopCallback();
-        this.onStopCallback = null;
+    let endedCount = 0;
+    const handleEnded = () => {
+      endedCount++;
+      if (endedCount >= 2) {
+        if (this.onStopCallback) {
+          this.onStopCallback();
+          this.onStopCallback = null;
+        }
+        this.activeSourceA = null;
+        this.activeSourceB = null;
       }
-      this.activeSource = null;
     };
 
-    this.activeSource.start(0, Math.max(0, startSec - 0.05), duration + 0.1);
+    this.activeSourceA.onended = handleEnded;
+    this.activeSourceB.onended = handleEnded;
+
+    this.activeSourceA.start(0, startTime, duration + 0.1);
+    this.activeSourceB.start(0, startTime, duration + 0.1);
   }
 
   public static stop(): void {
-    if (this.activeSource) {
+    if (this.activeSourceA) {
       try {
-        this.activeSource.stop();
-        this.activeSource.disconnect();
+        this.activeSourceA.stop();
+        this.activeSourceA.disconnect();
       } catch (e) {}
-      this.activeSource = null;
+      this.activeSourceA = null;
+    }
+    if (this.activeSourceB) {
+      try {
+        this.activeSourceB.stop();
+        this.activeSourceB.disconnect();
+      } catch (e) {}
+      this.activeSourceB = null;
     }
     if (this.onStopCallback) {
       this.onStopCallback();
@@ -469,4 +1384,5 @@ export class SnippetAudioPlayer {
     }
   }
 }
+
 

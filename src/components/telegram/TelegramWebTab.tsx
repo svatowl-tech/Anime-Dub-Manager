@@ -180,7 +180,6 @@ export const TelegramWebTab: React.FC = () => {
             partition="persist:publisher"
             allowpopups={true}
             useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
-            preload={preloadScriptPath || undefined}
             webpreferences="contextIsolation=yes, nodeIntegration=no, nodeIntegrationInSubFrames=no, allowRunningInsecureContent=yes, javascript=yes"
             style={{
               width: `${100000 / zoom}%`,

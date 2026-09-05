@@ -10,7 +10,38 @@ export interface TelegramChatMessage {
   isPinned?: boolean;
 }
 
-export type TelegramTabType = 'web' | 'messenger' | 'composer' | 'automations' | 'dialogs' | 'settings';
+export type TelegramTabType = 'web' | 'tracks' | 'verify' | 'composer' | 'automations' | 'messenger' | 'dialogs' | 'settings';
+
+export interface TelegramAudioFileItem {
+  id: number;
+  date: number;
+  dateFormatted: string;
+  sender: {
+    id: string;
+    name: string;
+    username: string;
+  };
+  fileName: string;
+  mimeType: string;
+  size: number;
+  sizeFormatted: string;
+  duration?: number;
+  durationFormatted?: string;
+  isVoice?: boolean;
+  caption?: string;
+  downloadedPath?: string;
+}
+
+export interface TelegramPostSearchResult {
+  id: number;
+  date: number;
+  dateFormatted: string;
+  text: string;
+  views?: number;
+  forwards?: number;
+  hasMedia?: boolean;
+  link: string;
+}
 
 export interface TelegramTabProps {
   status: TelegramMTProtoStatus | null;

@@ -60,6 +60,7 @@ export default function UploaderPanel({ currentEpisode, onRefresh, onNavigate }:
     handleDeleteChecklistItem,
     handleSyncChecklistWithQuickLinks,
     handleResetChecklistDefs,
+    handleMarkAllPublished,
 
     // Post Generator
     templateType,
@@ -169,6 +170,7 @@ export default function UploaderPanel({ currentEpisode, onRefresh, onNavigate }:
               handleSyncChecklistWithQuickLinks={handleSyncChecklistWithQuickLinks}
               onOpenChecklistModal={() => setIsChecklistModalOpen(true)}
               onSelectUrl={(url, label) => handleSelectBookmark({ id: `cl_${label}`, name: label, url })}
+              handleMarkAllPublished={handleMarkAllPublished}
             />
 
             {/* Section 6: Platform Notes */}

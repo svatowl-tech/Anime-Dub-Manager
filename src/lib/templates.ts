@@ -1,4 +1,5 @@
 import { Episode, Participant } from '../types';
+import { MissingLineDetection } from './qa/missingLinesDetector';
 
 export const formatDeadline = (dateStr?: string) => {
   if (!dateStr) return 'не указан';
@@ -69,6 +70,148 @@ export const generateFixesIssuedMessage = (episode: Episode, participants: Parti
   if (!vars.dubberFixesSections) return null; // No fixes
   const tpl = episode.fixesMessageTemplate || episode.project?.fixesMessageTemplate || DEFAULT_FIXES_ISSUED_TEMPLATE;
   return applyTemplate(tpl, vars);
+};
+
+export const generateSoundEngineerQAReport = (
+  episode: Episode,
+  detections: MissingLineDetection[],
+  participants: Participant[]
+): string => {
+  const vars = getTemplateVariables(episode, participants);
+  const seMention = vars.seMention || '@звукарь';
+  const title = vars.title || 'Серия';
+  const epNum = vars.episodeNumber || episode.number;
+
+  const items = detections.length > 0 ? (detections.some(d => d.selected) ? detections.filter(d => d.selected) : detections) : [];
+
+  const overlaps = items.filter(d => d.defectCategory === 'actor_overlap');
+  const collisions = items.filter(d => d.defectCategory === 'actor_collision');
+  const shortLines = items.filter(d => d.defectCategory === 'timing_too_short');
+  const longLines = items.filter(d => d.defectCategory === 'timing_too_long');
+  const unwanted = items.filter(d => d.defectCategory === 'unwanted_speech');
+  const subErrors = items.filter(d => d.resolutionAction === 'reassign_character' || d.isSubtitleError || d.reassignedCharacterName);
+  const regularMissing = items.filter(d => (d.defectCategory || 'missing_line') === 'missing_line' && !d.isSubtitleError && d.resolutionAction !== 'reassign_character');
+
+  let report = `🎧 ${seMention}, отчет по таймингу, стыкам и косякам озвучки:\n`;
+  report += `🎬 ${title} — ${epNum} серия\n`;
+  report += `━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  // 1. Наезды дублеров (хвосты фраз)
+  if (overlaps.length > 0) {
+    report += `⚡️ НАЕЗДЫ ХВОСТОВ ФРАЗ (КОЛЛИЗИИ ДУБЛЕРОВ):\n`;
+    overlaps.forEach((ov, idx) => {
+      report += `${idx + 1}. [${ov.startFormatted} - ${ov.endFormatted}] Наезд: ~${ov.overlapSec || 0.2}с\n`;
+      report += `   • ${ov.dubberName} (${ov.characterName}): "${ov.text.replace(/^\[.*?\]:\s*"/, '').replace(/"$/, '')}"\n`;
+      if (ov.secondDubberName) {
+        report += `   • наехал на ${ov.secondDubberName} (${ov.secondCharacterName}): "${(ov.secondText || '').replace(/^\[.*?\]:\s*"/, '').replace(/"$/, '')}"\n`;
+      }
+      report += `   👉 Рекомендация: развести стык / подрезать наплывающий хвост\n\n`;
+    });
+  } else {
+    report += `⚡️ НАЕЗДЫ ДУБЛЕРОВ: наездов хвостов фраз не обнаружено (чисто) ✅\n\n`;
+  }
+
+  // 2. Конфликты (одну реплику озвучили двое)
+  if (collisions.length > 0) {
+    report += `⚠️ КОНФЛИКТЫ (ОЗВУЧИЛИ ОДНУ РЕПЛИКУ ВДВОЁМ):\n`;
+    collisions.forEach((col, idx) => {
+      report += `${idx + 1}. [${col.startFormatted} - ${col.endFormatted}] Реплика: "${col.text}"\n`;
+      report += `   • Записали оба: ${col.dubberName} и ${col.secondDubberName || 'второй даббер'}\n`;
+      if (col.resolutionAction === 'keep_first') {
+        report += `   👉 Решение: оставить ${col.dubberName}, заглушить ${col.secondDubberName}\n`;
+      } else if (col.resolutionAction === 'keep_second') {
+        report += `   👉 Решение: оставить ${col.secondDubberName}, заглушить ${col.dubberName}\n`;
+      } else if (col.resolutionAction === 'fix_subs' && col.selectedCharacterForSub) {
+        report += `   👉 Решение: по сабам это персонаж ${col.selectedCharacterForSub}\n`;
+      } else {
+        report += `   👉 Рекомендация: выбрать основную дорожку, вторую заглушить\n`;
+      }
+      report += `\n`;
+    });
+  }
+
+  // 3. Рассинхрон тайминга: фраза короче саба (японский хвост)
+  if (shortLines.length > 0) {
+    report += `⏱ РАССИНХРОН: ФРАЗА КОРОЧЕ САБА (>10%, ВИСЯЩИЙ ЯПОНСКИЙ ХВОСТ):\n`;
+    shortLines.forEach((sh, idx) => {
+      const delta = sh.timingDeltaPercent ? Math.abs(sh.timingDeltaPercent) : '15+';
+      const tail = sh.tailDurationSec ? `~${sh.tailDurationSec}с` : 'есть';
+      report += `${idx + 1}. [${sh.startFormatted}] ${sh.dubberName} (${sh.characterName})\n`;
+      report += `   • Реплика: "${sh.text}"\n`;
+      report += `   • Короче на: -${delta}% | Хвост японского оригинала: ${tail}\n`;
+      report += `   👉 Рекомендация: аккуратно приглушить/увести оригинальную дорожку под конец фразы\n\n`;
+    });
+  }
+
+  // 4. Рассинхрон тайминга: фраза длиннее саба (>20%, вылет)
+  if (longLines.length > 0) {
+    report += `⏱ РАССИНХРОН: ФРАЗА ДЛИННЕЕ САБА (>20%, ВЫЛЕТ ЗА ТАЙМИНГ):\n`;
+    longLines.forEach((lg, idx) => {
+      const delta = lg.timingDeltaPercent ? `+${lg.timingDeltaPercent}%` : '+20%';
+      const overflow = lg.overflowDurationSec ? `(вылет +${lg.overflowDurationSec}с)` : '';
+      report += `${idx + 1}. [${lg.startFormatted} - ${lg.endFormatted}] ${lg.dubberName} (${lg.characterName})\n`;
+      report += `   • Реплика: "${lg.text}"\n`;
+      report += `   • Длиннее на: ${delta} ${overflow}\n`;
+      report += `   👉 Рекомендация: поджать тайминг / легкая компрессия длительности\n\n`;
+    });
+  }
+
+  // 5. Озвучено вне сабов (лишнее)
+  if (unwanted.length > 0) {
+    report += `🎙 ОЗВУЧЕНО ВНЕ САБОВ (ЛИШНИЕ ФРАЗЫ):\n`;
+    unwanted.forEach((un, idx) => {
+      const action = un.resolutionAction === 'silence' ? 'заменить тишиной' : 'оставить';
+      report += `${idx + 1}. [${un.startFormatted} - ${un.endFormatted}] ${un.dubberName} (${un.durationSec}с)\n`;
+      if (un.nearestContext) report += `   • Контекст: ${un.nearestContext}\n`;
+      report += `   👉 Решение: ${action}\n\n`;
+    });
+  }
+
+  // 6. Исправления субтитров (чужие фразы / ошибки разметки)
+  if (subErrors.length > 0) {
+    report += `🔄 ИСПРАВЛЕНИЯ СУБТИТРОВ (ОШИБКА АТРИБУЦИИ В САБАХ):\n`;
+    subErrors.forEach((se, idx) => {
+      const targetChar = se.reassignedCharacterName || se.selectedCharacterForSub || 'Персонаж';
+      const targetDubber = se.reassignedDubberName || 'Даббер';
+      report += `${idx + 1}. [${se.startFormatted}] Реплика: "${se.text}"\n`;
+      report += `   • В исходных сабах: ${se.characterName} (${se.dubberName})\n`;
+      report += `   • Переназначено на: ${targetChar} (${targetDubber})\n`;
+      report += `   👉 Субтитры обновлены, задача на доозвучку направлена ${targetDubber}\n\n`;
+    });
+  }
+
+  // 7. Технические артефакты записи (для исправления плагинами при сведении)
+  const seArtifacts = items.filter(d => 
+    (d.defectCategory === 'audio_artifact' || d.type === 'clipping' || d.type === 'mouse_click' || d.type === 'plosive' || d.type === 'swallowed_vowel') &&
+    d.resolutionAction === 'note_sound_engineer'
+  );
+
+  if (seArtifacts.length > 0) {
+    report += `🎛 ТЕХНИЧЕСКИЕ АРТЕФАКТЫ (ДЛЯ ОБРАБОТКИ ПЛАГИНАМИ / СВЕДЕНИЯ):\n`;
+    seArtifacts.forEach((art, idx) => {
+      const typeDesc = 
+        art.artifactType === 'clipping' ? 'Клиппинг / микро-перегруз' :
+        art.artifactType === 'mouse_click' ? 'Клик мыши / щелчок' :
+        art.artifactType === 'plosive' ? 'Задув капсюля / П-всплеск' : 'Обрыв фразы гейтом';
+      report += `${idx + 1}. [${art.startFormatted}] ${art.dubberName} (${art.characterName}): ${typeDesc}\n`;
+      if (art.artifactMetric) report += `   • Параметры: ${art.artifactMetric}\n`;
+      report += `   👉 Задача звукорежиссеру: ${art.comment.replace(/^\[.*?\]\s*/, '') || 'Обработать декликером / эквалайзером при сведении'}\n\n`;
+    });
+  }
+
+  // 8. Пропуски реплик (если есть)
+  if (regularMissing.length > 0) {
+    report += `🔇 ПРОПУСКИ РЕПЛИК В ДОРОЖКАХ (ОЖИДАЮТ ДООЗВУЧКИ):\n`;
+    regularMissing.forEach((m, idx) => {
+      report += `${idx + 1}. [${m.startFormatted}] ${m.dubberName} (${m.characterName}): "${m.text}"\n`;
+    });
+    report += `\n`;
+  }
+
+  report += `━━━━━━━━━━━━━━━━━━━━━\n`;
+  report += `Сгенерировано через QA Контроль Качества`;
+
+  return report;
 };
 
 export const generateStatusMessage = (episode: Episode, participants: Participant[]) => {

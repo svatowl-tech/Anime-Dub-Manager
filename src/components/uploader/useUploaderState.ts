@@ -441,6 +441,28 @@ export function useUploaderState(currentEpisode: Episode | null, onRefresh?: () 
     }
   }, [quickLinks, mergeQuickLinksIntoChecklist]);
 
+  const handleMarkAllPublished = useCallback(async () => {
+    if (!currentEpisode) return;
+    const allChecked: Record<string, boolean> = {};
+    checklistDefs.forEach(item => {
+      allChecked[item.id] = true;
+    });
+    setChecklist(allChecked);
+    const epKey = currentEpisode.id || 'global';
+    localStorage.setItem(`uploader_checklist_${epKey}`, JSON.stringify(allChecked));
+
+    try {
+      await ipcSafe.invoke('save-episode', {
+        ...currentEpisode,
+        status: 'FINISHED' as const
+      });
+      toast.success(`Серия #${currentEpisode.number} успешно отмечена как выложенная! 🎉`);
+      if (onRefresh) onRefresh();
+    } catch (e: any) {
+      toast.success('Все пункты отмечены как выложенные');
+    }
+  }, [currentEpisode, checklistDefs, onRefresh]);
+
   // Custom fields handlers
   const handleAddCustomField = useCallback(() => {
     if (!newFieldLabel.trim() || !newFieldValue.trim()) return;
@@ -493,6 +515,7 @@ export function useUploaderState(currentEpisode: Episode | null, onRefresh?: () 
     handleDeleteChecklistItem,
     handleSyncChecklistWithQuickLinks,
     handleResetChecklistDefs,
+    handleMarkAllPublished,
 
     // Post Generator
     templateType,

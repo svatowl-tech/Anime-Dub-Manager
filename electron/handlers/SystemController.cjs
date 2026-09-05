@@ -5,7 +5,7 @@ const { exec } = require('child_process');
 const log = require('electron-log');
 const AdmZip = require('adm-zip');
 const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
-const { setCustomFfmpegPath, getActiveProcesses } = require('../services/ffmpegService.cjs');
+const { setCustomFfmpegPath, getActiveProcesses, silenceAudioIntervals } = require('../services/ffmpegService.cjs');
 
 function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow) || BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
@@ -260,6 +260,11 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     const fullDir = path.isAbsolute(dirPath) ? dirPath : path.join(baseDir, dirPath);
     await fs.mkdir(fullDir, { recursive: true });
     return { path: fullDir };
+  }));
+
+  ipcMain.handle('silence-audio-intervals', wrapIpcHandler(async (event, { filePath, intervals }) => {
+    if (!filePath) throw new Error('Missing audio file path');
+    return await silenceAudioIntervals(filePath, intervals || []);
   }));
 
   ipcMain.handle('get-gpus', wrapIpcHandler(async () => {

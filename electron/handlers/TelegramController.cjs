@@ -74,6 +74,22 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
     if (!params || !params.type) throw new Error('Тип автоматизации обязателен');
     return await service.sendAutomationNotification(params);
   }));
+
+  ipcMain.handle('telegram-mtproto-search-posts', wrapIpcHandler(async (event, params) => {
+    return await service.searchChannelPosts(params || {});
+  }));
+
+  ipcMain.handle('telegram-mtproto-get-audio-files', wrapIpcHandler(async (event, params) => {
+    if (!params || !params.chatPeer) throw new Error('Чат обязателен');
+    return await service.getChatAudioFiles(params);
+  }));
+
+  ipcMain.handle('telegram-mtproto-download-audio', wrapIpcHandler(async (event, params) => {
+    if (!params || !params.messageId || !params.chatPeer) {
+      throw new Error('Идентификатор сообщения и чат обязательны');
+    }
+    return await service.downloadChatAudioFile(params);
+  }));
 }
 
 async function cleanupTelegramHandlers() {
