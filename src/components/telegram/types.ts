@@ -10,7 +10,7 @@ export interface TelegramChatMessage {
   isPinned?: boolean;
 }
 
-export type TelegramTabType = 'web' | 'tracks' | 'verify' | 'composer' | 'automations' | 'messenger' | 'dialogs' | 'settings';
+export type TelegramTabType = 'tracks' | 'verify' | 'composer' | 'automations' | 'messenger' | 'dialogs' | 'settings';
 
 export interface TelegramAudioFileItem {
   id: number;

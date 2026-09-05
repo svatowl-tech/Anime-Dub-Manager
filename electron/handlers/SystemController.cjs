@@ -49,24 +49,6 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     return true;
   }));
 
-  ipcMain.handle('get-browser-preload-path', wrapIpcHandler(async () => {
-    return path.join(__dirname, '..', 'lib', 'browser-preload.cjs');
-  }));
-
-  ipcMain.handle('clear-webview-storage', wrapIpcHandler(async () => {
-    const { session } = require('electron');
-    if (session && typeof session.fromPartition === 'function') {
-      const pubSession = session.fromPartition('persist:publisher');
-      await pubSession.clearStorageData({
-        storages: ['cookies', 'localstorage', 'shadercache', 'websql', 'serviceworkers', 'cachestorage', 'indexdb']
-      });
-      await pubSession.clearCache();
-      log.info('[SystemController] Cleared webview storage and cache for persist:publisher');
-      return true;
-    }
-    return false;
-  }));
-
   ipcMain.handle('export-data-zip', wrapIpcHandler(async () => {
     if (!mainWindow) throw new Error('No main window');
     

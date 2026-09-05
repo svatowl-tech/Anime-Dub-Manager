@@ -4,7 +4,6 @@ import { Toaster } from 'sonner';
 import Dashboard from './components/Dashboard';
 import QAPanel from './components/QAPanel';
 import ReleasePanel from './components/ReleasePanel';
-import UploaderPanel from './components/UploaderPanel';
 import AssEditor from './contexts/AssEditor';
 import DatabasePanel from './components/DatabasePanel';
 import SettingsPanel from './components/SettingsPanel';
@@ -21,7 +20,7 @@ import { VideoProvider } from './contexts/VideoContext';
 import { useGlobalKeyboard } from './hooks/useGlobalKeyboard';
  
 function AppContent() {
-  type TabType = 'dashboard' | 'subtitles' | 'qa' | 'release' | 'uploader' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
+  type TabType = 'dashboard' | 'subtitles' | 'qa' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [savedAudioUrl, setSavedAudioUrl] = useState<string | null>(null);
   
@@ -280,19 +279,6 @@ function AppContent() {
           </button>
 
           <button
-            onClick={() => setActiveTab('uploader')}
-            title="Загрузка релиза и публикация на веб-платформах"
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
-              activeTab === 'uploader' 
-                ? 'bg-emerald-600/10 text-emerald-400' 
-                : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
-            }`}
-          >
-            <Globe className="w-5 h-5" />
-            <span>Загрузчик</span>
-          </button>
-
-          <button
             onClick={() => setActiveTab('telegram')}
             title="Полноценный клиент Telegram, мессенджер, чаты, анонсы и автопостинг"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
@@ -360,7 +346,7 @@ function AppContent() {
       </aside>
 
       {/* Main Content */}
-      <main className={`flex-1 bg-neutral-950 flex flex-col ${['subtitles', 'qa', 'telegram', 'uploader'].includes(activeTab) ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <main className={`flex-1 bg-neutral-950 flex flex-col ${['subtitles', 'qa', 'telegram'].includes(activeTab) ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {activeTab === 'dashboard' && (
           <Dashboard 
             onNavigate={handleNavigate} 
@@ -392,7 +378,6 @@ function AppContent() {
         )}
         {activeTab === 'subtitles' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Утилиты субтитров" onApply={setStandaloneEpisode} /> : <AssEditor currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {activeTab === 'release' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Сборка релиза" onApply={setStandaloneEpisode} /> : <ReleasePanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
-        {activeTab === 'uploader' && <UploaderPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} onNavigate={handleNavigate} />}
         {activeTab === 'database' && <DatabasePanel />}
         {activeTab === 'stats' && <StatsPanel />}
         {activeTab === 'settings' && <SettingsPanel />}

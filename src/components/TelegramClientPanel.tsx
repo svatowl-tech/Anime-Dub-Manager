@@ -25,7 +25,6 @@ import {
   Project 
 } from '../types';
 import { TelegramTabType } from './telegram/types';
-import { TelegramWebTab } from './telegram/TelegramWebTab';
 import { TelegramAuthView } from './telegram/TelegramAuthView';
 import { TelegramTracksTab } from './telegram/TelegramTracksTab';
 import { TelegramPostVerifyTab } from './telegram/TelegramPostVerifyTab';
@@ -51,7 +50,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
   onRefreshProjects,
   onClose
 }) => {
-  const [activeTab, setActiveTab] = useState<TelegramTabType>('web');
+  const [activeTab, setActiveTab] = useState<TelegramTabType>('tracks');
   const [status, setStatus] = useState<TelegramMTProtoStatus | null>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState<boolean>(true);
   
@@ -136,18 +135,6 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
 
         {/* Tab Buttons */}
         <div className="flex items-center bg-neutral-950 p-1 rounded-xl border border-neutral-800 flex-wrap gap-1">
-          <button
-            onClick={() => setActiveTab('web')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
-              activeTab === 'web'
-                ? 'bg-sky-600 text-white shadow-sm'
-                : 'text-neutral-400 hover:text-white'
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5" />
-            <span>Telegram Web</span>
-          </button>
-
           <button
             onClick={() => setActiveTab('tracks')}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition cursor-pointer ${
@@ -247,8 +234,6 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
 
       {/* Main Tab Content */}
       <div className="flex-1 overflow-hidden relative flex flex-col">
-        {activeTab === 'web' && <TelegramWebTab />}
-
         {activeTab === 'tracks' && (
           isConnected ? (
             <TelegramTracksTab

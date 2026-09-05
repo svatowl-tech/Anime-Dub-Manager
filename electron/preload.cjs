@@ -1,10 +1,4 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const path = require('path');
-
-let browserPreloadPath = '';
-try {
-  browserPreloadPath = path.join(__dirname, 'lib', 'browser-preload.cjs');
-} catch (e) {}
 
 contextBridge.exposeInMainWorld('electronAPI', {
   invoke: (channel, ...args) => ipcRenderer.invoke(channel, ...args),
@@ -16,7 +10,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
       return result;
     }
     return () => ipcRenderer.off(channel, subscription);
-  },
-  browserPreloadPath
+  }
 });
 

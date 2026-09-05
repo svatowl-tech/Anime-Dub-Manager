@@ -85,14 +85,14 @@ if (ffmpegPath) {
       const { execSync } = require('child_process');
       const isWin = process.platform === 'win32';
       const cmd = isWin ? 'where ffmpeg' : 'which ffmpeg';
-      const systemFfmpeg = execSync(cmd).toString().trim().split('\n')[0].trim();
+      const systemFfmpeg = execSync(cmd, { windowsHide: true, timeout: 2500, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().split('\n')[0].trim();
       if (systemFfmpeg && fs.existsSync(systemFfmpeg)) {
         log.info('Using system FFmpeg at:', systemFfmpeg);
         ffmpeg.setFfmpegPath(systemFfmpeg);
         ffmpegPath = systemFfmpeg;
       }
     } catch (e) {
-      log.error('System FFmpeg not found in path');
+      log.warn('System FFmpeg not found in path, will use custom configuration if set.');
     }
   }
 }

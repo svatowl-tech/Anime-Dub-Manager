@@ -2,9 +2,22 @@ const { killAllTrackedProcesses, killAllTrackedProcessesSync } = require('./lib/
 const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, session, clipboard, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const { exec } = require('child_process');
 const log = require('electron-log');
 const { autoUpdater } = require('electron-updater');
+
+// Safe IPC handler registration helper: prevents "Attempted to register a second handler" crashes
+function safeHandle(channel, handler) {
+  try {
+    ipcMain.removeHandler(channel);
+  } catch (e) {}
+  try {
+    ipcMain.handle(channel, handler);
+  } catch (err) {
+    log.error(`Failed to register IPC handle for '${channel}':`, err);
+  }
+}
 
 // Single-Instance Lock: prevents zombie background processes and multiple fighting instances
 const gotTheLock = app.requestSingleInstanceLock();
@@ -14,13 +27,10 @@ if (!gotTheLock) {
   process.exit(0);
 }
 
-// Append Chromium switches for maximum browser compatibility, stealth, and video autoplay
+// Append Chromium switches for maximum browser compatibility, stealth, and audio/video playback
 // Disabling AutomationControlled masks navigator.webdriver at the C++ Chromium engine level
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
-app.commandLine.appendSwitch('disable-features', 'CrossOriginOpenerPolicy,CrossOriginEmbedderPolicy');
-app.commandLine.appendSwitch('enable-features', 'NetworkService,NetworkServiceInProcess');
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-app.commandLine.appendSwitch('disable-site-isolation-trials');
 
 // Setup safe electron-log path in userData (prevents EPERM errors in C:\Program Files\)
 try {
@@ -56,7 +66,6 @@ ipcMain.on('log-error', (event, error) => {
 const DataManager = require('./lib/DataManager.cjs');
 const TaskQueue = require('./lib/TaskQueue.cjs');
 const { initSharedOnnx } = require('./lib/onnxConfig.cjs');
-const { configureWebViewSession, handleWebContentsCreated, openAuthModalWindow } = require('./lib/WebViewSessionManager.cjs');
 
 const { extractHardsub } = require('./services/ocrService.cjs');
 const { bakeSubtitles, transcodeToMp4, muxRelease, takeScreenshot, getVideoMetadata, extractSubtitleTrack, setCustomFfmpegPath, getActiveProcesses, killAllProcesses } = require('./services/ffmpegService.cjs');
@@ -122,6 +131,14 @@ async function saveData(filename, data) {
 }
 
 function createWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    log.info('Main window already exists. Bringing to front.');
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+    return;
+  }
+
   log.info('Creating main application window...');
 
   mainWindow = new BrowserWindow({
@@ -135,7 +152,6 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      webviewTag: true,
       preload: path.join(__dirname, 'preload.cjs'),
       sandbox: false
     },
@@ -146,16 +162,20 @@ function createWindow() {
     log.info('Main window ready-to-show event received.');
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
+      mainWindow.focus();
     }
   });
 
-  // Safety fallback in case ready-to-show is delayed by asset loading
+  // Safety fallback in case ready-to-show is delayed by asset loading or Windows display driver
   setTimeout(() => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
       log.info('Forcing main window display after safety timeout.');
       mainWindow.show();
+      mainWindow.focus();
     }
-  }, 1500);
+  }, 2000);
+
+  const isDev = !app.isPackaged || process.env.NODE_ENV === 'development';
 
   // Failure handling when loading frontend bundle (only for main top frame, not webviews/subframes)
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -164,12 +184,22 @@ function createWindow() {
       return;
     }
     log.error(`Failed to load main frame ${validatedURL}: [${errorCode}] ${errorDescription}`);
-    if (process.env.NODE_ENV !== 'development' && errorCode !== -3 && errorCode !== -102) {
+    
+    if (isDev) {
+      // In development mode, retry loading localhost:5173 if Vite hasn't finished booting yet
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          log.info('Retrying loading dev server http://localhost:5173...');
+          mainWindow.loadURL('http://localhost:5173').catch(() => {});
+        }
+      }, 1500);
+    } else if (errorCode !== -3 && errorCode !== -102) {
       // Retry loading production dist after brief pause
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          log.info('Retrying loading dist/index.html...');
-          mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+          const indexPath = path.join(app.getAppPath(), 'dist', 'index.html');
+          log.info(`Retrying loading ${indexPath}...`);
+          mainWindow.loadFile(indexPath).catch(() => {});
         }
       }, 1000);
     }
@@ -179,12 +209,28 @@ function createWindow() {
     log.error('Main window render process gone:', details);
   });
 
-  if (process.env.NODE_ENV === 'development') {
-    mainWindow.loadURL('http://localhost:5173');
+  if (isDev) {
+    log.info('Development mode: loading dev server http://localhost:5173');
+    mainWindow.loadURL('http://localhost:5173').catch((err) => {
+      log.warn('Initial loadURL failed (Vite dev server may still be booting):', err.message);
+    });
   } else {
-    const indexPath = path.join(__dirname, '../dist/index.html');
-    log.info(`Loading production frontend file: ${indexPath}`);
-    mainWindow.loadFile(indexPath);
+    const candidates = [
+      path.join(app.getAppPath(), 'dist', 'index.html'),
+      path.join(__dirname, '..', 'dist', 'index.html'),
+      path.join(process.resourcesPath || '', 'app.asar', 'dist', 'index.html')
+    ];
+    let resolvedPath = candidates[0];
+    for (const c of candidates) {
+      if (fsSync.existsSync(c)) {
+        resolvedPath = c;
+        break;
+      }
+    }
+    log.info(`Loading production frontend file: ${resolvedPath}`);
+    mainWindow.loadFile(resolvedPath).catch(err => {
+      log.error('Failed to loadFile production index.html:', err);
+    });
   }
 
   mainWindow.on('close', () => {
@@ -217,10 +263,22 @@ function createDebugWindow() {
       },
     });
 
-    if (process.env.NODE_ENV === 'development') {
+    const isDev = !app.isPackaged || process.env.NODE_ENV === 'development';
+    if (isDev) {
       debugWindow.loadURL('http://localhost:5173/#/debug');
     } else {
-      debugWindow.loadFile(path.join(__dirname, '../dist/index.html'), { hash: 'debug' });
+      const candidates = [
+        path.join(app.getAppPath(), 'dist', 'index.html'),
+        path.join(__dirname, '..', 'dist', 'index.html')
+      ];
+      let p = candidates[0];
+      for (const c of candidates) {
+        if (fsSync.existsSync(c)) {
+          p = c;
+          break;
+        }
+      }
+      debugWindow.loadFile(p, { hash: 'debug' });
     }
 
     debugWindow.on('close', (e) => {
@@ -237,11 +295,21 @@ function createDebugWindow() {
 // Second instance focus
 app.on('second-instance', () => {
   log.info('Second instance launched. Restoring and focusing main window.');
-  if (mainWindow) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.show();
     mainWindow.focus();
+  } else {
+    try {
+      createWindow();
+    } catch (err) {
+      log.error('Failed to create window on second-instance:', err);
+    }
   }
+});
+
+app.on('child-process-gone', (event, details) => {
+  log.warn(`[Electron] Child process gone: type=${details.type}, reason=${details.reason}, exitCode=${details.exitCode}`);
 });
 
 // Auto-updater handlers
@@ -270,19 +338,23 @@ autoUpdater.on('update-downloaded', () => {
   }
 });
 
-ipcMain.handle('install-update', () => {
+safeHandle('install-update', () => {
   autoUpdater.quitAndInstall();
-});
-
-app.on('web-contents-created', (event, contents) => {
-  handleWebContentsCreated(event, contents);
 });
 
 // Main App Initialization
 app.whenReady().then(async () => {
-  log.info('app.whenReady resolved. Registering IPC handlers and subsystems...');
+  log.info('app.whenReady resolved. Initializing Anime Dub Manager...');
 
-  // 1. Initialize DataManager and TaskQueue immediately
+  // 1. Create main application window immediately so UI starts up without delay
+  try {
+    createWindow();
+    createDebugWindow();
+  } catch (winErr) {
+    log.error('Critical error creating main window:', winErr);
+  }
+
+  // 2. Initialize DataManager and TaskQueue
   try {
     dataManager = new DataManager(app.getPath('userData'));
   } catch (dmErr) {
@@ -333,8 +405,7 @@ app.whenReady().then(async () => {
     log.error('TaskQueue initialization error:', tqErr);
   }
 
-  // 2. Register all IPC handlers SYNCHRONOUSLY BEFORE creating any window
-  // This guarantees no race conditions when renderer components make initial IPC calls
+  // 3. Register all IPC handlers safely
   try {
     const getMainWindow = () => mainWindow;
     registerProjectHandlers(getData, saveData, getMainWindow);
@@ -357,76 +428,7 @@ app.whenReady().then(async () => {
     log.error('Fatal error registering IPC handlers:', ipcErr);
   }
 
-  // 3. Configure webview sessions
-  try {
-    if (session && session.defaultSession) {
-      configureWebViewSession(session.defaultSession);
-    }
-    if (session && typeof session.fromPartition === 'function') {
-      configureWebViewSession(session.fromPartition('persist:publisher'));
-    }
-  } catch (err) {
-    log.error('Failed to configure webview sessions:', err);
-  }
-
-  // Register Browser Engine IPC handlers for Uploader and embedded WebViews
-  ipcMain.handle('get-browser-preload-path', () => {
-    return path.join(__dirname, 'lib', 'browser-preload.cjs');
-  });
-
-  ipcMain.handle('browser-open-auth-window', async (event, { url, title }) => {
-    log.info(`[Main] Opening auth modal window for: ${url}`);
-    return await openAuthModalWindow(url, title);
-  });
-
-  ipcMain.handle('browser-clear-session-data', async () => {
-    try {
-      if (session && typeof session.fromPartition === 'function') {
-        const pubSession = session.fromPartition('persist:publisher');
-        await pubSession.clearStorageData({
-          storages: ['cookies', 'localstorage', 'caches', 'indexdb', 'serviceworkers']
-        });
-        log.info('[Main] Cleared persist:publisher session data');
-        return { success: true };
-      }
-      return { success: false, error: 'Session not available' };
-    } catch (e) {
-      log.error('[Main] Failed to clear session data:', e);
-      return { success: false, error: e.message };
-    }
-  });
-
-  ipcMain.handle('browser-copy-image-to-clipboard', async (event, imagePathOrUrl) => {
-    try {
-      if (!imagePathOrUrl) return { success: false, error: 'No image provided' };
-      
-      let img = null;
-      if (imagePathOrUrl.startsWith('http://') || imagePathOrUrl.startsWith('https://')) {
-        const res = await fetch(imagePathOrUrl);
-        const arrayBuf = await res.arrayBuffer();
-        img = nativeImage.createFromBuffer(Buffer.from(arrayBuf));
-      } else {
-        img = nativeImage.createFromPath(imagePathOrUrl);
-      }
-
-      if (img && !img.isEmpty()) {
-        clipboard.writeImage(img);
-        log.info('[Main] Successfully copied image to system clipboard');
-        return { success: true };
-      } else {
-        return { success: false, error: 'Failed to create image object' };
-      }
-    } catch (e) {
-      log.error('[Main] Failed to copy image to clipboard:', e);
-      return { success: false, error: e.message };
-    }
-  });
-
-  // 4. Create application windows
-  createWindow();
-  createDebugWindow();
-
-  // 5. Asynchronous background initializations (non-blocking)
+  // 4. Asynchronous background initializations (non-blocking)
   (async () => {
     try {
       if (dataManager) {
