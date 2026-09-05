@@ -677,8 +677,7 @@ class TelegramMTProtoService {
         type: d.isChannel ? 'channel' : d.isGroup ? 'group' : d.isUser ? 'user' : 'chat',
       }));
     } catch (e) {
-      log.error('[MTProto] getDialogs error:', e);
-      throw new Error(e.message || String(e));
+      await this._handleApiError(e, 'getDialogs');
     }
   }
 
@@ -758,8 +757,7 @@ class TelegramMTProtoService {
         messageId: sentMsg ? sentMsg.id : null,
       };
     } catch (e) {
-      log.error('[MTProto] sendPost error:', e);
-      throw new Error(e.message || String(e));
+      await this._handleApiError(e, 'sendPost');
     }
   }
 
@@ -842,8 +840,7 @@ class TelegramMTProtoService {
         };
       });
     } catch (e) {
-      log.error('[MTProto] searchChannelPosts error:', e);
-      throw new Error(e.message || String(e));
+      await this._handleApiError(e, 'searchChannelPosts');
     }
   }
 
@@ -920,8 +917,7 @@ class TelegramMTProtoService {
 
       return audioFiles;
     } catch (e) {
-      log.error('[MTProto] getChatAudioFiles error:', e);
-      throw new Error(e.message || String(e));
+      await this._handleApiError(e, 'getChatAudioFiles');
     }
   }
 
@@ -979,9 +975,19 @@ class TelegramMTProtoService {
         fileSize: buffer.length,
       };
     } catch (e) {
-      log.error('[MTProto] downloadChatAudioFile error:', e);
-      throw new Error(e.message || String(e));
+      await this._handleApiError(e, 'downloadChatAudioFile');
     }
+  }
+
+  async _handleApiError(e, contextStr) {
+    const log = require('electron-log');
+    log.error(`[MTProto] ${contextStr} error:`, e);
+    const errMsg = e.message || String(e);
+    if (errMsg.includes('AUTH_KEY_UNREGISTERED')) {
+      await this.logout();
+      throw new Error('AUTH_KEY_UNREGISTERED');
+    }
+    throw new Error(errMsg);
   }
 
   ensureConnected() {

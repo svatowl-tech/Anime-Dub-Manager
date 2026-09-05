@@ -29,6 +29,12 @@ export const ipcSafe = {
       // Fallback for handlers that haven't been wrapped yet
       return response;
     } catch (error: any) {
+      if (channel.startsWith('telegram-mtproto-') && String(error.message || error).includes('AUTH_KEY_UNREGISTERED')) {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('telegram-auth-invalidated'));
+        }
+      }
+
       if (error && error._isIpcError) {
         console.group(`🔴 [IPC Error on channel "${error._channel}"]`);
         console.error(`Message:`, error.message);

@@ -70,6 +70,16 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
 
   useEffect(() => {
     loadStatus();
+
+    const handleAuthInvalidated = () => {
+      console.warn('Telegram auth invalidated. Reloading status...');
+      loadStatus();
+    };
+
+    window.addEventListener('telegram-auth-invalidated', handleAuthInvalidated);
+    return () => {
+      window.removeEventListener('telegram-auth-invalidated', handleAuthInvalidated);
+    };
   }, []);
 
   const loadStatus = async () => {
@@ -101,6 +111,10 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
       }
     } catch (e: any) {
       console.warn('Dialogs fetch error:', e);
+      if (String(e).includes('AUTH_KEY_UNREGISTERED')) {
+        // Session was invalid and has been cleared by backend
+        loadStatus();
+      }
     } finally {
       setIsLoadingDialogs(false);
     }
