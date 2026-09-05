@@ -354,8 +354,12 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       const normGain = (isAutoNormalize && normalizationMetrics[selectedTrackId]?.status === 'ready')
         ? normalizationMetrics[selectedTrackId].gain
         : 1.0;
-      const volume = isMuted ? 0 : Math.max(0, userVol * normGain);
-      wavesurferRef.current.setVolume(volume);
+      const volume = isMuted ? 0 : Math.min(1.0, Math.max(0, userVol * normGain));
+      try {
+        wavesurferRef.current.setVolume(volume);
+      } catch (e) {
+        console.warn('WaveSurfer setVolume warning:', e);
+      }
     }
   }, [volumes, isMuted, selectedTrackId, isAutoNormalize, normalizationMetrics, audioRefsUpdated]);
 
@@ -413,7 +417,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           audioUrl = selectedFile.path.startsWith('file://') || selectedFile.path.startsWith('http') ? selectedFile.path : `file://${selectedFile.path}`;
         }
         const audio = new Audio(audioUrl);
-        audio.volume = volumes[track.id] ?? 0.8;
+        audio.volume = Math.min(1.0, Math.max(0, volumes[track.id] ?? 0.8));
         audioRefs.current[track.id] = audio;
         
         try {

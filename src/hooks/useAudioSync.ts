@@ -32,8 +32,13 @@ export const useAudioSync = (
   useEffect(() => {
     Object.entries(audioRefs.current).forEach(([id, audio]) => {
       if (audio instanceof HTMLAudioElement) {
-        const volume = isMuted ? 0 : (volumes[id] ?? 0.8);
-        audio.volume = volume;
+        const rawVol = volumes[id] ?? 0.8;
+        const volume = isMuted ? 0 : Math.min(1.0, Math.max(0, rawVol));
+        try {
+          audio.volume = volume;
+        } catch (e) {
+          console.warn('Audio volume set error:', e);
+        }
       }
     });
   }, [volumes, isMuted, audioRefsUpdated]);

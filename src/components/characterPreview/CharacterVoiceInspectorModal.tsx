@@ -194,7 +194,11 @@ export default function CharacterVoiceInspectorModal({
 
     video.currentTime = startTime;
     video.playbackRate = settings.playbackRate;
-    video.volume = settings.volume;
+    try {
+      video.volume = Math.min(1.0, Math.max(0, settings.volume ?? 1.0));
+    } catch (e) {
+      console.warn('Video volume set error:', e);
+    }
 
     const startPlaying = () => {
       video.play().then(() => {

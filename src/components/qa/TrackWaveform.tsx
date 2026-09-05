@@ -224,11 +224,15 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
         }
       }
 
-      if (gainNodeRef.current) {
-        wavesurferRef.current.setVolume(1.0);
-        gainNodeRef.current.gain.gain.value = isMuted ? 0 : volume;
-      } else {
-        wavesurferRef.current.setVolume(isMuted ? 0 : Math.min(1.0, volume));
+      try {
+        if (gainNodeRef.current) {
+          wavesurferRef.current.setVolume(1.0);
+          gainNodeRef.current.gain.gain.value = isMuted ? 0 : Math.max(0, volume);
+        } else {
+          wavesurferRef.current.setVolume(isMuted ? 0 : Math.min(1.0, Math.max(0, volume)));
+        }
+      } catch (e) {
+        console.warn('TrackWaveform setVolume error:', e);
       }
     }
   }, [volume, isMuted]);
