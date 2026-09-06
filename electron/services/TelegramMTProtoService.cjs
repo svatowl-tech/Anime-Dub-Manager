@@ -409,12 +409,6 @@ class TelegramMTProtoService {
                 return;
               }
             }
-
-            // Also check getMe directly if authorization succeeded on Telegram side
-            const me = await this.client.getMe().catch(() => null);
-            if (me && me.id) {
-              await this._completeAuthSuccess({ user: me });
-            }
           }
         } catch (evErr) {
           const errMsg = evErr.message || String(evErr);
@@ -455,28 +449,10 @@ class TelegramMTProtoService {
         if (!this.qrAuthActive || this.qrStatus !== 'waiting_scan') break;
         checkCount++;
 
-        // 1. Direct active authorization check (GramJS will return user info if session was activated)
-        try {
-          const me = await this.client.getMe();
-          if (me && me.id) {
-            log.info('[MTProto QR] Active session verified via getMe()!', me.username || me.id);
-            await this._completeAuthSuccess({ user: me });
-            break;
-          }
-        } catch (meErr) {
-          const meMsg = meErr.message || String(meErr);
-          if (meMsg.includes('SESSION_PASSWORD_NEEDED') || meMsg.includes('2FA')) {
-            this.qrStatus = 'password_required';
-            log.info('[MTProto QR] 2FA password required after QR scan');
-            break;
-          }
-        }
-
-        // 2. Periodic MTProto exportLoginToken check / renewal
         const nowSec = Math.floor(Date.now() / 1000);
         const shouldCallExport = (checkCount % 2 === 0) || (this.qrExpires && nowSec >= this.qrExpires - 3);
 
-        if (shouldCallExport) {
+        if (shouldCallExport && this.client) {
           const res = await this.client.invoke(new Api.auth.ExportLoginToken({
             apiId,
             apiHash,
@@ -517,10 +493,12 @@ class TelegramMTProtoService {
           this.qrStatus = 'password_required';
           log.info('[MTProto QR] 2FA password required');
           break;
-        } else if (errMsg.includes('AUTH_KEY_UNREGISTERED') || errMsg.includes('FLOOD_WAIT')) {
+        } else if (errMsg.includes('FLOOD_WAIT')) {
           this.qrStatus = 'error';
           this.qrError = errMsg;
           break;
+        } else {
+          log.warn('[MTProto QR] Polling check notice:', errMsg);
         }
       }
     }
@@ -530,7 +508,12 @@ class TelegramMTProtoService {
     try {
       const sessionStr = this.client.session.save();
       this.settings.sessionString = sessionStr;
-      const me = await this.client.getMe().catch(() => auth?.user || null);
+      let me = null;
+      try {
+        me = await this.client.getMe();
+      } catch (err) {
+        me = auth?.user || null;
+      }
       this.me = {
         id: (me && me.id) ? me.id.toString() : '',
         firstName: (me && me.firstName) || '',
@@ -570,13 +553,13 @@ class TelegramMTProtoService {
 
     const sessionStr = this.client.session.save();
     this.settings.sessionString = sessionStr;
-    const me = await this.client.getMe();
+    const me = await this.client.getMe().catch(() => checkRes.user || null);
     this.me = {
-      id: me.id ? me.id.toString() : '',
-      firstName: me.firstName || '',
-      lastName: me.lastName || '',
-      username: me.username || '',
-      phone: me.phone || '',
+      id: (me && me.id) ? me.id.toString() : '',
+      firstName: (me && me.firstName) || '',
+      lastName: (me && me.lastName) || '',
+      username: (me && me.username) || '',
+      phone: (me && me.phone) || '',
     };
     this.status = 'connected';
     this.qrStatus = 'authenticated';
@@ -597,31 +580,6 @@ class TelegramMTProtoService {
         error: null,
         me: this.me
       };
-    }
-
-    // If waiting for scan, active check via client.getMe()
-    if (this.qrAuthActive && this.qrStatus === 'waiting_scan' && this.client) {
-      try {
-        const me = await this.client.getMe();
-        if (me && me.id) {
-          log.info('[MTProto QR check] User confirmed authorized via getQrAuthStatus!', me.username || me.id);
-          await this._completeAuthSuccess({ user: me });
-          return {
-            active: false,
-            status: 'authenticated',
-            qrUrl: this.qrUrl,
-            qrDataUrl: this.qrDataUrl,
-            expires: this.qrExpires,
-            error: null,
-            me: this.me
-          };
-        }
-      } catch (checkErr) {
-        const errMsg = checkErr.message || String(checkErr);
-        if (errMsg.includes('SESSION_PASSWORD_NEEDED') || errMsg.includes('2FA')) {
-          this.qrStatus = 'password_required';
-        }
-      }
     }
 
     return {
@@ -646,10 +604,12 @@ class TelegramMTProtoService {
   async logout() {
     try {
       if (this.client) {
-        try {
-          await this.client.invoke(new Api.auth.LogOut());
-        } catch (e) {}
-        await this.client.disconnect();
+        if (this.status === 'connected') {
+          try {
+            await this.client.invoke(new Api.auth.LogOut());
+          } catch (e) {}
+        }
+        await this.client.disconnect().catch(() => {});
       }
     } catch (e) {}
     this.client = null;
@@ -984,7 +944,16 @@ class TelegramMTProtoService {
     log.error(`[MTProto] ${contextStr} error:`, e);
     const errMsg = e.message || String(e);
     if (errMsg.includes('AUTH_KEY_UNREGISTERED')) {
-      await this.logout();
+      this.status = 'disconnected';
+      this.me = null;
+      this.session = null;
+      if (this.client) {
+        try {
+          await this.client.disconnect();
+        } catch (err) {}
+        this.client = null;
+      }
+      await this.saveSettings({ sessionString: '' });
       throw new Error('AUTH_KEY_UNREGISTERED');
     }
     throw new Error(errMsg);

@@ -113,7 +113,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
       console.warn('Dialogs fetch error:', e);
       if (String(e).includes('AUTH_KEY_UNREGISTERED')) {
         // Session was invalid and has been cleared by backend
-        loadStatus();
+        setStatus(prev => prev ? { ...prev, status: 'disconnected', me: null } : { status: 'disconnected', me: null, settings: {} as any });
       }
     } finally {
       setIsLoadingDialogs(false);

@@ -29,7 +29,13 @@ export const ipcSafe = {
       // Fallback for handlers that haven't been wrapped yet
       return response;
     } catch (error: any) {
-      if (channel.startsWith('telegram-mtproto-') && String(error.message || error).includes('AUTH_KEY_UNREGISTERED')) {
+      const isOperationalTgChannel = channel.startsWith('telegram-mtproto-') && 
+        !channel.includes('qr') && 
+        !channel.includes('send-code') && 
+        !channel.includes('sign-in') && 
+        !channel.includes('submit-password');
+
+      if (isOperationalTgChannel && String(error.message || error).includes('AUTH_KEY_UNREGISTERED')) {
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('telegram-auth-invalidated'));
         }
