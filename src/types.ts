@@ -9,6 +9,7 @@ export interface TelegramMTProtoSettings {
   apiId: number | string;
   apiHash: string;
   phoneNumber: string;
+  botToken?: string;
   defaultChannelId: string;
   autoPin: boolean;
   autoNotify: boolean;
@@ -33,6 +34,12 @@ export interface TelegramMTProtoMe {
 export interface TelegramMTProtoStatus {
   status: 'disconnected' | 'code_sent' | 'password_required' | 'connected';
   me: TelegramMTProtoMe | null;
+  botConnected?: boolean;
+  botMe?: {
+    id: number;
+    username: string;
+    firstName: string;
+  } | null;
   settings: TelegramMTProtoSettings;
 }
 

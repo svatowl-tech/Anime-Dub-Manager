@@ -1108,6 +1108,137 @@ function handleIpcMock(channel: string, args: any[]): any {
     };
   }
 
+  if (channel === 'telegram-mtproto-get-audio-files') {
+    return {
+      success: true,
+      files: [
+        {
+          id: 10421,
+          date: Math.floor(Date.now() / 1000) - 1800,
+          dateFormatted: 'Сегодня, 14:10',
+          sender: { id: '112233', name: 'Александр Ветров', username: 'alex_voice' },
+          fileName: 'Frieren_05_Himmel_Alex.wav',
+          mimeType: 'audio/wav',
+          size: 14680000,
+          sizeFormatted: '14.00 MB',
+          duration: 184,
+          durationFormatted: '3:04',
+          isVoice: false,
+          caption: 'Химмель, реплики с 04:12 по 07:16. Дубль 2 почищен от шумов.'
+        },
+        {
+          id: 10420,
+          date: Math.floor(Date.now() / 1000) - 3600,
+          dateFormatted: 'Сегодня, 13:40',
+          sender: { id: '445566', name: 'Мария Соколова', username: 'masha_dub' },
+          fileName: 'Frieren_05_Frieren_Voice_Take1.ogg',
+          mimeType: 'audio/ogg',
+          size: 4200000,
+          sizeFormatted: '4.01 MB',
+          duration: 112,
+          durationFormatted: '1:52',
+          isVoice: true,
+          caption: 'Голосовое: Фрирен — сцена на кладбище (добавила дыхание).'
+        },
+        {
+          id: 10418,
+          date: Math.floor(Date.now() / 1000) - 7200,
+          dateFormatted: 'Сегодня, 12:45',
+          sender: { id: '778899', name: 'Дмитрий Кузнецов', username: 'dima_sound' },
+          fileName: 'Kimetsu_12_Tanjiro_FullTrack.wav',
+          mimeType: 'audio/wav',
+          size: 28400000,
+          sizeFormatted: '27.08 MB',
+          duration: 345,
+          durationFormatted: '5:45',
+          isVoice: false,
+          caption: 'Танджиро, 12 серия целиком с таймкодами.'
+        }
+      ]
+    };
+  }
+
+  if (channel === 'telegram-mtproto-search-posts') {
+    const query = args[0]?.query || '';
+    return {
+      success: true,
+      posts: [
+        {
+          id: 842,
+          date: Math.floor(Date.now() / 1000) - 86400,
+          dateFormatted: 'Вчера, 18:30',
+          text: `✨ <b>Провожающая в последний путь Фрирен</b> [5 СЕРИЯ]\n\nОзвучка: Akane Project\nРоли: Александр, Мария, Дмитрий\n\n📌 Смотреть: https://akane.club/frieren/5\n💬 Обсуждение: @akaneteam_chat`,
+          views: 3420,
+          forwards: 128,
+          hasMedia: true,
+          link: 'https://t.me/akaneproject/842'
+        },
+        {
+          id: 839,
+          date: Math.floor(Date.now() / 1000) - 172800,
+          dateFormatted: '02.09.2024, 21:15',
+          text: `✨ <b>Клинок, рассекающий демонов</b> [12 СЕРИЯ]\n\nФинальная серия арки!\n\n📌 Смотреть: https://akane.club/kimetsu/12\n💬 Чат: @akaneteam_chat`,
+          views: 5120,
+          forwards: 254,
+          hasMedia: true,
+          link: 'https://t.me/akaneproject/839'
+        }
+      ].filter(p => !query || p.text.toLowerCase().includes(query.toLowerCase()))
+    };
+  }
+
+  if (channel === 'telegram-mtproto-get-messages') {
+    return {
+      success: true,
+      messages: [
+        {
+          id: '1',
+          senderName: 'Александр Ветров',
+          text: 'Всем привет! Дорожки Химмеля по 5 серии готовы и залиты в чат.',
+          time: '14:10',
+          isMe: false,
+          isPinned: false
+        },
+        {
+          id: '2',
+          senderName: 'Мария Соколова',
+          text: 'Мои реплики Фрирен тоже готовы, прикрепила чуть выше аудио-сообщением 🎙️',
+          time: '14:12',
+          isMe: false,
+          isPinned: false
+        },
+        {
+          id: '3',
+          senderName: 'Вы',
+          text: 'Супер, забираю в работу на сведение! Пост релиза запланирован на 19:00.',
+          time: '14:15',
+          isMe: true,
+          isPinned: true
+        }
+      ]
+    };
+  }
+
+  if (channel === 'telegram-mtproto-download-audio') {
+    return {
+      success: true,
+      filePath: '/downloads/telegram_tracks/track_sample.wav',
+      fileName: 'track_sample.wav',
+      fileSize: 14680000
+    };
+  }
+
+  if (channel === 'telegram-bot-test-connection') {
+    return {
+      success: true,
+      bot: {
+        id: 777000123,
+        username: 'AkaneDubBot',
+        firstName: 'Akane Dubbing Bot'
+      }
+    };
+  }
+
   if (channel === 'telegram-mtproto-logout') {
     return { success: true };
   }

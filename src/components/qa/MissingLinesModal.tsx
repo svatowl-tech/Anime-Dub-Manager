@@ -55,6 +55,7 @@ interface MissingLinesModalProps {
   episode?: Episode | null;
   participants?: Participant[];
   onGenerateSoundEngineerMessage?: () => void;
+  onOpenScanConfig?: () => void;
 }
 
 export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
@@ -69,7 +70,8 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   currentThreshold = 3.0,
   episode,
   participants,
-  onGenerateSoundEngineerMessage
+  onGenerateSoundEngineerMessage,
+  onOpenScanConfig
 }) => {
   const [gaps, setGaps] = useState<MissingLineDetection[]>(initialGaps);
   const [selectedCategoryTab, setSelectedCategoryTab] = useState<'all' | DefectCategory | 'sub_error'>('all');
@@ -201,13 +203,14 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   const collisionsCount = gaps.filter(g => g.defectCategory === 'actor_collision').length;
   const overlapsCount = gaps.filter(g => g.defectCategory === 'actor_overlap').length;
   const shortTimingCount = gaps.filter(g => g.defectCategory === 'timing_too_short').length;
-  const longTimingCount = gaps.filter(g => g.defectCategory === 'timing_too_long').length;
+  const longTimingCount = gaps.filter(g => g.defectCategory === 'timing_too_long' || g.isTimingTooLongMerged).length;
   const subErrorCount = gaps.filter(g => g.isSubtitleError || g.resolutionAction === 'reassign_character').length;
   const artifactsCount = gaps.filter(g => g.defectCategory === 'audio_artifact').length;
   const clippingCount = gaps.filter(g => g.defectCategory === 'audio_artifact' && (g.artifactType === 'clipping' || g.type === 'clipping')).length;
   const clicksCount = gaps.filter(g => g.defectCategory === 'audio_artifact' && (g.artifactType === 'mouse_click' || g.type === 'mouse_click')).length;
   const plosivesCount = gaps.filter(g => g.defectCategory === 'audio_artifact' && (g.artifactType === 'plosive' || g.type === 'plosive')).length;
   const cutoffsCount = gaps.filter(g => g.defectCategory === 'audio_artifact' && (g.artifactType === 'swallowed_vowel' || g.type === 'swallowed_vowel')).length;
+  const textMismatchCount = gaps.filter(g => g.defectCategory === 'text_mismatch').length;
 
   // Dubbers list for filter chips
   const dubbers = Array.from(new Set(
@@ -226,7 +229,11 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
         if (artType !== selectedArtifactTypeFilter) return false;
       }
     } else if (selectedCategoryTab !== 'all' && cat !== selectedCategoryTab) {
-      return false;
+      if (selectedCategoryTab === 'timing_too_long' && gap.isTimingTooLongMerged) {
+        // also show in timing_too_long tab
+      } else {
+        return false;
+      }
     }
     if (selectedDubberFilter !== 'all' && gap.dubberName !== selectedDubberFilter && gap.secondDubberName !== selectedDubberFilter) {
       return false;
@@ -271,10 +278,18 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
     g.defectCategory === 'audio_artifact' && g.resolutionAction === 'note_sound_engineer'
   ).length;
 
+  const textMismatchFixCount = selectedGaps.filter(g => 
+    g.defectCategory === 'text_mismatch' && (g.resolutionAction === 'legitimate_fix' || g.resolutionAction === 'request_dubber_fix')
+  ).length;
+
+  const textMismatchActorBetterCount = selectedGaps.filter(g => 
+    g.defectCategory === 'text_mismatch' && g.resolutionAction === 'actor_better_than_sub'
+  ).length;
+
   const handleToggleSelectAll = (select: boolean) => {
     setGaps(prev => prev.map(g => {
       const cat = g.defectCategory || 'missing_line';
-      const matchesCategory = selectedCategoryTab === 'all' || cat === selectedCategoryTab;
+      const matchesCategory = selectedCategoryTab === 'all' || cat === selectedCategoryTab || (selectedCategoryTab === 'timing_too_long' && g.isTimingTooLongMerged);
       const matchesDubber = selectedDubberFilter === 'all' || g.dubberName === selectedDubberFilter || g.secondDubberName === selectedDubberFilter;
       return (matchesCategory && matchesDubber) ? { ...g, selected: select } : g;
     }));
@@ -463,6 +478,21 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               <span>Сообщение звукарю</span>
             </button>
 
+            {onOpenScanConfig && (
+              <button
+                type="button"
+                onClick={() => {
+                  SnippetAudioPlayer.stop();
+                  onOpenScanConfig();
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-all flex items-center gap-1.5 shadow-sm"
+                title="Настроить детекторы проверок (пропуски, конфликты, наезды, Whisper ASR)"
+              >
+                <Sliders className="w-3.5 h-3.5 text-amber-400" />
+                <span>Настроить проверки</span>
+              </button>
+            )}
+
             {onReAnalyze && (
               <button
                 onClick={() => onReAnalyze(selectedSensitivity)}
@@ -590,7 +620,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               }`}
             >
               <Clock className="w-3.5 h-3.5 text-cyan-400" />
-              <span>Короче саба (&gt;10%)</span>
+              <span>Короче саба (&gt;30%)</span>
               <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-cyan-950/80 text-cyan-200 border border-cyan-800/40">
                 {shortTimingCount}
               </span>
@@ -605,7 +635,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               }`}
             >
               <Clock className="w-3.5 h-3.5 text-purple-400" />
-              <span>Длиннее саба (&gt;20%)</span>
+              <span>Длиннее саба (&gt;40%)</span>
               <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-purple-950/80 text-purple-200 border border-purple-800/40">
                 {longTimingCount}
               </span>
@@ -625,6 +655,23 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                 {artifactsCount}
               </span>
             </button>
+
+            {textMismatchCount > 0 && (
+              <button
+                onClick={() => setSelectedCategoryTab('text_mismatch')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shrink-0 ${
+                  selectedCategoryTab === 'text_mismatch'
+                    ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400/50'
+                    : 'bg-emerald-950/40 text-emerald-300 hover:text-white hover:bg-emerald-900/60 border border-emerald-800/40'
+                }`}
+              >
+                <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Сверка текста (Whisper)</span>
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-900 text-emerald-200 border border-emerald-700">
+                  {textMismatchCount}
+                </span>
+              </button>
+            )}
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
@@ -838,21 +885,35 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                             </span>
                           )}
                           {category === 'actor_overlap' && (
-                            <span className="text-xs px-2 py-0.5 rounded bg-orange-500/10 text-orange-300 border border-orange-500/20 font-semibold flex items-center gap-1">
-                              <Zap className="w-3 h-3 text-orange-400" />
-                              Наезд хвоста (~{gap.overlapSec || 0.2}с)
-                            </span>
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="text-xs px-2 py-0.5 rounded bg-orange-500/10 text-orange-300 border border-orange-500/20 font-semibold flex items-center gap-1">
+                                <Zap className="w-3 h-3 text-orange-400" />
+                                Наезд хвоста (~{gap.overlapSec || 0.2}с)
+                              </span>
+                              {gap.isTimingTooLongMerged && (
+                                <span className="text-xs px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 font-semibold flex items-center gap-1">
+                                  <Clock className="w-3 h-3 text-purple-400" />
+                                  Длиннее саба (+{gap.timingDeltaPercent}%) • 1 фикс
+                                </span>
+                              )}
+                            </div>
                           )}
                           {category === 'timing_too_short' && (
                             <span className="text-xs px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 font-semibold flex items-center gap-1">
                               <Clock className="w-3 h-3 text-cyan-400" />
-                              Короче саба (-{Math.abs(gap.timingDeltaPercent || 15)}%)
+                              Короче саба (-{Math.abs(gap.timingDeltaPercent || 30)}%)
                             </span>
                           )}
                           {category === 'timing_too_long' && (
                             <span className="text-xs px-2 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 font-semibold flex items-center gap-1">
                               <Clock className="w-3 h-3 text-purple-400" />
-                              Длиннее саба (+{gap.timingDeltaPercent || 25}%)
+                              Длиннее саба (+{gap.timingDeltaPercent || 40}%)
+                            </span>
+                          )}
+                          {category === 'text_mismatch' && (
+                            <span className="text-xs px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold flex items-center gap-1">
+                              <Sparkles className="w-3 h-3 text-emerald-400" />
+                              {gap.typeLabel || 'Сверка текста (Whisper)'}
                             </span>
                           )}
 
@@ -1337,16 +1398,30 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                       {category === 'actor_overlap' && (
                         <div className="space-y-3">
                           {/* Collision warning banner */}
-                          <div className="bg-orange-500/10 border border-orange-500/30 rounded-xl p-3 flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2">
-                              <Zap className="w-4 h-4 text-orange-400 shrink-0" />
-                              <span className="text-xs text-orange-200">
-                                Хвост фразы <strong>{gap.dubberName}</strong> залезает на реплику <strong>{gap.secondDubberName}</strong> на <strong>~{gap.overlapSec || 0.2}с</strong>
+                          <div className="bg-orange-500/10 border border-orange-500/30 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                            <div className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <Zap className="w-4 h-4 text-orange-400 shrink-0" />
+                                <span className="text-xs text-orange-200 font-medium">
+                                  Хвост фразы <strong>{gap.dubberName}</strong> залезает на реплику <strong>{gap.secondDubberName}</strong> на <strong>~{gap.overlapSec || 0.2}с</strong>
+                                </span>
+                              </div>
+                              {gap.isTimingTooLongMerged && (
+                                <p className="text-[11px] text-purple-300/90 pl-6">
+                                  ⚠️ Объединено в один фикс: фраза дабера длиннее субтитра на <strong>+{gap.timingDeltaPercent}%</strong> (вылет +{gap.overflowDurationSec || 0.4}с) и залезает на соседний саб.
+                                </p>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {gap.isTimingTooLongMerged && (
+                                <span className="text-[11px] px-2 py-0.5 rounded bg-purple-950/80 text-purple-300 font-mono shrink-0 border border-purple-800/40">
+                                  +{gap.timingDeltaPercent}%
+                                </span>
+                              )}
+                              <span className="text-[11px] px-2 py-0.5 rounded bg-orange-950/80 text-orange-300 font-mono shrink-0 border border-orange-800/40">
+                                Наезд: ~{gap.overlapSec || 0.2}с
                               </span>
                             </div>
-                            <span className="text-[11px] px-2 py-0.5 rounded bg-orange-950/80 text-orange-300 font-mono shrink-0 border border-orange-800/40">
-                              Наезд: ~{gap.overlapSec || 0.2}с
-                            </span>
                           </div>
 
                           {/* Dual speech cards */}
@@ -1441,7 +1516,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                                 }`}
                               >
                                 <Headphones className="w-3.5 h-3.5 text-indigo-300" />
-                                В записку звукарю (развести стык)
+                                {gap.isTimingTooLongMerged ? 'В записку звукарю (поджать фразу и развести стык)' : 'В записку звукарю (развести стык)'}
                               </button>
 
                               <button
@@ -1483,7 +1558,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                               <div className="flex items-center gap-2">
                                 <Clock className="w-4 h-4 text-cyan-400 shrink-0" />
                                 <span className="text-xs font-bold text-cyan-200">
-                                  Фраза дабера короче субтитра на {Math.abs(gap.timingDeltaPercent || 15)}% (критично &gt;10%)
+                                  Фраза дабера короче субтитра на {Math.abs(gap.timingDeltaPercent || 30)}% (критично &gt;30%)
                                 </span>
                               </div>
                               <p className="text-[11px] text-cyan-300/80">
@@ -1594,7 +1669,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                         </div>
                       )}
 
-                      {/* CATEGORY 6: TIMING TOO LONG (ДЛИННЕЕ САБА >20%, ВЫЛЕТ) */}
+                      {/* CATEGORY 6: TIMING TOO LONG (ДЛИННЕЕ САБА >40%, ВЫЛЕТ) */}
                       {category === 'timing_too_long' && (
                         <div className="space-y-3">
                           {/* Alert info banner */}
@@ -1603,7 +1678,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                               <div className="flex items-center gap-2">
                                 <Clock className="w-4 h-4 text-purple-400 shrink-0" />
                                 <span className="text-xs font-bold text-purple-200">
-                                  Фраза дабера длиннее субтитра на +{gap.timingDeltaPercent || 25}% (критично &gt;20%)
+                                  Фраза дабера длиннее субтитра на +{gap.timingDeltaPercent || 40}% (критично &gt;40%)
                                 </span>
                               </div>
                               <p className="text-[11px] text-purple-300/80">
@@ -1916,6 +1991,254 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                         </div>
                       )}
 
+                      {/* CATEGORY 8: TEXT MISMATCH / WHISPER ASR */}
+                      {category === 'text_mismatch' && (
+                        <div className="space-y-3">
+                          {/* Top banner with similarity and model info */}
+                          <div className="bg-emerald-950/25 border border-emerald-500/30 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2.5">
+                            <div className="flex items-center gap-2.5">
+                              <div className="p-2 rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                                <Sparkles className="w-4 h-4" />
+                              </div>
+                              <div>
+                                <div className="text-xs font-bold text-emerald-200 flex items-center gap-2">
+                                  <span>Сверка речи со сценарием (Whisper ASR)</span>
+                                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-neutral-800 text-neutral-300 border border-neutral-700 font-mono">
+                                    модель: {gap.whisperModelUsed || 'small'}
+                                  </span>
+                                </div>
+                                <p className="text-[11px] text-neutral-400 mt-0.5">
+                                  Фраза распознана с передачей контекста из субтитров для исключения ошибок в терминах
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              {typeof gap.textSimilarityPercent === 'number' && (
+                                <div className={`text-xs px-2.5 py-1 rounded-lg border font-mono font-bold ${
+                                  gap.textSimilarityPercent >= 80 
+                                    ? 'bg-amber-950/60 text-amber-300 border-amber-500/40' 
+                                    : 'bg-red-950/60 text-red-300 border-red-500/40'
+                                }`}>
+                                  Сходство: {gap.textSimilarityPercent}%
+                                </div>
+                              )}
+                              <span className="text-[11px] px-2.5 py-1 rounded-lg bg-neutral-800 text-neutral-300 border border-neutral-700 font-medium">
+                                {gap.typeLabel || 'Расхождение текста'}
+                              </span>
+                            </div>
+                          </div>
+
+                          {/* Side-by-side script vs voiced comparison */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                            {/* Script Subtitle */}
+                            <div className="bg-neutral-950/60 border border-neutral-800 rounded-xl p-3 space-y-1.5">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-semibold text-neutral-400 flex items-center gap-1.5">
+                                  <FileText className="w-3.5 h-3.5 text-blue-400" />
+                                  В сценарии (Субтитры):
+                                </span>
+                                <span className="text-[11px] text-neutral-400">
+                                  {gap.characterName} {gap.lineIndex !== undefined ? `(строка #${gap.lineIndex + 1})` : ''}
+                                </span>
+                              </div>
+                              <p className="text-xs text-neutral-200 font-medium bg-neutral-900/80 p-2.5 rounded-lg border border-neutral-800/80 leading-relaxed select-text">
+                                «{gap.expectedText || gap.text}»
+                              </p>
+                            </div>
+
+                            {/* Spoken in Audio Track */}
+                            <div className="bg-neutral-950/60 border border-neutral-800 rounded-xl p-3 space-y-1.5">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-semibold text-emerald-400 flex items-center gap-1.5">
+                                  <Mic className="w-3.5 h-3.5 text-emerald-400" />
+                                  Произнесено дабером (Whisper):
+                                </span>
+                                <span className="text-[11px] text-neutral-400 font-bold text-amber-300">
+                                  🎙 {gap.dubberName}
+                                </span>
+                              </div>
+                              <p className="text-xs text-emerald-200 font-medium bg-neutral-900/80 p-2.5 rounded-lg border border-emerald-500/20 leading-relaxed select-text">
+                                «{gap.recognizedText || '...' }»
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Visual Word Differences (LCS) */}
+                          {gap.wordDiffs && gap.wordDiffs.length > 0 && (
+                            <div className="bg-neutral-950/40 border border-neutral-800/80 rounded-xl p-3 space-y-2">
+                              <div className="flex items-center justify-between text-xs">
+                                <span className="font-medium text-neutral-300 flex items-center gap-1.5">
+                                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                                  Пословный анализ расхождений:
+                                </span>
+                                <div className="flex items-center gap-2 text-[10px]">
+                                  <span className="flex items-center gap-1 text-red-400">
+                                    <span className="w-2 h-2 rounded-full bg-red-500"></span> Пропущено в озвучке
+                                  </span>
+                                  <span className="flex items-center gap-1 text-emerald-400">
+                                    <span className="w-2 h-2 rounded-full bg-emerald-500"></span> Добавлено / Сказано иначе
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="p-2.5 bg-neutral-900/90 rounded-lg border border-neutral-800 text-xs leading-relaxed flex flex-wrap gap-1.5 select-text">
+                                {gap.wordDiffs.map((diff, dIdx) => {
+                                  if (diff.status === 'missing') {
+                                    return (
+                                      <span
+                                        key={dIdx}
+                                        className="px-1.5 py-0.5 rounded bg-red-950/60 text-red-300 border border-red-800/50 line-through font-medium"
+                                        title="Пропущенное слово из субтитров"
+                                      >
+                                        {diff.word}
+                                      </span>
+                                    );
+                                  }
+                                  if (diff.status === 'added') {
+                                    return (
+                                      <span
+                                        key={dIdx}
+                                        className="px-1.5 py-0.5 rounded bg-emerald-950/60 text-emerald-300 border border-emerald-800/50 font-bold"
+                                        title="Слово, произнесённое дабером (отсутствует в субтитрах)"
+                                      >
+                                        {diff.word}
+                                      </span>
+                                    );
+                                  }
+                                  return (
+                                    <span key={dIdx} className="text-neutral-300">
+                                      {diff.word}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Audio playback controls with NORMALIZED AUDIO */}
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => handlePlaySnippet(gap, 'primary')}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border shadow-sm ${
+                                isPlayingPrimary
+                                  ? 'bg-amber-500 text-neutral-950 border-amber-400 animate-pulse'
+                                  : 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border-amber-500/40'
+                              }`}
+                              title="Прослушать реплику дабера (громкость автоматически нормализована)"
+                            >
+                              {isPlayingPrimary ? <Pause className="w-3.5 h-3.5 fill-current" /> : <Volume2 className="w-3.5 h-3.5 text-amber-400" />}
+                              <span>{isPlayingPrimary ? 'Остановить' : `Слушать дабера (${gap.dubberName})`}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handlePlaySnippet(gap, 'original')}
+                              className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 border ${
+                                isPlayingOriginal
+                                  ? 'bg-blue-600 text-white border-blue-500 font-bold animate-pulse'
+                                  : 'bg-neutral-800 text-neutral-300 hover:text-white border-neutral-700'
+                              }`}
+                              title="Прослушать японский оригинал"
+                            >
+                              {isPlayingOriginal ? <Pause className="w-3 h-3 fill-current" /> : <Volume2 className="w-3 h-3 text-blue-400" />}
+                              <span>Оригинал</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => onSeekMainPlayer?.(gap.startSec)}
+                              className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 border bg-neutral-800 text-neutral-300 hover:text-white border-neutral-700"
+                              title="Перемотать видеоплеер на эту реплику"
+                            >
+                              <span>В видеоплеере ⏱</span>
+                            </button>
+                          </div>
+
+                          {/* Curator decision controls: Legitimate Fix vs Actor Better vs Ignore */}
+                          <div className="bg-neutral-900/95 border border-neutral-700/80 rounded-xl p-3 space-y-2">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="font-bold text-white flex items-center gap-1.5">
+                                <Sliders className="w-3.5 h-3.5 text-emerald-400" />
+                                <span>Решение куратора по расхождению текста:</span>
+                              </span>
+                              <span className="text-[11px] text-neutral-400">
+                                {gap.resolutionAction === 'legitimate_fix' && <span className="text-rose-400 font-bold">🔴 Ошибка дабера (на перезапись)</span>}
+                                {gap.resolutionAction === 'actor_better_than_sub' && <span className="text-emerald-400 font-bold">✨ Актёр лучше сабов (обновить сабы)</span>}
+                                {gap.resolutionAction === 'ignore' && <span className="text-neutral-400 font-bold">⚪ Пропуск / всё ок</span>}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2">
+                              {/* 1. Легитимный фикс - дабер ошибся, надо переписать строго по сабам */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleResolutionChange(gap.id, 'legitimate_fix');
+                                  setGaps(prev => prev.map(g => g.id === gap.id ? {
+                                    ...g,
+                                    selected: true,
+                                    resolutionAction: 'legitimate_fix',
+                                    comment: `[Оговорка / Не по тексту] В сценарии: "${g.expectedText || g.text}". Вы сказали: "${g.recognizedText}". Пожалуйста, перезапишите строго по тексту сценария.`
+                                  } : g));
+                                }}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border ${
+                                  gap.resolutionAction === 'legitimate_fix'
+                                    ? 'bg-rose-600 text-white border-rose-500 shadow-md ring-1 ring-rose-400'
+                                    : 'bg-neutral-800 text-neutral-300 hover:text-white border-neutral-700 hover:bg-neutral-700'
+                                }`}
+                              >
+                                <AlertTriangle className="w-3.5 h-3.5 text-rose-300" />
+                                <span>Легитимный фикс (переписать даберу)</span>
+                              </button>
+
+                              {/* 2. Актёр лучше сабов - то, что сделал актёр, лучше сабов, оставить и обновить субтитры */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleResolutionChange(gap.id, 'actor_better_than_sub');
+                                  setGaps(prev => prev.map(g => g.id === gap.id ? {
+                                    ...g,
+                                    selected: true,
+                                    resolutionAction: 'actor_better_than_sub',
+                                    comment: `Оставлено в редакции актёра («${g.recognizedText}»). Текст субтитров будет обновлен.`
+                                  } : g));
+                                }}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border ${
+                                  gap.resolutionAction === 'actor_better_than_sub'
+                                    ? 'bg-emerald-600 text-white border-emerald-500 shadow-md ring-1 ring-emerald-400'
+                                    : 'bg-neutral-800 text-neutral-300 hover:text-white border-neutral-700 hover:bg-neutral-700'
+                                }`}
+                              >
+                                <Sparkles className="w-3.5 h-3.5 text-emerald-300" />
+                                <span>Актёр лучше сабов (оставить озвучку)</span>
+                              </button>
+
+                              {/* 3. Игнорировать / Всё в норме */}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  handleResolutionChange(gap.id, 'ignore');
+                                  setGaps(prev => prev.map(g => g.id === gap.id ? {
+                                    ...g,
+                                    selected: false,
+                                    resolutionAction: 'ignore'
+                                  } : g));
+                                }}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border ${
+                                  gap.resolutionAction === 'ignore'
+                                    ? 'bg-neutral-700 text-white border-neutral-600'
+                                    : 'bg-neutral-800/80 text-neutral-400 hover:text-white border-neutral-700'
+                                }`}
+                              >
+                                <Check className="w-3.5 h-3.5 text-neutral-400" />
+                                <span>Пропустить / Всё ок</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Editable Fix Comment (if checked) */}
                       {gap.selected && (
                         <div className="flex items-center gap-2 pt-1 border-t border-neutral-800/60">
@@ -1974,6 +2297,16 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               {fixSubsActionsCount > 0 && (
                 <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20">
                   Правок сабов: <strong>{fixSubsActionsCount}</strong>
+                </span>
+              )}
+              {textMismatchFixCount > 0 && (
+                <span className="px-2 py-0.5 rounded bg-rose-500/10 text-rose-300 border border-rose-500/20">
+                  Фиксов текста: <strong>{textMismatchFixCount}</strong>
+                </span>
+              )}
+              {textMismatchActorBetterCount > 0 && (
+                <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
+                  Обновлений сабов (актёр лучше): <strong>{textMismatchActorBetterCount}</strong>
                 </span>
               )}
             </div>

@@ -67,28 +67,59 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
 
   ipcMain.handle('telegram-mtproto-send-post', wrapIpcHandler(async (event, postParams) => {
     if (!postParams || !postParams.text) throw new Error('Текст поста обязателен');
-    return await service.sendPost(postParams);
+    const targetPeer = postParams.targetPeer || postParams.chatPeer || postParams.chatId || postParams.channelId;
+    return await service.sendPost({ ...postParams, targetPeer });
   }));
 
   ipcMain.handle('telegram-mtproto-send-automation', wrapIpcHandler(async (event, params) => {
     if (!params || !params.type) throw new Error('Тип автоматизации обязателен');
-    return await service.sendAutomationNotification(params);
+    const targetPeer = params.targetPeer || params.chatPeer || params.chatId;
+    return await service.sendAutomationNotification({ ...params, targetPeer });
   }));
 
   ipcMain.handle('telegram-mtproto-search-posts', wrapIpcHandler(async (event, params) => {
-    return await service.searchChannelPosts(params || {});
+    const peer = params?.channelPeer || params?.channelId || params?.targetPeer || params?.chatId;
+    return await service.searchChannelPosts({
+      channelPeer: peer,
+      query: params?.query || '',
+      limit: params?.limit || 50
+    });
   }));
 
   ipcMain.handle('telegram-mtproto-get-audio-files', wrapIpcHandler(async (event, params) => {
-    if (!params || !params.chatPeer) throw new Error('Чат обязателен');
-    return await service.getChatAudioFiles(params);
+    const peer = params?.chatPeer || params?.chatId || params?.peer;
+    if (!peer) throw new Error('Чат обязателен');
+    return await service.getChatAudioFiles({
+      chatPeer: peer,
+      limit: params?.limit || 50
+    });
+  }));
+
+  ipcMain.handle('telegram-mtproto-get-messages', wrapIpcHandler(async (event, params) => {
+    const peer = params?.chatPeer || params?.chatId || params?.peer;
+    if (!peer) throw new Error('Чат обязателен');
+    return await service.getChatMessages({
+      chatPeer: peer,
+      limit: params?.limit || 40
+    });
   }));
 
   ipcMain.handle('telegram-mtproto-download-audio', wrapIpcHandler(async (event, params) => {
-    if (!params || !params.messageId || !params.chatPeer) {
+    const peer = params?.chatPeer || params?.chatId || params?.peer;
+    const msgId = params?.messageId || params?.id;
+    if (!peer || !msgId) {
       throw new Error('Идентификатор сообщения и чат обязательны');
     }
-    return await service.downloadChatAudioFile(params);
+    return await service.downloadChatAudioFile({
+      chatPeer: peer,
+      messageId: msgId,
+      targetDir: params?.targetDir,
+      customFileName: params?.customFileName || params?.fileName
+    });
+  }));
+
+  ipcMain.handle('telegram-bot-test-connection', wrapIpcHandler(async (event, { botToken } = {}) => {
+    return await service.testBotConnection(botToken);
   }));
 }
 

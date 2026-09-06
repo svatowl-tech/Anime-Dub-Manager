@@ -48,11 +48,14 @@ class TelegramMTProtoService {
     this.qrStatus = 'idle'; // 'idle', 'waiting_scan', 'password_required', 'authenticated', 'error'
     this.qrError = null;
 
+    this.botMe = null;
+
     this.settings = {
       apiId: '',
       apiHash: '',
       phoneNumber: '',
       sessionString: '',
+      botToken: '',
       defaultChannelId: '',
       autoPin: false,
       autoNotify: true,
@@ -641,8 +644,125 @@ class TelegramMTProtoService {
     }
   }
 
+  async testBotConnection(customToken) {
+    const token = customToken ? String(customToken).trim() : String(this.settings.botToken || '').trim();
+    if (!token) {
+      throw new Error('Укажите токен бота Telegram (полученный у @BotFather)');
+    }
+
+    try {
+      const resp = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+      const data = await resp.json();
+      if (!data.ok) {
+        throw new Error(data.description || 'Не удалось авторизовать бота. Проверьте правильность токена.');
+      }
+      this.botMe = data.result;
+      log.info('[Telegram Bot] Bot verified successfully:', data.result.username);
+      return {
+        success: true,
+        bot: {
+          id: data.result.id,
+          username: data.result.username,
+          firstName: data.result.first_name,
+        }
+      };
+    } catch (err) {
+      log.error('[Telegram Bot] testBotConnection error:', err);
+      throw new Error(err.message || 'Ошибка подключения к Telegram Bot API');
+    }
+  }
+
+  async sendViaBotApi({ targetPeer, text, parseMode = 'html', silent = false, pin = false, mediaPath }) {
+    const token = String(this.settings.botToken || '').trim();
+    if (!token) {
+      throw new Error('Бот-токен не настроен в настройках Telegram.');
+    }
+
+    let chatId = targetPeer || this.settings.defaultChannelId;
+    if (!chatId) throw new Error('Укажите ID или логин канала/чата (@channel)');
+
+    chatId = String(chatId).trim();
+    if (chatId.startsWith('https://t.me/')) chatId = chatId.replace('https://t.me/', '@');
+    if (chatId.startsWith('t.me/')) chatId = chatId.replace('t.me/', '@');
+
+    const cleanText = text || '';
+    const body = {
+      chat_id: chatId,
+      text: cleanText,
+      parse_mode: parseMode === 'html' ? 'HTML' : 'Markdown',
+      disable_notification: !!silent,
+    };
+
+    let endpoint = `https://api.telegram.org/bot${token}/sendMessage`;
+
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const data = await resp.json();
+    if (!data.ok) {
+      // If formatting failed, retry with plain text
+      if (data.description && (data.description.includes('can\'t parse entities') || data.description.includes('formatting'))) {
+        log.warn('[Telegram Bot] HTML parse failed, retrying plain text...');
+        delete body.parse_mode;
+        body.text = cleanText.replace(/<[^>]*>/g, '');
+        const retryResp = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const retryData = await retryResp.json();
+        if (!retryData.ok) {
+          throw new Error(retryData.description || 'Ошибка отправки через Telegram Bot API');
+        }
+        if (pin && retryData.result?.message_id) {
+          await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: chatId, message_id: retryData.result.message_id, disable_notification: !!silent }),
+          }).catch(() => {});
+        }
+        return { success: true, messageId: retryData.result?.message_id, viaBot: true };
+      }
+      throw new Error(data.description || 'Ошибка отправки через Telegram Bot API');
+    }
+
+    if (pin && data.result?.message_id) {
+      await fetch(`https://api.telegram.org/bot${token}/pinChatMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, message_id: data.result.message_id, disable_notification: !!silent }),
+      }).catch(() => {});
+    }
+
+    return {
+      success: true,
+      messageId: data.result?.message_id,
+      viaBot: true,
+    };
+  }
+
   async sendPost({ targetPeer, text, parseMode = 'html', silent = false, pin = false, scheduleDate, mediaPath }) {
-    this.ensureConnected();
+    // Check if MTProto is connected or can auto-reconnect
+    let mtprotoReady = (this.client && this.status === 'connected');
+    if (!mtprotoReady && this.settings.sessionString) {
+      try {
+        mtprotoReady = await this.connectWithSavedSession();
+      } catch (e) {
+        log.warn('[MTProto] On-demand session reconnect notice:', e.message);
+      }
+    }
+
+    // If MTProto is not connected, but Bot Token is provided, fallback to Bot API
+    if (!mtprotoReady && this.settings.botToken) {
+      log.info('[Telegram] MTProto not active, using Bot API for sendPost...');
+      return await this.sendViaBotApi({ targetPeer, text, parseMode, silent, pin, mediaPath });
+    }
+
+    await this.ensureConnected();
+
     try {
       let peer = targetPeer || this.settings.defaultChannelId;
       if (!peer) throw new Error('Укажите ID или логин канала (@channel)');
@@ -722,7 +842,6 @@ class TelegramMTProtoService {
   }
 
   async sendAutomationNotification({ type, targetPeer, payload, pin = false, silent = false, customText = null, scheduleDate = null }) {
-    this.ensureConnected();
     let formattedText = customText;
 
     if (!formattedText) {
@@ -762,10 +881,10 @@ class TelegramMTProtoService {
     });
   }
 
-  async searchChannelPosts({ channelPeer, query = '', limit = 20 }) {
-    this.ensureConnected();
+  async searchChannelPosts({ channelPeer, channelId, query = '', limit = 20 }) {
+    await this.ensureConnected();
     try {
-      let peer = channelPeer || this.settings.defaultChannelId;
+      let peer = channelPeer || channelId || this.settings.defaultChannelId;
       if (!peer) throw new Error('Укажите ID или логин канала (@channel)');
       peer = String(peer).trim();
       if (peer.startsWith('https://t.me/')) peer = peer.replace('https://t.me/', '@');
@@ -779,7 +898,7 @@ class TelegramMTProtoService {
         search: query ? String(query).trim() : undefined,
       });
 
-      return (messages || []).map(m => {
+      const posts = (messages || []).map(m => {
         let channelUsername = '';
         if (typeof peer === 'string' && peer.startsWith('@')) {
           channelUsername = peer.slice(1);
@@ -788,26 +907,42 @@ class TelegramMTProtoService {
           ? `https://t.me/${channelUsername}/${m.id}`
           : `https://t.me/c/${String(peer).replace(/^-100/, '')}/${m.id}`;
 
+        const dateObj = m.date ? new Date(m.date * 1000) : new Date();
+
         return {
           id: m.id,
-          date: m.date ? new Date(m.date * 1000).toISOString() : '',
+          date: m.date ? m.date : Math.floor(dateObj.getTime() / 1000),
+          dateFormatted: dateObj.toLocaleString('ru-RU', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+          }),
+          text: m.message || '',
           message: m.message || '',
           views: m.views || 0,
           forwards: m.forwards || 0,
+          link: postLink,
           postLink,
           hasMedia: !!m.media,
           isPinned: !!m.pinned,
         };
       });
+
+      return {
+        success: true,
+        posts,
+      };
     } catch (e) {
       await this._handleApiError(e, 'searchChannelPosts');
     }
   }
 
-  async getChatAudioFiles({ chatPeer, limit = 40 }) {
-    this.ensureConnected();
+  async getChatAudioFiles({ chatPeer, chatId, limit = 40 }) {
+    await this.ensureConnected();
     try {
-      let peer = chatPeer;
+      let peer = chatPeer || chatId;
       if (!peer) throw new Error('Укажите чат или пользователя');
       peer = String(peer).trim();
       if (peer.startsWith('https://t.me/')) peer = peer.replace('https://t.me/', '@');
@@ -856,42 +991,121 @@ class TelegramMTProtoService {
         if (isAudio) {
           let senderName = 'Участник';
           let senderId = '';
+          let senderUsername = '';
           if (m.sender) {
             senderId = m.sender.id ? m.sender.id.toString() : '';
+            senderUsername = m.sender.username || '';
             senderName = [m.sender.firstName, m.sender.lastName].filter(Boolean).join(' ') || m.sender.username || senderId;
           }
 
+          const sizeMB = (fileSize / (1024 * 1024)).toFixed(2);
+          const durMin = duration ? `${Math.floor(duration / 60)}:${String(Math.floor(duration % 60)).padStart(2, '0')}` : '';
+          const dateObj = m.date ? new Date(m.date * 1000) : new Date();
+
           audioFiles.push({
+            id: m.id,
             messageId: m.id,
-            date: m.date ? new Date(m.date * 1000).toISOString() : '',
+            date: m.date || Math.floor(dateObj.getTime() / 1000),
+            dateFormatted: dateObj.toLocaleString('ru-RU', {
+              day: '2-digit',
+              month: '2-digit',
+              hour: '2-digit',
+              minute: '2-digit'
+            }),
+            sender: {
+              id: senderId,
+              name: senderName,
+              username: senderUsername
+            },
             senderId,
             senderName,
             fileName: fileName || `audio_${m.id}.mp3`,
             fileSize,
+            size: fileSize,
+            sizeFormatted: fileSize > 0 ? `${sizeMB} MB` : '0 MB',
             duration,
+            durationFormatted: durMin,
             mimeType,
-            text: m.message || '',
+            isVoice: mimeType.includes('ogg') || mimeType.includes('voice'),
+            caption: m.message || '',
+            text: m.message || ''
           });
         }
       }
 
-      return audioFiles;
+      return {
+        success: true,
+        files: audioFiles,
+      };
     } catch (e) {
       await this._handleApiError(e, 'getChatAudioFiles');
     }
   }
 
-  async downloadChatAudioFile({ chatPeer, messageId, targetDir, customFileName }) {
-    this.ensureConnected();
+  async getChatMessages({ chatPeer, chatId, limit = 40 }) {
+    await this.ensureConnected();
     try {
-      let peer = chatPeer;
+      let peer = chatPeer || chatId;
+      if (!peer) throw new Error('Укажите чат');
+      peer = String(peer).trim();
+      if (peer.startsWith('https://t.me/')) peer = peer.replace('https://t.me/', '@');
+      if (peer.startsWith('t.me/')) peer = peer.replace('t.me/', '@');
+      if (/^-?\d+$/.test(peer)) {
+        try { peer = BigInt(peer); } catch (e) {}
+      }
+
+      const messages = await this.client.getMessages(peer, { limit: Math.min(limit, 100) });
+      const myId = this.me?.id;
+
+      const formatted = (messages || []).map(m => {
+        let senderName = 'Участник';
+        let isMe = false;
+        if (m.sender) {
+          const sId = m.sender.id ? m.sender.id.toString() : '';
+          isMe = !!(myId && sId === String(myId));
+          senderName = isMe ? 'Вы' : ([m.sender.firstName, m.sender.lastName].filter(Boolean).join(' ') || m.sender.username || sId);
+        } else if (m.out) {
+          isMe = true;
+          senderName = 'Вы';
+        }
+
+        const dateObj = m.date ? new Date(m.date * 1000) : new Date();
+        const timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+        return {
+          id: String(m.id),
+          senderName,
+          text: m.message || (m.media ? '[Медиафайл]' : ''),
+          time: timeStr,
+          isMe,
+          isPinned: !!m.pinned,
+          mediaPath: undefined
+        };
+      }).reverse();
+
+      return {
+        success: true,
+        messages: formatted,
+      };
+    } catch (e) {
+      await this._handleApiError(e, 'getChatMessages');
+    }
+  }
+
+  async downloadChatAudioFile({ chatPeer, chatId, messageId, id, targetDir, customFileName, fileName }) {
+    await this.ensureConnected();
+    try {
+      let peer = chatPeer || chatId;
       if (!peer) throw new Error('Укажите чат');
       peer = String(peer).trim();
       if (/^-?\d+$/.test(peer)) {
         try { peer = BigInt(peer); } catch (e) {}
       }
 
-      const [msg] = await this.client.getMessages(peer, { ids: [Number(messageId)] });
+      const targetMsgId = Number(messageId || id);
+      if (!targetMsgId) throw new Error('Укажите ID сообщения');
+
+      const [msg] = await this.client.getMessages(peer, { ids: [targetMsgId] });
       if (!msg || !msg.media) {
         throw new Error('Файл или сообщение не найдены');
       }
@@ -902,7 +1116,7 @@ class TelegramMTProtoService {
         fs.mkdirSync(saveDir, { recursive: true });
       }
 
-      let originalName = customFileName;
+      let originalName = customFileName || fileName;
       if (!originalName) {
         if (msg.media.document && msg.media.document.attributes) {
           for (const attr of msg.media.document.attributes) {
@@ -911,11 +1125,11 @@ class TelegramMTProtoService {
         }
       }
       if (!originalName) {
-        originalName = `telegram_track_${messageId}.mp3`;
+        originalName = `telegram_track_${targetMsgId}.mp3`;
       }
 
       const finalPath = path.join(saveDir, originalName);
-      log.info(`[MTProto] Downloading audio message #${messageId} to ${finalPath}`);
+      log.info(`[MTProto] Downloading audio message #${targetMsgId} to ${finalPath}`);
 
       const buffer = await this.client.downloadMedia(msg.media, {
         workers: 2,
@@ -954,15 +1168,25 @@ class TelegramMTProtoService {
         this.client = null;
       }
       await this.saveSettings({ sessionString: '' });
-      throw new Error('AUTH_KEY_UNREGISTERED');
+      throw new Error('Сессия Telegram устарела или завершена. Пожалуйста, выполните повторный вход.');
     }
     throw new Error(errMsg);
   }
 
-  ensureConnected() {
-    if (!this.client || this.status !== 'connected') {
-      throw new Error('Подключение к Telegram MTProto отсутствует. Пожалуйста, авторизуйтесь в настройках Telegram MTProto.');
+  async ensureConnected() {
+    if (this.client && this.status === 'connected') {
+      return true;
     }
+
+    if (this.settings.sessionString) {
+      log.info('[MTProto] Attempting auto-reconnect with saved session...');
+      const reconnected = await this.connectWithSavedSession();
+      if (reconnected && this.status === 'connected') {
+        return true;
+      }
+    }
+
+    throw new Error('Подключение к Telegram MTProto отсутствует. Пожалуйста, авторизуйтесь в Telegram (по QR-коду или номеру телефона) или укажите Bot Token в настройках.');
   }
 
   getStatus() {
@@ -973,10 +1197,13 @@ class TelegramMTProtoService {
     return {
       status: effectiveStatus,
       me: this.me,
+      botConnected: !!this.botMe,
+      botMe: this.botMe,
       settings: {
         apiId: this.settings.apiId,
         apiHash: this.settings.apiHash,
         phoneNumber: this.settings.phoneNumber,
+        botToken: this.settings.botToken,
         defaultChannelId: this.settings.defaultChannelId,
         autoPin: this.settings.autoPin,
         autoNotify: this.settings.autoNotify,

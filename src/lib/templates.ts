@@ -105,7 +105,12 @@ export const generateSoundEngineerQAReport = (
       if (ov.secondDubberName) {
         report += `   • наехал на ${ov.secondDubberName} (${ov.secondCharacterName}): "${(ov.secondText || '').replace(/^\[.*?\]:\s*"/, '').replace(/"$/, '')}"\n`;
       }
-      report += `   👉 Рекомендация: развести стык / подрезать наплывающий хвост\n\n`;
+      if (ov.isTimingTooLongMerged) {
+        report += `   • ⚠️ Единый фикс: фраза длиннее саба на +${ov.timingDeltaPercent}% (вылет +${ov.overflowDurationSec || 0.4}с) и залезает на соседний саб\n`;
+        report += `   👉 Рекомендация: поджать длительность фразы дабера и развести стык\n\n`;
+      } else {
+        report += `   👉 Рекомендация: развести стык / подрезать наплывающий хвост\n\n`;
+      }
     });
   } else {
     report += `⚡️ НАЕЗДЫ ДУБЛЕРОВ: наездов хвостов фраз не обнаружено (чисто) ✅\n\n`;
@@ -132,9 +137,9 @@ export const generateSoundEngineerQAReport = (
 
   // 3. Рассинхрон тайминга: фраза короче саба (японский хвост)
   if (shortLines.length > 0) {
-    report += `⏱ РАССИНХРОН: ФРАЗА КОРОЧЕ САБА (>10%, ВИСЯЩИЙ ЯПОНСКИЙ ХВОСТ):\n`;
+    report += `⏱ РАССИНХРОН: ФРАЗА КОРОЧЕ САБА (>30%, ВИСЯЩИЙ ЯПОНСКИЙ ХВОСТ):\n`;
     shortLines.forEach((sh, idx) => {
-      const delta = sh.timingDeltaPercent ? Math.abs(sh.timingDeltaPercent) : '15+';
+      const delta = sh.timingDeltaPercent ? Math.abs(sh.timingDeltaPercent) : '30+';
       const tail = sh.tailDurationSec ? `~${sh.tailDurationSec}с` : 'есть';
       report += `${idx + 1}. [${sh.startFormatted}] ${sh.dubberName} (${sh.characterName})\n`;
       report += `   • Реплика: "${sh.text}"\n`;
@@ -143,11 +148,11 @@ export const generateSoundEngineerQAReport = (
     });
   }
 
-  // 4. Рассинхрон тайминга: фраза длиннее саба (>20%, вылет)
+  // 4. Рассинхрон тайминга: фраза длиннее саба (>40%, вылет)
   if (longLines.length > 0) {
-    report += `⏱ РАССИНХРОН: ФРАЗА ДЛИННЕЕ САБА (>20%, ВЫЛЕТ ЗА ТАЙМИНГ):\n`;
+    report += `⏱ РАССИНХРОН: ФРАЗА ДЛИННЕЕ САБА (>40%, ВЫЛЕТ ЗА ТАЙМИНГ):\n`;
     longLines.forEach((lg, idx) => {
-      const delta = lg.timingDeltaPercent ? `+${lg.timingDeltaPercent}%` : '+20%';
+      const delta = lg.timingDeltaPercent ? `+${lg.timingDeltaPercent}%` : '+40%';
       const overflow = lg.overflowDurationSec ? `(вылет +${lg.overflowDurationSec}с)` : '';
       report += `${idx + 1}. [${lg.startFormatted} - ${lg.endFormatted}] ${lg.dubberName} (${lg.characterName})\n`;
       report += `   • Реплика: "${lg.text}"\n`;

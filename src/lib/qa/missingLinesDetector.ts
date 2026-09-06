@@ -12,6 +12,7 @@ import { Episode, Track, SubtitleLine } from '../../types';
 import { SIGN_KEYWORDS } from '../../constants';
 import { getSharedAudioContext, ensureAudioContextResumed } from './sharedAudioContext';
 import { scanTrackForArtifacts, AudioArtifactType, ArtifactSeverity } from './artifactDetector';
+import { checkTrackTextWithWhisper, WordDiff, TextDiscrepancyType } from './whisperTextChecker';
 
 export type DefectCategory = 
   | 'missing_line' 
@@ -20,7 +21,8 @@ export type DefectCategory =
   | 'timing_too_short' 
   | 'timing_too_long' 
   | 'actor_overlap'
-  | 'audio_artifact';
+  | 'audio_artifact'
+  | 'text_mismatch';
 
 export type DefectType = 
   | 'silence' 
@@ -33,7 +35,8 @@ export type DefectType =
   | 'clipping'
   | 'mouse_click'
   | 'plosive'
-  | 'swallowed_vowel';
+  | 'swallowed_vowel'
+  | 'text_mismatch';
 
 export type DefectResolution = 
   | 'keep' 
@@ -46,7 +49,9 @@ export type DefectResolution =
   | 'note_sound_engineer'
   | 'request_dubber_fix'
   | 'ignore'
-  | 'trim_tail';
+  | 'trim_tail'
+  | 'actor_better_than_sub'
+  | 'legitimate_fix';
 
 export interface MissingLineDetection {
   id: string;
@@ -90,6 +95,7 @@ export interface MissingLineDetection {
   overflowDurationSec?: number; // speech overshooting subtitle end in seconds
 
   // Collision & Overlap fields
+  isTimingTooLongMerged?: boolean;
   secondTrackId?: string;
   secondDubberName?: string;
   secondCharacterName?: string;
@@ -113,6 +119,14 @@ export interface MissingLineDetection {
   artifactDescription?: string;
   nearestSubtitleText?: string;
 
+  // Whisper speech-to-text discrepancy fields
+  expectedText?: string;
+  recognizedText?: string;
+  textSimilarityPercent?: number;
+  textDiscrepancyType?: TextDiscrepancyType;
+  wordDiffs?: WordDiff[];
+  whisperModelUsed?: string;
+
   // Curator resolution options
   resolutionAction?: DefectResolution;
   selectedCharacterForSub?: string;
@@ -127,6 +141,10 @@ export interface MissingLineDetection {
 }
 
 export interface GapDetectionOptions {
+  /**
+   * Scan for missing voiced lines. Default: true.
+   */
+  scanMissingLines?: boolean;
   /**
    * Dynamic swing threshold in dB (max short-time RMS vs min short-time RMS).
    * If audio energy fluctuates by more than this threshold within the subtitle duration,
@@ -158,7 +176,7 @@ export interface GapDetectionOptions {
    */
   scanCollisions?: boolean;
   /**
-   * Scan for timing mismatches (short speech / hanging original tail > 10%, or long speech > 20%). Default: true.
+   * Scan for timing mismatches (short speech / hanging original tail > 30%, or long speech > 40%). Default: true.
    */
   scanTimingMismatches?: boolean;
   /**
@@ -166,17 +184,25 @@ export interface GapDetectionOptions {
    */
   scanOverlaps?: boolean;
   /**
-   * Threshold percentage below which short speech is flagged (default: 10%).
+   * Threshold percentage below which short speech is flagged (default: 30%).
    */
   shortLineThresholdPercent?: number;
   /**
-   * Threshold percentage above which long speech is flagged (default: 20%).
+   * Threshold percentage above which long speech is flagged (default: 40%).
    */
   longLineThresholdPercent?: number;
   /**
    * Scan for audio artifacts (clipping, mouse clicks, plosives, swallowed words/gate cutoffs). Default: true.
    */
   scanArtifacts?: boolean;
+  /**
+   * Scan voiced lines for text discrepancies with Whisper ASR (model: small). Default: false.
+   */
+  scanWhisperText?: boolean;
+  /**
+   * Whisper model to use ('small' | 'base' | 'tiny'). Default: 'small'.
+   */
+  whisperModel?: string;
 }
 
 /**
@@ -505,15 +531,20 @@ export async function detectEpisodeGaps(
     silencePeakThresholdDb = -52,
     silenceRmsThresholdDb = -60,
     minDurationSec = 0.15,
+    scanMissingLines = true,
     scanUnwantedSpeech = true,
     scanCollisions = true,
     scanTimingMismatches = true,
     scanOverlaps = true,
-    shortLineThresholdPercent = 10,
-    longLineThresholdPercent = 20
+    shortLineThresholdPercent = 30,
+    longLineThresholdPercent = 40,
+    scanWhisperText = false,
+    whisperModel = 'small'
   } = options;
 
   const results: MissingLineDetection[] = [];
+  // Map to hold timing_too_long defects for potential merging with subsequent actor_overlap
+  const longTimingDetections = new Map<string, MissingLineDetection>();
 
   // Filter valid dubber tracks with uploaded files
   const dubberTracks = tracks.filter(t => t.id !== 'original' && t.files.length > 0);
@@ -674,6 +705,7 @@ export async function detectEpisodeGaps(
       });
 
       if (isAbsoluteSilence || isStationaryNoise) {
+        if (!scanMissingLines) continue;
         const gapType: 'silence' | 'noise' = isAbsoluteSilence ? 'silence' : 'noise';
         const typeLabel = isAbsoluteSilence 
           ? '🔇 Тишина' 
@@ -741,13 +773,13 @@ export async function detectEpisodeGaps(
             const speechDur = boundaries.speechDurationSec;
             const subDur = durationSec;
 
-            // 1. Line is significantly shorter than subtitle (> 10%)
+            // 1. Line is significantly shorter than subtitle (> 30%)
             // Leads to the original Japanese dialogue sticking out ("японский хвост остаётся")
             const shortRatio = (subDur - speechDur) / subDur;
-            const shortThreshold = (shortLineThresholdPercent || 10) / 100;
+            const shortThreshold = (shortLineThresholdPercent || 30) / 100;
             const tailSec = Math.max(0, endSec - boundaries.speechEndSec);
 
-            if (shortRatio > shortThreshold && (subDur - speechDur) >= 0.35 && (tailSec >= 0.28 || shortRatio >= 0.20)) {
+            if (shortRatio > shortThreshold && (subDur - speechDur) >= 0.35 && (tailSec >= 0.28 || shortRatio >= 0.30)) {
               const timingDeltaPercent = -Math.round(shortRatio * 100);
               const tailDurationSec = Math.round(tailSec * 10) / 10;
 
@@ -770,7 +802,7 @@ export async function detectEpisodeGaps(
                 rmsDb: boundaries.rmsDb,
                 dynamicRangeDb: metrics.dynamicRangeDb,
                 type: 'timing_too_short',
-                typeLabel: `⏱ Фраза короче саба на ${Math.abs(timingDeltaPercent)}%`,
+                typeLabel: `⏱ Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (>30%)`,
                 selected: true,
                 actualSpeechStartSec: boundaries.speechStartSec,
                 actualSpeechEndSec: boundaries.speechEndSec,
@@ -787,10 +819,10 @@ export async function detectEpisodeGaps(
               });
             }
 
-            // 2. Line is significantly longer than subtitle (> 20%)
+            // 2. Line is significantly longer than subtitle (> 40%)
             // Must be compressed or trimmed so it does not collide with neighboring lines
             const longRatio = (speechDur - subDur) / subDur;
-            const longThreshold = (longLineThresholdPercent || 20) / 100;
+            const longThreshold = (longLineThresholdPercent || 40) / 100;
             const overflowSec = Math.max(0, boundaries.speechEndSec - endSec);
 
             if (longRatio > longThreshold && (speechDur - subDur) >= 0.35) {
@@ -798,7 +830,8 @@ export async function detectEpisodeGaps(
               const overflowDurationSec = Math.round(overflowSec * 10) / 10;
               const expandedEnd = Math.max(endSec, boundaries.speechEndSec);
 
-              results.push({
+              const lineKey = `${track.id}_${line.rawLineIndex ?? lineIdx}`;
+              longTimingDetections.set(lineKey, {
                 id: `timing_long_${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`,
                 defectCategory: 'timing_too_long',
                 trackId: track.id,
@@ -817,7 +850,7 @@ export async function detectEpisodeGaps(
                 rmsDb: boundaries.rmsDb,
                 dynamicRangeDb: metrics.dynamicRangeDb,
                 type: 'timing_too_long',
-                typeLabel: `⏱ Фраза длиннее саба на +${timingDeltaPercent}% (>20%)`,
+                typeLabel: `⏱ Фраза длиннее саба на +${timingDeltaPercent}% (>40%)`,
                 selected: true,
                 actualSpeechStartSec: boundaries.speechStartSec,
                 actualSpeechEndSec: boundaries.speechEndSec,
@@ -1026,21 +1059,41 @@ export async function detectEpisodeGaps(
         const { track, audioBuffer, audioUrl, assignedCharacters } = trackCtx;
         if (lineEnd > audioBuffer.duration + 0.5) continue;
 
-        const metrics = analyzeSegmentDynamics(
+        // Use findVoicedBoundaries to inspect speech structure inside this subtitle interval
+        const boundaries = findVoicedBoundaries(
           audioBuffer,
-          lineStart,
-          Math.min(audioBuffer.duration, lineEnd)
+          Math.max(0, lineStart - 0.2),
+          Math.min(audioBuffer.duration, lineEnd + 0.25),
+          speechDynamicThresholdDb - 0.2
         );
 
-        // Does this track contain active voiced speech on this subtitle?
-        const isVoiced = 
-          (metrics.peakDb > -38 && metrics.rmsDb > -48 && metrics.dynamicRangeDb >= speechDynamicThresholdDb) ||
-          (metrics.peakDb > -28 && metrics.dynamicRangeDb >= (speechDynamicThresholdDb - 0.5));
+        if (!boundaries.isVoiced) continue;
 
-        if (isVoiced) {
+        // Calculate overlap of voiced speech with the subtitle duration
+        const voicedStartInSub = Math.max(lineStart, boundaries.speechStartSec);
+        const voicedEndInSub = Math.min(lineEnd, boundaries.speechEndSec);
+        const voicedDurationInSub = Math.max(0, voicedEndInSub - voicedStartInSub);
+        const subCoverageRatio = voicedDurationInSub / Math.max(0.1, lineDuration);
+
+        // A conflict specifically requires that BOTH dubbers recorded speech across the body of this subtitle,
+        // rather than just having a bleeding tail in the first few fractions of a second or an early intake at the end.
+        const isTrueVoiceAcrossSub = 
+          subCoverageRatio >= 0.45 &&
+          voicedDurationInSub >= Math.min(0.45, lineDuration * 0.45) &&
+          boundaries.speechStartSec <= lineStart + Math.max(0.6, lineDuration * 0.45) &&
+          boundaries.speechEndSec >= lineEnd - Math.max(0.6, lineDuration * 0.45) &&
+          boundaries.peakDb > -38;
+
+        if (isTrueVoiceAcrossSub) {
           const isAssigned = 
             assignedCharacters.has(rawCharName.toLowerCase()) || 
             assignedCharacters.has(resolvedCharName.toLowerCase());
+
+          const metrics = analyzeSegmentDynamics(
+            audioBuffer,
+            lineStart,
+            Math.min(audioBuffer.duration, lineEnd)
+          );
 
           collidingActors.push({
             track,
@@ -1132,20 +1185,58 @@ export async function detectEpisodeGaps(
           continue;
         }
 
+        // Check if subtitles themselves overlap in time ("наезд сабов").
+        // If subtitles are concurrent/overlapping in the script, speech overlap is completely legitimate!
+        const subOverlapStart = Math.max(itemA.subStartSec, itemB.subStartSec);
+        const subOverlapEnd = Math.min(itemA.subEndSec, itemB.subEndSec);
+        const subOverlapDuration = subOverlapEnd - subOverlapStart;
+        if (subOverlapDuration > 0.08) {
+          continue;
+        }
+
         // Overlap timeframe
         const overlapStart = Math.max(itemA.speechStartSec, itemB.speechStartSec);
         const overlapEnd = Math.min(itemA.speechEndSec, itemB.speechEndSec);
-        const overlapDuration = overlapEnd - overlapStart;
+        const speechOverlapDuration = overlapEnd - overlapStart;
 
-        // Threshold: at least 0.15s overlap
-        if (overlapDuration >= 0.15) {
+        // Also check if itemA speechEnd overruns past itemA.subEndSec and into itemB.subStartSec
+        const subBoundaryOverrun = itemA.speechEndSec - itemB.subStartSec;
+        const overlapDuration = Math.max(
+          speechOverlapDuration,
+          (speechOverlapDuration > 0 || subBoundaryOverrun >= 0.15) ? subBoundaryOverrun : 0
+        );
+
+        // Threshold: at least 0.12s overlap
+        if (overlapDuration >= 0.12) {
           const overlapSecRounded = Math.round(overlapDuration * 100) / 100;
           const collisionStart = Math.max(0, overlapStart - 0.25);
           const collisionEnd = overlapEnd + 0.25;
 
+          // Check if this phrase (itemA) also figures in timing_too_long (> 40%).
+          // If so, merge into ONE unified fix instead of two separate defects.
+          const longKeyA = `${itemA.track.id}_${itemA.lineIndex}`;
+          const longCandidateA = longTimingDetections.get(longKeyA);
+
+          const isMerged = !!longCandidateA;
+          if (longCandidateA) {
+            longCandidateA.isTimingTooLongMerged = true;
+          }
+
+          const timingDeltaPercent = longCandidateA?.timingDeltaPercent;
+          const overflowDurationSec = longCandidateA?.overflowDurationSec;
+
+          const typeLabel = isMerged
+            ? `⚡ Наезд хвостом + вылет тайминга (+${timingDeltaPercent}%)`
+            : `⚡ Наезд хвостом (${overlapSecRounded}с)`;
+
+          const comment = isMerged
+            ? `Фраза ${itemA.track.participant} (${itemA.resolvedCharName}) длиннее саба на +${timingDeltaPercent}% (вылет +${overflowDurationSec}с) и залезла на ${overlapSecRounded}с на начало реплики ${itemB.track.participant} (${itemB.resolvedCharName}). Объединено в один фикс: требуется поджать фразу и развести стык звукорежиссеру.`
+            : `Наезд дублеров: хвост реплики ${itemA.track.participant} (${itemA.resolvedCharName}) залез на ${overlapSecRounded}с на начало реплики ${itemB.track.participant} (${itemB.resolvedCharName}). Требуется разводка или подрезка стыка звукорежиссером.`;
+
           results.push({
             id: `overlap_${itemA.track.id}_${itemB.track.id}_${itemA.lineIndex}_${itemB.lineIndex}_${overlapStart.toFixed(2)}`,
             defectCategory: 'actor_overlap',
+            isTimingTooLongMerged: isMerged,
             trackId: itemA.track.id,
             dubberName: itemA.track.participant,
             characterName: itemA.resolvedCharName,
@@ -1162,7 +1253,7 @@ export async function detectEpisodeGaps(
             rmsDb: itemA.metrics.rmsDb,
             dynamicRangeDb: itemA.metrics.dynamicRangeDb,
             type: 'actor_overlap',
-            typeLabel: `⚡ Наезд хвостом (${overlapSecRounded}с)`,
+            typeLabel,
             selected: true,
             resolutionAction: 'note_sound_engineer',
             audioUrl: itemA.audioUrl,
@@ -1182,10 +1273,22 @@ export async function detectEpisodeGaps(
             secondLineIndex: itemB.lineIndex,
             secondSubId: itemB.subId,
             overlapSec: overlapSecRounded,
-            comment: `Наезд дублеров: хвост реплики ${itemA.track.participant} (${itemA.resolvedCharName}) залез на ${overlapSecRounded}с на начало реплики ${itemB.track.participant} (${itemB.resolvedCharName}). Требуется разводка или подрезка стыка звукорежиссером.`
+            timingDeltaPercent,
+            overflowDurationSec,
+            speechDurationSec: itemA.speechDurationSec,
+            subDurationSec: itemA.subDurationSec,
+            actualDurationSec: itemA.speechDurationSec,
+            comment
           });
         }
       }
+    }
+  }
+
+  // Add stand-alone timing_too_long defects (those not merged into any actor_overlap)
+  for (const longDet of longTimingDetections.values()) {
+    if (!longDet.isTimingTooLongMerged) {
+      results.push(longDet);
     }
   }
 
@@ -1254,6 +1357,90 @@ export async function detectEpisodeGaps(
     }
   }
 
+  // =========================================================================
+  // 6. SCAN FOR TEXT DISCREPANCIES VIA WHISPER (ASR + SUBTITLE PROMPT CONTEXT)
+  // =========================================================================
+  if (scanWhisperText) {
+    onProgress?.(totalTracks, totalTracks, `Сверка текста через Whisper (${whisperModel}) с контекстом сценария...`);
+
+    for (const trackCtx of decodedTracks) {
+      const { track, audioBuffer, audioUrl } = trackCtx;
+      const trackVoiced = voicedLines.filter(v => v.track.id === track.id);
+      if (trackVoiced.length === 0) continue;
+
+      const linesToCheck = trackVoiced.map(v => ({
+        lineIndex: v.lineIndex,
+        subId: v.subId,
+        startSec: v.speechStartSec,
+        endSec: v.speechEndSec,
+        startFormatted: formatTimecode(v.speechStartSec),
+        endFormatted: formatTimecode(v.speechEndSec),
+        characterName: v.resolvedCharName || track.character,
+        text: v.cleanedText
+      }));
+
+      const selectedFile = track.files.find(f => f.id === track.selectedFileId) || track.files[0];
+      const filePath = selectedFile?.path || audioUrl;
+
+      const comparisons = await checkTrackTextWithWhisper(
+        filePath,
+        linesToCheck,
+        whisperModel,
+        (curr, tot, msg) => {
+          onProgress?.(curr, tot, `Whisper (${whisperModel}): ${track.participant} [${curr}/${tot}]`);
+        }
+      );
+
+      for (const comp of comparisons) {
+        if (!comp.isDiscrepancy) continue;
+
+        const voicedItem = trackVoiced.find(v => v.lineIndex === comp.lineIndex);
+        if (!voicedItem) continue;
+
+        const discType = comp.discrepancyType || 'changed_words';
+        const typeLabel = 
+          discType === 'missing_words' ? 'Пропуск слов' :
+          discType === 'extra_words_or_retake' ? 'Лишние слова / дубль' : 'Отсебятина / замена слов';
+
+        const detectionId = `whisper_text_${track.id}_${comp.lineIndex}_${voicedItem.speechStartSec.toFixed(2)}`;
+
+        results.push({
+          id: detectionId,
+          defectCategory: 'text_mismatch',
+          type: 'text_mismatch',
+          typeLabel: `ASR: ${typeLabel}`,
+          trackId: track.id,
+          dubberName: track.participant,
+          characterName: voicedItem.resolvedCharName || track.character,
+          assignmentId: voicedItem.matchingAssignmentId,
+          lineIndex: comp.lineIndex,
+          subId: voicedItem.subId,
+          startSec: voicedItem.speechStartSec,
+          endSec: voicedItem.speechEndSec,
+          startFormatted: formatTimecode(voicedItem.speechStartSec),
+          endFormatted: formatTimecode(voicedItem.speechEndSec),
+          durationSec: Math.round((voicedItem.speechEndSec - voicedItem.speechStartSec) * 10) / 10,
+          text: comp.expectedText,
+          expectedText: comp.expectedText,
+          recognizedText: comp.recognizedText,
+          textSimilarityPercent: comp.similarityPercent,
+          textDiscrepancyType: discType,
+          wordDiffs: comp.wordDiffs,
+          whisperModelUsed: whisperModel,
+          peakDb: voicedItem.metrics.peakDb,
+          rmsDb: voicedItem.metrics.rmsDb,
+          dynamicRangeDb: voicedItem.metrics.dynamicRangeDb,
+          selected: true,
+          resolutionAction: 'legitimate_fix',
+          comment: `[Несовпадение текста] В сценарии: "${comp.expectedText}". Сказано: "${comp.recognizedText}".`,
+          audioUrl,
+          audioBuffer,
+          originalAudioBuffer
+        });
+      }
+    }
+  }
+
   // Sort chronologically by start timestamp
   results.sort((a, b) => a.startSec - b.startSec);
   return results;
@@ -1261,11 +1448,69 @@ export async function detectEpisodeGaps(
 
 /**
  * Plays an isolated audio snippet or simultaneous dual mix (for overlaps and sync checks)
+ * with dynamic peak volume normalization and soft limiting so all tracks are clearly audible.
  */
 export class SnippetAudioPlayer {
   private static activeSourceA: AudioBufferSourceNode | null = null;
   private static activeSourceB: AudioBufferSourceNode | null = null;
   private static onStopCallback: (() => void) | null = null;
+  private static limiterNode: DynamicsCompressorNode | null = null;
+
+  /**
+   * Lazily creates or reuses a shared soft-knee audio limiter node
+   * to guarantee zero clipping when quiet tracks are boosted.
+   */
+  private static getLimiter(ctx: AudioContext): DynamicsCompressorNode {
+    if (!this.limiterNode || this.limiterNode.context !== ctx) {
+      this.limiterNode = ctx.createDynamicsCompressor();
+      this.limiterNode.threshold.setValueAtTime(-1.0, ctx.currentTime);
+      this.limiterNode.knee.setValueAtTime(0, ctx.currentTime);
+      this.limiterNode.ratio.setValueAtTime(20, ctx.currentTime);
+      this.limiterNode.attack.setValueAtTime(0.002, ctx.currentTime);
+      this.limiterNode.release.setValueAtTime(0.05, ctx.currentTime);
+      this.limiterNode.connect(ctx.destination);
+    }
+    return this.limiterNode;
+  }
+
+  /**
+   * Computes dynamic peak normalization gain for a specific interval of an AudioBuffer.
+   * Brings quiet lines up to standard audible volume (target peak ~ -1.0 dBFS)
+   * while guarding against blowing up baseline quiet noise floors.
+   */
+  public static computeNormalizedGain(
+    buffer: AudioBuffer | null | undefined,
+    startSec: number,
+    endSec: number,
+    targetPeak: number = 0.89 // -1.0 dBFS
+  ): number {
+    if (!buffer) return 1.0;
+    const sampleRate = buffer.sampleRate;
+    const startSample = Math.max(0, Math.floor(startSec * sampleRate));
+    const endSample = Math.min(buffer.length, Math.ceil(endSec * sampleRate));
+    const totalSamples = endSample - startSample;
+    if (totalSamples <= 0) return 1.0;
+
+    let peak = 0;
+    // Fast peak scan sampling up to 3000 points
+    const step = Math.max(1, Math.floor(totalSamples / 3000));
+    const numChannels = buffer.numberOfChannels;
+    for (let ch = 0; ch < numChannels; ch++) {
+      const data = buffer.getChannelData(ch);
+      for (let i = startSample; i < endSample; i += step) {
+        const val = Math.abs(data[i]);
+        if (val > peak) peak = val;
+      }
+    }
+
+    // If pure digital silence or very low noise floor (< -54 dBFS), keep standard unity gain
+    if (peak < 0.002) return 1.0;
+
+    // Calculate gain needed to reach target peak
+    const desiredGain = targetPeak / peak;
+    // Allow boosting up to +24 dB (16.0x) for very quiet recordings, down to 0.4x for loud takes
+    return Math.min(16.0, Math.max(0.4, desiredGain));
+  }
 
   public static play(
     buffer: AudioBuffer,
@@ -1280,16 +1525,21 @@ export class SnippetAudioPlayer {
     if (!ctx) return;
     ensureAudioContextResumed();
 
+    const limiter = this.getLimiter(ctx);
+
     this.activeSourceA = ctx.createBufferSource();
     this.activeSourceA.buffer = buffer;
 
-    const gainNode = ctx.createGain();
-    gainNode.gain.value = 1.0;
-    this.activeSourceA.connect(gainNode);
-    gainNode.connect(ctx.destination);
-
     const startTime = Math.max(0, startSec - 0.05);
     const duration = Math.max(0.1, endSec - startTime);
+
+    // Compute dynamic normalization gain for this snippet
+    const normGain = this.computeNormalizedGain(buffer, startTime, endSec);
+
+    const gainNode = ctx.createGain();
+    gainNode.gain.setValueAtTime(normGain, ctx.currentTime);
+    this.activeSourceA.connect(gainNode);
+    gainNode.connect(limiter);
 
     if (loop) {
       this.activeSourceA.loop = true;
@@ -1324,22 +1574,28 @@ export class SnippetAudioPlayer {
     if (!ctx) return;
     ensureAudioContextResumed();
 
+    const limiter = this.getLimiter(ctx);
+
     const duration = Math.max(0.1, endSec - startSec);
     const startTime = Math.max(0, startSec - 0.05);
+
+    // Dynamic normalization for both channels so neither is muffled
+    const normA = this.computeNormalizedGain(bufferA, startTime, endSec, 0.80) * gainA;
+    const normB = this.computeNormalizedGain(bufferB, startTime, endSec, 0.80) * gainB;
 
     this.activeSourceA = ctx.createBufferSource();
     this.activeSourceA.buffer = bufferA;
     const gainNodeA = ctx.createGain();
-    gainNodeA.gain.value = gainA;
+    gainNodeA.gain.setValueAtTime(normA, ctx.currentTime);
     this.activeSourceA.connect(gainNodeA);
-    gainNodeA.connect(ctx.destination);
+    gainNodeA.connect(limiter);
 
     this.activeSourceB = ctx.createBufferSource();
     this.activeSourceB.buffer = bufferB;
     const gainNodeB = ctx.createGain();
-    gainNodeB.gain.value = gainB;
+    gainNodeB.gain.setValueAtTime(normB, ctx.currentTime);
     this.activeSourceB.connect(gainNodeB);
-    gainNodeB.connect(ctx.destination);
+    gainNodeB.connect(limiter);
 
     this.onStopCallback = onEnded || null;
 

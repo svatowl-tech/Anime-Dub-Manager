@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Send, 
   Paperclip, 
@@ -9,9 +9,10 @@ import {
   Users, 
   MessageSquare, 
   Hash, 
-  CheckCheck,
-  X,
-  FileText
+  CheckCheck, 
+  X, 
+  FileText,
+  RefreshCw
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../../lib/ipcSafe';
@@ -29,19 +30,8 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
   selectedChatId,
   onSelectChat
 }) => {
-  const [messages, setMessages] = useState<Record<string, TelegramChatMessage[]>>({
-    default: [
-      {
-        id: '1',
-        senderName: 'Akane Studio Bot',
-        text: '👋 Добро пожаловать в Telegram Studio Hub! Здесь отображаются сообщения из рабочих чатов и каналов.',
-        time: '12:00',
-        isMe: false,
-        isPinned: true
-      }
-    ]
-  });
-
+  const [messages, setMessages] = useState<Record<string, TelegramChatMessage[]>>({});
+  const [isLoadingMessages, setIsLoadingMessages] = useState<boolean>(false);
   const [inputMessage, setInputMessage] = useState<string>('');
   const [isSilent, setIsSilent] = useState<boolean>(false);
   const [isPin, setIsPin] = useState<boolean>(false);
@@ -51,7 +41,46 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
 
   const currentDialog = dialogs.find(d => d.id === selectedChatId) || dialogs[0] || null;
   const currentChatKey = currentDialog?.id || 'default';
-  const chatMessages = messages[currentChatKey] || messages['default'] || [];
+  const chatMessages = messages[currentChatKey] || [
+    {
+      id: '1',
+      senderName: 'Akane Studio Bot',
+      text: '👋 Добро пожаловать в Telegram Studio Hub! Выберите чат для просмотра и отправки сообщений.',
+      time: '12:00',
+      isMe: false,
+      isPinned: true
+    }
+  ];
+
+  useEffect(() => {
+    if (currentDialog) {
+      loadMessagesForChat(currentDialog);
+    }
+  }, [currentDialog?.id]);
+
+  const loadMessagesForChat = async (dialog: TelegramMTProtoDialog) => {
+    const peer = dialog.username ? `@${dialog.username}` : dialog.id;
+    if (!peer) return;
+
+    setIsLoadingMessages(true);
+    try {
+      const res = await ipcSafe.invoke('telegram-mtproto-get-messages', {
+        chatId: peer,
+        limit: 50
+      });
+
+      if (res && res.success && Array.isArray(res.messages)) {
+        setMessages(prev => ({
+          ...prev,
+          [dialog.id]: res.messages
+        }));
+      }
+    } catch (e: any) {
+      console.warn('Could not load chat messages:', e);
+    } finally {
+      setIsLoadingMessages(false);
+    }
+  };
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -198,46 +227,65 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
               </p>
             </div>
           </div>
+
+          {currentDialog && (
+            <button
+              onClick={() => loadMessagesForChat(currentDialog)}
+              disabled={isLoadingMessages}
+              className="p-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white text-xs flex items-center gap-1.5 cursor-pointer"
+              title="Обновить сообщения"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMessages ? 'animate-spin' : ''}`} />
+              <span className="text-[11px]">Обновить</span>
+            </button>
+          )}
         </div>
 
         {/* Messages List */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3">
-          {chatMessages.map(m => (
-            <div
-              key={m.id}
-              className={`flex flex-col ${m.isMe ? 'items-end' : 'items-start'}`}
-            >
+          {isLoadingMessages && chatMessages.length === 0 ? (
+            <div className="flex items-center justify-center h-32 text-xs text-neutral-400 gap-2">
+              <RefreshCw className="w-4 h-4 animate-spin text-sky-400" />
+              <span>Загрузка сообщений из Telegram...</span>
+            </div>
+          ) : (
+            chatMessages.map(m => (
               <div
-                className={`max-w-md rounded-2xl p-3.5 shadow-md relative text-xs space-y-1.5 ${
-                  m.isMe
-                    ? 'bg-sky-600 text-white rounded-br-none'
-                    : 'bg-neutral-900 text-neutral-200 border border-neutral-800 rounded-bl-none'
-                }`}
+                key={m.id}
+                className={`flex flex-col ${m.isMe ? 'items-end' : 'items-start'}`}
               >
-                {!m.isMe && (
-                  <div className="text-[11px] font-bold text-sky-400">{m.senderName}</div>
-                )}
-                {m.isPinned && (
-                  <div className="flex items-center gap-1 text-[10px] text-amber-300 font-semibold mb-1">
-                    <Pin className="w-3 h-3" /> Закрепленное сообщение
-                  </div>
-                )}
                 <div
-                  className="leading-relaxed break-words"
-                  dangerouslySetInnerHTML={{ __html: m.text }}
-                />
-                {m.mediaPath && (
-                  <div className="mt-2 text-[11px] bg-black/20 p-2 rounded-lg flex items-center gap-1.5">
-                    <FileText className="w-3.5 h-3.5" />
-                    <span className="truncate">{m.mediaPath.split(/[\\/]/).pop()}</span>
+                  className={`max-w-md rounded-2xl p-3.5 shadow-md relative text-xs space-y-1.5 ${
+                    m.isMe
+                      ? 'bg-sky-600 text-white rounded-br-none'
+                      : 'bg-neutral-900 text-neutral-200 border border-neutral-800 rounded-bl-none'
+                  }`}
+                >
+                  {!m.isMe && (
+                    <div className="text-[11px] font-bold text-sky-400">{m.senderName}</div>
+                  )}
+                  {m.isPinned && (
+                    <div className="flex items-center gap-1 text-[10px] text-amber-300 font-semibold mb-1">
+                      <Pin className="w-3 h-3" /> Закрепленное сообщение
+                    </div>
+                  )}
+                  <div
+                    className="leading-relaxed break-words"
+                    dangerouslySetInnerHTML={{ __html: m.text }}
+                  />
+                  {m.mediaPath && (
+                    <div className="mt-2 text-[11px] bg-black/20 p-2 rounded-lg flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5" />
+                      <span className="truncate">{m.mediaPath.split(/[\\/]/).pop()}</span>
+                    </div>
+                  )}
+                  <div className={`text-[10px] text-right mt-1 ${m.isMe ? 'text-sky-200' : 'text-neutral-500'}`}>
+                    {m.time}
                   </div>
-                )}
-                <div className={`text-[10px] text-right mt-1 ${m.isMe ? 'text-sky-200' : 'text-neutral-500'}`}>
-                  {m.time}
                 </div>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
 
         {/* Input Bar */}

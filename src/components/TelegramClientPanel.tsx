@@ -67,6 +67,8 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
 
   // Project Chat Config Modal
   const [isProjectModalOpen, setIsProjectModalOpen] = useState<boolean>(false);
+  // Auth Modal (QR / Phone)
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
 
   useEffect(() => {
     loadStatus();
@@ -121,6 +123,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
   };
 
   const isConnected = status?.status === 'connected';
+  const hasBot = !!(status?.botConnected || status?.settings?.botToken);
 
   return (
     <div className="flex-1 flex flex-col h-full bg-neutral-950 text-white overflow-hidden select-none">
@@ -133,13 +136,19 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <h2 className="text-xs font-bold text-white uppercase tracking-wider">Telegram Studio Center</h2>
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                isConnected
-                  ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                  : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-              }`}>
-                {isConnected ? 'MTProto Online' : 'Web Ready'}
-              </span>
+              <button
+                onClick={() => !isConnected && setIsAuthModalOpen(true)}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition flex items-center gap-1 ${
+                  isConnected
+                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                    : hasBot
+                    ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30 hover:bg-purple-500/25 cursor-pointer'
+                    : 'bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 cursor-pointer'
+                }`}
+                title={!isConnected ? 'Нажмите для входа в MTProto' : 'MTProto подключен'}
+              >
+                {isConnected ? 'MTProto Online' : hasBot ? 'Bot API Online (MTProto offline)' : 'Авторизоваться в MTProto'}
+              </button>
             </div>
             <p className="text-[11px] text-neutral-400">
               {activeProject ? `Проект: ${activeProject.title}` : 'Управление публикациями и чатами озвучки'}
@@ -230,7 +239,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
             }`}
           >
             <Settings className="w-3.5 h-3.5" />
-            <span>Настройки MTProto</span>
+            <span>Настройки</span>
           </button>
         </div>
 
@@ -246,153 +255,131 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
         )}
       </div>
 
+      {/* Offline Alert Strip when MTProto is disconnected */}
+      {!isConnected && (
+        <div className="bg-amber-950/40 border-b border-amber-900/50 px-4 py-2 flex items-center justify-between text-xs text-amber-200 flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span>
+              Telegram MTProto не подключен. {hasBot ? 'Отправка постов работает через Bot API.' : 'Авторизуйтесь по QR / телефону для чтения чатов и скачивания дорожек.'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsAuthModalOpen(true)}
+              className="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white font-semibold rounded-lg text-xs transition cursor-pointer"
+            >
+              Войти через QR-код
+            </button>
+            <button
+              onClick={() => setActiveTab('settings')}
+              className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-semibold rounded-lg text-xs transition cursor-pointer"
+            >
+              Настроить Bot API
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Tab Content */}
       <div className="flex-1 overflow-hidden relative flex flex-col">
         {activeTab === 'tracks' && (
-          isConnected ? (
-            <TelegramTracksTab
-              currentProject={activeProject}
-              currentEpisode={currentEpisode}
-              allProjects={allProjects}
-              dialogs={dialogs}
-              onRefreshProjects={onRefreshProjects}
-            />
-          ) : (
-            <div className="flex-1 overflow-y-auto">
-              <TelegramAuthView
-                onSuccess={loadStatus}
-                savedPhone={status?.settings?.phoneNumber}
-                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
-                savedApiHash={status?.settings?.apiHash || ''}
-              />
-            </div>
-          )
+          <TelegramTracksTab
+            currentProject={activeProject}
+            currentEpisode={currentEpisode}
+            allProjects={allProjects}
+            dialogs={dialogs}
+            onRefreshProjects={onRefreshProjects}
+          />
         )}
 
         {activeTab === 'verify' && (
-          isConnected ? (
-            <TelegramPostVerifyTab
-              currentProject={activeProject}
-              currentEpisode={currentEpisode}
-              dialogs={dialogs}
-              defaultChannelId={status?.settings?.defaultChannelId || ''}
-              onRefreshProjects={onRefreshProjects}
-            />
-          ) : (
-            <div className="flex-1 overflow-y-auto">
-              <TelegramAuthView
-                onSuccess={loadStatus}
-                savedPhone={status?.settings?.phoneNumber}
-                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
-                savedApiHash={status?.settings?.apiHash || ''}
-              />
-            </div>
-          )
+          <TelegramPostVerifyTab
+            currentProject={activeProject}
+            currentEpisode={currentEpisode}
+            dialogs={dialogs}
+            defaultChannelId={status?.settings?.defaultChannelId || ''}
+            onRefreshProjects={onRefreshProjects}
+          />
         )}
 
         {activeTab === 'composer' && (
-          isConnected ? (
-            <TelegramComposerTab
-              currentProject={activeProject}
-              currentEpisode={currentEpisode}
-              dialogs={dialogs}
-              defaultChannelId={status?.settings?.defaultChannelId || ''}
-              headerTemplate={status?.settings?.headerTemplate || ''}
-              footerTemplate={status?.settings?.footerTemplate || ''}
-            />
-          ) : (
-            <div className="flex-1 overflow-y-auto">
-              <TelegramAuthView
-                onSuccess={loadStatus}
-                savedPhone={status?.settings?.phoneNumber}
-                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
-                savedApiHash={status?.settings?.apiHash || ''}
-              />
-            </div>
-          )
+          <TelegramComposerTab
+            currentProject={activeProject}
+            currentEpisode={currentEpisode}
+            dialogs={dialogs}
+            defaultChannelId={status?.settings?.defaultChannelId || ''}
+            headerTemplate={status?.settings?.headerTemplate || ''}
+            footerTemplate={status?.settings?.footerTemplate || ''}
+          />
         )}
 
         {activeTab === 'automations' && (
-          isConnected ? (
-            <TelegramAutomationsTab
-              currentProject={activeProject}
-              currentEpisode={currentEpisode}
-              allProjects={allProjects}
-              dialogs={dialogs}
-              defaultChannelId={status?.settings?.defaultChannelId || ''}
-            />
-          ) : (
-            <div className="flex-1 overflow-y-auto">
-              <TelegramAuthView
-                onSuccess={loadStatus}
-                savedPhone={status?.settings?.phoneNumber}
-                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
-                savedApiHash={status?.settings?.apiHash || ''}
-              />
-            </div>
-          )
+          <TelegramAutomationsTab
+            currentProject={activeProject}
+            currentEpisode={currentEpisode}
+            allProjects={allProjects}
+            dialogs={dialogs}
+            defaultChannelId={status?.settings?.defaultChannelId || ''}
+          />
         )}
 
         {activeTab === 'messenger' && (
-          isConnected ? (
-            <TelegramMessengerTab
-              dialogs={dialogs}
-              selectedChatId={selectedChatId}
-              onSelectChat={(id) => setSelectedChatId(id)}
-            />
-          ) : (
-            <div className="flex-1 overflow-y-auto">
-              <TelegramAuthView
-                onSuccess={loadStatus}
-                savedPhone={status?.settings?.phoneNumber}
-                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
-                savedApiHash={status?.settings?.apiHash || ''}
-              />
-            </div>
-          )
+          <TelegramMessengerTab
+            dialogs={dialogs}
+            selectedChatId={selectedChatId}
+            onSelectChat={(id) => setSelectedChatId(id)}
+          />
         )}
 
         {activeTab === 'dialogs' && (
-          isConnected ? (
-            <TelegramDialogsTab
-              dialogs={dialogs}
-              isLoading={isLoadingDialogs}
-              onRefresh={loadDialogs}
-              onSelectChat={(id) => {
-                setSelectedChatId(id);
-                setActiveTab('messenger');
-              }}
-            />
-          ) : (
-            <div className="flex-1 overflow-y-auto">
-              <TelegramAuthView
-                onSuccess={loadStatus}
-                savedPhone={status?.settings?.phoneNumber}
-                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
-                savedApiHash={status?.settings?.apiHash || ''}
-              />
-            </div>
-          )
+          <TelegramDialogsTab
+            dialogs={dialogs}
+            isLoading={isLoadingDialogs}
+            onRefresh={loadDialogs}
+            onSelectChat={(id) => {
+              setSelectedChatId(id);
+              setActiveTab('messenger');
+            }}
+          />
         )}
 
         {activeTab === 'settings' && (
-          <div className="flex-1 overflow-y-auto">
-            {!isConnected ? (
-              <TelegramAuthView
-                onSuccess={loadStatus}
-                savedPhone={status?.settings?.phoneNumber}
-                savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
-                savedApiHash={status?.settings?.apiHash || ''}
-              />
-            ) : (
-              <TelegramSettingsTab
-                status={status}
-                onRefreshStatus={loadStatus}
-              />
-            )}
-          </div>
+          <TelegramSettingsTab
+            status={status}
+            onRefreshStatus={loadStatus}
+            onOpenAuth={() => setIsAuthModalOpen(true)}
+          />
         )}
       </div>
+
+      {/* Auth Modal (QR / Phone) */}
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-3xl max-w-xl w-full max-h-[90vh] overflow-y-auto relative p-6 shadow-2xl">
+            <button
+              onClick={() => setIsAuthModalOpen(false)}
+              className="absolute right-4 top-4 p-2 text-neutral-400 hover:text-white rounded-full hover:bg-neutral-800 transition cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+            <div className="mb-4">
+              <h3 className="text-base font-bold text-white">Авторизация в Telegram MTProto</h3>
+              <p className="text-xs text-neutral-400">Сканируйте QR-код через мобильное приложение Telegram или войдите по номеру телефона</p>
+            </div>
+            <TelegramAuthView
+              onSuccess={async () => {
+                await loadStatus();
+                setIsAuthModalOpen(false);
+                toast.success('Авторизация в Telegram MTProto успешна!');
+              }}
+              savedPhone={status?.settings?.phoneNumber}
+              savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
+              savedApiHash={status?.settings?.apiHash || ''}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Project Chat Config Modal */}
       {isProjectModalOpen && activeProject && (

@@ -14,7 +14,8 @@ import { ConfirmModal } from './ui/ConfirmModal';
 import { useVideoContext } from '../contexts/VideoContext';
 import { SIGN_KEYWORDS } from '../constants';
 import { analyzeAudioForPreview, NormalizationMetrics, getCachedNormalization } from '../lib/qa/audioNormalizer';
-import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval } from '../lib/qa/missingLinesDetector';
+import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval, GapDetectionOptions } from '../lib/qa/missingLinesDetector';
+import { QAScanConfigModal } from './qa/QAScanConfigModal';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
@@ -59,9 +60,21 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
   const [normalizationMetrics, setNormalizationMetrics] = useState<Record<string, NormalizationMetrics>>({});
   const [detectedGaps, setDetectedGaps] = useState<MissingLineDetection[]>([]);
   const [isGapModalOpen, setIsGapModalOpen] = useState(false);
+  const [isScanConfigModalOpen, setIsScanConfigModalOpen] = useState(false);
   const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
   const [isApplyingGapFixes, setIsApplyingGapFixes] = useState(false);
   const [gapSensitivityThreshold, setGapSensitivityThreshold] = useState<number>(3.0);
+  const [gapScanOptions, setGapScanOptions] = useState<GapDetectionOptions>({
+    speechDynamicThresholdDb: 3.0,
+    scanMissingLines: true,
+    scanUnwantedSpeech: true,
+    scanCollisions: true,
+    scanOverlaps: true,
+    scanTimingMismatches: true,
+    scanArtifacts: true,
+    scanWhisperText: false,
+    whisperModel: 'small'
+  });
 
   const gapsByTrack = useMemo(() => {
     const map: Record<string, number> = {};
@@ -924,7 +937,21 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     }
   };
 
-  const handleRunGapDetection = async (overrideThreshold?: number) => {
+  const handleOpenScanConfig = () => {
+    if (!currentEpisode) return;
+    if (subLines.length === 0) {
+      toast.error('Субтитры еще не загружены или отсутствуют в серии');
+      return;
+    }
+    const dubberTracks = tracks.filter(t => t.id !== 'original' && t.files.length > 0);
+    if (dubberTracks.length === 0) {
+      toast.error('Нет загруженных аудиодорожек даберов для анализа');
+      return;
+    }
+    setIsScanConfigModalOpen(true);
+  };
+
+  const handleExecuteGapDetection = async (overrideOptions?: GapDetectionOptions) => {
     if (!currentEpisode) return;
     if (subLines.length === 0) {
       toast.error('Субтитры еще не загружены или отсутствуют в серии');
@@ -936,23 +963,27 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       return;
     }
 
-    const thresholdToUse = typeof overrideThreshold === 'number' ? overrideThreshold : gapSensitivityThreshold;
-    if (typeof overrideThreshold === 'number') {
-      setGapSensitivityThreshold(overrideThreshold);
-    }
+    const optionsToUse: GapDetectionOptions = overrideOptions || gapScanOptions;
+    const thresholdToUse = optionsToUse.speechDynamicThresholdDb ?? gapSensitivityThreshold;
+    setGapSensitivityThreshold(thresholdToUse);
+    setGapScanOptions(optionsToUse);
 
     setIsAnalyzingGaps(true);
     try {
-      toast.info(`Сканирование косяков озвучки (порог динамики ${thresholdToUse} дБ)...`);
+      const activeModes: string[] = [];
+      if (optionsToUse.scanMissingLines) activeModes.push('пропуски');
+      if (optionsToUse.scanCollisions) activeModes.push('конфликты');
+      if (optionsToUse.scanOverlaps) activeModes.push('наезды хвостов');
+      if (optionsToUse.scanTimingMismatches) activeModes.push('тайминги');
+      if (optionsToUse.scanArtifacts) activeModes.push('артефакты');
+      if (optionsToUse.scanWhisperText) activeModes.push(`Whisper (${optionsToUse.whisperModel || 'small'})`);
+
+      toast.info(`Запуск QA анализа [${activeModes.join(', ')}]...`);
       const gaps = await detectEpisodeGaps(
         currentEpisode,
         tracks,
         subLines,
-        {
-          speechDynamicThresholdDb: thresholdToUse,
-          scanUnwantedSpeech: true,
-          scanCollisions: true
-        },
+        optionsToUse,
         (current, total, msg) => {
           // Progress feedback
         }
@@ -964,11 +995,21 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       const missing = gaps.filter(g => (g.defectCategory || 'missing_line') === 'missing_line').length;
       const unwanted = gaps.filter(g => g.defectCategory === 'unwanted_speech').length;
       const collisions = gaps.filter(g => g.defectCategory === 'actor_collision').length;
+      const overlaps = gaps.filter(g => g.defectCategory === 'actor_overlap').length;
+      const artifacts = gaps.filter(g => g.defectCategory === 'audio_artifact').length;
+      const textMismatches = gaps.filter(g => g.defectCategory === 'text_mismatch').length;
 
       if (gaps.length === 0) {
         toast.success('✨ Замечаний не обнаружено! Все реплики озвучены корректно.');
       } else {
-        toast.warning(`Найдено замечаний: ${gaps.length} (пропусков: ${missing}, вне сабов: ${unwanted}, конфликтов: ${collisions})`);
+        toast.warning(
+          `Найдено замечаний: ${gaps.length}` +
+          (missing ? ` • Пропусков: ${missing}` : '') +
+          (collisions ? ` • Конфликтов: ${collisions}` : '') +
+          (overlaps ? ` • Наездов: ${overlaps}` : '') +
+          (artifacts ? ` • Артефактов: ${artifacts}` : '') +
+          (textMismatches ? ` • Расхождений текста: ${textMismatches}` : '')
+        );
       }
     } catch (e: any) {
       console.error('Gap detection failed:', e);
@@ -976,6 +1017,14 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     } finally {
       setIsAnalyzingGaps(false);
     }
+  };
+
+  const handleRunGapDetection = async (overrideThreshold?: number) => {
+    const updatedOptions: GapDetectionOptions = {
+      ...gapScanOptions,
+      speechDynamicThresholdDb: typeof overrideThreshold === 'number' ? overrideThreshold : gapScanOptions.speechDynamicThresholdDb
+    };
+    await handleExecuteGapDetection(updatedOptions);
   };
 
   const handleApplyGapFixes = async (selectedGaps: MissingLineDetection[]) => {
@@ -986,7 +1035,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       const commentsByTrackId: Record<string, Comment[]> = {};
       const commentsByAssignmentId: Record<string, Comment[]> = {};
       const intervalsToSilenceByFilePath: Record<string, { startSec: number; endSec: number }[]> = {};
-      const subUpdates: { rawLineIndex: number; name: string }[] = [];
+      const subUpdates: { rawLineIndex: number; name?: string; text?: string }[] = [];
 
       const getFilePathForTrack = (trackId: string): string | null => {
         const trk = tracks.find(t => t.id === trackId);
@@ -1166,6 +1215,37 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           }
           // Note: 'note_sound_engineer' is included in sound engineer QA report, 'ignore' is dismissed.
         }
+
+        // 6. Text Mismatch / Whisper ASR
+        else if (category === 'text_mismatch') {
+          if (gap.resolutionAction === 'actor_better_than_sub') {
+            // Actor's delivery is superior to original subtitles -> update subtitles!
+            if (gap.recognizedText && typeof gap.lineIndex === 'number') {
+              subUpdates.push({
+                rawLineIndex: gap.lineIndex,
+                text: gap.recognizedText,
+                name: gap.characterName
+              });
+            }
+          } else if (gap.resolutionAction === 'legitimate_fix' || gap.resolutionAction === 'request_dubber_fix') {
+            // Dubber made a slip of tongue / mistake -> request re-recording
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: gap.comment || `[Фикс текста / Оговорка] В сабах: "${gap.expectedText || gap.text}". Озвучено: "${gap.recognizedText}". Перезапишите строго по тексту.`,
+              timestamp: gap.startSec,
+              author: 'Куратор (Whisper QA)',
+              subId: gap.subId
+            };
+
+            if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+            commentsByTrackId[gap.trackId].push(comment);
+
+            if (gap.assignmentId) {
+              if (!commentsByAssignmentId[gap.assignmentId]) commentsByAssignmentId[gap.assignmentId] = [];
+              commentsByAssignmentId[gap.assignmentId].push(comment);
+            }
+          }
+        }
       });
 
       // Execute audio silencing on physical files in Electron
@@ -1186,7 +1266,12 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           });
           setSubLines(prev => prev.map(l => {
             const up = subUpdates.find(u => u.rawLineIndex === l.rawLineIndex);
-            return up ? { ...l, name: up.name } : l;
+            if (!up) return l;
+            return {
+              ...l,
+              name: up.name !== undefined ? up.name : l.name,
+              text: up.text !== undefined ? up.text : l.text
+            };
           }));
         } catch (subErr) {
           console.error('Failed to save corrected subtitles:', subErr);
@@ -1624,7 +1709,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           isAutoNormalize={isAutoNormalize}
           onToggleAutoNormalize={toggleAutoNormalize}
           normalizationMetrics={normalizationMetrics}
-          onOpenGapDetection={handleRunGapDetection}
+          onOpenGapDetection={handleOpenScanConfig}
           isAnalyzingGaps={isAnalyzingGaps}
           detectedGapsCount={detectedGaps.length}
           gapsByTrack={gapsByTrack}
@@ -2140,6 +2225,22 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         </div>
       )}
 
+      {/* Pre-scan Configuration Modal */}
+      {isScanConfigModalOpen && (
+        <QAScanConfigModal
+          isOpen={isScanConfigModalOpen}
+          onClose={() => setIsScanConfigModalOpen(false)}
+          onStartScan={(options) => {
+            setGapScanOptions(options);
+            setIsScanConfigModalOpen(false);
+            handleExecuteGapDetection(options);
+          }}
+          initialOptions={gapScanOptions}
+          totalDubbers={tracks.filter(t => t.id !== 'original' && t.files.length > 0).length}
+          totalSubLines={subLines.length}
+        />
+      )}
+
       {/* Missing Lines / Gaps Review Modal */}
       {isGapModalOpen && (
         <MissingLinesModal
@@ -2154,6 +2255,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           }}
           isApplying={isApplyingGapFixes}
           onReAnalyze={handleRunGapDetection}
+          onOpenScanConfig={() => setIsScanConfigModalOpen(true)}
           isAnalyzing={isAnalyzingGaps}
           currentThreshold={gapSensitivityThreshold}
         />

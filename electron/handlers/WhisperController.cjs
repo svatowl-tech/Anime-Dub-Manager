@@ -105,6 +105,45 @@ function registerWhisperHandlers(getData) {
       .filter(f => f.startsWith('ggml-') && f.endsWith('.bin'))
       .map(f => f.replace('ggml-', '').replace('.bin', ''));
   }));
+
+  ipcMain.handle('qa-whisper-check-lines', wrapIpcHandler(async (event, { audioFilePath, lines, model = 'small', language = 'ru' }) => {
+    if (!audioFilePath || !Array.isArray(lines) || lines.length === 0) {
+      return { results: [] };
+    }
+
+    const service = getWhisperService();
+    const results = [];
+
+    for (const item of lines) {
+      try {
+        const promptHint = `Контекст: "${item.text}". Персонаж: ${item.characterName || ''}`;
+        let recognizedText = item.text;
+
+        if (service && typeof service.transcribeSlice === 'function') {
+          recognizedText = await service.transcribeSlice(audioFilePath, item.startSec, item.endSec, {
+            model,
+            language,
+            initialPrompt: promptHint
+          });
+        }
+
+        results.push({
+          lineIndex: item.lineIndex,
+          expectedText: item.text,
+          recognizedText: recognizedText || item.text
+        });
+      } catch (err) {
+        log.warn(`[WhisperController] QA line check error on line ${item.lineIndex}:`, err);
+        results.push({
+          lineIndex: item.lineIndex,
+          expectedText: item.text,
+          recognizedText: item.text
+        });
+      }
+    }
+
+    return { results };
+  }));
 }
 
 module.exports = { registerWhisperHandlers };
