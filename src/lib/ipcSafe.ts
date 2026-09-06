@@ -35,10 +35,19 @@ export const ipcSafe = {
         !channel.includes('sign-in') && 
         !channel.includes('submit-password');
 
-      if (isOperationalTgChannel && String(error.message || error).includes('AUTH_KEY_UNREGISTERED')) {
+      const errStr = String(error?.message || error || '');
+      const isAuthError = errStr.includes('AUTH_KEY_UNREGISTERED') ||
+                          errStr.includes('AUTH_KEY_INVALID') ||
+                          errStr.includes('SESSION_REVOKED') ||
+                          errStr.includes('SESSION_EXPIRED') ||
+                          errStr.includes('Сессия Telegram устарела');
+
+      if (isOperationalTgChannel && isAuthError) {
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('telegram-auth-invalidated'));
         }
+        console.warn(`[Telegram MTProto] Session invalidated on channel "${channel}". Prompting re-auth.`);
+        throw error;
       }
 
       if (error && error._isIpcError) {

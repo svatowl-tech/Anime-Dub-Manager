@@ -62,7 +62,14 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
   }));
 
   ipcMain.handle('telegram-mtproto-get-dialogs', wrapIpcHandler(async (event, { limit } = {}) => {
-    return await service.getDialogs(limit || 50);
+    try {
+      return await service.getDialogs(limit || 50);
+    } catch (err) {
+      if (String(err).includes('AUTH_KEY_UNREGISTERED') || String(err).includes('Сессия Telegram устарела')) {
+        return [];
+      }
+      throw err;
+    }
   }));
 
   ipcMain.handle('telegram-mtproto-send-post', wrapIpcHandler(async (event, postParams) => {

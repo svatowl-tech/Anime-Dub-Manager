@@ -90,7 +90,11 @@ class TelegramMTProtoService {
   }
 
   async connectWithSavedSession() {
-    if (!this.settings.sessionString) return false;
+    if (!this.settings.sessionString) {
+      this.status = 'disconnected';
+      this.me = null;
+      return false;
+    }
     try {
       const apiId = Number(this.settings.apiId || DEFAULT_TELEGRAM_API_ID);
       const apiHash = String(this.settings.apiHash || DEFAULT_TELEGRAM_API_HASH).trim();
@@ -101,13 +105,13 @@ class TelegramMTProtoService {
       this.session = new StringSession(this.settings.sessionString);
 
       this.client = new TelegramClient(this.session, apiId, apiHash, {
-        connectionRetries: 3,
+        connectionRetries: 2,
         useWSS: false,
       });
 
       await this.client.connect();
       const me = await this.client.getMe();
-      if (me) {
+      if (me && me.id) {
         this.me = {
           id: me.id ? me.id.toString() : '',
           firstName: me.firstName || '',
@@ -120,10 +124,30 @@ class TelegramMTProtoService {
         return true;
       } else {
         this.status = 'disconnected';
+        this.me = null;
       }
     } catch (e) {
       log.error('[MTProto] Failed connecting with saved session:', e);
       this.status = 'disconnected';
+      this.me = null;
+      this.session = null;
+      if (this.client) {
+        try {
+          await this.client.disconnect();
+        } catch (err) {}
+        this.client = null;
+      }
+      const errMsg = e.message || String(e);
+      if (
+        errMsg.includes('AUTH_KEY_UNREGISTERED') ||
+        errMsg.includes('AUTH_KEY_INVALID') ||
+        errMsg.includes('SESSION_REVOKED') ||
+        errMsg.includes('SESSION_EXPIRED')
+      ) {
+        log.warn('[MTProto] Stored session is expired or revoked. Clearing sessionString...');
+        this.settings.sessionString = '';
+        await this.saveSettings({ sessionString: '' });
+      }
     }
     return false;
   }
@@ -626,7 +650,17 @@ class TelegramMTProtoService {
   }
 
   async getDialogs(limit = 50) {
-    this.ensureConnected();
+    if (this.status !== 'connected' || !this.client) {
+      if (this.settings.sessionString) {
+        const reconnected = await this.connectWithSavedSession();
+        if (!reconnected) {
+          return [];
+        }
+      } else {
+        return [];
+      }
+    }
+
     try {
       const dialogs = await this.client.getDialogs({ limit });
       return dialogs.map(d => ({
@@ -641,6 +675,7 @@ class TelegramMTProtoService {
       }));
     } catch (e) {
       await this._handleApiError(e, 'getDialogs');
+      return [];
     }
   }
 
@@ -1157,7 +1192,12 @@ class TelegramMTProtoService {
     const log = require('electron-log');
     log.error(`[MTProto] ${contextStr} error:`, e);
     const errMsg = e.message || String(e);
-    if (errMsg.includes('AUTH_KEY_UNREGISTERED')) {
+    if (
+      errMsg.includes('AUTH_KEY_UNREGISTERED') ||
+      errMsg.includes('AUTH_KEY_INVALID') ||
+      errMsg.includes('SESSION_REVOKED') ||
+      errMsg.includes('SESSION_EXPIRED')
+    ) {
       this.status = 'disconnected';
       this.me = null;
       this.session = null;
@@ -1167,14 +1207,15 @@ class TelegramMTProtoService {
         } catch (err) {}
         this.client = null;
       }
+      this.settings.sessionString = '';
       await this.saveSettings({ sessionString: '' });
-      throw new Error('Сессия Telegram устарела или завершена. Пожалуйста, выполните повторный вход.');
+      throw new Error('AUTH_KEY_UNREGISTERED: Сессия Telegram устарела или завершена. Пожалуйста, выполните повторный вход.');
     }
     throw new Error(errMsg);
   }
 
   async ensureConnected() {
-    if (this.client && this.status === 'connected') {
+    if (this.client && this.status === 'connected' && this.me && this.me.id) {
       return true;
     }
 
@@ -1190,13 +1231,10 @@ class TelegramMTProtoService {
   }
 
   getStatus() {
-    let effectiveStatus = this.status;
-    if (effectiveStatus !== 'connected' && this.me && this.me.id) {
-      effectiveStatus = 'connected';
-    }
+    const isConnected = this.status === 'connected' && !!(this.me && this.me.id);
     return {
-      status: effectiveStatus,
-      me: this.me,
+      status: isConnected ? 'connected' : 'disconnected',
+      me: isConnected ? this.me : null,
       botConnected: !!this.botMe,
       botMe: this.botMe,
       settings: {

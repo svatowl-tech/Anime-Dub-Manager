@@ -75,7 +75,11 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
 
     const handleAuthInvalidated = () => {
       console.warn('Telegram auth invalidated. Reloading status...');
+      setStatus(prev => prev ? { ...prev, status: 'disconnected', me: null } : null);
+      setDialogs([]);
       loadStatus();
+      toast.error('Сессия Telegram устарела. Пожалуйста, выполните повторный вход.');
+      setIsAuthModalOpen(true);
     };
 
     window.addEventListener('telegram-auth-invalidated', handleAuthInvalidated);
@@ -92,6 +96,8 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
         setStatus(res);
         if (res.status === 'connected') {
           loadDialogs();
+        } else {
+          setDialogs([]);
         }
       }
     } catch (e: any) {
@@ -110,12 +116,16 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
         if (res.length > 0 && !selectedChatId) {
           setSelectedChatId(res[0].id);
         }
+      } else {
+        setDialogs([]);
       }
     } catch (e: any) {
       console.warn('Dialogs fetch error:', e);
-      if (String(e).includes('AUTH_KEY_UNREGISTERED')) {
-        // Session was invalid and has been cleared by backend
+      const errStr = String(e?.message || e || '');
+      if (errStr.includes('AUTH_KEY_UNREGISTERED') || errStr.includes('Сессия Telegram устарела')) {
         setStatus(prev => prev ? { ...prev, status: 'disconnected', me: null } : { status: 'disconnected', me: null, settings: {} as any });
+        setDialogs([]);
+        setIsAuthModalOpen(true);
       }
     } finally {
       setIsLoadingDialogs(false);
