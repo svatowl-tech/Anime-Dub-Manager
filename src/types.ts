@@ -112,6 +112,7 @@ export interface Episode {
   subPath?: string;
   isHardsub?: boolean;
   tgPostTemplate?: string;
+  tgArticleTemplate?: string;
   vkPostTemplate?: string;
   finalTgPostTemplate?: string;
   linksTemplate?: string;
@@ -186,6 +187,7 @@ export interface Project {
   tgTrackReceivedTemplate?: string;
   autoTriggersConfig?: string;
   tgPostTemplate?: string;
+  tgArticleTemplate?: string;
   vkPostTemplate?: string;
   finalTgPostTemplate?: string;
   linksTemplate?: string;

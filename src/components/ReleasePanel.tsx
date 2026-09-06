@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   PlaySquare, Send, Copy, MessageSquare, Sparkles, CheckCircle2, Globe, Link2, Save, 
-  Package, Loader2, Camera, Image as ImageIcon, Download, Upload, Plus, Trash2, Edit3, Check 
+  Package, Loader2, Camera, Image as ImageIcon, Download, Upload, Plus, Trash2, Edit3, Check,
+  Table, ExternalLink, Columns, Eye, Code
 } from 'lucide-react';
 import { getParticipants } from '../services/dbService';
 import { Participant, Episode, Project } from '../types';
@@ -12,10 +13,12 @@ import {
   generateTGPostMessage, 
   generateVKPostMessage, 
   generateFinalTGMessage,
+  generateTGArticleMessage,
   getTemplateString,
   applyTemplate,
   getTemplateVariables,
-  convertToHTMLForTelegram
+  convertToHTMLForTelegram,
+  markdownTableToUnicodeBox
 } from '../lib/templates';
 import { useVideoContext } from '../contexts/VideoContext';
 
@@ -50,7 +53,10 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [postContent, setPostContent] = useState('');
   const [isCopied, setIsCopied] = useState(false);
-  const [activeTemplate, setActiveTemplate] = useState<'TG' | 'VK' | 'FINAL_TG' | null>(null);
+  const [isCopiedMarkdown, setIsCopiedMarkdown] = useState(false);
+  const [isCopiedUnicode, setIsCopiedUnicode] = useState(false);
+  const [activeTemplate, setActiveTemplate] = useState<'TG' | 'VK' | 'FINAL_TG' | 'TG_ARTICLE' | null>(null);
+  const [articleViewMode, setArticleViewMode] = useState<'visual' | 'markdown' | 'unicode'>('visual');
   const [links, setLinks] = useState<ProjectLinks>({});
   const [isSavingLinks, setIsSavingLinks] = useState(false);
   const [isBuilding, setIsBuilding] = useState(false);
@@ -386,8 +392,13 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
 
   const handleSaveTemplateLocal = async () => {
     if (!currentEpisode || !activeTemplate) return;
-    const propMap = { 'TG': 'tgPostTemplate', 'VK': 'vkPostTemplate', 'FINAL_TG': 'finalTgPostTemplate' };
-    const propName = propMap[activeTemplate] as 'tgPostTemplate' | 'vkPostTemplate' | 'finalTgPostTemplate';
+    const propMap = { 
+      'TG': 'tgPostTemplate', 
+      'VK': 'vkPostTemplate', 
+      'FINAL_TG': 'finalTgPostTemplate',
+      'TG_ARTICLE': 'tgArticleTemplate'
+    };
+    const propName = propMap[activeTemplate] as 'tgPostTemplate' | 'vkPostTemplate' | 'finalTgPostTemplate' | 'tgArticleTemplate';
     if (!propName) return; 
 
     try {
@@ -426,8 +437,13 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
 
   const handleSaveTemplateGlobal = async () => {
     if (!currentEpisode?.project || !activeTemplate) return;
-    const propMap = { 'TG': 'tgPostTemplate', 'VK': 'vkPostTemplate', 'FINAL_TG': 'finalTgPostTemplate' };
-    const propName = propMap[activeTemplate] as 'tgPostTemplate' | 'vkPostTemplate' | 'finalTgPostTemplate';
+    const propMap = { 
+      'TG': 'tgPostTemplate', 
+      'VK': 'vkPostTemplate', 
+      'FINAL_TG': 'finalTgPostTemplate',
+      'TG_ARTICLE': 'tgArticleTemplate'
+    };
+    const propName = propMap[activeTemplate] as 'tgPostTemplate' | 'vkPostTemplate' | 'finalTgPostTemplate' | 'tgArticleTemplate';
     if (!propName) return;
 
     try {
@@ -470,6 +486,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
       tgPostTemplate: project.tgPostTemplate || '',
       vkPostTemplate: project.vkPostTemplate || '',
       finalTgPostTemplate: project.finalTgPostTemplate || '',
+      tgArticleTemplate: project.tgArticleTemplate || '',
       linksTemplate: project.linksTemplate || '',
       typeAndSeason: project.typeAndSeason || ''
     };
@@ -523,6 +540,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
           tgPostTemplate: configData.tgPostTemplate !== undefined ? configData.tgPostTemplate : project.tgPostTemplate,
           vkPostTemplate: configData.vkPostTemplate !== undefined ? configData.vkPostTemplate : project.vkPostTemplate,
           finalTgPostTemplate: configData.finalTgPostTemplate !== undefined ? configData.finalTgPostTemplate : project.finalTgPostTemplate,
+          tgArticleTemplate: configData.tgArticleTemplate !== undefined ? configData.tgArticleTemplate : project.tgArticleTemplate,
           linksTemplate: configData.linksTemplate !== undefined ? configData.linksTemplate : project.linksTemplate,
           typeAndSeason: configData.typeAndSeason || project.typeAndSeason || ''
         };
@@ -548,6 +566,13 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
       color: 'bg-blue-600',
       generate: () => currentEpisode ? generateTGPostMessage(currentEpisode, participants) : '',
       type: 'TG' as const
+    },
+    { 
+      name: 'Статья TG (с таблицей)', 
+      icon: <Table className="w-4 h-4" />, 
+      color: 'bg-emerald-600',
+      generate: () => currentEpisode ? generateTGArticleMessage(currentEpisode, participants) : '',
+      type: 'TG_ARTICLE' as const
     },
     { 
       name: 'Пост в VK', 
@@ -879,7 +904,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {templates.map((tpl) => (
           <button
             key={tpl.type}
@@ -1047,12 +1072,62 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
 
       {postContent && (
         <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-2xl animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="p-4 border-b border-neutral-800 bg-neutral-900/50 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <MessageSquare className="w-4 h-4 text-purple-400" />
-              <span className="text-sm font-bold text-white uppercase tracking-wider">{isEditingTemplate ? 'Редактирование шаблона' : 'Предпросмотр сообщения'}</span>
-            </div>
+          <div className="p-4 border-b border-neutral-800 bg-neutral-900/50 flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                {activeTemplate === 'TG_ARTICLE' ? (
+                  <Table className="w-4 h-4 text-emerald-400" />
+                ) : (
+                  <MessageSquare className="w-4 h-4 text-purple-400" />
+                )}
+                <span className="text-sm font-bold text-white uppercase tracking-wider">
+                  {isEditingTemplate ? 'Редактирование шаблона' : activeTemplate === 'TG_ARTICLE' ? 'Статья Telegram с таблицей' : 'Предпросмотр сообщения'}
+                </span>
+              </div>
+
+              {!isEditingTemplate && activeTemplate === 'TG_ARTICLE' && (
+                <div className="flex items-center bg-black/40 border border-neutral-800 rounded-lg p-0.5 text-xs">
+                  <button
+                    onClick={() => setArticleViewMode('visual')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all font-medium ${
+                      articleViewMode === 'visual'
+                        ? 'bg-emerald-600/80 text-white shadow-sm'
+                        : 'text-neutral-400 hover:text-white'
+                    }`}
+                    title="Вид статьи со стилизованной таблицей"
+                  >
+                    <Eye className="w-3 h-3" />
+                    <span>Вид статьи</span>
+                  </button>
+                  <button
+                    onClick={() => setArticleViewMode('markdown')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all font-medium ${
+                      articleViewMode === 'markdown'
+                        ? 'bg-emerald-600/80 text-white shadow-sm'
+                        : 'text-neutral-400 hover:text-white'
+                    }`}
+                    title="Исходная Markdown-разметка таблицы"
+                  >
+                    <Code className="w-3 h-3" />
+                    <span>Markdown</span>
+                  </button>
+                  <button
+                    onClick={() => setArticleViewMode('unicode')}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md transition-all font-medium ${
+                      articleViewMode === 'unicode'
+                        ? 'bg-emerald-600/80 text-white shadow-sm'
+                        : 'text-neutral-400 hover:text-white'
+                    }`}
+                    title="Таблица Unicode-символами (для моноширинного текста в Telegram)"
+                  >
+                    <Columns className="w-3 h-3" />
+                    <span>Unicode-таблица</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
               {!isEditingTemplate ? (
                 <>
                   <button
@@ -1062,19 +1137,76 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                         setIsEditingTemplate(true);
                       }
                     }}
-                    className="flex items-center gap-2 px-4 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-bold transition-all"
+                    className="flex items-center gap-2 px-3.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-bold transition-all"
                   >
+                    <Edit3 className="w-3.5 h-3.5 text-purple-400" />
                     Редактировать шаблон
                   </button>
+
+                  {activeTemplate === 'TG_ARTICLE' && (
+                    <>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(postContent);
+                            setIsCopiedMarkdown(true);
+                            setTimeout(() => setIsCopiedMarkdown(false), 2000);
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                          isCopiedMarkdown ? 'bg-green-600 text-white' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300'
+                        }`}
+                        title="Скопировать чистый Markdown статьи"
+                      >
+                        {isCopiedMarkdown ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
+                        {isCopiedMarkdown ? 'Markdown скопирован!' : 'Копировать MD'}
+                      </button>
+
+                      <button
+                        onClick={async () => {
+                          try {
+                            const unicodeText = markdownTableToUnicodeBox(postContent);
+                            await navigator.clipboard.writeText(unicodeText);
+                            setIsCopiedUnicode(true);
+                            setTimeout(() => setIsCopiedUnicode(false), 2000);
+                          } catch (e) {
+                            console.error(e);
+                          }
+                        }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                          isCopiedUnicode ? 'bg-green-600 text-white' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300'
+                        }`}
+                        title="Скопировать таблицу псевдографикой Unicode (для обычных постов в моноширинном шрифте)"
+                      >
+                        {isCopiedUnicode ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Columns className="w-3.5 h-3.5" />}
+                        {isCopiedUnicode ? 'Таблица скопирована!' : 'Копировать Unicode'}
+                      </button>
+
+                      <a
+                        href="https://telegra.ph"
+                        onClick={(e) => handleOpenExternal('https://telegra.ph', e)}
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-bold transition-all"
+                        title="Открыть Telegra.ph в браузере для вставки статьи"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Telegra.ph</span>
+                      </a>
+                    </>
+                  )}
+
                   <button
                     onClick={handleCopy}
-                    className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all ${
-                      isCopied ? 'bg-green-600 text-white' : 'bg-purple-600 hover:bg-purple-500 text-white'
+                    className={`flex items-center gap-2 px-4 py-1.5 rounded-lg text-xs font-bold transition-all shadow-md ${
+                      isCopied ? 'bg-green-600 text-white' : activeTemplate === 'TG_ARTICLE' ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-purple-600 hover:bg-purple-500 text-white'
                     }`}
+                    title="Копирует форматированный текст и HTML-таблицу для вставки в Telegram/Telegra.ph"
                   >
                     {isCopied ? <CheckCircle2 className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    {isCopied ? 'Скопировано!' : 'Копировать'}
+                    {isCopied ? 'Скопировано!' : activeTemplate === 'TG_ARTICLE' ? 'Скопировать для статьи' : 'Копировать'}
                   </button>
+
                   <button
                     onClick={() => setIsTelegramModalOpen(true)}
                     className="flex items-center gap-1.5 px-4 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-bold transition-all shadow-md"
@@ -1110,15 +1242,32 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
               )}
             </div>
           </div>
-          <div className="p-8 flex flex-col gap-4">
+
+          <div className="p-6 md:p-8 flex flex-col gap-4">
+            {activeTemplate === 'TG_ARTICLE' && !isEditingTemplate && (
+              <div className="bg-emerald-950/30 border border-emerald-500/30 rounded-xl p-3.5 text-xs text-emerald-200/90 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-2.5">
+                  <span className="text-base">💡</span>
+                  <span>
+                    Нажмите <strong>«Скопировать для статьи»</strong> и вставьте (<strong>Ctrl+V</strong>) в редактор <strong>Telegram Desktop</strong> или <strong>Telegra.ph</strong>. Готовая таблица, роли и ссылки отформатируются автоматически.
+                  </span>
+                </div>
+              </div>
+            )}
+
             {isEditingTemplate && (
               <div className="bg-blue-900/20 border border-blue-500/20 p-6 rounded-xl text-xs text-blue-200 overflow-y-auto max-h-[300px] custom-scrollbar space-y-6">
                 <div>
-                  <p className="font-bold mb-3 text-sm text-blue-300">💡 Списки (Массовые переменные):</p>
-                  <p className="mb-2 opacity-80">Используйте синтаксис <code className="bg-blue-900/40 px-1.5 py-0.5 rounded text-white">{'{список:[шаблон_элемента], разделитель}'}</code></p>
+                  <p className="font-bold mb-3 text-sm text-blue-300">💡 Таблицы и списки для статьи:</p>
                   <div className="space-y-4 font-mono bg-black/40 p-3 rounded-lg border border-blue-900/40">
                     <div>
-                      <p className="text-[10px] text-blue-400 font-bold uppercase mb-1">Списки для использования:</p>
+                      <p className="text-[10px] text-emerald-400 font-bold uppercase mb-1">Готовая таблица для статьи:</p>
+                      <ul className="list-disc list-inside space-y-1 opacity-90">
+                        <li><span className="text-emerald-300">{'{articleTable}'}</span> — полная таблица с ролями, дабберами, таймингом и оформлением</li>
+                      </ul>
+                    </div>
+                    <div className="pt-2 border-t border-blue-900/20">
+                      <p className="text-[10px] text-blue-400 font-bold uppercase mb-1">Списки для кастомной таблицы:</p>
                       <ul className="list-disc list-inside space-y-1 opacity-90">
                         <li><span className="text-white">mainRoles</span> (Пер. { '{character}, {nickname}, {tgLink}, {vk}' })</li>
                         <li><span className="text-white">secondaryDubbers</span> (Пер. { '{nickname}, {tgLink}, {vk}' })</li>
@@ -1126,16 +1275,8 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                       </ul>
                     </div>
                     <div className="pt-2 border-t border-blue-900/20">
-                      <p className="text-[10px] text-blue-400 font-bold uppercase mb-1">Спец. переменные (Предыдущая серия):</p>
-                      <ul className="list-disc list-inside space-y-1 opacity-90">
-                        <li>{'{prevEpisodeNumber}'}</li>
-                        <li>{'{prevLinkTg}'}</li>
-                        <li>{'{prevLinkVk}'}</li>
-                      </ul>
-                    </div>
-                    <div className="pt-2 border-t border-blue-900/20">
-                      <p className="text-[10px] text-blue-400 font-bold uppercase mb-1">Пример (Роли озвучили):</p>
-                      <p className="text-white opacity-80 whitespace-pre text-[11px]">{'{mainRoles:[➤ {character} - [{nickname}]({tgLink})\\n]}'}</p>
+                      <p className="text-[10px] text-blue-400 font-bold uppercase mb-1">Пример строки таблицы:</p>
+                      <p className="text-white opacity-80 whitespace-pre text-[11px]">| ❇ {'{character}'} | [{'{nickname}'}]({'{tgLink}'}) |</p>
                     </div>
                   </div>
                 </div>
@@ -1155,24 +1296,28 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest mb-1 opacity-70">Предыдущая серия</p>
+                    <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest mb-1 opacity-70">Предыдущая серия и ссылки</p>
                     <div className="grid grid-cols-1 gap-1 font-mono text-[11px]">
                       <span>{'{prevEpisodeNumber}'}</span>
                       <span>{'{prevLinkTg}'}</span>
                       <span>{'{prevLinkVk}'}</span>
+                      <span>{'{linkCatalog}'}</span>
+                      <span>{'{catalogLabel}'}</span>
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest mb-1 opacity-70">Звукорежитсер</p>
+                    <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest mb-1 opacity-70">Звукорежиссер</p>
                     <div className="grid grid-cols-1 gap-1 font-mono text-[11px]">
                       <span>{'{seNickname}'}</span>
                       <span>{'{seMention}'} - @тг</span>
                       <span>{'{seVk}'} - @вк</span>
+                      <span>{'{seTgLink}'} - ссылка на тг</span>
                     </div>
                   </div>
                   <div className="space-y-2">
                     <p className="text-[10px] text-blue-400 font-bold uppercase tracking-widest mb-1 opacity-70">Готовые блоки</p>
                     <div className="grid grid-cols-1 gap-1 font-mono text-[11px]">
+                      <span>{'{articleTable}'}</span>
                       <span>{'{mainRolesText}'}</span>
                       <span>{'{dubberLinks}'}</span>
                       <span>{'{dubberInfo}'}</span>
@@ -1182,6 +1327,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                 </div>
               </div>
             )}
+
             {isEditingTemplate ? (
               <textarea
                 value={editingTemplateStr}
@@ -1189,6 +1335,17 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                 onKeyDown={e => handleTextareaKeyDown(e, setEditingTemplateStr)}
                 className="w-full bg-black/50 border border-neutral-800 rounded-xl p-6 text-sm text-neutral-300 font-mono leading-relaxed min-h-[400px] focus:outline-none focus:ring-2 focus:ring-purple-500/50"
               />
+            ) : activeTemplate === 'TG_ARTICLE' && articleViewMode === 'visual' ? (
+              <div className="bg-[#0e1621] border border-[#233d5d] rounded-2xl p-6 overflow-x-auto shadow-inner flex justify-center">
+                <div 
+                  className="w-full max-w-[540px]"
+                  dangerouslySetInnerHTML={{ __html: convertToHTMLForTelegram(postContent) }}
+                />
+              </div>
+            ) : activeTemplate === 'TG_ARTICLE' && articleViewMode === 'unicode' ? (
+              <pre className="bg-black/60 border border-neutral-800 rounded-xl p-6 text-sm text-emerald-300/90 whitespace-pre font-mono leading-tight max-h-[550px] overflow-x-auto overflow-y-auto custom-scrollbar">
+                {markdownTableToUnicodeBox(postContent)}
+              </pre>
             ) : (
               <pre className="bg-black/50 border border-neutral-800 rounded-xl p-8 text-sm text-neutral-300 whitespace-pre-wrap font-mono leading-relaxed max-h-[500px] overflow-y-auto custom-scrollbar">
                 {postContent}

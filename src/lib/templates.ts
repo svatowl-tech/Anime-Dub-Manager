@@ -292,6 +292,26 @@ export const DEFAULT_FINAL_TG_TEMPLATE = `{emoji} СЕРИЯ ВЫЛОЖЕНА: {
 ━━━━━━ ◦ ❖ ◦ ━━━━━━
 #{projectSlug} #готово`;
 
+export const DEFAULT_TG_ARTICLE_TEMPLATE_RECAST = `─── 🎀 ───
+˗ˏˋ **{title}** ˎˊ˗
+🤍 **{progress}** 🤍
+─── 🎀 ───
+
+{articleTable}
+
+─── 🎀 ───
+🌸 [{catalogLabel}]({linkCatalog}) | {nextEpisodeNumber} (Скоро) ➡️`;
+
+export const DEFAULT_TG_ARTICLE_TEMPLATE_VOICEOVER = `─── 🎀 ───
+˗ˏˋ **{title}** ˎˊ˗
+🤍 **{progress}** 🤍
+─── 🎀 ───
+
+{articleTable}
+
+─── 🎀 ───
+🌸 [{catalogLabel}]({linkCatalog}) | {nextEpisodeNumber} (Скоро) ➡️`;
+
 export const DEFAULT_START_EPISODE_TEMPLATE = `{emoji} {title}
 👾Серия: #{episodeNumber}
 📅 ДЕДЛАЙН: {deadline}
@@ -406,6 +426,25 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
 
   const links = episode.project?.links ? JSON.parse(episode.project.links) : {};
 
+  const seTgLink = se ? (se.tgChannel || `https://t.me/${(se.telegram || se.nickname).replace('@', '')}`) : 'https://t.me/Tenmag';
+  const catalogLabel = 'Каталог всех релизов';
+  const linkCatalog = links.catalog || links.tg || 'https://t.me';
+
+  // Build article table in standard Markdown table format
+  let articleTableRows = '';
+  if (mainRolesData.length > 0) {
+    articleTableRows += mainRolesData.map(r => `| ❇ ${r?.character} | [${r?.nickname}](${r?.tgLink}) |`).join('\n') + '\n';
+  } else if (uniqueDubbersData.length > 0) {
+    articleTableRows += uniqueDubbersData.map(d => `| 🎙 Даббер | [${d.nickname}](${d.tgLink}) |`).join('\n') + '\n';
+  }
+  if (secondaryDubbersData.length > 0) {
+    const secStr = secondaryDubbersData.map(d => `[${d.nickname}](${d.tgLink})`).join(', ');
+    articleTableRows += `| ${secStr} | |\n`;
+  }
+  articleTableRows += `| **Работа со звуком:** | [${seName}](${seTgLink}) |`;
+
+  const articleTable = `| **Роли озвучивали** | |\n| :--- | :--- |\n${articleTableRows}`;
+
   const vars: Record<string, any> = {
     emoji,
     title,
@@ -424,6 +463,11 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
     seNickname: seName,
     seTg,
     seVk,
+    seTgLink,
+    catalogLabel,
+    linkCatalog,
+    articleTable,
+    articleTableMarkdown: articleTable,
     projectSlug,
     projectSlugRaw: projectSlug,
     allTgMentions: uniqueDubbersData.map(d => (d.tg.startsWith('@') ? d.tg : `@${d.tg}`)).join(', '),
@@ -432,6 +476,7 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
     mainNicknames: mainRolesData.map(r => r?.nickname).join(', '),
     mainCharacters: mainRolesData.map(r => r?.character).join(', '),
     secondaryNicknames: secondaryDubbersData.map(d => d.nickname).join(', '),
+    secondaryDubberLinks: secondaryDubbersData.map(d => `[${d.nickname}](${d.tgLink})`).join(', '),
     // Add backward compatibility strings (cleaned)
     mainRolesText: mainRolesData.map(r => `${r?.character} - ${r?.nickname}`).join('\n'),
     secondaryDubbersText: secondaryDubbersData.map(d => d.nickname).join(', '),
@@ -574,11 +619,23 @@ export const generateVKPostMessage = (episode: Episode, participants: Participan
   return applyTemplate(tplStr, vars);
 };
 
-export const getTemplateString = (episode: Episode, type: 'TG' | 'VK' | 'FINAL_TG'): string => {
+export const generateTGArticleMessage = (episode: Episode, participants: Participant[]) => {
+  const isRecastOrRedub = episode.project?.releaseType === 'RECAST' || episode.project?.releaseType === 'REDUB';
+  const defaultTpl = isRecastOrRedub ? DEFAULT_TG_ARTICLE_TEMPLATE_RECAST : DEFAULT_TG_ARTICLE_TEMPLATE_VOICEOVER;
+  const tplStr = episode.tgArticleTemplate || episode.project?.tgArticleTemplate || defaultTpl;
+  const vars = getTemplateVariables(episode, participants);
+  return applyTemplate(tplStr, vars);
+};
+
+export const getTemplateString = (episode: Episode, type: 'TG' | 'VK' | 'FINAL_TG' | 'TG_ARTICLE' | 'LINKS'): string => {
   const isRecastOrRedub = episode.project?.releaseType === 'RECAST' || episode.project?.releaseType === 'REDUB';
   if (type === 'TG') {
     const defaultTpl = isRecastOrRedub ? DEFAULT_TG_TEMPLATE_RECAST : DEFAULT_TG_TEMPLATE_VOICEOVER;
     return episode.tgPostTemplate || episode.project?.tgPostTemplate || defaultTpl;
+  }
+  if (type === 'TG_ARTICLE') {
+    const defaultTpl = isRecastOrRedub ? DEFAULT_TG_ARTICLE_TEMPLATE_RECAST : DEFAULT_TG_ARTICLE_TEMPLATE_VOICEOVER;
+    return episode.tgArticleTemplate || episode.project?.tgArticleTemplate || defaultTpl;
   }
   if (type === 'VK') {
     const defaultTpl = isRecastOrRedub ? DEFAULT_VK_TEMPLATE_RECAST : DEFAULT_VK_TEMPLATE_VOICEOVER;
@@ -599,44 +656,260 @@ export const generateFinalTGMessage = (episode: Episode, participants: Participa
   return applyTemplate(defaultTpl, vars);
 };
 
-export const convertToHTMLForTelegram = (text: string): string => {
+export const formatInlineMarkdown = (text: string): string => {
   if (!text) return '';
-  
   let html = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
+  // Links: [text](url)
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
     const safeUrl = url.replace(/"/g, '&quot;');
-    return `<a href="${safeUrl}">${linkText}</a>`;
+    return `<a href="${safeUrl}" style="color: #64b5f6; font-style: italic; text-decoration: none;">${linkText}</a>`;
   });
 
+  // Bold: **text**
   html = html.replace(/\*\*([\s\S]+?)\*\*/g, '<b>$1</b>');
+
+  // Italic: __text__ or _text_
   html = html.replace(/__([\s\S]+?)__/g, '<i>$1</i>');
   html = html.replace(/(?<!_)_([^_]+?)_(?!_)/g, '<i>$1</i>');
-  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
 
-  html = html
-    .replace(/&lt;b&gt;/gi, '<b>')
-    .replace(/&lt;\/b&gt;/gi, '</b>')
-    .replace(/&lt;i&gt;/gi, '<i>')
-    .replace(/&lt;\/i&gt;/gi, '</i>')
-    .replace(/&lt;strong&gt;/gi, '<strong>')
-    .replace(/&lt;\/strong&gt;/gi, '</strong>')
-    .replace(/&lt;em&gt;/gi, '<em>')
-    .replace(/&lt;\/em&gt;/gi, '</em>')
-    .replace(/&lt;s&gt;/gi, '<s>')
-    .replace(/&lt;\/s&gt;/gi, '</s>')
-    .replace(/&lt;u&gt;/gi, '<u>')
-    .replace(/&lt;\/u&gt;/gi, '</u>')
-    .replace(/&lt;code&gt;/gi, '<code>')
-    .replace(/&lt;\/code&gt;/gi, '</code>')
-    .replace(/&lt;pre&gt;/gi, '<pre>')
-    .replace(/&lt;\/pre&gt;/gi, '</pre>');
+  // Code: `code`
+  html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.1); padding: 2px 4px; border-radius: 4px; font-family: monospace;">$1</code>');
 
-  html = html.replace(/\n/g, '<br/>');
+  return html;
+};
 
-  return `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; white-space: pre-wrap;">${html}</div>`;
+export const convertToHTMLForTelegram = (text: string): string => {
+  if (!text) return '';
+
+  const lines = text.split('\n');
+  const resultBlocks: string[] = [];
+  let inTable = false;
+  let tableRows: string[] = [];
+
+  const flushTable = () => {
+    if (tableRows.length === 0) return;
+
+    let tableHtml = `<table style="width: 100%; max-width: 480px; margin: 12px auto; border-collapse: collapse; border: 1px solid #233d5d; border-radius: 8px; overflow: hidden; background-color: #141f2d; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13.5px; color: #ffffff; text-align: left;">\n<tbody>\n`;
+
+    const contentRows = tableRows.filter(r => !/^\s*\|?\s*:?-+:?\s*(\|?\s*:?-+:?\s*)+\|?\s*$/.test(r));
+
+    contentRows.forEach((row, idx) => {
+      const cells = row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+      const isHeader = idx === 0 && (cells.length === 1 || !cells[1] || cells[0].includes('Роли озвучивали'));
+
+      if (isHeader) {
+        tableHtml += `  <tr style="background-color: #1e334d;">\n`;
+        tableHtml += `    <th colspan="2" style="padding: 10px 14px; text-align: center; font-weight: bold; color: #ffffff; border: 1px solid #233d5d; font-size: 14.5px;">${formatInlineMarkdown(cells[0])}</th>\n`;
+        tableHtml += `  </tr>\n`;
+      } else if (cells.length >= 2 && !cells[1]) {
+        // Single cell spanning 2 columns (e.g. secondary actors)
+        tableHtml += `  <tr>\n`;
+        tableHtml += `    <td colspan="2" style="padding: 8px 14px; border: 1px solid #233d5d; color: #94a3b8; font-style: italic; text-align: left; vertical-align: middle;">${formatInlineMarkdown(cells[0])}</td>\n`;
+        tableHtml += `  </tr>\n`;
+      } else if (cells.length >= 2) {
+        // Standard two-column row
+        tableHtml += `  <tr>\n`;
+        tableHtml += `    <td style="padding: 8px 14px; border: 1px solid #233d5d; color: #f0f6fc; vertical-align: middle; width: 62%;">${formatInlineMarkdown(cells[0])}</td>\n`;
+        tableHtml += `    <td style="padding: 8px 14px; border: 1px solid #233d5d; color: #64b5f6; font-style: italic; vertical-align: middle; width: 38%;">${formatInlineMarkdown(cells[1])}</td>\n`;
+        tableHtml += `  </tr>\n`;
+      } else if (cells.length === 1) {
+        tableHtml += `  <tr>\n`;
+        tableHtml += `    <td colspan="2" style="padding: 8px 14px; border: 1px solid #233d5d; color: #f0f6fc; vertical-align: middle;">${formatInlineMarkdown(cells[0])}</td>\n`;
+        tableHtml += `  </tr>\n`;
+      }
+    });
+
+    tableHtml += `</tbody>\n</table>`;
+    resultBlocks.push(tableHtml);
+    tableRows = [];
+    inTable = false;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const isTableLine = /^\s*\|.*\|\s*$/.test(line);
+
+    if (isTableLine) {
+      inTable = true;
+      tableRows.push(line);
+    } else {
+      if (inTable) {
+        flushTable();
+      }
+
+      const trimmed = line.trim();
+      if (!trimmed) {
+        resultBlocks.push('<div style="height: 6px;"></div>');
+      } else if (trimmed.includes('───') || trimmed.includes('🎀')) {
+        resultBlocks.push(`<div style="text-align: center; color: #f472b6; font-weight: bold; margin: 8px 0; font-size: 14px; letter-spacing: 1px;">${formatInlineMarkdown(trimmed)}</div>`);
+      } else if (trimmed.startsWith('˗ˏˋ') || (trimmed.startsWith('**') && trimmed.endsWith('**') && trimmed.length < 60)) {
+        resultBlocks.push(`<div style="text-align: center; font-weight: bold; font-size: 16px; color: #ffffff; margin: 4px 0;">${formatInlineMarkdown(trimmed)}</div>`);
+      } else if (trimmed.includes('🤍') || (trimmed.startsWith('👾') && trimmed.endsWith('👾'))) {
+        resultBlocks.push(`<div style="text-align: center; font-weight: bold; font-size: 14px; color: #ffffff; margin: 4px 0;">${formatInlineMarkdown(trimmed)}</div>`);
+      } else if (trimmed.includes('🌸') || trimmed.includes('➡️') || trimmed.includes('Каталог')) {
+        resultBlocks.push(`<div style="text-align: center; font-size: 13.5px; color: #e2e8f0; margin: 8px 0;">${formatInlineMarkdown(trimmed)}</div>`);
+      } else {
+        resultBlocks.push(`<div style="margin: 3px 0;">${formatInlineMarkdown(trimmed)}</div>`);
+      }
+    }
+  }
+
+  if (inTable) {
+    flushTable();
+  }
+
+  return `<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #0e1621; color: #ffffff; padding: 16px 20px; border-radius: 12px; max-width: 520px; margin: 0 auto; line-height: 1.5;">${resultBlocks.join('\n')}</div>`;
+};
+
+export const markdownTableToUnicodeBox = (text: string): string => {
+  if (!text) return '';
+
+  const getVisualLength = (str: string): number => {
+    const clean = str
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/_([^_]+)_/g, '$1')
+      .replace(/`([^`]+)`/g, '$1');
+    
+    let len = 0;
+    for (const char of clean) {
+      const code = char.codePointAt(0) || 0;
+      if (
+        (code >= 0x1F300 && code <= 0x1F9FF) ||
+        (code >= 0x2600 && code <= 0x27BF) ||
+        char === '❇' || char === '🎀' || char === '🤍' || char === '🌸' || char === '🎙' || char === '👾'
+      ) {
+        len += 2;
+      } else {
+        len += 1;
+      }
+    }
+    return len;
+  };
+
+  const stripFormatting = (str: string): string => {
+    return str
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/\*\*([^*]+)\*\*/g, '$1')
+      .replace(/__([^_]+)__/g, '$1')
+      .replace(/_([^_]+)_/g, '$1')
+      .replace(/`([^`]+)`/g, '$1');
+  };
+
+  const padRight = (str: string, targetWidth: number): string => {
+    const currentWidth = getVisualLength(str);
+    if (currentWidth >= targetWidth) return str;
+    return str + ' '.repeat(targetWidth - currentWidth);
+  };
+
+  const centerText = (str: string, targetWidth: number): string => {
+    const currentWidth = getVisualLength(str);
+    if (currentWidth >= targetWidth) return str;
+    const totalSpaces = targetWidth - currentWidth;
+    const leftSpaces = Math.floor(totalSpaces / 2);
+    const rightSpaces = totalSpaces - leftSpaces;
+    return ' '.repeat(leftSpaces) + str + ' '.repeat(rightSpaces);
+  };
+
+  const lines = text.split('\n');
+  const outputLines: string[] = [];
+  let tableRows: string[] = [];
+
+  const flushUnicodeTable = () => {
+    if (tableRows.length === 0) return;
+
+    const contentRows = tableRows.filter(r => !/^\s*\|?\s*:?-+:?\s*(\|?\s*:?-+:?\s*)+\|?\s*$/.test(r));
+    if (contentRows.length === 0) {
+      tableRows = [];
+      return;
+    }
+
+    const parsedRows: { isHeader: boolean; isFullWidth: boolean; col1: string; col2: string }[] = [];
+
+    let col1Max = 22;
+    let col2Max = 12;
+
+    contentRows.forEach((row, idx) => {
+      const cells = row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => stripFormatting(c.trim()));
+      const isHeader = idx === 0 && (cells.length === 1 || !cells[1] || cells[0].includes('Роли озвучивали'));
+      const isFullWidth = !isHeader && cells.length >= 2 && !cells[1];
+
+      const col1 = cells[0] || '';
+      const col2 = cells[1] || '';
+
+      if (!isHeader && !isFullWidth) {
+        col1Max = Math.max(col1Max, getVisualLength(col1));
+        col2Max = Math.max(col2Max, getVisualLength(col2));
+      }
+
+      parsedRows.push({ isHeader, isFullWidth, col1, col2 });
+    });
+
+    const col1Width = col1Max + 1;
+    const col2Width = col2Max + 1;
+    const totalInnerWidth = col1Width + col2Width + 3;
+
+    const boxLines: string[] = [];
+
+    parsedRows.forEach((row, idx) => {
+      if (row.isHeader) {
+        boxLines.push(`┌${'─'.repeat(totalInnerWidth)}┐`);
+        boxLines.push(`│${centerText(row.col1, totalInnerWidth)}│`);
+      } else if (idx === 0) {
+        boxLines.push(`┌${'─'.repeat(col1Width + 2)}┬${'─'.repeat(col2Width + 2)}┐`);
+      }
+
+      if (idx === 0 && row.isHeader) {
+        boxLines.push(`├${'─'.repeat(col1Width + 2)}┬${'─'.repeat(col2Width + 2)}┤`);
+      } else if (idx > 0) {
+        const prev = parsedRows[idx - 1];
+        if (prev.isFullWidth && !row.isFullWidth) {
+          boxLines.push(`├${'─'.repeat(col1Width + 2)}┬${'─'.repeat(col2Width + 2)}┤`);
+        } else if (!prev.isFullWidth && row.isFullWidth) {
+          boxLines.push(`├${'─'.repeat(col1Width + 2)}┴${'─'.repeat(col2Width + 2)}┤`);
+        } else if (!prev.isFullWidth && !row.isFullWidth && !prev.isHeader) {
+          boxLines.push(`├${'─'.repeat(col1Width + 2)}┼${'─'.repeat(col2Width + 2)}┤`);
+        }
+      }
+
+      if (row.isFullWidth) {
+        boxLines.push(`│ ${padRight(row.col1, totalInnerWidth - 2)} │`);
+      } else if (!row.isHeader) {
+        boxLines.push(`│ ${padRight(row.col1, col1Width)} │ ${padRight(row.col2, col2Width)} │`);
+      }
+    });
+
+    const last = parsedRows[parsedRows.length - 1];
+    if (last && last.isFullWidth) {
+      boxLines.push(`└${'─'.repeat(totalInnerWidth)}┘`);
+    } else {
+      boxLines.push(`└${'─'.repeat(col1Width + 2)}┴${'─'.repeat(col2Width + 2)}┘`);
+    }
+
+    outputLines.push(boxLines.join('\n'));
+    tableRows = [];
+  };
+
+  for (const line of lines) {
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      tableRows.push(line);
+    } else {
+      if (tableRows.length > 0) {
+        flushUnicodeTable();
+      }
+      outputLines.push(line);
+    }
+  }
+
+  if (tableRows.length > 0) {
+    flushUnicodeTable();
+  }
+
+  return outputLines.join('\n');
 };
 
