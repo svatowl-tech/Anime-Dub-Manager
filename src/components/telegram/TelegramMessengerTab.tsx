@@ -12,7 +12,10 @@ import {
   CheckCheck, 
   X, 
   FileText,
-  RefreshCw
+  RefreshCw,
+  AlertCircle,
+  QrCode,
+  LogIn
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../../lib/ipcSafe';
@@ -22,12 +25,16 @@ import { TelegramChatMessage } from './types';
 interface TelegramMessengerTabProps {
   dialogs: TelegramMTProtoDialog[];
   selectedChatId: string;
+  isConnected?: boolean;
+  onOpenAuth?: () => void;
   onSelectChat: (chatId: string) => void;
 }
 
 export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
   dialogs,
   selectedChatId,
+  isConnected = true,
+  onOpenAuth,
   onSelectChat
 }) => {
   const [messages, setMessages] = useState<Record<string, TelegramChatMessage[]>>({});
@@ -45,7 +52,9 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
     {
       id: '1',
       senderName: 'Akane Studio Bot',
-      text: '👋 Добро пожаловать в Telegram Studio Hub! Выберите чат для просмотра и отправки сообщений.',
+      text: isConnected 
+        ? '👋 Добро пожаловать в Telegram Studio Hub! Выберите чат для просмотра и отправки сообщений.' 
+        : '⚠️ Подключение к Telegram отсутствует. Авторизуйтесь через QR-код, чтобы загрузить ваши чаты и сообщения.',
       time: '12:00',
       isMe: false,
       isPinned: true
@@ -53,12 +62,13 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
   ];
 
   useEffect(() => {
-    if (currentDialog) {
+    if (currentDialog && isConnected) {
       loadMessagesForChat(currentDialog);
     }
-  }, [currentDialog?.id]);
+  }, [currentDialog?.id, isConnected]);
 
   const loadMessagesForChat = async (dialog: TelegramMTProtoDialog) => {
+    if (!isConnected) return;
     const peer = dialog.username ? `@${dialog.username}` : dialog.id;
     if (!peer) return;
 
@@ -84,6 +94,17 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isConnected) {
+      toast.error('Подключение к Telegram MTProto отсутствует. Пожалуйста, выполните вход.', {
+        action: onOpenAuth ? {
+          label: 'Войти',
+          onClick: () => onOpenAuth()
+        } : undefined
+      });
+      if (onOpenAuth) onOpenAuth();
+      return;
+    }
+
     if (!inputMessage.trim() && !mediaPath) return;
 
     const textToSend = inputMessage.trim();

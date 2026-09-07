@@ -15,7 +15,9 @@ import {
   Search,
   ExternalLink,
   Copy,
-  Check
+  Check,
+  QrCode,
+  LogIn
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../../lib/ipcSafe';
@@ -27,6 +29,8 @@ interface TelegramTracksTabProps {
   currentEpisode?: Episode | null;
   allProjects?: Project[];
   dialogs: TelegramMTProtoDialog[];
+  isConnected?: boolean;
+  onOpenAuth?: () => void;
   onRefreshProjects?: () => void;
 }
 
@@ -35,6 +39,8 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
   currentEpisode,
   allProjects,
   dialogs,
+  isConnected = true,
+  onOpenAuth,
   onRefreshProjects
 }) => {
   const [selectedChatId, setSelectedChatId] = useState<string>(() => {
@@ -60,12 +66,23 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
   const activeChat = dialogs.find(d => d.id === selectedChatId);
 
   useEffect(() => {
-    if (selectedChatId && !isCustomPeer) {
+    if (selectedChatId && !isCustomPeer && isConnected) {
       handleFetchAudioFiles();
     }
-  }, [selectedChatId]);
+  }, [selectedChatId, isConnected]);
 
   const handleFetchAudioFiles = async () => {
+    if (!isConnected) {
+      toast.error('Подключение к Telegram MTProto отсутствует. Выполните вход для загрузки дорожек.', {
+        action: onOpenAuth ? {
+          label: 'Войти',
+          onClick: () => onOpenAuth()
+        } : undefined
+      });
+      if (onOpenAuth) onOpenAuth();
+      return;
+    }
+
     const targetPeer = isCustomPeer ? customChatPeer.trim() : selectedChatId;
     if (!targetPeer) {
       toast.error('Выберите или укажите чат для поиска аудиодорожек');
@@ -86,7 +103,18 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
         throw new Error(res?.error || 'Не удалось получить файлы');
       }
     } catch (err: any) {
-      toast.error(`Ошибка загрузки дорожек: ${err.message || String(err)}`);
+      const errMessage = err?.message || String(err);
+      if (errMessage.includes('Подключение к Telegram MTProto отсутствует') || errMessage.includes('AUTH_KEY_UNREGISTERED')) {
+        toast.error('Требуется авторизация в Telegram для загрузки дорожек', {
+          action: onOpenAuth ? {
+            label: 'Войти',
+            onClick: () => onOpenAuth()
+          } : undefined
+        });
+        if (onOpenAuth) onOpenAuth();
+      } else {
+        toast.error(`Ошибка загрузки дорожек: ${errMessage}`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -190,6 +218,27 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
     <div className="flex-1 flex flex-col h-full bg-neutral-950 text-white overflow-hidden select-none">
       {/* Top Controls Toolbar */}
       <div className="bg-neutral-900 border-b border-neutral-800 p-4 space-y-3 flex-shrink-0">
+        {!isConnected && (
+          <div className="p-3 bg-amber-950/40 border border-amber-800/60 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                <strong>Telegram MTProto не подключен.</strong> Для сканирования и скачивания аудиодорожек из чатов выполните вход.
+              </span>
+            </div>
+            {onOpenAuth && (
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                <span>Войти по QR-коду</span>
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center text-violet-400">
@@ -299,13 +348,41 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
           </div>
         ) : filteredFiles.length === 0 ? (
           <div className="h-64 flex flex-col items-center justify-center text-neutral-500 space-y-3 border border-dashed border-neutral-800 rounded-2xl p-6 text-center">
-            <Music className="w-10 h-10 text-neutral-700" />
-            <div>
-              <p className="text-sm font-semibold text-neutral-300">Дорожки не обнаружены</p>
-              <p className="text-xs text-neutral-500 max-w-sm mt-1">
-                Выберите чат вашей команды даберов и нажмите «Сканировать дорожки». Все присланные аудиозаписи и архивы отобразятся здесь.
-              </p>
-            </div>
+            {!isConnected ? (
+              <>
+                <div className="w-12 h-12 rounded-2xl bg-amber-950/40 border border-amber-800/40 flex items-center justify-center text-amber-400">
+                  <LogIn className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-neutral-200">
+                    Авторизация в Telegram не выполнена
+                  </p>
+                  <p className="text-xs text-neutral-400 max-w-md mt-1">
+                    Чтобы находить аудиодорожки и архивы от команды озвучки, выполните вход в Telegram.
+                  </p>
+                </div>
+                {onOpenAuth && (
+                  <button
+                    type="button"
+                    onClick={onOpenAuth}
+                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition cursor-pointer shadow-md shadow-sky-950/40"
+                  >
+                    <QrCode className="w-4 h-4" />
+                    <span>Авторизоваться через QR-код</span>
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <Music className="w-10 h-10 text-neutral-700" />
+                <div>
+                  <p className="text-sm font-semibold text-neutral-300">Дорожки не обнаружены</p>
+                  <p className="text-xs text-neutral-500 max-w-sm mt-1">
+                    Выберите чат вашей команды даберов и нажмите «Сканировать дорожки». Все присланные аудиозаписи и архивы отобразятся здесь.
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         ) : (
           filteredFiles.map(item => {

@@ -299,6 +299,8 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
             currentEpisode={currentEpisode}
             allProjects={allProjects}
             dialogs={dialogs}
+            isConnected={isConnected}
+            onOpenAuth={() => setIsAuthModalOpen(true)}
             onRefreshProjects={onRefreshProjects}
           />
         )}
@@ -309,6 +311,8 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
             currentEpisode={currentEpisode}
             dialogs={dialogs}
             defaultChannelId={status?.settings?.defaultChannelId || ''}
+            isConnected={isConnected}
+            onOpenAuth={() => setIsAuthModalOpen(true)}
             onRefreshProjects={onRefreshProjects}
           />
         )}
@@ -338,6 +342,8 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
           <TelegramMessengerTab
             dialogs={dialogs}
             selectedChatId={selectedChatId}
+            isConnected={isConnected}
+            onOpenAuth={() => setIsAuthModalOpen(true)}
             onSelectChat={(id) => setSelectedChatId(id)}
           />
         )}

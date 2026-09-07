@@ -40,13 +40,17 @@ export const ipcSafe = {
                           errStr.includes('AUTH_KEY_INVALID') ||
                           errStr.includes('SESSION_REVOKED') ||
                           errStr.includes('SESSION_EXPIRED') ||
-                          errStr.includes('Сессия Telegram устарела');
+                          errStr.includes('Сессия Telegram устарела') ||
+                          errStr.includes('Подключение к Telegram MTProto отсутствует') ||
+                          errStr.includes('Подключение к Telegram отсутствует') ||
+                          errStr.includes('авторизуйтесь в Telegram') ||
+                          errStr.includes('ensureConnected');
 
       if (isOperationalTgChannel && isAuthError) {
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('telegram-auth-invalidated'));
         }
-        console.warn(`[Telegram MTProto] Session invalidated on channel "${channel}". Prompting re-auth.`);
+        console.warn(`[Telegram MTProto] Auth required on channel "${channel}":`, error.message || errStr);
         throw error;
       }
 

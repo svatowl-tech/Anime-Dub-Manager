@@ -13,7 +13,9 @@ import {
   Check, 
   AlertCircle,
   Radio,
-  FileCheck
+  FileCheck,
+  QrCode,
+  LogIn
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../../lib/ipcSafe';
@@ -25,6 +27,8 @@ interface TelegramPostVerifyTabProps {
   currentEpisode?: Episode | null;
   dialogs: TelegramMTProtoDialog[];
   defaultChannelId?: string;
+  isConnected?: boolean;
+  onOpenAuth?: () => void;
   onRefreshProjects?: () => void;
 }
 
@@ -33,6 +37,8 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
   currentEpisode,
   dialogs,
   defaultChannelId = '',
+  isConnected = true,
+  onOpenAuth,
   onRefreshProjects
 }) => {
   // Only channel dialogs
@@ -66,9 +72,21 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
 
   const handleSearchPosts = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
+
+    if (!isConnected) {
+      toast.error('Подключение к Telegram MTProto отсутствует. Пожалуйста, выполните вход.', {
+        action: onOpenAuth ? {
+          label: 'Войти',
+          onClick: () => onOpenAuth()
+        } : undefined
+      });
+      if (onOpenAuth) onOpenAuth();
+      return;
+    }
+
     const targetPeer = isCustomPeer ? customChannelPeer.trim() : selectedChannelId;
     if (!targetPeer) {
-      toast.error('Выберите канал для проверки');
+      toast.error('Выберите канал для проверки или введите @username');
       return;
     }
 
@@ -92,7 +110,18 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
         throw new Error(res?.error || 'Не удалось выполнить поиск');
       }
     } catch (err: any) {
-      toast.error(`Ошибка поиска постов: ${err.message || String(err)}`);
+      const errMessage = err?.message || String(err);
+      if (errMessage.includes('Подключение к Telegram MTProto отсутствует') || errMessage.includes('AUTH_KEY_UNREGISTERED')) {
+        toast.error('Требуется авторизация в Telegram для поиска постов', {
+          action: onOpenAuth ? {
+            label: 'Войти',
+            onClick: () => onOpenAuth()
+          } : undefined
+        });
+        if (onOpenAuth) onOpenAuth();
+      } else {
+        toast.error(`Ошибка поиска постов: ${errMessage}`);
+      }
     } finally {
       setIsSearching(false);
     }
@@ -130,6 +159,27 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
     <div className="flex-1 flex flex-col h-full bg-neutral-950 text-white overflow-hidden select-none">
       {/* Top Controls Toolbar */}
       <div className="bg-neutral-900 border-b border-neutral-800 p-4 space-y-3 flex-shrink-0">
+        {!isConnected && (
+          <div className="p-3 bg-amber-950/40 border border-amber-800/60 rounded-xl flex items-center justify-between gap-3 text-xs text-amber-200">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>
+                <strong>Telegram MTProto не подключен.</strong> Для поиска и автопроверки постов в Telegram-канале выполните вход.
+              </span>
+            </div>
+            {onOpenAuth && (
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition"
+              >
+                <QrCode className="w-3.5 h-3.5" />
+                <span>Войти по QR-коду</span>
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
@@ -232,17 +282,45 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
           </div>
         ) : foundPosts.length === 0 ? (
           <div className="h-64 flex flex-col items-center justify-center text-neutral-500 space-y-3 border border-dashed border-neutral-800 rounded-2xl p-6 text-center">
-            <FileCheck className="w-10 h-10 text-neutral-700" />
-            <div>
-              <p className="text-sm font-semibold text-neutral-300">
-                {hasSearched ? 'Посты не найдены' : 'Проверьте публикацию серии'}
-              </p>
-              <p className="text-xs text-neutral-500 max-w-md mt-1">
-                {hasSearched
-                  ? 'Попробуйте изменить поисковый запрос или выбрать другой канал.'
-                  : 'Выберите канал, нажмите «Проверить постинг», и приложение найдёт пост с серией, позволит скопировать ссылку или одним кликом отметить серию завершённой.'}
-              </p>
-            </div>
+            {!isConnected ? (
+              <>
+                <div className="w-12 h-12 rounded-2xl bg-amber-950/40 border border-amber-800/40 flex items-center justify-center text-amber-400">
+                  <LogIn className="w-6 h-6" />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-neutral-200">
+                    Авторизация в Telegram не выполнена
+                  </p>
+                  <p className="text-xs text-neutral-400 max-w-md mt-1">
+                    Чтобы находить посты в канале, скачивать дорожки и управлять публикациями, войдите в свой Telegram аккаунт.
+                  </p>
+                </div>
+                {onOpenAuth && (
+                  <button
+                    type="button"
+                    onClick={onOpenAuth}
+                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition cursor-pointer shadow-md shadow-sky-950/40"
+                  >
+                    <QrCode className="w-4 h-4" />
+                    <span>Авторизоваться через QR-код</span>
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <FileCheck className="w-10 h-10 text-neutral-700" />
+                <div>
+                  <p className="text-sm font-semibold text-neutral-300">
+                    {hasSearched ? 'Посты не найдены' : 'Проверьте публикацию серии'}
+                  </p>
+                  <p className="text-xs text-neutral-500 max-w-md mt-1">
+                    {hasSearched
+                      ? 'Попробуйте изменить поисковый запрос или выбрать другой канал.'
+                      : 'Выберите канал, нажмите «Проверить постинг», и приложение найдёт пост с серией, позволит скопировать ссылку или одним кликом отметить серию завершённой.'}
+                  </p>
+                </div>
+              </>
+            )}
           </div>
         ) : (
           foundPosts.map(post => {
