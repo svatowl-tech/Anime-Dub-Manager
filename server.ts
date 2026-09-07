@@ -268,6 +268,31 @@ async function startServer() {
       });
     }
 
+    if (channel === 'get-whisper-system-status') {
+      const requestedModel = (args[0] && args[0].model) || 'small';
+      console.log(`[IPC Server] Whisper system status check requested (model: ${requestedModel})`);
+      return res.json({
+        success: true,
+        data: {
+          isReady: true,
+          canLoadModel: true,
+          statusText: 'Система Whisper готова к загрузке модели',
+          backendType: 'server',
+          availableModels: ['small', 'base', 'tiny'],
+          activeModel: requestedModel,
+          modelsDir: path.join(__dirname, 'mock_user_data', 'models', 'whisper'),
+          details: `Движок Whisper готов принимать аудиодорожки. Выбранная модель «${requestedModel}» готова к загрузке в память.`
+        }
+      });
+    }
+
+    if (channel === 'get-downloaded-whisper-models') {
+      return res.json({
+        success: true,
+        data: ['small', 'base', 'tiny']
+      });
+    }
+
     if (channel === 'qa-whisper-check-lines') {
       const inputData = args[0] || {};
       const lines = inputData.lines || [];

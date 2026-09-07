@@ -184,19 +184,121 @@ export interface LineToCheck {
   text: string;
 }
 
+export interface WhisperReadinessResult {
+  isReady: boolean;
+  canLoadModel: boolean;
+  isModelDownloaded?: boolean;
+  availableModels: string[];
+  activeModel: string;
+  statusText: string;
+  details?: string;
+  backendType?: string;
+  errorMessage?: string;
+}
+
+export interface TrackWhisperExecutionResult {
+  success: boolean;
+  errorMessage?: string;
+  results: WhisperTextComparisonResult[];
+  logs: string[];
+}
+
 /**
- * Executes Whisper ASR text comparison for a track's voiced lines
+ * Checks if the Whisper system is ready to start loading the chosen model
+ */
+export async function checkWhisperSystemReadiness(modelName: string = 'small'): Promise<WhisperReadinessResult> {
+  try {
+    const res = await ipcSafe.invoke('get-whisper-system-status', { model: modelName });
+    if (res && typeof res === 'object') {
+      const isDownloaded = res.isModelDownloaded ?? (Array.isArray(res.availableModels) && res.availableModels.includes(modelName));
+      return {
+        isReady: res.isReady !== false,
+        canLoadModel: res.canLoadModel !== false,
+        isModelDownloaded: isDownloaded,
+        availableModels: res.availableModels || ['small', 'base', 'tiny'],
+        activeModel: modelName,
+        statusText: res.statusText || (isDownloaded 
+          ? `Система Whisper готова к загрузке модели «${modelName}» (модель уже скачана на диск)`
+          : `Система Whisper готова к загрузке модели «${modelName}» (модель будет скачана при старте)`),
+        details: res.details || 'Движок Whisper ASR готов к работе и загрузке весов модели в память.',
+        backendType: res.backendType || 'desktop'
+      };
+    }
+  } catch (err: any) {
+    console.warn('[WhisperReadiness] Check failed:', err?.message || err);
+    return {
+      isReady: false,
+      canLoadModel: false,
+      isModelDownloaded: false,
+      availableModels: [],
+      activeModel: modelName,
+      statusText: `Система Whisper не готова: ${err?.message || 'Сервис недоступен'}`,
+      errorMessage: err?.message || 'Служба Whisper недоступна или не отвечает',
+      details: 'Не удалось получить ответ от бэкенда Whisper. Проверьте запуск службы распознавания.',
+      backendType: 'error'
+    };
+  }
+
+  return {
+    isReady: true,
+    canLoadModel: true,
+    isModelDownloaded: true,
+    availableModels: ['small', 'base', 'tiny'],
+    activeModel: modelName,
+    statusText: `Система Whisper готова к загрузке модели «${modelName}»`,
+    details: 'Движок Whisper ASR готов к загрузке модели в память.',
+    backendType: 'auto'
+  };
+}
+
+/**
+ * Executes Whisper ASR text comparison for a track's voiced lines with full logging
  */
 export async function checkTrackTextWithWhisper(
   audioFilePath: string,
   lines: LineToCheck[],
   modelName: string = 'small',
-  onProgress?: (current: number, total: number, msg: string) => void
-): Promise<WhisperTextComparisonResult[]> {
-  if (lines.length === 0) return [];
+  onProgress?: (current: number, total: number, msg: string) => void,
+  onLog?: (msg: string, level: 'info' | 'warn' | 'error' | 'success') => void
+): Promise<TrackWhisperExecutionResult> {
+  const logs: string[] = [];
+  const logHelper = (msg: string, level: 'info' | 'warn' | 'error' | 'success' = 'info') => {
+    logs.push(msg);
+    onLog?.(msg, level);
+  };
+
+  if (lines.length === 0) {
+    logHelper('[Whisper ASR] Список реплик для сверки пуст, пропуск дорожки.', 'info');
+    return { success: true, results: [], logs };
+  }
+
+  logHelper(`[Whisper ASR] Инициализация сверки дорожки (${lines.length} реплик). Модель: «${modelName}», язык: ru`, 'info');
+
+  if (!audioFilePath) {
+    const errorMsg = 'Проверка по Whisper неудачна: аудиофайл дорожки не задан или недоступен';
+    logHelper(`[Whisper ASR] ❌ ${errorMsg}`, 'error');
+    return { success: false, errorMessage: errorMsg, results: [], logs };
+  }
+
+  // Check system readiness before loading model
+  logHelper(`[Whisper ASR] Проверка готовности системы Whisper к загрузке модели «${modelName}»...`, 'info');
+  const readiness = await checkWhisperSystemReadiness(modelName);
+
+  if (!readiness.isReady || !readiness.canLoadModel) {
+    const errorMsg = `Проверка по Whisper не произошла: система Whisper не готова к загрузке модели «${modelName}» (${readiness.errorMessage || readiness.statusText})`;
+    logHelper(`[Whisper ASR] ❌ ${errorMsg}`, 'error');
+    return {
+      success: false,
+      errorMessage: errorMsg,
+      results: [],
+      logs
+    };
+  }
+
+  logHelper(`[Whisper ASR] Система Whisper готова к загрузке модели. Отправка запроса на распознавание ${lines.length} реплик...`, 'info');
 
   try {
-    // Attempt IPC call in Electron / Web proxy
+    // Attempt IPC call
     const ipcResponse = await ipcSafe.invoke('qa-whisper-check-lines', {
       audioFilePath,
       lines: lines.map(l => ({
@@ -211,45 +313,42 @@ export async function checkTrackTextWithWhisper(
     });
 
     if (ipcResponse && Array.isArray(ipcResponse.results)) {
-      return ipcResponse.results.map((r: any) => {
-        return classifyDiscrepancy(r.expectedText, r.recognizedText, r.lineIndex);
+      logHelper(`[Whisper ASR] Ответ получен от Whisper бэкенда: успешно обработано ${ipcResponse.results.length} реплик.`, 'success');
+
+      let discrepanciesCount = 0;
+      const results = ipcResponse.results.map((r: any) => {
+        const comp = classifyDiscrepancy(r.expectedText, r.recognizedText, r.lineIndex);
+        if (comp.isDiscrepancy) {
+          discrepanciesCount++;
+          logHelper(`[Whisper ASR] ⚠️ Расхождение в реплике #${r.lineIndex}: "${r.expectedText.slice(0, 30)}..." → сказано: "${r.recognizedText.slice(0, 30)}..." (${comp.summaryDescription})`, 'warn');
+        }
+        return comp;
       });
+
+      logHelper(`[Whisper ASR] Сверка дорожки завершена: проверено ${results.length} реплик, выявлено расхождений: ${discrepanciesCount}`, discrepanciesCount > 0 ? 'warn' : 'success');
+      return {
+        success: true,
+        results,
+        logs
+      };
+    } else {
+      const errorMsg = 'Проверка по Whisper неудачна: бэкенд Whisper вернул пустой или некорректный ответ';
+      logHelper(`[Whisper ASR] ❌ ${errorMsg}`, 'error');
+      return {
+        success: false,
+        errorMessage: errorMsg,
+        results: [],
+        logs
+      };
     }
   } catch (err: any) {
-    console.warn('[WhisperTextChecker] Whisper IPC check not available or failed:', err?.message || err);
+    const errorMsg = `Проверка по Whisper неудачна / не произошла: ${err?.message || 'Сбой выполнения'}`;
+    logHelper(`[Whisper ASR] ❌ ${errorMsg}`, 'error');
+    return {
+      success: false,
+      errorMessage: errorMsg,
+      results: [],
+      logs
+    };
   }
-
-  // Fallback / Web preview mode:
-  // When running in preview without full Whisper Python environment,
-  // we do an intelligent comparison: if audio is present, we check if there are typical
-  // discrepancies or simulate accurate validation against expected text.
-  const results: WhisperTextComparisonResult[] = [];
-  const total = lines.length;
-
-  for (let i = 0; i < total; i++) {
-    const line = lines[i];
-    onProgress?.(i + 1, total, `Сверка текста через Whisper (${modelName}): реплика [${line.startFormatted}] "${line.text.slice(0, 24)}..."`);
-
-    // In web preview fallback, we provide realistic validation:
-    // If the line contains known marker or simulated drift for demonstration:
-    const text = line.text;
-    let simulatedSpoken = text;
-
-    // Simulate occasional dubber drift on long/complex lines in demo mode if no backend
-    if (i % 7 === 3 && text.length > 20) {
-      // Dubber swapped wording or dropped ending
-      const words = text.split(' ');
-      if (words.length > 4) {
-        simulatedSpoken = words.slice(0, words.length - 2).join(' ') + ' ладно';
-      }
-    } else if (i % 11 === 5 && text.length > 15) {
-      // Dubber did a retake / stumble
-      simulatedSpoken = text.split(' ')[0] + '... ' + text;
-    }
-
-    const comparison = classifyDiscrepancy(text, simulatedSpoken, line.lineIndex);
-    results.push(comparison);
-  }
-
-  return results;
 }

@@ -28,14 +28,21 @@ import {
   RotateCcw,
   Repeat,
   Activity,
-  Flame
+  Flame,
+  ScrollText,
+  Terminal,
+  Info,
+  XCircle
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { 
   MissingLineDetection, 
   DefectCategory, 
   DefectResolution, 
-  SnippetAudioPlayer 
+  SnippetAudioPlayer,
+  QAScanReport,
+  QAScanLogEntry,
+  WhisperScanStatus
 } from '../../lib/qa/missingLinesDetector';
 import { AudioArtifactType } from '../../lib/qa/artifactDetector';
 import { ArtifactWaveformMarker } from './ArtifactWaveformMarker';
@@ -56,6 +63,7 @@ interface MissingLinesModalProps {
   participants?: Participant[];
   onGenerateSoundEngineerMessage?: () => void;
   onOpenScanConfig?: () => void;
+  scanReport?: QAScanReport;
 }
 
 export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
@@ -71,9 +79,14 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   episode,
   participants,
   onGenerateSoundEngineerMessage,
-  onOpenScanConfig
+  onOpenScanConfig,
+  scanReport
 }) => {
   const [gaps, setGaps] = useState<MissingLineDetection[]>(initialGaps);
+  const activeReport: QAScanReport | undefined = scanReport || (initialGaps as any)?.scanReport;
+  const [isLogModalOpen, setIsLogModalOpen] = useState(false);
+  const [logFilterStage, setLogFilterStage] = useState<'all' | 'whisper' | 'error' | 'audio'>('all');
+  const [copiedLogs, setCopiedLogs] = useState(false);
   const [selectedCategoryTab, setSelectedCategoryTab] = useState<'all' | DefectCategory | 'sub_error'>('all');
   const [selectedArtifactTypeFilter, setSelectedArtifactTypeFilter] = useState<'all' | AudioArtifactType>('all');
   const [selectedDubberFilter, setSelectedDubberFilter] = useState<string>('all');
@@ -478,6 +491,24 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               <span>Сообщение звукарю</span>
             </button>
 
+            {/* QA Scan Log Button */}
+            <button
+              onClick={() => setIsLogModalOpen(true)}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 transition-all flex items-center gap-1.5 shadow-sm relative"
+              title="Открыть журнал проверок аудиодорожек и распознавания Whisper"
+            >
+              <ScrollText className="w-3.5 h-3.5 text-sky-400" />
+              <span>Журнал проверок</span>
+              {activeReport?.logs && activeReport.logs.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-neutral-900 text-neutral-400 font-mono">
+                  {activeReport.logs.length}
+                </span>
+              )}
+              {activeReport?.whisperStatus?.attempted && !activeReport.whisperStatus.success && (
+                <span className="w-2 h-2 rounded-full bg-rose-500 animate-pulse" title="Ошибка проверки Whisper" />
+              )}
+            </button>
+
             {onOpenScanConfig && (
               <button
                 type="button"
@@ -656,20 +687,30 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               </span>
             </button>
 
-            {textMismatchCount > 0 && (
+            {(textMismatchCount > 0 || activeReport?.whisperStatus?.attempted) && (
               <button
                 onClick={() => setSelectedCategoryTab('text_mismatch')}
                 className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shrink-0 ${
                   selectedCategoryTab === 'text_mismatch'
-                    ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400/50'
-                    : 'bg-emerald-950/40 text-emerald-300 hover:text-white hover:bg-emerald-900/60 border border-emerald-800/40'
+                    ? (activeReport?.whisperStatus?.attempted && !activeReport.whisperStatus.success
+                        ? 'bg-rose-600 text-white shadow-sm ring-1 ring-rose-400/50'
+                        : 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-400/50')
+                    : (activeReport?.whisperStatus?.attempted && !activeReport.whisperStatus.success
+                        ? 'bg-rose-950/40 text-rose-300 hover:text-white hover:bg-rose-900/60 border border-rose-800/40'
+                        : 'bg-emerald-950/40 text-emerald-300 hover:text-white hover:bg-emerald-900/60 border border-emerald-800/40')
                 }`}
               >
-                <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                <FileText className={`w-3.5 h-3.5 ${activeReport?.whisperStatus?.attempted && !activeReport.whisperStatus.success ? 'text-rose-400' : 'text-emerald-400'}`} />
                 <span>Сверка текста (Whisper)</span>
-                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-900 text-emerald-200 border border-emerald-700">
-                  {textMismatchCount}
-                </span>
+                {activeReport?.whisperStatus?.attempted && !activeReport.whisperStatus.success ? (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-900 text-rose-200 border border-rose-700">
+                    Сбой ASR
+                  </span>
+                ) : (
+                  <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-900 text-emerald-200 border border-emerald-700">
+                    {textMismatchCount}
+                  </span>
+                )}
               </button>
             )}
           </div>
@@ -808,17 +849,132 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
 
         {/* Defect Items List */}
         <div className="flex-1 overflow-y-auto p-4 space-y-3.5 custom-scrollbar">
+          {/* Explicit Whisper Result Banner */}
+          {activeReport?.whisperStatus?.attempted && (
+            <div className={`p-3.5 rounded-xl border text-xs transition-all ${
+              !activeReport.whisperStatus.success || !activeReport.whisperStatus.ready
+                ? 'bg-rose-950/30 border-rose-500/50 text-rose-200 shadow-sm'
+                : 'bg-emerald-950/25 border-emerald-500/40 text-emerald-200 shadow-sm'
+            }`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start gap-2.5">
+                  <div className={`p-1.5 rounded-lg border mt-0.5 shrink-0 ${
+                    !activeReport.whisperStatus.success || !activeReport.whisperStatus.ready
+                      ? 'bg-rose-900/50 border-rose-500/40 text-rose-400'
+                      : 'bg-emerald-900/50 border-emerald-500/40 text-emerald-400'
+                  }`}>
+                    {!activeReport.whisperStatus.success || !activeReport.whisperStatus.ready ? (
+                      <AlertTriangle className="w-4 h-4" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4" />
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-bold text-sm text-neutral-100">
+                        {!activeReport.whisperStatus.success || !activeReport.whisperStatus.ready
+                          ? 'Проверка текста по Whisper: неудачна / не произошла'
+                          : 'Проверка текста по Whisper: успешно выполнена'}
+                      </span>
+                      <span className={`text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded border ${
+                        !activeReport.whisperStatus.success || !activeReport.whisperStatus.ready
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                      }`}>
+                        {!activeReport.whisperStatus.success || !activeReport.whisperStatus.ready ? 'Сбой проверки' : 'ASR OK'}
+                      </span>
+                      {activeReport.whisperStatus.modelUsed && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700 font-mono">
+                          модель: {activeReport.whisperStatus.modelUsed}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="opacity-95 leading-relaxed text-xs">
+                      {!activeReport.whisperStatus.success || !activeReport.whisperStatus.ready
+                        ? (activeReport.whisperStatus.errorMessage || 'Система Whisper не была готова к загрузке выбранной модели или возникла ошибка при вызове ASR.')
+                        : `Проверено озвученных реплик: ${activeReport.whisperStatus.totalLinesChecked}, выявлено расхождений со сценарием: ${activeReport.whisperStatus.discrepanciesCount}.`}
+                    </p>
+
+                    {!activeReport.whisperStatus.success && (
+                      <p className="text-[11px] text-rose-300/80">
+                        Аудиодорожки не были сверены со сценарием через нейросеть. Ознакомьтесь с журналом проверки для анализа причин.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setIsLogModalOpen(true)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-800/90 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition-colors shrink-0 flex items-center gap-1.5"
+                >
+                  <ScrollText className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Посмотреть лог</span>
+                </button>
+              </div>
+            </div>
+          )}
+
           {filteredGaps.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-8 text-neutral-500">
-              <Check className="w-12 h-12 text-emerald-500/40 mb-3" />
-              <div className="text-base font-semibold text-neutral-300">
-                {gaps.length === 0 ? 'Замечаний не обнаружено!' : 'Ничего не найдено по заданным фильтрам'}
-              </div>
-              <p className="text-xs text-neutral-500 mt-1 max-w-sm">
-                {gaps.length === 0 
-                  ? 'Все реплики субтитров озвучены корректно, лишней речи и конфликтов не найдено.' 
-                  : 'Попробуйте сбросить фильтр или строку поиска.'}
-              </p>
+              {selectedCategoryTab === 'text_mismatch' && activeReport?.whisperStatus?.attempted ? (
+                !activeReport.whisperStatus.success || !activeReport.whisperStatus.ready ? (
+                  <div className="max-w-md mx-auto space-y-3">
+                    <div className="w-12 h-12 rounded-2xl bg-rose-900/30 border border-rose-500/40 text-rose-400 flex items-center justify-center mx-auto">
+                      <XCircle className="w-6 h-6" />
+                    </div>
+                    <div className="text-base font-bold text-rose-200">
+                      Проверка текста по Whisper: неудачна / не произошла
+                    </div>
+                    <p className="text-xs text-rose-300/90 leading-relaxed">
+                      {activeReport.whisperStatus.errorMessage || 'Система Whisper не была готова к загрузке модели, либо сервис вернул ошибку.'}
+                    </p>
+                    <div className="pt-2">
+                      <button
+                        onClick={() => setIsLogModalOpen(true)}
+                        className="px-4 py-2 rounded-lg bg-rose-900/60 hover:bg-rose-900 text-xs font-semibold text-rose-100 border border-rose-500/40 transition-colors inline-flex items-center gap-2"
+                      >
+                        <ScrollText className="w-4 h-4" />
+                        Открыть журнал проверок
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="max-w-md mx-auto space-y-3">
+                    <div className="w-12 h-12 rounded-2xl bg-emerald-900/30 border border-emerald-500/40 text-emerald-400 flex items-center justify-center mx-auto">
+                      <CheckCircle2 className="w-6 h-6" />
+                    </div>
+                    <div className="text-base font-bold text-emerald-200">
+                      Расхождений текста не обнаружено!
+                    </div>
+                    <p className="text-xs text-neutral-400 leading-relaxed">
+                      Все {activeReport.whisperStatus.totalLinesChecked} озвученных реплик в точности соответствуют тексту субтитров (модель: {activeReport.whisperStatus.modelUsed}).
+                    </p>
+                    <div className="pt-2">
+                      <button
+                        onClick={() => setIsLogModalOpen(true)}
+                        className="px-4 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs font-medium text-neutral-200 border border-neutral-700 transition-colors inline-flex items-center gap-2"
+                      >
+                        <ScrollText className="w-4 h-4 text-emerald-400" />
+                        Открыть журнал проверок
+                      </button>
+                    </div>
+                  </div>
+                )
+              ) : (
+                <>
+                  <Check className="w-12 h-12 text-emerald-500/40 mb-3" />
+                  <div className="text-base font-semibold text-neutral-300">
+                    {gaps.length === 0 ? 'Замечаний не обнаружено!' : 'Ничего не найдено по заданным фильтрам'}
+                  </div>
+                  <p className="text-xs text-neutral-500 mt-1 max-w-sm">
+                    {gaps.length === 0 
+                      ? 'Все реплики субтитров озвучены корректно, лишней речи и конфликтов не найдено.' 
+                      : 'Попробуйте сбросить фильтр или строку поиска.'}
+                  </p>
+                </>
+              )}
             </div>
           ) : (
             filteredGaps.map(gap => {
@@ -2402,6 +2558,171 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               </div>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* Comprehensive QA Scan Log Modal */}
+      {isLogModalOpen && (
+        <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[85vh] text-neutral-200">
+            {/* Header */}
+            <div className="p-5 border-b border-neutral-800 flex items-center justify-between bg-neutral-900/90 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-sky-600/20 border border-sky-500/30 flex items-center justify-center text-sky-400">
+                  <Terminal className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>Журнал проверок дорожек и Whisper</span>
+                    {activeReport?.whisperStatus?.attempted && (
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${
+                        !activeReport.whisperStatus.success || !activeReport.whisperStatus.ready
+                          ? 'bg-rose-950/80 text-rose-300 border-rose-500/40'
+                          : 'bg-emerald-950/80 text-emerald-300 border-emerald-500/40'
+                      }`}>
+                        {!activeReport.whisperStatus.success || !activeReport.whisperStatus.ready
+                          ? 'Whisper: Неудачна'
+                          : 'Whisper: Готова и проверена'}
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-xs text-neutral-400">
+                    Детальный хронологический лог сканирования аудио, детекции VAD и сверки ASR
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setIsLogModalOpen(false)}
+                className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Filter Bar */}
+            <div className="px-5 py-2.5 border-b border-neutral-800 bg-neutral-950/60 flex items-center justify-between shrink-0 gap-2">
+              <div className="flex items-center gap-1.5">
+                {[
+                  { id: 'all', label: 'Все записи', count: activeReport?.logs?.length || 0 },
+                  { id: 'whisper', label: 'Whisper ASR', count: activeReport?.logs?.filter(l => l.stage === 'whisper').length || 0 },
+                  { id: 'error', label: 'Ошибки & Предупреждения', count: activeReport?.logs?.filter(l => l.level === 'error' || l.level === 'warn').length || 0 },
+                  { id: 'audio', label: 'Аудио & Детекторы', count: activeReport?.logs?.filter(l => l.stage !== 'whisper').length || 0 }
+                ].map(tab => (
+                  <button
+                    key={tab.id}
+                    onClick={() => setLogFilterStage(tab.id as any)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 ${
+                      logFilterStage === tab.id
+                        ? 'bg-neutral-200 text-neutral-900 font-bold'
+                        : 'bg-neutral-800/70 text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    <span>{tab.label}</span>
+                    <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${
+                      logFilterStage === tab.id ? 'bg-neutral-900 text-white' : 'bg-neutral-700 text-neutral-300'
+                    }`}>
+                      {tab.count}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  const allText = (activeReport?.logs || [])
+                    .map(l => `[${l.timestamp}] [${l.stage.toUpperCase()}] [${l.level.toUpperCase()}] ${l.message}${l.details ? ' -> ' + l.details : ''}`)
+                    .join('\n');
+                  navigator.clipboard.writeText(allText);
+                  setCopiedLogs(true);
+                  toast.success('Лог проверок скопирован в буфер обмена');
+                  setTimeout(() => setCopiedLogs(false), 2000);
+                }}
+                className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5"
+              >
+                {copiedLogs ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedLogs ? 'Скопировано!' : 'Копировать лог'}</span>
+              </button>
+            </div>
+
+            {/* Log Terminal Console */}
+            <div className="p-4 overflow-y-auto flex-1 custom-scrollbar space-y-1 bg-black/90 font-mono text-xs select-text">
+              {(!activeReport?.logs || activeReport.logs.length === 0) ? (
+                <div className="p-8 text-center text-neutral-500">
+                  <Terminal className="w-8 h-8 mx-auto mb-2 opacity-40" />
+                  <div>Записи журнала проверок отсутствуют.</div>
+                  <p className="text-[11px] text-neutral-600 mt-1">Запустите анализ дорожек в окне QA, чтобы залогировать процесс.</p>
+                </div>
+              ) : (
+                activeReport.logs
+                  .filter(entry => {
+                    if (logFilterStage === 'whisper') return entry.stage === 'whisper';
+                    if (logFilterStage === 'error') return entry.level === 'error' || entry.level === 'warn';
+                    if (logFilterStage === 'audio') return entry.stage !== 'whisper';
+                    return true;
+                  })
+                  .map(entry => (
+                    <div
+                      key={entry.id}
+                      className={`p-2 rounded border flex items-start gap-2.5 transition-colors ${
+                        entry.level === 'error'
+                          ? 'bg-rose-950/40 border-rose-500/40 text-rose-200'
+                          : entry.level === 'warn'
+                          ? 'bg-amber-950/30 border-amber-500/30 text-amber-200'
+                          : entry.level === 'success'
+                          ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200'
+                          : entry.stage === 'whisper'
+                          ? 'bg-purple-950/20 border-purple-500/20 text-purple-200'
+                          : 'bg-neutral-900/60 border-neutral-800 text-neutral-300'
+                      }`}
+                    >
+                      <span className="text-[10px] text-neutral-500 shrink-0 font-mono mt-0.5">
+                        {entry.timestamp}
+                      </span>
+                      <span className={`text-[9px] uppercase font-bold px-1.5 py-0.5 rounded shrink-0 border ${
+                        entry.stage === 'whisper'
+                          ? 'bg-purple-900/60 text-purple-300 border-purple-600/40'
+                          : entry.stage === 'speech'
+                          ? 'bg-blue-900/60 text-blue-300 border-blue-600/40'
+                          : entry.stage === 'missing'
+                          ? 'bg-rose-900/60 text-rose-300 border-rose-600/40'
+                          : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}>
+                        {entry.stage}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <div className="leading-relaxed font-mono">
+                          {entry.message}
+                        </div>
+                        {entry.details && (
+                          <div className="text-[11px] text-neutral-400 mt-1 font-mono break-all bg-black/40 p-1.5 rounded border border-neutral-800/80">
+                            {entry.details}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="p-3.5 border-t border-neutral-800 bg-neutral-900/90 flex items-center justify-between shrink-0 text-xs text-neutral-400">
+              <div className="flex items-center gap-3">
+                <span>Проверено дорожек: <strong className="text-neutral-200 font-mono">{activeReport?.totalTracks ?? 0}</strong></span>
+                <span>•</span>
+                <span>Реплик сценария: <strong className="text-neutral-200 font-mono">{activeReport?.totalSubLines ?? 0}</strong></span>
+                <span>•</span>
+                <span>Выявлено замечаний: <strong className="text-amber-300 font-mono">{activeReport?.totalGapsFound ?? gaps.length}</strong></span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsLogModalOpen(false)}
+                className="px-4 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-xs font-semibold transition-colors"
+              >
+                Закрыть
+              </button>
+            </div>
           </div>
         </div>
       )}

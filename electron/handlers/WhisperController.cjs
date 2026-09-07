@@ -97,6 +97,45 @@ function registerWhisperHandlers(getData) {
     });
   }));
 
+  ipcMain.handle('get-whisper-system-status', wrapIpcHandler(async (event, { model = 'small' } = {}) => {
+    try {
+      const service = getWhisperService();
+      await service.ensureFolder();
+      const files = await fs.readdir(service.modelsDir).catch(() => []);
+      const downloaded = files
+        .filter(f => f.startsWith('ggml-') && f.endsWith('.bin'))
+        .map(f => f.replace('ggml-', '').replace('.bin', ''));
+
+      const isModelDownloaded = downloaded.includes(model);
+
+      return {
+        isReady: true,
+        canLoadModel: true,
+        statusText: isModelDownloaded 
+          ? `Система Whisper готова к загрузке модели «${model}» (модель уже скачана)` 
+          : `Система Whisper готова к загрузке модели «${model}» (модель будет скачана при старте)`,
+        backendType: 'electron',
+        availableModels: downloaded,
+        activeModel: model,
+        isModelDownloaded,
+        modelsDir: service.modelsDir,
+        details: `Каталог моделей: ${service.modelsDir}. Скачано моделей: ${downloaded.length}`
+      };
+    } catch (err) {
+      log.warn('[WhisperController] get-whisper-system-status error:', err);
+      return {
+        isReady: false,
+        canLoadModel: false,
+        statusText: `Система Whisper не готова: ${err.message}`,
+        backendType: 'electron',
+        availableModels: [],
+        activeModel: model,
+        isModelDownloaded: false,
+        details: err.message
+      };
+    }
+  }));
+
   ipcMain.handle('get-downloaded-whisper-models', wrapIpcHandler(async () => {
     const service = getWhisperService();
     await service.ensureFolder();

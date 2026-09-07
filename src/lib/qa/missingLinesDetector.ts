@@ -12,7 +12,41 @@ import { Episode, Track, SubtitleLine } from '../../types';
 import { SIGN_KEYWORDS } from '../../constants';
 import { getSharedAudioContext, ensureAudioContextResumed } from './sharedAudioContext';
 import { scanTrackForArtifacts, AudioArtifactType, ArtifactSeverity } from './artifactDetector';
-import { checkTrackTextWithWhisper, WordDiff, TextDiscrepancyType } from './whisperTextChecker';
+import { 
+  checkTrackTextWithWhisper, 
+  checkWhisperSystemReadiness, 
+  WordDiff, 
+  TextDiscrepancyType 
+} from './whisperTextChecker';
+
+export interface QAScanLogEntry {
+  id: string;
+  timestamp: string;
+  stage: 'general' | 'audio' | 'missing' | 'speech' | 'collisions' | 'timing' | 'artifacts' | 'whisper';
+  level: 'info' | 'success' | 'warn' | 'error' | 'whisper';
+  message: string;
+  details?: string;
+}
+
+export interface WhisperScanStatus {
+  attempted: boolean;
+  ready: boolean;
+  success: boolean;
+  modelUsed?: string;
+  totalLinesChecked: number;
+  discrepanciesCount: number;
+  errorMessage?: string;
+  completedAt?: string;
+}
+
+export interface QAScanReport {
+  timestamp: string;
+  totalTracks: number;
+  totalSubLines: number;
+  totalGapsFound: number;
+  whisperStatus: WhisperScanStatus;
+  logs: QAScanLogEntry[];
+}
 
 export type DefectCategory = 
   | 'missing_line' 
@@ -524,7 +558,8 @@ export async function detectEpisodeGaps(
   tracks: Track[],
   subLines: SubtitleLine[],
   options: GapDetectionOptions = {},
-  onProgress?: (current: number, total: number, message: string) => void
+  onProgress?: (current: number, total: number, message: string) => void,
+  onLog?: (logEntry: QAScanLogEntry) => void
 ): Promise<MissingLineDetection[]> {
   const {
     speechDynamicThresholdDb = 3.0,
@@ -542,6 +577,36 @@ export async function detectEpisodeGaps(
     whisperModel = 'small'
   } = options;
 
+  const scanLogs: QAScanLogEntry[] = [];
+  const addLog = (
+    stage: QAScanLogEntry['stage'],
+    level: QAScanLogEntry['level'],
+    message: string,
+    details?: string
+  ) => {
+    const now = new Date();
+    const ts = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}.${now.getMilliseconds().toString().padStart(3, '0').slice(0, 2)}`;
+    const entry: QAScanLogEntry = {
+      id: `log_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: ts,
+      stage,
+      level,
+      message,
+      details
+    };
+    scanLogs.push(entry);
+    onLog?.(entry);
+  };
+
+  let whisperStatus: WhisperScanStatus = {
+    attempted: scanWhisperText,
+    ready: false,
+    success: false,
+    modelUsed: whisperModel,
+    totalLinesChecked: 0,
+    discrepanciesCount: 0
+  };
+
   const results: MissingLineDetection[] = [];
   // Map to hold timing_too_long defects for potential merging with subsequent actor_overlap
   const longTimingDetections = new Map<string, MissingLineDetection>();
@@ -549,8 +614,20 @@ export async function detectEpisodeGaps(
   // Filter valid dubber tracks with uploaded files
   const dubberTracks = tracks.filter(t => t.id !== 'original' && t.files.length > 0);
   if (dubberTracks.length === 0 || subLines.length === 0) {
+    addLog('general', 'warn', 'Не найдены дорожки озвучки с аудиофайлами или список субтитров пуст.');
+    const report: QAScanReport = {
+      timestamp: new Date().toISOString(),
+      totalTracks: dubberTracks.length,
+      totalSubLines: subLines.length,
+      totalGapsFound: 0,
+      whisperStatus,
+      logs: scanLogs
+    };
+    (results as any).scanReport = report;
     return results;
   }
+
+  addLog('general', 'info', `Старт комплексного QA сканирования серии: ${dubberTracks.length} дабберских дорожек, ${subLines.length} субтитров.`);
 
   // Parse project character aliases
   let aliases: Record<string, string> = {};
@@ -1361,88 +1438,170 @@ export async function detectEpisodeGaps(
   // 6. SCAN FOR TEXT DISCREPANCIES VIA WHISPER (ASR + SUBTITLE PROMPT CONTEXT)
   // =========================================================================
   if (scanWhisperText) {
-    onProgress?.(totalTracks, totalTracks, `Сверка текста через Whisper (${whisperModel}) с контекстом сценария...`);
+    addLog('whisper', 'whisper', `--- НАЧАЛО ПРОВЕРКИ ПО WHISPER ---`);
+    addLog('whisper', 'whisper', `Инициализация сверки текста. Выбранная модель: «${whisperModel}».`);
+    onProgress?.(totalTracks, totalTracks, `Проверка готовности Whisper системы к загрузке модели «${whisperModel}»...`);
 
-    for (const trackCtx of decodedTracks) {
-      const { track, audioBuffer, audioUrl } = trackCtx;
-      const trackVoiced = voicedLines.filter(v => v.track.id === track.id);
-      if (trackVoiced.length === 0) continue;
+    // Verify readiness before starting heavy model load
+    addLog('whisper', 'whisper', `Запрос статуса системы Whisper: готова ли система к загрузке модели «${whisperModel}»...`);
+    const readiness = await checkWhisperSystemReadiness(whisperModel);
 
-      const linesToCheck = trackVoiced.map(v => ({
-        lineIndex: v.lineIndex,
-        subId: v.subId,
-        startSec: v.speechStartSec,
-        endSec: v.speechEndSec,
-        startFormatted: formatTimecode(v.speechStartSec),
-        endFormatted: formatTimecode(v.speechEndSec),
-        characterName: v.resolvedCharName || track.character,
-        text: v.cleanedText
-      }));
+    whisperStatus = {
+      attempted: true,
+      ready: readiness.isReady && readiness.canLoadModel,
+      success: false,
+      modelUsed: whisperModel,
+      totalLinesChecked: 0,
+      discrepanciesCount: 0,
+      errorMessage: undefined
+    };
 
-      const selectedFile = track.files.find(f => f.id === track.selectedFileId) || track.files[0];
-      const filePath = selectedFile?.path || audioUrl;
+    if (!readiness.isReady || !readiness.canLoadModel) {
+      const failReason = readiness.errorMessage || readiness.statusText || 'Служба Whisper недоступна';
+      whisperStatus.success = false;
+      whisperStatus.errorMessage = `Проверка по Whisper не произошла: ${failReason}`;
+      addLog('whisper', 'error', `❌ Система Whisper не готова к загрузке модели «${whisperModel}»: ${failReason}`);
+      addLog('whisper', 'error', `❌ Проверка текста по Whisper завершилась неудачей (проверка не произошла).`);
+      addLog('whisper', 'whisper', `--- ЗАВЕРШЕНИЕ ПРОВЕРКИ ПО WHISPER (ОШИБКА ГОТОВНОСТИ) ---`);
+    } else {
+      addLog('whisper', 'success', `🟢 ${readiness.statusText}`);
+      addLog('whisper', 'whisper', `Система Whisper готова. Начинается загрузка модели «${whisperModel}» в память и сверка аудиодорожек...`);
 
-      const comparisons = await checkTrackTextWithWhisper(
-        filePath,
-        linesToCheck,
-        whisperModel,
-        (curr, tot, msg) => {
-          onProgress?.(curr, tot, `Whisper (${whisperModel}): ${track.participant} [${curr}/${tot}]`);
+      let totalCheckedLines = 0;
+      let totalDiscrepancies = 0;
+      let hasWhisperFailure = false;
+      let lastErrorMessage = '';
+
+      for (let tIdx = 0; tIdx < decodedTracks.length; tIdx++) {
+        const trackCtx = decodedTracks[tIdx];
+        const { track, audioBuffer, audioUrl } = trackCtx;
+        const trackVoiced = voicedLines.filter(v => v.track.id === track.id);
+        if (trackVoiced.length === 0) {
+          addLog('whisper', 'info', `Дорожка «${track.participant}»: нет озвученных реплик для сверки, пропуск.`);
+          continue;
         }
-      );
 
-      for (const comp of comparisons) {
-        if (!comp.isDiscrepancy) continue;
+        const linesToCheck = trackVoiced.map(v => ({
+          lineIndex: v.lineIndex,
+          subId: v.subId,
+          startSec: v.speechStartSec,
+          endSec: v.speechEndSec,
+          startFormatted: formatTimecode(v.speechStartSec),
+          endFormatted: formatTimecode(v.speechEndSec),
+          characterName: v.resolvedCharName || track.character,
+          text: v.cleanedText
+        }));
 
-        const voicedItem = trackVoiced.find(v => v.lineIndex === comp.lineIndex);
-        if (!voicedItem) continue;
+        const selectedFile = track.files.find(f => f.id === track.selectedFileId) || track.files[0];
+        const filePath = selectedFile?.path || audioUrl;
 
-        const discType = comp.discrepancyType || 'changed_words';
-        const typeLabel = 
-          discType === 'missing_words' ? 'Пропуск слов' :
-          discType === 'extra_words_or_retake' ? 'Лишние слова / дубль' : 'Отсебятина / замена слов';
+        addLog('whisper', 'whisper', `[Дорожка ${tIdx + 1}/${decodedTracks.length}] Сверка даббера «${track.participant}» (${linesToCheck.length} реплик)...`);
 
-        const detectionId = `whisper_text_${track.id}_${comp.lineIndex}_${voicedItem.speechStartSec.toFixed(2)}`;
+        const trackResult = await checkTrackTextWithWhisper(
+          filePath,
+          linesToCheck,
+          whisperModel,
+          (curr, tot, msg) => {
+            onProgress?.(curr, tot, `Whisper (${whisperModel}): ${track.participant} [${curr}/${tot}]`);
+          },
+          (msg, level) => {
+            addLog('whisper', level, msg);
+          }
+        );
 
-        results.push({
-          id: detectionId,
-          defectCategory: 'text_mismatch',
-          type: 'text_mismatch',
-          typeLabel: `ASR: ${typeLabel}`,
-          trackId: track.id,
-          dubberName: track.participant,
-          characterName: voicedItem.resolvedCharName || track.character,
-          assignmentId: voicedItem.matchingAssignmentId,
-          lineIndex: comp.lineIndex,
-          subId: voicedItem.subId,
-          startSec: voicedItem.speechStartSec,
-          endSec: voicedItem.speechEndSec,
-          startFormatted: formatTimecode(voicedItem.speechStartSec),
-          endFormatted: formatTimecode(voicedItem.speechEndSec),
-          durationSec: Math.round((voicedItem.speechEndSec - voicedItem.speechStartSec) * 10) / 10,
-          text: comp.expectedText,
-          expectedText: comp.expectedText,
-          recognizedText: comp.recognizedText,
-          textSimilarityPercent: comp.similarityPercent,
-          textDiscrepancyType: discType,
-          wordDiffs: comp.wordDiffs,
-          whisperModelUsed: whisperModel,
-          peakDb: voicedItem.metrics.peakDb,
-          rmsDb: voicedItem.metrics.rmsDb,
-          dynamicRangeDb: voicedItem.metrics.dynamicRangeDb,
-          selected: true,
-          resolutionAction: 'legitimate_fix',
-          comment: `[Несовпадение текста] В сценарии: "${comp.expectedText}". Сказано: "${comp.recognizedText}".`,
-          audioUrl,
-          audioBuffer,
-          originalAudioBuffer
-        });
+        if (!trackResult.success) {
+          hasWhisperFailure = true;
+          lastErrorMessage = trackResult.errorMessage || 'Ошибка сверки реплик через Whisper';
+          addLog('whisper', 'error', `❌ Дорожка «${track.participant}»: ${lastErrorMessage}`);
+        } else {
+          totalCheckedLines += linesToCheck.length;
+          const comparisons = trackResult.results;
+
+          for (const comp of comparisons) {
+            if (!comp.isDiscrepancy) continue;
+
+            const voicedItem = trackVoiced.find(v => v.lineIndex === comp.lineIndex);
+            if (!voicedItem) continue;
+
+            totalDiscrepancies++;
+            const discType = comp.discrepancyType || 'changed_words';
+            const typeLabel = 
+              discType === 'missing_words' ? 'Пропуск слов' :
+              discType === 'extra_words_or_retake' ? 'Лишние слова / дубль' : 'Отсебятина / замена слов';
+
+            const detectionId = `whisper_text_${track.id}_${comp.lineIndex}_${voicedItem.speechStartSec.toFixed(2)}`;
+
+            results.push({
+              id: detectionId,
+              defectCategory: 'text_mismatch',
+              type: 'text_mismatch',
+              typeLabel: `ASR: ${typeLabel}`,
+              trackId: track.id,
+              dubberName: track.participant,
+              characterName: voicedItem.resolvedCharName || track.character,
+              assignmentId: voicedItem.matchingAssignmentId,
+              lineIndex: comp.lineIndex,
+              subId: voicedItem.subId,
+              startSec: voicedItem.speechStartSec,
+              endSec: voicedItem.speechEndSec,
+              startFormatted: formatTimecode(voicedItem.speechStartSec),
+              endFormatted: formatTimecode(voicedItem.speechEndSec),
+              durationSec: Math.round((voicedItem.speechEndSec - voicedItem.speechStartSec) * 10) / 10,
+              text: comp.expectedText,
+              expectedText: comp.expectedText,
+              recognizedText: comp.recognizedText,
+              textSimilarityPercent: comp.similarityPercent,
+              textDiscrepancyType: discType,
+              wordDiffs: comp.wordDiffs,
+              whisperModelUsed: whisperModel,
+              peakDb: voicedItem.metrics.peakDb,
+              rmsDb: voicedItem.metrics.rmsDb,
+              dynamicRangeDb: voicedItem.metrics.dynamicRangeDb,
+              selected: true,
+              resolutionAction: 'legitimate_fix',
+              comment: `[Несовпадение текста] В сценарии: "${comp.expectedText}". Сказано: "${comp.recognizedText}".`,
+              audioUrl,
+              audioBuffer,
+              originalAudioBuffer
+            });
+          }
+        }
       }
+
+      whisperStatus.totalLinesChecked = totalCheckedLines;
+      whisperStatus.discrepanciesCount = totalDiscrepancies;
+      whisperStatus.completedAt = new Date().toISOString();
+
+      if (hasWhisperFailure) {
+        whisperStatus.success = false;
+        whisperStatus.errorMessage = `Проверка по Whisper завершилась с ошибкой: ${lastErrorMessage}`;
+        addLog('whisper', 'error', `❌ Проверка по Whisper неудачна / завершилась с ошибкой: ${lastErrorMessage}`);
+      } else {
+        whisperStatus.success = true;
+        addLog('whisper', 'success', `✅ Сверка через Whisper ASR успешно завершена: проверено ${totalCheckedLines} реплик, выявлено ${totalDiscrepancies} расхождений.`);
+      }
+
+      addLog('whisper', 'whisper', `--- ЗАВЕРШЕНИЕ ПРОВЕРКИ ПО WHISPER ---`);
     }
+  } else {
+    addLog('whisper', 'info', 'Сверка текста через Whisper отключена в параметрах сканирования.');
   }
 
   // Sort chronologically by start timestamp
   results.sort((a, b) => a.startSec - b.startSec);
+
+  addLog('general', 'success', `Комплексный анализ завершён. Всего выявлено замечаний: ${results.length}.`);
+
+  const report: QAScanReport = {
+    timestamp: new Date().toISOString(),
+    totalTracks: dubberTracks.length,
+    totalSubLines: validSubLines.length,
+    totalGapsFound: results.length,
+    whisperStatus,
+    logs: scanLogs
+  };
+  (results as any).scanReport = report;
+
   return results;
 }
 

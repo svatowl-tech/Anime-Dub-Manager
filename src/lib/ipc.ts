@@ -884,6 +884,46 @@ function handleIpcMock(channel: string, args: any[]): any {
   }
 
   // DIARIZATION, OLLAMA, AND VOICE BASE MOCKS FOR WEB COMPATIBILITY
+  if (channel === 'get-whisper-system-status') {
+    const requestedModel = (args[0] && args[0].model) || 'small';
+    return {
+      isReady: true,
+      canLoadModel: true,
+      statusText: `Система Whisper готова к загрузке модели «${requestedModel}»`,
+      backendType: 'web',
+      availableModels: ['small', 'base', 'tiny'],
+      activeModel: requestedModel,
+      isModelDownloaded: true,
+      details: 'Среда веб-превью: движок Whisper ASR инициализирован и готов к работе.'
+    };
+  }
+
+  if (channel === 'get-downloaded-whisper-models') {
+    return ['small', 'base', 'tiny'];
+  }
+
+  if (channel === 'qa-whisper-check-lines') {
+    const inputData = args[0] || {};
+    const lines = inputData.lines || [];
+    const results = lines.map((line: any, idx: number) => {
+      let recognizedText = line.text;
+      if (idx % 6 === 2 && line.text.length > 20) {
+        const words = line.text.split(' ');
+        if (words.length > 4) {
+          recognizedText = words.slice(0, words.length - 2).join(' ') + ' ладно';
+        }
+      } else if (idx % 8 === 4 && line.text.length > 15) {
+        recognizedText = line.text.split(' ')[0] + '... ' + line.text;
+      }
+      return {
+        lineIndex: line.lineIndex,
+        expectedText: line.text,
+        recognizedText
+      };
+    });
+    return { results };
+  }
+
   if (channel === 'check-diarization-status') {
     return { isLoaded: true, isLoading: false, downloadProgress: 100, loadingStatus: 'Ready' };
   }

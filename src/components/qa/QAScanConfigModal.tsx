@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   X, 
   Sparkles, 
@@ -14,9 +14,13 @@ import {
   FileText, 
   AlertCircle,
   HelpCircle,
-  Cpu
+  Cpu,
+  RefreshCw,
+  CheckCircle2,
+  AlertTriangle
 } from 'lucide-react';
 import { GapDetectionOptions } from '../../lib/qa/missingLinesDetector';
+import { checkWhisperSystemReadiness, WhisperReadinessResult } from '../../lib/qa/whisperTextChecker';
 
 interface QAScanConfigModalProps {
   isOpen: boolean;
@@ -124,6 +128,48 @@ export const QAScanConfigModal: React.FC<QAScanConfigModalProps> = ({
 
   // Whisper model choice
   const [whisperModel, setWhisperModel] = useState<string>(initialOptions?.whisperModel || 'small');
+
+  // Whisper system readiness state
+  const [whisperReadiness, setWhisperReadiness] = useState<WhisperReadinessResult & { loading: boolean; checked: boolean }>({
+    loading: false,
+    checked: false,
+    isReady: true,
+    canLoadModel: true,
+    availableModels: ['small', 'base', 'tiny'],
+    activeModel: initialOptions?.whisperModel || 'small',
+    statusText: 'Готова к проверке (модель Whisper будет загружена при старте)',
+    details: 'Служба Whisper ожидает запуска'
+  });
+
+  const refreshWhisperReadiness = async (modelToProbe = whisperModel) => {
+    setWhisperReadiness(prev => ({ ...prev, loading: true }));
+    try {
+      const result = await checkWhisperSystemReadiness(modelToProbe);
+      setWhisperReadiness({
+        ...result,
+        loading: false,
+        checked: true
+      });
+    } catch (e: any) {
+      setWhisperReadiness({
+        loading: false,
+        checked: true,
+        isReady: false,
+        canLoadModel: false,
+        availableModels: ['small', 'base', 'tiny'],
+        activeModel: modelToProbe,
+        statusText: 'Сбой проверки доступности Whisper',
+        errorMessage: e?.message || 'Не удалось связаться со службой Whisper',
+        details: String(e)
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      refreshWhisperReadiness(whisperModel);
+    }
+  }, [isOpen, whisperModel]);
 
   // Sensitivity threshold (speech dynamic delta)
   const [sensitivityDb, setSensitivityDb] = useState<number>(initialOptions?.speechDynamicThresholdDb ?? 3.0);
@@ -277,6 +323,26 @@ export const QAScanConfigModal: React.FC<QAScanConfigModalProps> = ({
                           {item.badge}
                         </span>
                       )}
+                      {item.key === 'scanWhisperText' && (
+                        <div className="ml-auto flex items-center gap-1">
+                          {whisperReadiness.loading ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-neutral-800 text-neutral-400 border border-neutral-700">
+                              <RefreshCw className="w-3 h-3 animate-spin text-neutral-400" />
+                              Опрос готовности...
+                            </span>
+                          ) : whisperReadiness.isReady && whisperReadiness.canLoadModel ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-emerald-950/70 text-emerald-300 border border-emerald-500/40 font-medium">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                              Готова к загрузке
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-rose-950/70 text-rose-300 border border-rose-500/40 font-medium">
+                              <AlertTriangle className="w-3 h-3 text-rose-400" />
+                              Не готова
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </div>
                     <p className="text-xs text-neutral-400 mt-0.5 leading-relaxed">
                       {item.subtitle}
@@ -290,10 +356,95 @@ export const QAScanConfigModal: React.FC<QAScanConfigModalProps> = ({
           {/* Whisper Options Details (when scanWhisperText is selected) */}
           {scanWhisperText && (
             <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/30 space-y-3 animate-in fade-in duration-200">
-              <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold">
-                <Sparkles className="w-4 h-4" />
-                <span>Параметры сверки текста через Whisper</span>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold">
+                  <Sparkles className="w-4 h-4" />
+                  <span>Параметры сверки текста через Whisper</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => refreshWhisperReadiness(whisperModel)}
+                  disabled={whisperReadiness.loading}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-neutral-700 bg-neutral-800/80 text-xs text-neutral-300 hover:text-neutral-100 hover:bg-neutral-700 transition-colors"
+                  title="Повторить опрос готовности службы Whisper"
+                >
+                  <RefreshCw className={`w-3 h-3 ${whisperReadiness.loading ? 'animate-spin' : ''}`} />
+                  <span>Проверить готовность</span>
+                </button>
               </div>
+
+              {/* Explicit Whisper System Readiness Status Box */}
+              <div className={`p-3 rounded-lg border text-xs transition-all ${
+                whisperReadiness.loading
+                  ? 'bg-neutral-800/40 border-neutral-700 text-neutral-300'
+                  : whisperReadiness.isReady && whisperReadiness.canLoadModel
+                  ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
+                  : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
+              }`}>
+                <div className="flex items-start gap-2.5">
+                  <div className={`p-1 rounded-md border mt-0.5 shrink-0 ${
+                    whisperReadiness.loading
+                      ? 'bg-neutral-800 border-neutral-700 text-neutral-400'
+                      : whisperReadiness.isReady && whisperReadiness.canLoadModel
+                      ? 'bg-emerald-900/50 border-emerald-500/40 text-emerald-400'
+                      : 'bg-rose-900/50 border-rose-500/40 text-rose-400'
+                  }`}>
+                    {whisperReadiness.loading ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : whisperReadiness.isReady && whisperReadiness.canLoadModel ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    ) : (
+                      <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+                    )}
+                  </div>
+
+                  <div className="flex-1 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-neutral-100">
+                        {whisperReadiness.loading
+                          ? 'Опрос доступности Whisper...'
+                          : whisperReadiness.isReady && whisperReadiness.canLoadModel
+                          ? `Система Whisper готова к загрузке модели «${whisperModel}»`
+                          : `Система Whisper не готова к загрузке модели`}
+                      </span>
+
+                      {whisperReadiness.backendType && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700 font-mono">
+                          {whisperReadiness.backendType}
+                        </span>
+                      )}
+
+                      {whisperReadiness.isModelDownloaded !== undefined && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${
+                          whisperReadiness.isModelDownloaded
+                            ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700'
+                            : 'bg-amber-900/40 text-amber-300 border-amber-700'
+                        }`}>
+                          {whisperReadiness.isModelDownloaded ? 'Веса модели на диске' : 'Потребуется загрузка'}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="opacity-90 leading-relaxed">
+                      {whisperReadiness.statusText}
+                    </p>
+
+                    {whisperReadiness.details && (
+                      <p className="text-[11px] text-neutral-400 font-mono">
+                        {whisperReadiness.details}
+                      </p>
+                    )}
+
+                    {!whisperReadiness.loading && (!whisperReadiness.isReady || !whisperReadiness.canLoadModel) && (
+                      <div className="text-[11px] text-rose-300 mt-1 flex items-center gap-1.5 bg-rose-950/60 p-1.5 rounded border border-rose-500/30">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                        <span>Если запустить сканирование сейчас, проверка текста по Whisper не произойдет и в результатах будет статус «проверка неудачна».</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
               <p className="text-xs text-neutral-300 leading-relaxed">
                 Модель Whisper расшифрует произнесённые фрагменты речи с передачей субтитров в качестве подсказок (<code className="px-1 py-0.5 rounded bg-neutral-800 text-neutral-200">prompt context</code>), что гарантирует безошибочное распознавание японских имён, приёмов и терминов.
               </p>

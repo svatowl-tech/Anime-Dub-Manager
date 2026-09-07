@@ -14,7 +14,7 @@ import { ConfirmModal } from './ui/ConfirmModal';
 import { useVideoContext } from '../contexts/VideoContext';
 import { SIGN_KEYWORDS } from '../constants';
 import { analyzeAudioForPreview, NormalizationMetrics, getCachedNormalization } from '../lib/qa/audioNormalizer';
-import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval, GapDetectionOptions } from '../lib/qa/missingLinesDetector';
+import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval, GapDetectionOptions, QAScanReport } from '../lib/qa/missingLinesDetector';
 import { QAScanConfigModal } from './qa/QAScanConfigModal';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import WaveSurfer from 'wavesurfer.js';
@@ -59,6 +59,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
   });
   const [normalizationMetrics, setNormalizationMetrics] = useState<Record<string, NormalizationMetrics>>({});
   const [detectedGaps, setDetectedGaps] = useState<MissingLineDetection[]>([]);
+  const [qaScanReport, setQaScanReport] = useState<QAScanReport | null>(null);
   const [isGapModalOpen, setIsGapModalOpen] = useState(false);
   const [isScanConfigModalOpen, setIsScanConfigModalOpen] = useState(false);
   const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
@@ -990,6 +991,9 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       );
 
       setDetectedGaps(gaps);
+      if ((gaps as any)?.scanReport) {
+        setQaScanReport((gaps as any).scanReport);
+      }
       setIsGapModalOpen(true);
 
       const missing = gaps.filter(g => (g.defectCategory || 'missing_line') === 'missing_line').length;
@@ -2258,6 +2262,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           onOpenScanConfig={() => setIsScanConfigModalOpen(true)}
           isAnalyzing={isAnalyzingGaps}
           currentThreshold={gapSensitivityThreshold}
+          scanReport={qaScanReport || (detectedGaps as any)?.scanReport}
         />
       )}
 
