@@ -369,7 +369,10 @@ app.whenReady().then(async () => {
     });
 
     taskQueue.on('task-progress', (data) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task-progress', data);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('task-progress', data);
+        mainWindow.webContents.send('ffmpeg-progress', data.progress);
+      }
     });
 
     taskQueue.on('task-completed', async (data) => {
@@ -379,14 +382,31 @@ app.whenReady().then(async () => {
       if (data.task && data.task.type === 'transcode-video' && data.task.metadata && data.task.metadata.episodeId) {
         try {
           const episodes = await getData('episodes.json');
-          const epIndex = episodes.findIndex(e => e.id === data.task.metadata.episodeId);
+          let epIndex = episodes.findIndex(e => e.id === data.task.metadata.episodeId);
+          if (epIndex === -1 && data.task.metadata.projectId && data.task.metadata.episodeNumber) {
+            epIndex = episodes.findIndex(e => e.projectId === data.task.metadata.projectId && e.number === data.task.metadata.episodeNumber);
+          }
           if (epIndex !== -1) {
             const outputPath = data.result || data.task.metadata.outputPath;
             if (outputPath) {
               episodes[epIndex].rawPath = outputPath;
               episodes[epIndex].updatedAt = new Date().toISOString();
               await saveData('episodes.json', episodes);
-              log.info(`[main] Auto-updated episode ${data.task.metadata.episodeId} rawPath to ${outputPath}`);
+              log.info(`[main] Auto-updated episode ${episodes[epIndex].id} rawPath to ${outputPath}`);
+              
+              try {
+                const config = await getData('config.json');
+                const baseDir = config?.baseDir || require('electron').app.getPath('userData');
+                const projects = await getData('projects.json');
+                const associatedProject = projects.find(p => p.id === episodes[epIndex].projectId);
+                if (associatedProject) {
+                  const ProjectScanner = require('./lib/ProjectScanner.cjs');
+                  await ProjectScanner.saveEpisodeJsonOnDisk(baseDir, associatedProject, episodes[epIndex]);
+                }
+              } catch (diskErr) {
+                log.warn('Failed saving episode.json on disk after transcode:', diskErr);
+              }
+
               if (mainWindow && !mainWindow.isDestroyed()) {
                 mainWindow.webContents.send('episode-updated', episodes[epIndex]);
               }

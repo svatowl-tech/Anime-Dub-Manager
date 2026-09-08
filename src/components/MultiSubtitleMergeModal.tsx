@@ -1,9 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { X, Layers, Plus, Trash2, ArrowUp, ArrowDown, FileText, Check, Loader2, Sparkles, Sliders, Users, Palette, AlignLeft, Film, Video, Info, CheckSquare, Square } from 'lucide-react';
+import { X, Layers, Plus, Trash2, ArrowUp, ArrowDown, FileText, Check, Loader2, Sparkles, Sliders, Users, UserMinus, UserX, Palette, AlignLeft, Film, Video, Info, CheckSquare, Square } from 'lucide-react';
 import { ipcSafe } from '../lib/ipcSafe';
 import { Episode } from '../types';
 import { toast } from 'sonner';
-import { MkvTrackInfo, formatTrackDisplayName, formatLanguageLabel } from '../lib/mkvSubtitleExtractor';
+import {
+  MkvTrackInfo,
+  formatTrackDisplayName,
+  formatLanguageLabel,
+  SubtitleCharacterAnalysis,
+  analyzeAllMkvSubtitleTracks,
+  getSplitStatusDisplay
+} from '../lib/mkvSubtitleExtractor';
 import { sanitizeFolderName } from '../lib/pathUtils';
 
 export interface SubFileItem {
@@ -52,6 +59,8 @@ export default function MultiSubtitleMergeModal({
   const [mkvTracks, setMkvTracks] = useState<MkvTrackInfo[]>([]);
   const [selectedTrackIndexes, setSelectedTrackIndexes] = useState<number[]>([]);
   const [isExtractingTracks, setIsExtractingTracks] = useState(false);
+  const [mkvTrackAnalyses, setMkvTrackAnalyses] = useState<Record<number, SubtitleCharacterAnalysis>>({});
+  const [isAnalyzingMkvTracks, setIsAnalyzingMkvTracks] = useState(false);
 
   // Synchronize initial files when modal opens or initialFiles change
   useEffect(() => {
@@ -91,6 +100,24 @@ export default function MultiSubtitleMergeModal({
           // Multiple tracks, show picker
           setPendingMkvPath(videoPath);
           setMkvTracks(subs);
+          setMkvPickerOpen(true);
+
+          // Trigger background character analysis for tracks
+          setIsAnalyzingMkvTracks(true);
+          analyzeAllMkvSubtitleTracks(videoPath, subs, (idx, analysis) => {
+            setMkvTrackAnalyses(prev => ({ ...prev, [idx]: analysis }));
+          }).then((results) => {
+            setMkvTrackAnalyses(results);
+            setIsAnalyzingMkvTracks(false);
+            // Auto-select recommended track if available
+            const recIdx = Object.keys(results).find(k => results[Number(k)]?.isRecommendedForDubbing);
+            if (recIdx) {
+              setSelectedTrackIndexes([Number(recIdx)]);
+            }
+          }).catch(() => {
+            setIsAnalyzingMkvTracks(false);
+          });
+
           // By default, select default track or all tracks
           const defTrack = subs.find(s => s.disposition?.default);
           if (defTrack) {
@@ -98,7 +125,6 @@ export default function MultiSubtitleMergeModal({
           } else {
             setSelectedTrackIndexes(subs.map(s => s.index));
           }
-          setMkvPickerOpen(true);
         }
       } else {
         toast.error('Не удалось прочитать метаданные видеофайла');
@@ -752,6 +778,8 @@ export default function MultiSubtitleMergeModal({
                 const title = track.tags?.title || `Дорожка #${track.index}`;
                 const lang = formatLanguageLabel(track.tags?.language);
                 const codec = track.codec_name || 'sub';
+                const analysis = mkvTrackAnalyses[track.index];
+                const display = analysis ? getSplitStatusDisplay(analysis.splitStatus) : null;
 
                 return (
                   <div
@@ -763,27 +791,55 @@ export default function MultiSubtitleMergeModal({
                         setSelectedTrackIndexes(prev => [...prev, track.index]);
                       }
                     }}
-                    className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition-all text-xs select-none ${
+                    className={`flex flex-col gap-1.5 p-2.5 rounded-xl border cursor-pointer transition-all text-xs select-none ${
                       isSelected
                         ? 'bg-purple-600/15 border-purple-500/80 text-white'
                         : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:border-neutral-700'
                     }`}
                   >
-                    <div className="pt-0.5 text-purple-400 shrink-0">
-                      {isSelected ? (
-                        <CheckSquare className="w-4 h-4 text-purple-400" />
-                      ) : (
-                        <Square className="w-4 h-4 text-neutral-600" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="font-semibold text-neutral-200 truncate">{title}</div>
-                      <div className="text-[10px] text-neutral-400 flex items-center gap-2 mt-0.5 flex-wrap">
-                        {lang && <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1.5 py-0.2 rounded font-mono text-[9px]">{lang}</span>}
-                        <span className="uppercase font-mono bg-neutral-800 px-1 rounded">{codec}</span>
-                        <span>Поток #{track.index}</span>
+                    <div className="flex items-start gap-2.5">
+                      <div className="pt-0.5 text-purple-400 shrink-0">
+                        {isSelected ? (
+                          <CheckSquare className="w-4 h-4 text-purple-400" />
+                        ) : (
+                          <Square className="w-4 h-4 text-neutral-600" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-neutral-200 truncate">{title}</span>
+                          {lang && <span className="bg-purple-500/20 text-purple-300 border border-purple-500/30 px-1.5 py-0.2 rounded font-mono text-[9px]">{lang}</span>}
+                          <span className="uppercase font-mono bg-neutral-800 px-1 rounded text-[9px]">{codec}</span>
+                          <span className="text-[10px] text-neutral-500">#{track.index}</span>
+                        </div>
                       </div>
                     </div>
+
+                    {/* Character split status row */}
+                    {display && analysis ? (
+                      <div className="flex items-center justify-between gap-2 text-[10px] pt-1 border-t border-neutral-800/60 pl-6 flex-wrap">
+                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded border font-semibold ${display.badgeClass}`}>
+                          <span className={`w-1 h-1 rounded-full ${display.dotClass}`} />
+                          {analysis.splitStatus === 'full' && <Users className="w-3 h-3" />}
+                          {analysis.splitStatus === 'partial' && <UserMinus className="w-3 h-3" />}
+                          {analysis.splitStatus === 'none' && <UserX className="w-3 h-3" />}
+                          {display.label}
+                        </span>
+
+                        <span className="text-neutral-400">
+                          {analysis.splitStatus === 'full' || analysis.splitStatus === 'partial' ? (
+                            <span>{analysis.characterCount} персонажей • {analysis.namedPercentage}% строк</span>
+                          ) : (
+                            <span>Сплошной текст ({analysis.totalLines} стр.)</span>
+                          )}
+                        </span>
+                      </div>
+                    ) : isAnalyzingMkvTracks ? (
+                      <div className="flex items-center gap-1 text-[10px] text-neutral-500 pl-6">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        <span>Определение ролей...</span>
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}

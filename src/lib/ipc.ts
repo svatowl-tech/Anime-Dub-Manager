@@ -62,10 +62,10 @@ export const ipcRenderer: {
       cleanup = window.electronAPI.on(channel, callback);
     } else {
       const handler = (e: any) => {
-        if (channel === 'download-progress' && e.type === 'download-progress') {
+        if (e && e.detail !== undefined) {
           callback(e.detail);
-        } else if (channel === 'ffmpeg-progress' && e.type === 'ffmpeg-progress') {
-          callback(e.detail);
+        } else {
+          callback(e);
         }
       };
       window.addEventListener(channel, handler);
@@ -106,6 +106,24 @@ export const ipcRenderer: {
 };
 
 const listenerCleanups = new Map<string, Map<Function, () => void>>();
+
+if (typeof window !== 'undefined' && !(window as any).electronAPI && typeof EventSource !== 'undefined') {
+  try {
+    const sse = new EventSource('/api/ipc/events');
+    sse.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload && payload.channel) {
+          window.dispatchEvent(new CustomEvent(payload.channel, { detail: payload.data }));
+        }
+      } catch (err) {
+        // ignore
+      }
+    };
+  } catch (err) {
+    // ignore
+  }
+}
 
 function parseMemoryAss(text: string) {
   const lines: any[] = [];
@@ -561,6 +579,135 @@ function handleIpcMock(channel: string, args: any[]): any {
     })();
   }
   
+  if (channel === 'get-video-metadata') {
+    return {
+      format: {
+        filename: args[0] || 'video.mkv',
+        nb_streams: 7,
+        duration: '1420.5'
+      },
+      streams: [
+        { index: 0, codec_type: 'video', codec_name: 'h264', width: 1920, height: 1080 },
+        { index: 1, codec_type: 'audio', codec_name: 'aac', tags: { language: 'jpn', title: 'Оригинал (Japanese)' }, disposition: { default: 1 } },
+        { index: 2, codec_type: 'audio', codec_name: 'aac', tags: { language: 'rus', title: 'Озвучка (Russian Dub)' } },
+        {
+          index: 3,
+          codec_type: 'subtitle',
+          codec_name: 'ass',
+          tags: { language: 'rus', title: 'Полные субтитры (по ролям для озвучки)' },
+          disposition: { default: 1 }
+        },
+        {
+          index: 4,
+          codec_type: 'subtitle',
+          codec_name: 'ass',
+          tags: { language: 'rus', title: 'Сплошной перевод (без разделения на персонажей)' }
+        },
+        {
+          index: 5,
+          codec_type: 'subtitle',
+          codec_name: 'ass',
+          tags: { language: 'rus', title: 'Надписи и караоке (только знаки)' }
+        },
+        {
+          index: 6,
+          codec_type: 'subtitle',
+          codec_name: 'subrip',
+          tags: { language: 'eng', title: 'English Subtitles (Partially split)' }
+        }
+      ]
+    };
+  }
+
+  if (channel === 'analyze-mkv-subtitles') {
+    const streamIndices: number[] = args[0]?.streamIndices || [3, 4, 5, 6];
+    const mockMap: Record<number, any> = {
+      3: {
+        splitStatus: 'full',
+        statusLabel: 'Разделены на персонажей',
+        totalLines: 382,
+        namedLines: 363,
+        unnamedLines: 19,
+        namedPercentage: 95,
+        characterCount: 12,
+        topCharacters: [
+          { name: 'Эрен', count: 124 },
+          { name: 'Микаса', count: 88 },
+          { name: 'Армин', count: 64 },
+          { name: 'Леви', count: 42 },
+          { name: 'Ханджи', count: 28 },
+          { name: 'Жан', count: 17 }
+        ],
+        allCharacters: ['Эрен', 'Микаса', 'Армин', 'Леви', 'Ханджи', 'Жан', 'Конни', 'Саша', 'Эрвин', 'Райнер', 'Бертольд', 'Энни'],
+        isRecommendedForDubbing: true
+      },
+      4: {
+        splitStatus: 'none',
+        statusLabel: 'Вообще не разделены',
+        totalLines: 395,
+        namedLines: 0,
+        unnamedLines: 395,
+        namedPercentage: 0,
+        characterCount: 0,
+        topCharacters: [],
+        allCharacters: [],
+        isRecommendedForDubbing: false
+      },
+      5: {
+        splitStatus: 'none',
+        statusLabel: 'Только надписи / Без диалогов',
+        totalLines: 0,
+        namedLines: 0,
+        unnamedLines: 0,
+        namedPercentage: 0,
+        characterCount: 0,
+        topCharacters: [],
+        allCharacters: [],
+        isRecommendedForDubbing: false
+      },
+      6: {
+        splitStatus: 'partial',
+        statusLabel: 'Частично разделены',
+        totalLines: 380,
+        namedLines: 125,
+        unnamedLines: 255,
+        namedPercentage: 33,
+        characterCount: 3,
+        topCharacters: [
+          { name: 'Narrator', count: 76 },
+          { name: 'Eren', count: 36 },
+          { name: 'Commander', count: 13 }
+        ],
+        allCharacters: ['Narrator', 'Eren', 'Commander'],
+        isRecommendedForDubbing: false
+      }
+    };
+
+    const res: Record<number, any> = {};
+    for (const idx of streamIndices) {
+      if (mockMap[idx]) {
+        res[idx] = mockMap[idx];
+      } else {
+        res[idx] = {
+          splitStatus: 'none',
+          statusLabel: 'Вообще не разделены',
+          totalLines: 300,
+          namedLines: 0,
+          unnamedLines: 300,
+          namedPercentage: 0,
+          characterCount: 0,
+          topCharacters: [],
+          allCharacters: []
+        };
+      }
+    }
+    return res;
+  }
+
+  if (channel === 'extract-subtitle-track') {
+    return { path: args[0]?.outputPath || '/mock/extracted_sub.ass' };
+  }
+
   if (channel === 'get-raw-subtitles') {
     return (async () => {
       const filePath = args[0];

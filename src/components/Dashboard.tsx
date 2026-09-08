@@ -97,6 +97,7 @@ export default function Dashboard({
 
   const [isUploading, setIsUploading] = useState(false);
   const [transcodingProgress, setTranscodingProgress] = useState<number | null>(null);
+  const [transcodingTasks, setTranscodingTasks] = useState<Record<string, { id: string, progress: number, eta: number | null, title?: string, episodeId?: string }>>({});
   const [status, setStatus] = useState<string>('');
 
   const [isProjectSettingsModalOpen, setIsProjectSettingsModalOpen] = useState(false);
@@ -872,185 +873,273 @@ export default function Dashboard({
     if (!episodeToUpdate) return;
     
     try {
-      let finalFilePath = filePath;
       const fileName = filePath.split(/[\\/]/).pop() || 'file';
       const ext = fileName.split('.').pop()?.toLowerCase();
-      
-      // Extract subtitle if requested
-      if (type === 'RAW' && ext === 'mkv' && selectedSubtitleStreamIndex !== undefined) {
-        setStatus("Извлечение субтитров...");
-        const subOutputPath = filePath.replace(/\.mkv$/i, '.ass');
-        const extractRes = await ipcSafe.invoke('extract-subtitle-track', {
-          videoPath: filePath,
-          outputPath: subOutputPath,
-          streamIndex: selectedSubtitleStreamIndex
-        });
-        
-        if (extractRes && extractRes.path) {
-          // Upload extracted subtitles
-          await processFileUpload(subOutputPath, 'SUB', undefined, undefined, targetEpisodeId || episodeToUpdate.id);
-          // Очистка временного извлеченного файла субтитров
-          try {
-            await ipcSafe.invoke('delete-file', subOutputPath);
-          } catch (e) {}
-        } else {
-          console.error("Failed to extract subtitles. extractRes:", extractRes, "from path:", filePath);
-          toast.error("Не удалось извлечь субтитры: возможно формат файла не поддерживается или произошла системная ошибка.");
-        }
-      }
 
-      // For MKV files, copy first then enqueue transcoding task in TaskQueue
-      const isMkv = type === 'RAW' && ext === 'mkv';
-      
       // Use project title if available, otherwise fallback to ID
       const projectTitle = sanitizeFolderName(selectedProject?.title || 'Project');
       const episodeFolder = sanitizeFolderName(`Episode_${episodeToUpdate.number}`);
       const subDir = `${projectTitle}/${episodeFolder}`;
-      
-      const originalExt = finalFilePath.split('.').pop() || (type === 'RAW' ? (isMkv ? 'mkv' : 'mp4') : 'ass');
-      const targetFileName = type === 'RAW' 
-        ? (isHardsubEnabled ? `raw_video_hardsub.${originalExt}` : `raw_video.${originalExt}`) 
+
+      // Refresh latestEp from get-project / get-projects to have most recent state
+      let latestEp = episodeToUpdate;
+      try {
+        const proj: Project | null = await ipcSafe.invoke('get-project', selectedProject?.id);
+        if (proj && Array.isArray(proj.episodes)) {
+          const found = proj.episodes.find((e: any) => e.id === episodeToUpdate.id);
+          if (found) latestEp = found;
+        }
+      } catch (e) {}
+
+      // Helper function to extract characters and map to dubbers
+      const extractActorsAndAssign = async (subPath: string) => {
+        try {
+          const result = await ipcSafe.invoke('get-raw-subtitles', subPath);
+          if (result && result.actors) {
+            const rawActors: string[] = result.actors;
+            const lines: any[] = result.lines || [];
+
+            let aliases: Record<string, string> = {};
+            try {
+              aliases = JSON.parse(selectedProject?.characterAliases || '{}');
+            } catch (e) {}
+
+            const lineCounts: Record<string, number> = {};
+            lines.forEach(line => {
+              const nameToUse = line.name || line.actor || line.style || "Unknown";
+              const mainName = aliases[nameToUse] || nameToUse;
+              lineCounts[mainName] = (lineCounts[mainName] || 0) + 1;
+            });
+
+            const mainActors = Array.from(new Set(rawActors.map(name => {
+              const nameToUse = name || "Unknown";
+              return aliases[nameToUse] || nameToUse;
+            }))).filter(name => !SIGN_KEYWORDS.includes(name as string)) as string[];
+
+            const globalMappingRaw = selectedProject?.globalMapping || '[]';
+            let globalMapping: {characterName: string, dubberId: string, isMain?: boolean}[] = [];
+            try {
+              const parsed = JSON.parse(globalMappingRaw);
+              if (Array.isArray(parsed)) {
+                globalMapping = parsed;
+              } else if (parsed && typeof parsed === 'object') {
+                globalMapping = Object.entries(parsed).map(([k, v]) => ({ characterName: k, dubberId: v as string }));
+              }
+            } catch (e) {}
+
+            const existingAssignments = Array.isArray(latestEp.assignments) ? latestEp.assignments : [];
+            const existingNames = new Set(existingAssignments.map(a => a.characterName));
+
+            const toAdd = mainActors.filter(name => !existingNames.has(name));
+
+            const newAssignments = toAdd.map((actor: string) => {
+              const mappingEntry = globalMapping.find(m => m.characterName === actor);
+              let dubberId = mappingEntry?.dubberId || "";
+              let isMain = mappingEntry?.isMain || false;
+
+              if (!dubberId) {
+                const matchedParticipant = participants.find(
+                  p => p.nickname.toLowerCase() === actor.toLowerCase()
+                );
+                if (matchedParticipant) {
+                  dubberId = matchedParticipant.id;
+                }
+              }
+
+              const dubber = participants.find(p => p.id === dubberId);
+              return {
+                id: `${latestEp.id}-${actor}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+                episodeId: latestEp.id,
+                characterName: actor,
+                dubberId: dubberId,
+                dubber: dubber,
+                status: "PENDING",
+                lineCount: lineCounts[actor] || 0,
+                isMain: isMain
+              };
+            });
+
+            return [...existingAssignments, ...newAssignments];
+          }
+        } catch (e) {
+          console.error("Auto-extract characters failed:", e);
+        }
+        return latestEp.assignments || [];
+      };
+
+      const updateData: any = {};
+
+      // CASE 1: Video import with selected embedded subtitle track
+      if (type === 'RAW' && ext === 'mkv' && selectedSubtitleStreamIndex !== undefined) {
+        setStatus("Извлечение субтитров из MKV...");
+        const tempSubPath = filePath.replace(/\.mkv$/i, `_track${selectedSubtitleStreamIndex}.ass`);
+        let finalSubPath = '';
+
+        try {
+          const extractRes = await ipcSafe.invoke('extract-subtitle-track', {
+            videoPath: filePath,
+            outputPath: tempSubPath,
+            streamIndex: selectedSubtitleStreamIndex
+          });
+          if (extractRes && extractRes.path) {
+            const subCopyRes = await ipcSafe.invoke('copy-file', {
+              sourcePath: extractRes.path,
+              targetDir: subDir,
+              fileName: 'subtitles.ass'
+            });
+            finalSubPath = subCopyRes?.path || extractRes.path;
+            if (extractRes.path !== finalSubPath) {
+              try { await ipcSafe.invoke('delete-file', extractRes.path); } catch(e) {}
+            }
+          }
+        } catch (extErr) {
+          console.error("Subtitle extraction failed:", extErr);
+        }
+
+        setStatus("Копирование видеофайла...");
+        const copyVideoRes = await ipcSafe.invoke('copy-file', {
+          sourcePath: filePath,
+          targetDir: subDir,
+          fileName: isHardsubEnabled ? 'raw_video_hardsub.mkv' : 'raw_video.mkv'
+        });
+        const finalVideoPath = copyVideoRes?.path || filePath;
+
+        updateData.rawPath = finalVideoPath;
+        updateData.isHardsub = isHardsubEnabled;
+
+        if (finalSubPath) {
+          updateData.subPath = finalSubPath;
+          updateData.assignments = await extractActorsAndAssign(finalSubPath);
+        }
+
+        if (updateData.subPath || latestEp.subPath) {
+          updateData.status = 'ROLES';
+        }
+
+        // Enqueue background transcode MKV -> MP4
+        const mp4OutputPath = finalVideoPath.replace(/\.mkv$/i, '.mp4');
+        try {
+          await ipcSafe.invoke('enqueue-ffmpeg-task', {
+            type: 'transcode-video',
+            payload: {
+              videoPath: finalVideoPath,
+              outputPath: mp4OutputPath,
+              options: { audioStreamIndex: selectedAudioStreamIndex }
+            },
+            metadata: {
+              title: `Конвертация серии ${latestEp.number} (MKV -> MP4)`,
+              episodeId: latestEp.id,
+              episodeNumber: latestEp.number,
+              projectId: selectedProject?.id,
+              outputPath: mp4OutputPath
+            }
+          });
+          toast.info(`Серия ${latestEp.number}: Конвертация MKV в MP4 запущена в фоновом режиме.`);
+        } catch (tqErr) {
+          console.error('Failed to enqueue transcode task:', tqErr);
+        }
+
+        const mergedEp = { ...latestEp, ...updateData };
+        await ipcSafe.invoke('save-episode', mergedEp);
+        onRefresh();
+        toast.success(`Серия ${latestEp.number}: Видео и субтитры успешно импортированы!`);
+        return;
+      }
+
+      // CASE 2: Subtitle-only extraction from MKV
+      if (type === 'SUB' && ext === 'mkv' && selectedSubtitleStreamIndex !== undefined) {
+        setStatus("Извлечение субтитров из MKV...");
+        const tempSubPath = filePath.replace(/\.mkv$/i, `_track${selectedSubtitleStreamIndex}.ass`);
+        let finalSubPath = '';
+
+        const extractRes = await ipcSafe.invoke('extract-subtitle-track', {
+          videoPath: filePath,
+          outputPath: tempSubPath,
+          streamIndex: selectedSubtitleStreamIndex
+        });
+
+        if (extractRes && extractRes.path) {
+          const subCopyRes = await ipcSafe.invoke('copy-file', {
+            sourcePath: extractRes.path,
+            targetDir: subDir,
+            fileName: 'subtitles.ass'
+          });
+          finalSubPath = subCopyRes?.path || extractRes.path;
+          if (extractRes.path !== finalSubPath) {
+            try { await ipcSafe.invoke('delete-file', extractRes.path); } catch(e) {}
+          }
+        }
+
+        if (finalSubPath) {
+          updateData.subPath = finalSubPath;
+          updateData.assignments = await extractActorsAndAssign(finalSubPath);
+          if (latestEp.rawPath) {
+            updateData.status = 'ROLES';
+          }
+          const mergedEp = { ...latestEp, ...updateData };
+          await ipcSafe.invoke('save-episode', mergedEp);
+          onRefresh();
+          toast.success(`Серия ${latestEp.number}: Субтитры из MKV успешно извлечены и прикреплены!`);
+        } else {
+          toast.error("Не удалось извлечь субтитры из MKV файла.");
+        }
+        return;
+      }
+
+      // CASE 3 & 4: Standard file copy for RAW or SUB
+      const isMkv = type === 'RAW' && ext === 'mkv';
+      const originalExt = filePath.split('.').pop() || (type === 'RAW' ? (isMkv ? 'mkv' : 'mp4') : 'ass');
+      const targetFileName = type === 'RAW'
+        ? (isHardsubEnabled ? `raw_video_hardsub.${originalExt}` : `raw_video.${originalExt}`)
         : `subtitles.${originalExt}`;
 
       const copyRes = await ipcSafe.invoke('copy-file', {
-        sourcePath: finalFilePath,
+        sourcePath: filePath,
         targetDir: subDir,
         fileName: targetFileName
       });
 
       if (copyRes && copyRes.path) {
-        // If it's an MKV file, enqueue background transcoding task
-        if (isMkv) {
-          const mp4OutputPath = copyRes.path.replace(/\.mkv$/i, '.mp4');
-          try {
-            await ipcSafe.invoke('enqueue-ffmpeg-task', {
-              type: 'transcode-video',
-              payload: {
-                videoPath: copyRes.path,
-                outputPath: mp4OutputPath,
-                options: { audioStreamIndex: selectedAudioStreamIndex }
-              },
-              metadata: {
-                title: `Конвертация серии ${episodeToUpdate.number} (MKV -> MP4)`,
-                episodeId: episodeToUpdate.id,
-                projectId: selectedProject?.id,
-                outputPath: mp4OutputPath
-              }
-            });
-            toast.info(`Серия ${episodeToUpdate.number}: Конвертация MKV в MP4 добавлена в очередь задач.`);
-          } catch (tqErr) {
-            console.error('Failed to enqueue transcode task:', tqErr);
-          }
-        }
-        // Re-fetch latest episode state before saving to avoid overwriting fields
-        let latestEp = episodeToUpdate;
-        try {
-          const allProjects = await ipcSafe.invoke('get-projects');
-          if (Array.isArray(allProjects)) {
-            for (const p of allProjects) {
-              const found = p.episodes?.find((e: any) => e.id === episodeToUpdate.id);
-              if (found) {
-                latestEp = found;
-                break;
-              }
-            }
-          }
-        } catch (e) {}
-
-        // Update episode in DB
-        const updateData: any = {};
         if (type === 'RAW') {
           updateData.rawPath = copyRes.path;
           updateData.isHardsub = isHardsubEnabled;
+
+          if (isMkv) {
+            const mp4OutputPath = copyRes.path.replace(/\.mkv$/i, '.mp4');
+            try {
+              await ipcSafe.invoke('enqueue-ffmpeg-task', {
+                type: 'transcode-video',
+                payload: {
+                  videoPath: copyRes.path,
+                  outputPath: mp4OutputPath,
+                  options: { audioStreamIndex: selectedAudioStreamIndex }
+                },
+                metadata: {
+                  title: `Конвертация серии ${latestEp.number} (MKV -> MP4)`,
+                  episodeId: latestEp.id,
+                  episodeNumber: latestEp.number,
+                  projectId: selectedProject?.id,
+                  outputPath: mp4OutputPath
+                }
+              });
+              toast.info(`Серия ${latestEp.number}: Конвертация MKV в MP4 добавлена в очередь задач.`);
+            } catch (tqErr) {
+              console.error('Failed to enqueue transcode task:', tqErr);
+            }
+          }
         } else {
           updateData.subPath = copyRes.path;
-          
-          // Automatically extract characters and apply global mapping
-          try {
-            const result = await ipcSafe.invoke('get-raw-subtitles', updateData.subPath);
-            if (result && result.actors) {
-              const rawActors: string[] = result.actors;
-              const lines: any[] = result.lines || [];
-              
-              const aliases: Record<string, string> = JSON.parse(selectedProject?.characterAliases || '{}');
-              
-              const lineCounts: Record<string, number> = {};
-              lines.forEach(line => {
-                const nameToUse = line.name || line.style || "Unknown";
-                const mainName = aliases[nameToUse] || nameToUse;
-                lineCounts[mainName] = (lineCounts[mainName] || 0) + 1;
-              });
-
-              const mainActors = Array.from(new Set(rawActors.map(name => {
-                const nameToUse = name || "Unknown";
-                return aliases[nameToUse] || nameToUse;
-              }))).filter(name => !SIGN_KEYWORDS.includes(name as string)) as string[];
-
-              const globalMappingRaw = selectedProject?.globalMapping || '[]';
-              let globalMapping: {characterName: string, dubberId: string, isMain?: boolean}[] = [];
-              try {
-                const parsed = JSON.parse(globalMappingRaw);
-                if (Array.isArray(parsed)) {
-                  globalMapping = parsed;
-                } else if (parsed && typeof parsed === 'object') {
-                  globalMapping = Object.entries(parsed).map(([k, v]) => ({ characterName: k, dubberId: v as string }));
-                }
-              } catch (e) {}
-
-              // Preserve existing assignments if any
-              const existingAssignments = Array.isArray(latestEp.assignments) ? latestEp.assignments : [];
-              const existingNames = new Set(existingAssignments.map(a => a.characterName));
-              
-              const toAdd = mainActors.filter(name => !existingNames.has(name));
-              
-              const newAssignments = toAdd.map((actor: string) => {
-                const mappingEntry = globalMapping.find(m => m.characterName === actor);
-                let dubberId = mappingEntry?.dubberId || "";
-                let isMain = mappingEntry?.isMain || false;
-                
-                if (!dubberId) {
-                  const matchedParticipant = participants.find(
-                    p => p.nickname.toLowerCase() === actor.toLowerCase()
-                  );
-                  if (matchedParticipant) {
-                    dubberId = matchedParticipant.id;
-                  }
-                }
-
-                const dubber = participants.find(p => p.id === dubberId);
-                return {
-                  id: Math.random().toString(),
-                  episodeId: latestEp.id,
-                  characterName: actor,
-                  dubberId: dubberId,
-                  dubber: dubber,
-                  status: "PENDING",
-                  lineCount: lineCounts[actor] || 0,
-                  isMain: isMain
-                };
-              });
-
-              updateData.assignments = [...existingAssignments, ...newAssignments];
-            }
-          } catch (e) {
-            console.error("Auto-extract characters failed:", e);
-          }
+          updateData.assignments = await extractActorsAndAssign(copyRes.path);
         }
-        
-        // If both exist, move to ROLES status
-        const finalSubPath = updateData.subPath || latestEp.subPath;
-        const finalRawPath = updateData.rawPath || latestEp.rawPath;
 
-        if (finalSubPath && finalRawPath) {
+        if ((updateData.subPath || latestEp.subPath) && (updateData.rawPath || latestEp.rawPath)) {
           updateData.status = 'ROLES';
         }
 
-        await ipcSafe.invoke('save-episode', { ...latestEp, ...updateData });
-        
+        const mergedEp = { ...latestEp, ...updateData };
+        await ipcSafe.invoke('save-episode', mergedEp);
         onRefresh();
-        if (type === 'RAW' || !pendingMkvUpload) {
-          toast.success(`${type === 'RAW' ? 'Видео' : 'Субтитры'} успешно загружены!`);
-        }
+        toast.success(`${type === 'RAW' ? 'Видео' : 'Субтитры'} успешно загружены!`);
       } else {
         toast.error('Ошибка при сохранении файла: Не удалось получить путь к файлу.');
       }
@@ -1219,17 +1308,123 @@ export default function Dashboard({
     }
   };
 
+  const handleTranscodeCurrentEpisodeMkv = async () => {
+    if (!currentEpisode || !currentEpisode.rawPath || !currentEpisode.rawPath.toLowerCase().endsWith('.mkv')) {
+      return;
+    }
+    const mp4OutputPath = currentEpisode.rawPath.replace(/\.mkv$/i, '.mp4');
+    try {
+      await ipcSafe.invoke('enqueue-ffmpeg-task', {
+        type: 'transcode-video',
+        payload: {
+          videoPath: currentEpisode.rawPath,
+          outputPath: mp4OutputPath,
+          options: {}
+        },
+        metadata: {
+          title: `Конвертация серии ${currentEpisode.number} (MKV -> MP4)`,
+          episodeId: currentEpisode.id,
+          projectId: selectedProject?.id,
+          outputPath: mp4OutputPath
+        }
+      });
+      toast.info(`Серия ${currentEpisode.number}: Конвертация MKV в MP4 добавлена в очередь задач.`);
+    } catch (err: any) {
+      console.error('Failed to enqueue transcode:', err);
+      toast.error('Не удалось запустить конвертацию: ' + (err.message || 'Ошибка'));
+    }
+  };
+
   useEffect(() => {
     getParticipants().then(setParticipants);
     ipcSafe.invoke('get-config').then(data => {});
     
+    // Fetch initial tasks
+    ipcSafe.invoke('get-tasks').then((tasks: any[]) => {
+      if (Array.isArray(tasks)) {
+        const activeMap: Record<string, { id: string, progress: number, eta: number | null, title?: string, episodeId?: string }> = {};
+        for (const t of tasks) {
+          if (t.type === 'transcode-video' && (t.status === 'running' || t.status === 'pending')) {
+            activeMap[t.id] = {
+              id: t.id,
+              progress: t.progress || 0,
+              eta: t.eta ?? null,
+              title: t.metadata?.title,
+              episodeId: t.metadata?.episodeId
+            };
+          }
+        }
+        setTranscodingTasks(activeMap);
+      }
+    }).catch(() => {});
+
     const progressListener = (percent: number) => {
       setTranscodingProgress(percent);
     };
-    const cleanup = ipcSafe.on('ffmpeg-progress', progressListener);
+    const unsubFfmpeg = ipcSafe.on('ffmpeg-progress', progressListener);
+
+    const unsubTaskProgress = ipcSafe.on('task-progress', (data: { id: string, progress: number, eta: number | null, task?: any }) => {
+      if (data && data.id) {
+        setTranscodingProgress(data.progress);
+        setTranscodingTasks(prev => {
+          const existing = prev[data.id] || { id: data.id, progress: 0, eta: null };
+          return {
+            ...prev,
+            [data.id]: {
+              ...existing,
+              id: data.id,
+              progress: data.progress,
+              eta: data.eta,
+              episodeId: data.task?.metadata?.episodeId || existing.episodeId,
+              title: data.task?.metadata?.title || existing.title
+            }
+          };
+        });
+      }
+    });
+
+    const unsubQueueUpdated = ipcSafe.on('task-queue-updated', (tasks: any[]) => {
+      if (Array.isArray(tasks)) {
+        const activeMap: Record<string, { id: string, progress: number, eta: number | null, title?: string, episodeId?: string }> = {};
+        for (const t of tasks) {
+          if (t.type === 'transcode-video' && (t.status === 'running' || t.status === 'pending')) {
+            activeMap[t.id] = {
+              id: t.id,
+              progress: t.progress || 0,
+              eta: t.eta ?? null,
+              title: t.metadata?.title,
+              episodeId: t.metadata?.episodeId
+            };
+          }
+        }
+        setTranscodingTasks(activeMap);
+      }
+    });
+
+    const unsubTaskCompleted = ipcSafe.on('task-completed', (data: any) => {
+      if (data?.id) {
+        setTranscodingTasks(prev => {
+          const next = { ...prev };
+          delete next[data.id];
+          return next;
+        });
+      }
+      if (data?.task?.type === 'transcode-video') {
+        setTranscodingProgress(null);
+        onRefresh();
+      }
+    });
+
+    const unsubEpisodeUpdated = ipcSafe.on('episode-updated', () => {
+      onRefresh();
+    });
     
     return () => {
-      cleanup();
+      unsubFfmpeg();
+      unsubTaskProgress();
+      unsubQueueUpdated();
+      unsubTaskCompleted();
+      unsubEpisodeUpdated();
     };
   }, []);
 
@@ -2069,6 +2264,45 @@ export default function Dashboard({
                   <p className="text-xs text-amber-500/70 mt-2">
                     * Внимание: формат .mkv не поддерживается для воспроизведения в браузере. Используйте .mp4 или .webm
                   </p>
+
+                  {currentEpisode && Object.values(transcodingTasks).find(t => t.episodeId === currentEpisode.id) && (
+                    <div className="mt-3 p-3 bg-indigo-950/40 border border-indigo-500/30 rounded-xl space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <div className="flex items-center gap-2 text-indigo-300 font-medium">
+                          <Loader2 className="w-4 h-4 animate-spin text-indigo-400" />
+                          <span>Конвертация MKV в MP4</span>
+                        </div>
+                        <span className="font-bold text-indigo-400 font-mono text-sm">
+                          {Object.values(transcodingTasks).find(t => t.episodeId === currentEpisode.id)?.progress || 0}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden border border-indigo-500/20">
+                        <div 
+                          className="bg-indigo-500 h-full transition-all duration-300 rounded-full"
+                          style={{ width: `${Object.values(transcodingTasks).find(t => t.episodeId === currentEpisode.id)?.progress || 0}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between items-center text-[10px] text-indigo-300/70">
+                        <span>Фоновый процесс</span>
+                        <span>
+                          {Object.values(transcodingTasks).find(t => t.episodeId === currentEpisode.id)?.eta 
+                            ? `Осталось: ~${Object.values(transcodingTasks).find(t => t.episodeId === currentEpisode.id)?.eta}с` 
+                            : 'Идет расчет времени...'}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {currentEpisode.rawPath && currentEpisode.rawPath.toLowerCase().endsWith('.mkv') && !Object.values(transcodingTasks).some(t => t.episodeId === currentEpisode.id) && (
+                    <button
+                      onClick={handleTranscodeCurrentEpisodeMkv}
+                      type="button"
+                      className="mt-3 w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg bg-indigo-600/15 hover:bg-indigo-600/25 text-indigo-400 hover:text-indigo-300 border border-indigo-500/20 hover:border-indigo-500/40 text-xs font-bold transition-all cursor-pointer font-sans"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 text-indigo-400" />
+                      Конвертировать MKV в MP4 (HTML5)
+                    </button>
+                  )}
                   <div className="mt-4 flex items-center gap-2">
                     <input
                       type="checkbox"

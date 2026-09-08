@@ -28,6 +28,19 @@ process.on('exit', () => {
 // Mock Electron Environment State
 const mockIpcHandlers = new Map<string, Function>();
 
+// SSE Clients for real-time frontend event dispatch
+const sseClients = new Set<express.Response>();
+export function broadcastIpcEvent(channel: string, data: any) {
+  const payload = JSON.stringify({ channel, data });
+  for (const client of sseClients) {
+    try {
+      client.write(`data: ${payload}\n\n`);
+    } catch (e) {
+      sseClients.delete(client);
+    }
+  }
+}
+
 // Monkey-patch require to mock 'electron'
 const Module = require('module');
 const originalRequire = Module.prototype.require;
@@ -50,7 +63,7 @@ Module.prototype.require = function(id: string) {
         isPackaged: false,
       },
       BrowserWindow: class { 
-        webContents = { send: () => {} };
+        webContents = { send: (channel: string, data: any) => broadcastIpcEvent(channel, data) };
         on() {}
       },
       session: {
@@ -153,21 +166,80 @@ async function startServer() {
   const TelegramController = require('./electron/handlers/TelegramController.cjs');
   const { handleWebProxyRequest, handleWebProxyAgentRequest } = require('./electron/services/webProxyService.cjs');
 
-  ProjectController.registerProjectHandlers(getData, saveData, null);
+  const getMainWindow = () => ({
+    webContents: {
+      send: (channel: string, data: any) => broadcastIpcEvent(channel, data)
+    },
+    isDestroyed: () => false
+  });
+
+  taskQueue.on('queue-updated', (summary: any) => {
+    broadcastIpcEvent('task-queue-updated', summary);
+  });
+
+  taskQueue.on('task-progress', (data: any) => {
+    broadcastIpcEvent('task-progress', data);
+    broadcastIpcEvent('ffmpeg-progress', data.progress);
+  });
+
+  taskQueue.on('task-completed', async (data: any) => {
+    broadcastIpcEvent('task-completed', data);
+
+    // Auto-update episode rawPath when MKV transcoding finishes
+    if (data.task && data.task.type === 'transcode-video' && data.task.metadata && data.task.metadata.episodeId) {
+      try {
+        const episodes = await getData('episodes.json');
+        let epIndex = episodes.findIndex((e: any) => e.id === data.task.metadata.episodeId);
+        if (epIndex === -1 && data.task.metadata.projectId && data.task.metadata.episodeNumber) {
+          epIndex = episodes.findIndex((e: any) => e.projectId === data.task.metadata.projectId && e.number === data.task.metadata.episodeNumber);
+        }
+        if (epIndex !== -1) {
+          const outputPath = data.result || data.task.metadata.outputPath;
+          if (outputPath) {
+            episodes[epIndex].rawPath = outputPath;
+            episodes[epIndex].updatedAt = new Date().toISOString();
+            await saveData('episodes.json', episodes);
+            broadcastIpcEvent('episode-updated', episodes[epIndex]);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to update episode in web server:', e);
+      }
+    }
+  });
+
+  taskQueue.on('task-failed', (data: any) => {
+    broadcastIpcEvent('task-failed', data);
+  });
+
+  ProjectController.registerProjectHandlers(getData, saveData, getMainWindow);
   EpisodeHandlers.registerEpisodeHandlers(getData, saveData);
   ApiController.registerApiHandlers(getData, saveData);
   SyncController.registerSyncHandlers(getData, saveData, userDataPath);
-  MediaController.registerMediaHandlers(getData, null, taskQueue);
-  ExportController.registerExportHandlers(getData, null);
-  SystemController.registerSystemHandlers(getData, saveData, null, taskQueue);
+  MediaController.registerMediaHandlers(getData, getMainWindow, taskQueue);
+  ExportController.registerExportHandlers(getData, getMainWindow);
+  SystemController.registerSystemHandlers(getData, saveData, getMainWindow, taskQueue);
   SubtitleController.registerSubtitleHandlers(getData);
   WhisperController.registerWhisperHandlers();
   LocalTranslateController.registerLocalTranslateHandlers();
   DiarizationController.registerDiarizationHandlers(getData);
-  YoutubeController.registerYoutubeHandlers(getData, null, taskQueue);
+  YoutubeController.registerYoutubeHandlers(getData, getMainWindow, taskQueue);
   TelegramController.registerTelegramHandlers(getData, saveData, userDataPath);
   
   console.log('[IPC Server] Handler registration complete.');
+
+  // SSE endpoint for web clients to receive IPC events in real time
+  app.get('/api/ipc/events', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    sseClients.add(res);
+    req.on('close', () => {
+      sseClients.delete(res);
+    });
+  });
 
   // Proxy endpoint for web preview to bypass iframe restrictions
   app.get('/api/web-proxy', handleWebProxyRequest);

@@ -97,6 +97,42 @@ if (ffmpegPath) {
   }
 }
 
+async function getDurationSec(videoPath) {
+  try {
+    const meta = await getVideoMetadata(videoPath);
+    if (meta && meta.format && meta.format.duration) {
+      const d = parseFloat(meta.format.duration);
+      if (!isNaN(d) && d > 0) return d;
+    }
+    if (meta && meta.streams) {
+      const vStream = meta.streams.find(s => s.codec_type === 'video');
+      if (vStream && vStream.duration) {
+        const d = parseFloat(vStream.duration);
+        if (!isNaN(d) && d > 0) return d;
+      }
+    }
+  } catch (e) {
+    log.warn(`[getDurationSec] Could not probe video duration for ${videoPath}:`, e.message);
+  }
+  return 0;
+}
+
+function calculateProgressPercent(progress, totalDurationSec) {
+  if (progress && progress.percent !== undefined && !isNaN(progress.percent) && progress.percent > 0) {
+    return Math.min(99, Math.max(0, Math.round(progress.percent)));
+  }
+  if (progress && progress.timemark && totalDurationSec > 0) {
+    const parts = progress.timemark.split(':');
+    if (parts.length === 3) {
+      const currentSec = parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+      if (!isNaN(currentSec) && currentSec > 0) {
+        return Math.min(99, Math.max(0, Math.round((currentSec / totalDurationSec) * 100)));
+      }
+    }
+  }
+  return undefined;
+}
+
 /**
  * Функция для хардсаба субтитров в видеофайл (Main Process).
  * Использует fluent-ffmpeg для наложения .ass файла на видео.
@@ -116,6 +152,9 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
     const vPath = path.resolve(videoPath);
     const aPath = path.resolve(finalAssPath);
     const oPath = path.resolve(outputPath);
+
+    // Pre-calculate duration for reliable progress calculation
+    const totalDurationSec = await getDurationSec(vPath);
 
     let currentCommandLine = '';
     let processId = null;
@@ -179,17 +218,19 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
         log.info('FFmpeg started with command: ' + commandLine);
         currentCommandLine = commandLine;
         processId = addProcess(commandLine, command);
-        onProgress(0);
+        if (typeof onProgress === 'function') onProgress(0);
       })
       .on('progress', (progress) => {
-        if (progress.percent !== undefined) {
-          onProgress(Math.round(progress.percent));
+        if (typeof onProgress !== 'function') return;
+        const pct = calculateProgressPercent(progress, totalDurationSec);
+        if (pct !== undefined) {
+          onProgress(pct);
         }
       })
       .on('end', () => {
         log.info('FFmpeg processing finished successfully');
         if (processId) removeProcess(processId);
-        onProgress(100);
+        if (typeof onProgress === 'function') onProgress(100);
         resolve(oPath);
       })
       .on('error', (err, stdout, stderr) => {
@@ -239,6 +280,9 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
     
     const vPath = path.resolve(videoPath);
     const oPath = path.resolve(outputPath);
+
+    // Pre-calculate duration for reliable progress percentage calculation on MKV/MP4 files
+    const totalDurationSec = await getDurationSec(vPath);
 
     let currentCommandLine = '';
     let processId = null;
@@ -294,17 +338,19 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
         log.info('FFmpeg transcode started: ' + commandLine);
         currentCommandLine = commandLine;
         processId = addProcess(commandLine, command);
-        onProgress(0);
+        if (typeof onProgress === 'function') onProgress(0);
       })
       .on('progress', (progress) => {
-        if (progress.percent !== undefined) {
-          onProgress(Math.round(progress.percent));
+        if (typeof onProgress !== 'function') return;
+        const pct = calculateProgressPercent(progress, totalDurationSec);
+        if (pct !== undefined) {
+          onProgress(pct);
         }
       })
       .on('end', () => {
         log.info('FFmpeg transcode finished');
         if (processId) removeProcess(processId);
-        onProgress(100);
+        if (typeof onProgress === 'function') onProgress(100);
         resolve(oPath);
       })
       .on('error', (err, stdout, stderr) => {
@@ -359,10 +405,12 @@ function setCustomFfmpegPath(path) {
  * @returns Promise с путем к готовому файлу
  */
 function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, onCommand) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     const vPath = path.resolve(videoPath);
     const aPath = path.resolve(audioPath);
     const oPath = path.resolve(outputPath);
+
+    const totalDurationSec = await getDurationSec(vPath);
 
     let currentCommandLine = '';
     let processId = null;
@@ -396,17 +444,19 @@ function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, 
         log.info('Muxing started: ' + commandLine);
         currentCommandLine = commandLine;
         processId = addProcess(commandLine, command);
-        onProgress(0);
+        if (typeof onProgress === 'function') onProgress(0);
       })
       .on('progress', (progress) => {
-        if (progress.percent !== undefined) {
-          onProgress(Math.round(progress.percent));
+        if (typeof onProgress !== 'function') return;
+        const pct = calculateProgressPercent(progress, totalDurationSec);
+        if (pct !== undefined) {
+          onProgress(pct);
         }
       })
       .on('end', () => {
         log.info('Muxing finished');
         if (processId) removeProcess(processId);
-        onProgress(100);
+        if (typeof onProgress === 'function') onProgress(100);
         resolve(oPath);
       })
       .on('error', (err, stdout, stderr) => {

@@ -162,10 +162,22 @@ class TaskQueue extends EventEmitter {
         task.id, 
         ...task.args || [], 
         (progressData) => {
-          task.progress = progressData.percent || 0;
+          let percent = 0;
+          if (typeof progressData === 'number') {
+            percent = progressData;
+          } else if (progressData && typeof progressData.percent === 'number') {
+            percent = progressData.percent;
+          } else if (progressData && progressData.percent !== undefined) {
+            percent = Number(progressData.percent) || 0;
+          } else if (progressData && typeof progressData.progress === 'number') {
+            percent = progressData.progress;
+          }
+          task.progress = Math.min(100, Math.max(0, Math.round(percent)));
           
           // Calculate ETA
-          if (task.progress > 0 && task.progress < 100) {
+          if (progressData && typeof progressData === 'object' && progressData.eta !== undefined && progressData.eta !== null) {
+            task.eta = progressData.eta;
+          } else if (task.progress > 0 && task.progress < 100) {
             const now = Date.now();
             const startedAt = new Date(task.startedAt).getTime();
             const elapsed = now - startedAt;
@@ -175,7 +187,7 @@ class TaskQueue extends EventEmitter {
             task.eta = 0;
           }
 
-          this.emit('task-progress', { id: task.id, progress: task.progress, eta: task.eta });
+          this.emit('task-progress', { id: task.id, progress: task.progress, eta: task.eta, task });
         },
         (command) => {
           this.activeTasks.set(task.id, { command, task });

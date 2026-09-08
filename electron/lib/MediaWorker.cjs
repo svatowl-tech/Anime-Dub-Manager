@@ -12,7 +12,10 @@ class MediaWorker {
    * @param {Function} onCommand - Callback to register the process
    */
   static async execute(taskFn, args, onProgress, onCommand) {
-    return await taskFn(...args, onProgress, onCommand);
+    if (onProgress !== undefined || onCommand !== undefined) {
+      return await taskFn(...args, onProgress, onCommand);
+    }
+    return await taskFn(...args);
   }
 }
 

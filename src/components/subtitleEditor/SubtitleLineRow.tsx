@@ -1,6 +1,7 @@
-import React, { useRef, useEffect } from "react";
+import React, { useRef, useEffect, useMemo } from "react";
 import { Bookmark, AlertCircle, Plus, Copy, Trash2 } from "lucide-react";
 import { RawSubtitleLine } from "./types";
+import { getCharacterColor } from "./characterColors";
 
 interface SubtitleLineRowProps {
   line: RawSubtitleLine;
@@ -43,6 +44,11 @@ export const SubtitleLineRow = React.memo(({
   const currentStart = updates?.start !== undefined ? updates.start : line.start;
   const currentEnd = updates?.end !== undefined ? updates.end : line.end;
 
+  const charColor = useMemo(
+    () => getCharacterColor(currentName, stableNames),
+    [currentName, stableNames]
+  );
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -61,12 +67,21 @@ export const SubtitleLineRow = React.memo(({
         if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement).closest('button')) return;
         onPlay(line.start);
       }}
-      className={`grid grid-cols-[55px_70px_70px_100px_150px_1fr_100px] gap-3 p-2 items-start rounded-lg border transition-colors cursor-pointer group ${
-        isSelected
-          ? "bg-indigo-500/10 border-indigo-500/30"
+      style={{
+        borderLeftColor: charColor.borderSolid,
+        borderLeftWidth: '4px',
+        backgroundColor: isSelected
+          ? undefined
           : isActive
-          ? "bg-blue-500/10 border-blue-500/30 ring-1 ring-blue-500/20"
-          : "bg-neutral-950 border-transparent hover:border-neutral-800 hover:bg-neutral-900"
+          ? undefined
+          : charColor.bgRgba
+      }}
+      className={`grid grid-cols-[55px_70px_70px_100px_160px_1fr_100px] gap-3 p-2 items-start rounded-lg border transition-all cursor-pointer group ${
+        isSelected
+          ? "bg-indigo-500/15 border-indigo-500/40 shadow-sm"
+          : isActive
+          ? "bg-blue-500/15 border-blue-500/40 ring-1 ring-blue-500/25"
+          : "border-neutral-900/80 hover:border-neutral-800 hover:brightness-110"
       }`}
     >
       <div className="text-center flex items-center justify-between gap-1.5 pl-1">
@@ -108,20 +123,34 @@ export const SubtitleLineRow = React.memo(({
       >
         {line.style}
       </div>
-      <div className="relative">
+      <div className="relative flex items-center">
+        {/* Character Color Dot Indicator */}
+        <span
+          className="w-2.5 h-2.5 rounded-full absolute left-2 top-1/2 -translate-y-1/2 shrink-0 shadow-sm pointer-events-none z-10 transition-colors"
+          style={{ backgroundColor: charColor.borderSolid }}
+          title={charColor.isUnassigned ? "Персонаж не указан" : `Персонаж: ${currentName}`}
+        />
         <input
           type="text"
           value={currentName}
           onChange={(e) => onUpdate(line.rawLineIndex, { name: e.target.value })}
           onBlur={(e) => onCommitName(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
-          className={`w-full bg-neutral-900 border rounded px-2 py-1 pr-6 text-xs focus:outline-none focus:border-indigo-500 transition-colors ${
+          className={`w-full bg-neutral-900/90 border rounded pl-6 pr-6 py-1 text-xs focus:outline-none focus:border-indigo-500 transition-colors font-medium ${
             updates?.name !== undefined
               ? "border-indigo-500/50 text-indigo-300"
               : !currentName || !currentName.trim()
-              ? "border-red-500/50 text-red-300 bg-red-500/5"
-              : "border-neutral-800 text-neutral-300"
+              ? "border-red-500/50 text-red-300 bg-red-500/10"
+              : "text-neutral-200"
           }`}
+          style={
+            currentName?.trim() && updates?.name === undefined
+              ? {
+                  borderColor: charColor.badgeBorder,
+                  color: charColor.textHex
+                }
+              : undefined
+          }
           placeholder="Имя..."
           list={`names-${line.rawLineIndex}`}
         />

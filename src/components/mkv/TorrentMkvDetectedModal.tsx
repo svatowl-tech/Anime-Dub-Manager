@@ -1,6 +1,12 @@
-import React from 'react';
-import { Film, Layers, X, Sparkles, ArrowRight, Download, Check } from 'lucide-react';
-import { MkvTrackInfo, formatTrackDisplayName, formatLanguageLabel } from '../../lib/mkvSubtitleExtractor';
+import React, { useState, useEffect } from 'react';
+import { Film, Layers, X, Sparkles, ArrowRight, Users, UserMinus, UserX, Loader2 } from 'lucide-react';
+import {
+  MkvTrackInfo,
+  formatLanguageLabel,
+  SubtitleCharacterAnalysis,
+  analyzeAllMkvSubtitleTracks,
+  getSplitStatusDisplay
+} from '../../lib/mkvSubtitleExtractor';
 
 export interface TorrentMkvDetectedModalProps {
   isOpen: boolean;
@@ -21,6 +27,32 @@ export default function TorrentMkvDetectedModal({
   subtitleTracks,
   onOpenMultiMerge
 }: TorrentMkvDetectedModalProps) {
+  const [trackAnalyses, setTrackAnalyses] = useState<Record<number, SubtitleCharacterAnalysis>>({});
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen || !filePath || subtitleTracks.length === 0) return;
+
+    let isMounted = true;
+    setIsAnalyzing(true);
+
+    analyzeAllMkvSubtitleTracks(filePath, subtitleTracks, (trackIndex, analysis) => {
+      if (!isMounted) return;
+      setTrackAnalyses(prev => ({ ...prev, [trackIndex]: analysis }));
+    }).then((results) => {
+      if (!isMounted) return;
+      setTrackAnalyses(results);
+      setIsAnalyzing(false);
+    }).catch(() => {
+      if (!isMounted) return;
+      setIsAnalyzing(false);
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, filePath, subtitleTracks]);
+
   if (!isOpen) return null;
 
   const fileName = filePath.split(/[\\/]/).pop() || 'video.mkv';
@@ -63,31 +95,66 @@ export default function TorrentMkvDetectedModal({
           </p>
 
           {subtitleTracks.length > 0 && (
-            <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1 bg-neutral-950/50 p-3 rounded-xl border border-neutral-800">
-              <span className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider block mb-1">
-                Доступные дорожки:
-              </span>
+            <div className="space-y-2 max-h-56 overflow-y-auto pr-1 bg-neutral-950/50 p-3 rounded-xl border border-neutral-800">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-neutral-400 uppercase tracking-wider block">
+                  Доступные дорожки:
+                </span>
+                {isAnalyzing && (
+                  <span className="text-[10px] text-indigo-400 flex items-center gap-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Определение персонажей...
+                  </span>
+                )}
+              </div>
+
               {subtitleTracks.map((track) => {
                 const lang = formatLanguageLabel(track.tags?.language);
                 const title = track.tags?.title || `Дорожка #${track.index}`;
+                const analysis = trackAnalyses[track.index];
+                const display = analysis ? getSplitStatusDisplay(analysis.splitStatus) : null;
+
                 return (
                   <div
                     key={track.index}
-                    className="text-xs text-neutral-300 flex items-center justify-between py-1 border-b border-neutral-800/50 last:border-0"
+                    className="p-2 rounded-lg bg-neutral-900/60 border border-neutral-800/80 text-xs flex flex-col gap-1.5"
                   >
-                    <span className="truncate pr-2">{title}</span>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      {lang && (
-                        <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.2 rounded">
-                          {lang}
-                        </span>
-                      )}
-                      {track.codec_name && (
-                        <span className="text-[9px] bg-neutral-800 text-neutral-400 px-1 rounded uppercase font-mono">
-                          {track.codec_name}
-                        </span>
-                      )}
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="truncate font-medium text-neutral-200">{title}</span>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {lang && (
+                          <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1.5 py-0.2 rounded border border-indigo-500/30">
+                            {lang}
+                          </span>
+                        )}
+                        {track.codec_name && (
+                          <span className="text-[9px] bg-neutral-800 text-neutral-400 px-1 rounded uppercase font-mono">
+                            {track.codec_name}
+                          </span>
+                        )}
+                      </div>
                     </div>
+
+                    {/* Character split info */}
+                    {display && analysis && (
+                      <div className="flex items-center justify-between gap-2 text-[10px] pt-1 border-t border-neutral-800/60 flex-wrap">
+                        <span className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded border font-semibold ${display.badgeClass}`}>
+                          <span className={`w-1 h-1 rounded-full ${display.dotClass}`} />
+                          {analysis.splitStatus === 'full' && <Users className="w-3 h-3" />}
+                          {analysis.splitStatus === 'partial' && <UserMinus className="w-3 h-3" />}
+                          {analysis.splitStatus === 'none' && <UserX className="w-3 h-3" />}
+                          {display.shortLabel}
+                        </span>
+
+                        <span className="text-neutral-400">
+                          {analysis.splitStatus === 'full' || analysis.splitStatus === 'partial' ? (
+                            <span>{analysis.characterCount} перс. • {analysis.namedPercentage}% строк</span>
+                          ) : (
+                            <span>Сплошной текст</span>
+                          )}
+                        </span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -95,7 +162,7 @@ export default function TorrentMkvDetectedModal({
           )}
 
           <p className="text-xs text-neutral-400">
-            Вы можете открыть мульти-импорт прямо сейчас, чтобы выбрать одну или несколько дорожек и объединить их.
+            Вы можете открыть окно импорта прямо сейчас, чтобы выбрать дорожки с готовыми персонажами или объединить их.
           </p>
         </div>
 
@@ -103,7 +170,7 @@ export default function TorrentMkvDetectedModal({
         <div className="p-4 border-t border-neutral-800 bg-neutral-950/80 flex items-center justify-between gap-3">
           <button
             onClick={onClose}
-            className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl text-xs font-medium transition-colors"
+            className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl text-xs font-medium transition-colors cursor-pointer"
           >
             Позже
           </button>
@@ -116,7 +183,7 @@ export default function TorrentMkvDetectedModal({
             className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-600/20 flex items-center gap-2 cursor-pointer"
           >
             <Layers className="w-4 h-4" />
-            <span>Выбрать и слить субтитры</span>
+            <span>Выбрать и импортировать</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>

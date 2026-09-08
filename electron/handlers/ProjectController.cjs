@@ -36,6 +36,30 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
           createdAt: index !== -1 && items[index].createdAt ? items[index].createdAt : (projectData.createdAt || new Date().toISOString())
         };
 
+        // If episodes were passed inside project, ensure they are persisted in episodes.json
+        if (Array.isArray(episodes) && episodes.length > 0) {
+          try {
+            const allEpisodes = await getData('episodes.json');
+            let episodesModified = false;
+            for (const ep of episodes) {
+              if (!ep || !ep.id) continue;
+              const epIdx = allEpisodes.findIndex(e => e.id === ep.id);
+              if (epIdx !== -1) {
+                allEpisodes[epIdx] = { ...allEpisodes[epIdx], ...ep, updatedAt: new Date().toISOString() };
+                episodesModified = true;
+              } else {
+                allEpisodes.push({ ...ep, projectId: item.id, updatedAt: new Date().toISOString() });
+                episodesModified = true;
+              }
+            }
+            if (episodesModified) {
+              await saveData('episodes.json', allEpisodes);
+            }
+          } catch (e) {
+            console.error('Error persisting episodes from save-project:', e);
+          }
+        }
+
         // Auto-clean orphaned dubbers from globalMapping and episodes if assignedDubberIds is specified
         if (Array.isArray(dataToSave.assignedDubberIds)) {
           const allowedDubberIds = new Set(dataToSave.assignedDubberIds);
@@ -153,7 +177,25 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
     const projects = await getData('projects.json');
     const project = projects.find(p => p.id === projectId);
     if (!project) throw new Error('Project not found');
-    return project;
+
+    const episodes = await getData('episodes.json');
+    const participants = await getData('participants.json');
+
+    const projectEpisodes = episodes.filter(ep => ep.projectId === project.id).map(ep => {
+      const assignments = (ep.assignments || []).map(assignment => {
+        const dubber = participants.find(p => p.id === assignment.dubberId);
+        const substitute = assignment.substituteId ? participants.find(p => p.id === assignment.substituteId) : undefined;
+        return { ...assignment, dubber, substitute };
+      });
+      const uploads = (ep.uploads || []).map(upload => {
+        const uploadedBy = participants.find(p => p.id === upload.uploadedById);
+        return { ...upload, uploadedBy };
+      });
+      return { ...ep, assignments, uploads };
+    });
+    const soundEngineer = project.soundEngineerId ? participants.find(p => p.id === project.soundEngineerId) : undefined;
+    const assignedDubbers = (project.assignedDubberIds || []).map(id => participants.find(p => p.id === id)).filter(Boolean);
+    return { ...project, episodes: projectEpisodes, soundEngineer, assignedDubbers };
   }));
 
   // Import participants

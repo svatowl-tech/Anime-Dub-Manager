@@ -154,6 +154,12 @@ function registerMediaHandlers(getData, mainWindow, taskQueue) {
     return await getVideoMetadata(videoPath);
   }));
 
+  ipcMain.handle('analyze-mkv-subtitles', wrapIpcHandler(async (event, { videoPath, streamIndices }) => {
+    if (!videoPath) throw new Error('Missing video path');
+    const { analyzeMkvSubtitleStreams } = require('../services/subtitleService.cjs');
+    return await analyzeMkvSubtitleStreams(videoPath, streamIndices);
+  }));
+
   ipcMain.handle('extract-subtitle-track', wrapIpcHandler(async (event, { videoPath, outputPath, streamIndex }) => {
     if (!videoPath || !outputPath || streamIndex === undefined) throw new Error('Missing required parameters');
     await extractSubtitleTrack(videoPath, outputPath, streamIndex);

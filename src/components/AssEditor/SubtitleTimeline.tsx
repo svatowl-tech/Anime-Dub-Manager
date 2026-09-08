@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { ZoomIn, ZoomOut, Play, Pause, AlertCircle, ArrowLeftRight, Loader2, Edit3 } from 'lucide-react';
 import { ipcSafe } from '../../lib/ipcSafe';
+import { getCharacterColor } from '../subtitleEditor/characterColors';
 
 interface RawSubtitleLine {
   id?: number;
@@ -548,6 +549,12 @@ export default function SubtitleTimeline({
               // Keep row placement stable using index in full list
               const globalIdx = resolvedLines.indexOf(line);
 
+              // Character color calculation
+              const charName = updates[line.rawLineIndex]?.name !== undefined
+                ? updates[line.rawLineIndex].name
+                : line.name;
+              const charColor = getCharacterColor(charName);
+
               // If block is off-screen entirely during layout, do paint it to support drags but style lightweight
               return (
                 <div
@@ -558,19 +565,28 @@ export default function SubtitleTimeline({
                     e.stopPropagation();
                     onSelectLine(line.rawLineIndex);
                   }}
-                  className={`subtitle-block absolute h-[24px] rounded-md border text-[10px] font-sans flex items-center justify-between transition-colors select-none overflow-visible group ${
+                  className={`subtitle-block absolute h-[24px] rounded-md border text-[10px] font-sans flex items-center justify-between transition-all select-none overflow-visible group ${
                     isSelected
-                      ? 'bg-indigo-600/30 border-indigo-500 shadow-lg shadow-indigo-500/10 text-white z-20 font-medium'
+                      ? 'shadow-lg z-20 font-medium brightness-125'
                       : isHovered
-                      ? 'bg-neutral-800/80 border-neutral-600 text-neutral-100 z-10 cursor-grab'
-                      : 'bg-neutral-900/90 border-[#1f1f1f] text-neutral-300'
+                      ? 'z-10 cursor-grab brightness-110'
+                      : ''
                   }`}
                   style={{
                     left: `${startX}px`,
                     width: `${width}px`,
                     // Cascade overlapping subtitles visually by odd/even row height placement
                     top: `${(globalIdx % 2) * 28 + 6}px`,
-                    boxShadow: isSelected ? '0 0 10px rgba(99, 102, 241, 0.4)' : undefined
+                    backgroundColor: isSelected
+                      ? charColor.borderSolid + '44'
+                      : isHovered
+                      ? charColor.borderSolid + '33'
+                      : charColor.timelineBg,
+                    borderColor: isSelected
+                      ? charColor.borderSolid
+                      : charColor.timelineBorder,
+                    borderLeft: `3px solid ${charColor.borderSolid}`,
+                    boxShadow: isSelected ? `0 0 12px ${charColor.borderSolid}` : undefined
                   }}
                 >
                   {/* Left Resize Handle (Col-Resize Cursor) */}
@@ -584,7 +600,7 @@ export default function SubtitleTimeline({
                         line.currentEndSec
                       )
                     }
-                    className="absolute left-0 top-0 bottom-0 w-2 hover:bg-neutral-400/50 cursor-col-resize rounded-l-md transition-colors"
+                    className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/40 cursor-col-resize rounded-l-md transition-colors z-10"
                   />
 
                   {/* Text Label Container */}
@@ -598,12 +614,19 @@ export default function SubtitleTimeline({
                         line.currentEndSec
                       )
                     }
-                    className="flex-1 h-full flex items-center px-2.5 truncate cursor-grab active:cursor-grabbing select-none"
+                    className="flex-1 h-full flex items-center px-2 truncate cursor-grab active:cursor-grabbing select-none"
                   >
-                    <span className="font-mono text-[9px] font-bold text-indigo-400 mr-1 shrink-0">
-                      [{line.name || '?'}]
+                    <span
+                      className="font-mono text-[9px] font-bold mr-1.5 shrink-0 px-1 py-0.5 rounded shadow-xs"
+                      style={{
+                        color: charColor.textHex,
+                        backgroundColor: charColor.badgeBg,
+                        border: `1px solid ${charColor.badgeBorder}`
+                      }}
+                    >
+                      [{charName || '?'}]
                     </span>
-                    <span className="truncate">{line.text || '(Пустая реплика)'}</span>
+                    <span className="truncate text-neutral-100 font-medium">{line.text || '(Пустая реплика)'}</span>
                   </div>
 
                   {/* Hover Realtime Timings Tip */}

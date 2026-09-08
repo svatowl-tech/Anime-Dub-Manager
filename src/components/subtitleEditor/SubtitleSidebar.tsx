@@ -3,6 +3,7 @@ import { Languages, Save, Loader2, Bookmark, X, Mic2, UserCheck, Tag } from "luc
 import { Episode } from "../../types";
 import { RawSubtitleLine, SubtitleUpdates } from "./types";
 import { SHORTCUT_KEYS } from "./utils";
+import { getCharacterColor } from "./characterColors";
 
 interface SubtitleSidebarProps {
   currentEpisode: Episode | null;
@@ -156,13 +157,25 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
             {currentActiveSpeaker ? (
               <div className="space-y-1">
                 <div className="flex items-center gap-1.5">
-                  <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
-                    currentActiveSpeaker.name === 'Без имени' || !currentActiveSpeaker.name
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                      : 'bg-indigo-500/20 text-indigo-200 border border-indigo-500/30'
-                  }`}>
-                    {currentActiveSpeaker.name}
-                  </span>
+                  {(() => {
+                    const speakerColor = getCharacterColor(currentActiveSpeaker.name, stableNames);
+                    return (
+                      <span
+                        className="text-xs font-bold px-2 py-0.5 rounded flex items-center gap-1.5 border shadow-sm"
+                        style={{
+                          backgroundColor: speakerColor.badgeBg,
+                          borderColor: speakerColor.badgeBorder,
+                          color: speakerColor.textHex
+                        }}
+                      >
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0 shadow-sm"
+                          style={{ backgroundColor: speakerColor.borderSolid }}
+                        />
+                        {currentActiveSpeaker.name}
+                      </span>
+                    );
+                  })()}
                 </div>
                 {currentActiveSpeaker.text && (
                   <p className="text-xs text-neutral-300 line-clamp-2 italic font-normal">
@@ -346,25 +359,38 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
             <span className="text-[10px] text-neutral-500">Авто-назначение: выберите строки и нажмите цифру</span>
           </div>
           <div className="flex flex-wrap gap-2">
-            {stableNames.map((name, index) => (
-              <button
-                key={name}
-                onClick={() => onQuickAssign(name)}
-                className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white rounded-lg text-xs transition-colors border border-neutral-700 flex items-center gap-2 group cursor-pointer"
-                title={
-                  selectedLines.size > 0
-                    ? `Применить к выбранным (${selectedLines.size})`
-                    : "Выбрать имя"
-                }
-              >
-                {index < SHORTCUT_KEYS.length && (
-                  <span className="text-[9px] bg-neutral-950 text-neutral-400 px-1.5 py-0.5 rounded border border-neutral-800 group-hover:text-indigo-400 group-hover:border-indigo-500/30 transition-colors uppercase font-mono shadow-sm">
-                    {SHORTCUT_KEYS[index]}
+            {stableNames.map((name, index) => {
+              const charColor = getCharacterColor(name, stableNames);
+              return (
+                <button
+                  key={name}
+                  onClick={() => onQuickAssign(name)}
+                  style={{
+                    borderColor: charColor.borderRgba,
+                    backgroundColor: 'rgba(23, 23, 23, 0.85)'
+                  }}
+                  className="px-2.5 py-1.5 hover:bg-neutral-800 text-neutral-200 hover:text-white rounded-lg text-xs transition-colors border flex items-center gap-2 group cursor-pointer shadow-sm"
+                  title={
+                    selectedLines.size > 0
+                      ? `Применить к выбранным (${selectedLines.size})`
+                      : "Выбрать имя"
+                  }
+                >
+                  <span
+                    className="w-2.5 h-2.5 rounded-full shrink-0 shadow-sm"
+                    style={{ backgroundColor: charColor.borderSolid }}
+                  />
+                  {index < SHORTCUT_KEYS.length && (
+                    <span className="text-[9px] bg-neutral-950 text-neutral-400 px-1.5 py-0.5 rounded border border-neutral-800 group-hover:text-indigo-400 group-hover:border-indigo-500/30 transition-colors uppercase font-mono shadow-sm">
+                      {SHORTCUT_KEYS[index]}
+                    </span>
+                  )}
+                  <span className="truncate max-w-[150px] font-medium" style={{ color: charColor.textHex }}>
+                    {name}
                   </span>
-                )}
-                <span className="truncate max-w-[150px]">{name}</span>
-              </button>
-            ))}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -407,12 +433,22 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
                       <span className="text-indigo-400 font-semibold">Строка {bId + 1}</span>
                       <span className="text-neutral-600">•</span>
                       <span className="text-amber-400 font-bold">{formattedTime}</span>
-                      {charName && (
-                        <>
-                          <span className="text-neutral-600">•</span>
-                          <span className="text-emerald-400 truncate max-w-[130px]" title={charName}>[{charName}]</span>
-                        </>
-                      )}
+                      {charName && (() => {
+                        const bColor = getCharacterColor(charName, stableNames);
+                        return (
+                          <>
+                            <span className="text-neutral-600">•</span>
+                            <span
+                              className="truncate max-w-[130px] font-semibold flex items-center gap-1"
+                              style={{ color: bColor.textHex }}
+                              title={charName}
+                            >
+                              <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: bColor.borderSolid }} />
+                              [{charName}]
+                            </span>
+                          </>
+                        );
+                      })()}
                     </div>
                     <div className="text-[11px] text-neutral-300 truncate mt-0.5">
                       {lineText || "(Пустая реплика)"}

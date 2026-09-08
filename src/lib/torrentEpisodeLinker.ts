@@ -107,7 +107,91 @@ export async function linkDownloadedTorrentFile(params: {
       if (ext === 'mkv') {
         try {
           const { subtitles } = await inspectMkvTracks(finalVideoPath);
-          if (subtitles && subtitles.length > 0) {
+          if (subtitles && subtitles.length === 1) {
+            // Auto-attach when exactly 1 subtitle track is present
+            try {
+              const subOutputPath = finalVideoPath.replace(/\.mkv$/i, '.ass');
+              const extractRes = await ipcSafe.invoke('extract-subtitle-track', {
+                videoPath: finalVideoPath,
+                outputPath: subOutputPath,
+                streamIndex: subtitles[0].index
+              });
+
+              if (extractRes && extractRes.path) {
+                const subCopyRes = await ipcSafe.invoke('copy-file', {
+                  sourcePath: extractRes.path,
+                  targetDir: subDir,
+                  fileName: 'subtitles.ass'
+                });
+                const finalSubPath = subCopyRes?.path || extractRes.path;
+
+                // Cleanup temp extracted file if distinct
+                if (extractRes.path !== finalSubPath) {
+                  try { await ipcSafe.invoke('delete-file', extractRes.path); } catch (e) {}
+                }
+
+                updatedEp.subPath = finalSubPath;
+
+                // Auto-parse actors & lines
+                try {
+                  const subData = await ipcSafe.invoke('get-raw-subtitles', finalSubPath);
+                  if (subData && subData.actors && Array.isArray(subData.actors)) {
+                    const rawActors: string[] = subData.actors;
+                    const lines: any[] = subData.lines || [];
+                    const globalMappingRaw = proj.globalMapping || '[]';
+                    let globalMapping: any[] = [];
+                    try {
+                      const parsed = typeof globalMappingRaw === 'string' ? JSON.parse(globalMappingRaw) : globalMappingRaw;
+                      globalMapping = Array.isArray(parsed) ? parsed : Object.entries(parsed || {}).map(([k, v]) => ({ characterName: k, dubberId: v }));
+                    } catch (e) {}
+
+                    let aliases: Record<string, string> = {};
+                    try {
+                      aliases = JSON.parse(proj.characterAliases || '{}');
+                    } catch (e) {}
+
+                    const lineCounts: Record<string, number> = {};
+                    lines.forEach((line: any) => {
+                      const nameToUse = line.name || line.actor || line.style || 'Unknown';
+                      const mainName = aliases[nameToUse] || nameToUse;
+                      lineCounts[mainName] = (lineCounts[mainName] || 0) + 1;
+                    });
+
+                    const mainActors = Array.from(new Set(rawActors.map(name => {
+                      const nameToUse = name || 'Unknown';
+                      return aliases[nameToUse] || nameToUse;
+                    }))).filter(name => !['sign', 'signs', 'титры', 'надписи'].includes((name || '').toLowerCase()));
+
+                    const existingAssignments = Array.isArray(updatedEp.assignments) ? updatedEp.assignments : [];
+                    const existingNames = new Set(existingAssignments.map(a => a.characterName));
+                    const toAdd = mainActors.filter(name => !existingNames.has(name));
+
+                    const newAssignments: RoleAssignment[] = toAdd.map((actor: string) => {
+                      const mappingEntry = globalMapping.find((m: any) => m.characterName === actor);
+                      return {
+                        id: `${updatedEp.id}-${actor}-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+                        episodeId: updatedEp.id,
+                        characterName: actor,
+                        dubberId: mappingEntry?.dubberId || '',
+                        lineCount: lineCounts[actor] || 0,
+                        status: 'PENDING'
+                      };
+                    });
+
+                    updatedEp.assignments = [...existingAssignments, ...newAssignments];
+                  }
+                } catch (subParseErr) {
+                  console.warn('Failed parsing auto-extracted subtitles:', subParseErr);
+                }
+
+                updatedEp.status = 'ROLES';
+                detectedSubtitleTracks = []; // Already attached
+              }
+            } catch (extErr) {
+              console.warn('Failed auto-extracting single subtitle track:', extErr);
+              detectedSubtitleTracks = subtitles;
+            }
+          } else if (subtitles && subtitles.length > 1) {
             detectedSubtitleTracks = subtitles;
           }
         } catch (e) {
@@ -127,6 +211,7 @@ export async function linkDownloadedTorrentFile(params: {
             metadata: {
               title: `Конвертация серии ${updatedEp.number} (MKV -> MP4)`,
               episodeId: updatedEp.id,
+              episodeNumber: updatedEp.number,
               projectId: proj.id,
               outputPath: mp4OutputPath
             }
@@ -191,12 +276,15 @@ export async function linkDownloadedTorrentFile(params: {
     }
 
     // 5. Save changes to DB
-    if (isNewEpisode) {
-      const updatedProject = { ...proj, episodes };
-      await ipcSafe.invoke('save-project', updatedProject);
+    await ipcSafe.invoke('save-episode', updatedEp);
+
+    const epIdx = episodes.findIndex(e => e.id === updatedEp.id);
+    if (epIdx !== -1) {
+      episodes[epIdx] = updatedEp;
     } else {
-      await ipcSafe.invoke('save-episode', updatedEp);
+      episodes.push(updatedEp);
     }
+    await ipcSafe.invoke('save-project', { ...proj, episodes });
 
     if (onRefresh) {
       onRefresh();

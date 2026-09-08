@@ -1661,6 +1661,163 @@ async function mergeMultipleSubtitles(filePaths, options = {}) {
   return { success: true, outputPath };
 }
 
+/**
+ * Evaluates character distribution from dialogue lines.
+ */
+function evaluateCharacterDistribution(lines) {
+  const genericStyles = new Set([
+    'default', 'main', 'standard', 'normal', 'dialogue', 'dialogues', 'alt', 'sub', 'subs',
+    'sign', 'signs', 'title', 'titles', 'op', 'ed', 'lyrics', 'song', 'songs', 'note', 'notes',
+    'italics', 'italic', 'flashback', 'credits', 'credit', 'typeset'
+  ]);
+
+  const signWords = new Set([
+    ...SIGN_KEYWORDS.map(s => s.toLowerCase()),
+    'op', 'ed', 'надпись', 'надписи', 'титры', 'песня', 'караоке', 'sign', 'signs', 'title', 'logo'
+  ]);
+
+  let totalDialogueLines = 0;
+  let namedLines = 0;
+  const characterCounts = new Map();
+
+  for (const line of lines) {
+    const rawText = (line.text || '').replace(/\{[^}]+\}/g, '').trim();
+    if (!rawText) continue;
+
+    const rawName = (line.name || '').trim();
+    const rawStyle = (line.style || '').trim();
+
+    const isSign = signWords.has(rawName.toLowerCase()) || 
+                   signWords.has(rawStyle.toLowerCase()) ||
+                   SIGN_KEYWORDS.some(k => rawName.toLowerCase().includes(k.toLowerCase()) || rawStyle.toLowerCase().includes(k.toLowerCase()));
+
+    if (isSign) {
+      continue;
+    }
+
+    totalDialogueLines++;
+
+    let characterName = '';
+    if (rawName && !signWords.has(rawName.toLowerCase()) && !genericStyles.has(rawName.toLowerCase())) {
+      characterName = rawName;
+    } else if (rawStyle && !genericStyles.has(rawStyle.toLowerCase()) && !signWords.has(rawStyle.toLowerCase())) {
+      characterName = rawStyle;
+    }
+
+    if (characterName) {
+      namedLines++;
+      const current = characterCounts.get(characterName) || 0;
+      characterCounts.set(characterName, current + 1);
+    }
+  }
+
+  const characterCount = characterCounts.size;
+  const namedPercentage = totalDialogueLines > 0 ? Math.round((namedLines / totalDialogueLines) * 100) : 0;
+  const unnamedLines = totalDialogueLines - namedLines;
+
+  const sortedCharacters = Array.from(characterCounts.entries())
+    .sort((a, b) => b[1] - a[1]);
+
+  const topCharacters = sortedCharacters.slice(0, 8).map(([name, count]) => ({ name, count }));
+  const allCharacters = sortedCharacters.map(([name]) => name);
+
+  let splitStatus = 'none';
+  let statusLabel = 'Вообще не разделены';
+
+  if (totalDialogueLines === 0) {
+    splitStatus = 'none';
+    statusLabel = 'Только надписи / Без диалогов';
+  } else if ((namedPercentage >= 60 && characterCount >= 2) || (namedPercentage >= 50 && characterCount >= 3) || (namedPercentage >= 80 && characterCount >= 1)) {
+    splitStatus = 'full';
+    statusLabel = 'Разделены на персонажей';
+  } else if (
+    (namedPercentage >= 15 && namedPercentage < 60) ||
+    (characterCount >= 1 && namedLines >= 3 && namedPercentage < 60) ||
+    (characterCount === 1 && namedPercentage >= 35)
+  ) {
+    splitStatus = 'partial';
+    statusLabel = 'Частично разделены';
+  } else {
+    splitStatus = 'none';
+    statusLabel = 'Вообще не разделены';
+  }
+
+  return {
+    splitStatus,
+    statusLabel,
+    totalLines: totalDialogueLines,
+    namedLines,
+    unnamedLines,
+    namedPercentage,
+    characterCount,
+    topCharacters,
+    allCharacters
+  };
+}
+
+/**
+ * Extracts and analyzes MKV subtitle streams for character breakdown.
+ */
+async function analyzeMkvSubtitleStreams(videoPath, streamIndices = []) {
+  const os = require('os');
+  const { extractSubtitleTrack } = require('./ffmpegService.cjs');
+  const results = {};
+
+  if (!videoPath || !Array.isArray(streamIndices) || streamIndices.length === 0) {
+    return results;
+  }
+
+  for (const streamIndex of streamIndices) {
+    const tempAssPath = path.join(
+      os.tmpdir(),
+      `mkv_probe_${streamIndex}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.ass`
+    );
+
+    try {
+      await extractSubtitleTrack(videoPath, tempAssPath, streamIndex);
+      const raw = await getRawSubtitles(tempAssPath);
+      const lines = raw.lines || [];
+      const analysis = evaluateCharacterDistribution(lines);
+      results[streamIndex] = analysis;
+    } catch (err) {
+      log.warn(`[SubtitleService] Failed to analyze stream #${streamIndex} of ${videoPath}:`, err.message);
+      results[streamIndex] = {
+        splitStatus: 'none',
+        statusLabel: 'Вообще не разделены',
+        totalLines: 0,
+        namedLines: 0,
+        unnamedLines: 0,
+        namedPercentage: 0,
+        characterCount: 0,
+        topCharacters: [],
+        allCharacters: []
+      };
+    } finally {
+      try {
+        await fs.unlink(tempAssPath);
+      } catch {}
+    }
+  }
+
+  // Find best candidate for dubbing
+  let bestStreamIndex = null;
+  let maxScore = -1;
+  for (const [idxStr, analysis] of Object.entries(results)) {
+    if (analysis.splitStatus === 'full') {
+      const score = (analysis.namedPercentage * 2) + analysis.characterCount;
+      if (score > maxScore) {
+        maxScore = score;
+        bestStreamIndex = Number(idxStr);
+      }
+    }
+  }
+  if (bestStreamIndex !== null && results[bestStreamIndex]) {
+    results[bestStreamIndex].isRecommendedForDubbing = true;
+  }
+
+  return results;
+}
+
 module.exports = {
   getRawSubtitles,
   saveRawSubtitles,
@@ -1678,6 +1835,8 @@ module.exports = {
   shiftSubtitlesTime,
   exportCharacterSubtitles,
   removeHonorificsFromSubtitles,
-  filterHonorificsFromAssTextCjs
+  filterHonorificsFromAssTextCjs,
+  evaluateCharacterDistribution,
+  analyzeMkvSubtitleStreams
 };
 

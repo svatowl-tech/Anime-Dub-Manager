@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { Search, Clock, Play, Volume2, CheckCircle2, MessageSquare, ArrowRightLeft } from 'lucide-react';
 import { CharacterDialogueLine } from '../../lib/characterPreview/characterPreviewTypes';
 import { formatSecondsToTime } from '../../lib/characterPreview/timeUtils';
+import { getCharacterColor } from '../subtitleEditor/characterColors';
 
 interface CharacterLineListProps {
   lines: CharacterDialogueLine[];
@@ -109,11 +110,16 @@ export default function CharacterLineList({
           filteredLines.map(({ line, originalIndex }) => {
             const isSelected = selectedLineIndex === originalIndex;
             const isCurrentlyPlaying = isPlaying && activeLinePlayingIndex === originalIndex;
+            const currentCharColor = getCharacterColor(currentCharacterName, knownCharacters);
 
             return (
               <div
                 key={`${line.rawIndex}_${line.startSec}`}
                 onClick={() => onSelectLine(originalIndex)}
+                style={{
+                  borderLeftColor: currentCharColor.borderSolid,
+                  borderLeftWidth: '3px'
+                }}
                 className={`group p-2.5 rounded-lg cursor-pointer transition-all border flex flex-col gap-1.5 relative ${
                   isSelected
                     ? 'bg-indigo-950/40 border-indigo-500/50 shadow-sm'
@@ -182,19 +188,26 @@ export default function CharacterLineList({
                                   Нет доступных персонажей
                                 </div>
                               ) : (
-                                filteredDropdownChars.map(char => (
-                                  <button
-                                    key={char}
-                                    type="button"
-                                    onClick={async () => {
-                                      setOpenDropdownIdx(null);
-                                      await onReassignLine(originalIndex, char);
-                                    }}
-                                    className="w-full text-left px-2 py-1 hover:bg-indigo-600 hover:text-white rounded text-[11px] text-neutral-200 transition-colors truncate"
-                                  >
-                                    {char}
-                                  </button>
-                                ))
+                                filteredDropdownChars.map(char => {
+                                  const charColor = getCharacterColor(char, knownCharacters);
+                                  return (
+                                    <button
+                                      key={char}
+                                      type="button"
+                                      onClick={async () => {
+                                        setOpenDropdownIdx(null);
+                                        await onReassignLine(originalIndex, char);
+                                      }}
+                                      className="w-full text-left px-2 py-1 hover:bg-neutral-800 hover:text-white rounded text-[11px] text-neutral-200 transition-colors truncate flex items-center gap-1.5"
+                                    >
+                                      <span
+                                        className="w-2 h-2 rounded-full shrink-0 shadow-sm"
+                                        style={{ backgroundColor: charColor.borderSolid }}
+                                      />
+                                      <span style={{ color: charColor.textHex }}>{char}</span>
+                                    </button>
+                                  );
+                                })
                               )}
                             </div>
 
