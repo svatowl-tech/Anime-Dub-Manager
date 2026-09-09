@@ -14,6 +14,7 @@ import { StatsPanel } from './components/StatsPanel';
 import ActiveDownloadsIndicator from './components/ActiveDownloadsIndicator';
 import ArchivePanel from './components/ArchivePanel';
 import { TelegramClientPanel } from './components/TelegramClientPanel';
+import { UnsavedChangesModal } from './components/ui/UnsavedChangesModal';
 import { Project, Episode } from './types';
 import { ipcSafe, isWeb } from './lib/ipcSafe';
 import { VideoProvider } from './contexts/VideoContext';
@@ -28,6 +29,58 @@ function AppContent() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [currentEpisode, setCurrentEpisode] = useState<Episode | null>(null);
   const [standaloneEpisode, setStandaloneEpisode] = useState<Episode | null>(null);
+
+  // Unsaved changes interception for navigation
+  interface UnsavedHandler {
+    hasChanges: () => boolean;
+    save: () => Promise<void>;
+    discard: () => void;
+  }
+  const unsavedHandlerRef = useRef<UnsavedHandler | null>(null);
+  const [showUnsavedModal, setShowUnsavedModal] = useState(false);
+  const [isSavingPending, setIsSavingPending] = useState(false);
+  const pendingActionRef = useRef<(() => void) | null>(null);
+
+  const confirmIfUnsaved = (action: () => void) => {
+    if (unsavedHandlerRef.current && unsavedHandlerRef.current.hasChanges()) {
+      pendingActionRef.current = action;
+      setShowUnsavedModal(true);
+      return;
+    }
+    action();
+  };
+
+  const handleSaveAndProceed = async () => {
+    if (unsavedHandlerRef.current) {
+      setIsSavingPending(true);
+      try {
+        await unsavedHandlerRef.current.save();
+      } catch (e) {
+        console.error("Failed to save changes:", e);
+      } finally {
+        setIsSavingPending(false);
+      }
+    }
+    setShowUnsavedModal(false);
+    const action = pendingActionRef.current;
+    pendingActionRef.current = null;
+    if (action) action();
+  };
+
+  const handleDiscardAndProceed = () => {
+    if (unsavedHandlerRef.current) {
+      unsavedHandlerRef.current.discard();
+    }
+    setShowUnsavedModal(false);
+    const action = pendingActionRef.current;
+    pendingActionRef.current = null;
+    if (action) action();
+  };
+
+  const handleCancelModal = () => {
+    setShowUnsavedModal(false);
+    pendingActionRef.current = null;
+  };
 
   const selectedProjectIdRef = useRef<string | null>(null);
   useEffect(() => {
@@ -138,35 +191,40 @@ function AppContent() {
   }, [loadProjects]);
 
   const handleNavigate = (tab: TabType) => {
-    setActiveTab(tab);
+    if (tab === activeTab) return;
+    confirmIfUnsaved(() => setActiveTab(tab));
   };
 
   const handleProjectSelect = (projectId: string) => {
-    setSelectedProjectId(projectId || null);
-    if (!projectId) {
-      setCurrentEpisode(null);
-      return;
-    }
-    const project = projects.find(p => p.id === projectId);
-    if (project) {
-      const ep = project.episodes.find(e => e.number === project.lastActiveEpisode) || project.episodes[0];
-      if (ep) {
-        setCurrentEpisode({ ...ep, project });
+    confirmIfUnsaved(() => {
+      setSelectedProjectId(projectId || null);
+      if (!projectId) {
+        setCurrentEpisode(null);
+        return;
+      }
+      const project = projects.find(p => p.id === projectId);
+      if (project) {
+        const ep = project.episodes.find(e => e.number === project.lastActiveEpisode) || project.episodes[0];
+        if (ep) {
+          setCurrentEpisode({ ...ep, project });
+        } else {
+          setCurrentEpisode(null);
+        }
       } else {
         setCurrentEpisode(null);
       }
-    } else {
-      setCurrentEpisode(null);
-    }
+    });
   };
 
   const handleEpisodeSelect = async (episodeNumber: number) => {
-    if (!selectedProjectId) return;
-    const project = projects.find(p => p.id === selectedProjectId);
-    if (project) {
-      await ipcSafe.invoke('save-project', { ...project, lastActiveEpisode: episodeNumber });
-      await loadProjects();
-    }
+    confirmIfUnsaved(async () => {
+      if (!selectedProjectId) return;
+      const project = projects.find(p => p.id === selectedProjectId);
+      if (project) {
+        await ipcSafe.invoke('save-project', { ...project, lastActiveEpisode: episodeNumber });
+        await loadProjects();
+      }
+    });
   };
 
   return (
@@ -187,7 +245,7 @@ function AppContent() {
                  {currentEpisode.project?.title || 'Проект'}
                </span>
                <button 
-                 onClick={() => { setSelectedProjectId(null); setCurrentEpisode(null); }}
+                 onClick={() => confirmIfUnsaved(() => { setSelectedProjectId(null); setCurrentEpisode(null); })}
                  className="text-neutral-500 hover:text-red-400"
                  title="Закрыть проект и перейти в ручной режим"
                >
@@ -199,7 +257,7 @@ function AppContent() {
             <div className="flex items-center justify-between bg-blue-900/20 py-1.5 px-3 rounded-md text-xs border border-blue-800/30">
                <span className="text-blue-400 font-medium">Ручной режим</span>
                <button 
-                 onClick={() => setStandaloneEpisode(null)}
+                 onClick={() => confirmIfUnsaved(() => setStandaloneEpisode(null))}
                  className="text-blue-500 hover:text-red-400"
                  title="Очистить файлы ручного режима"
                >
@@ -212,7 +270,7 @@ function AppContent() {
         <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
           <button
             id="step-dashboard"
-            onClick={() => setActiveTab('dashboard')}
+            onClick={() => handleNavigate('dashboard')}
             title="Главная панель управления проектами и сериями"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'dashboard' 
@@ -226,7 +284,7 @@ function AppContent() {
 
           <button
             id="step-subtitles"
-            onClick={() => setActiveTab('subtitles')}
+            onClick={() => handleNavigate('subtitles')}
             title="Инструменты для редактирования и синхронизации субтитров (ASS)"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'subtitles' 
@@ -240,7 +298,7 @@ function AppContent() {
 
           <button
             id="step-qa"
-            onClick={() => setActiveTab('qa')}
+            onClick={() => handleNavigate('qa')}
             title="Проверка качества озвучки и синхронизации"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'qa' 
@@ -253,7 +311,7 @@ function AppContent() {
           </button>
 
           <button
-            onClick={() => setActiveTab('cover')}
+            onClick={() => handleNavigate('cover')}
             title="Генерация обложек для серий"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'cover' 
@@ -266,7 +324,7 @@ function AppContent() {
           </button>
 
           <button
-            onClick={() => setActiveTab('release')}
+            onClick={() => handleNavigate('release')}
             title="Финальная сборка и экспорт релиза"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'release' 
@@ -279,7 +337,7 @@ function AppContent() {
           </button>
 
           <button
-            onClick={() => setActiveTab('telegram')}
+            onClick={() => handleNavigate('telegram')}
             title="Полноценный клиент Telegram, мессенджер, чаты, анонсы и автопостинг"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'telegram' 
@@ -292,7 +350,7 @@ function AppContent() {
           </button>
 
           <button
-            onClick={() => setActiveTab('archive')}
+            onClick={() => handleNavigate('archive')}
             title="Архив завершенных и приостановленных проектов"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'archive' 
@@ -307,7 +365,7 @@ function AppContent() {
 
         <div className="p-4 border-t border-neutral-800 space-y-1">
           <button
-            onClick={() => setActiveTab('stats')}
+            onClick={() => handleNavigate('stats')}
             title="Интеллектуальная аналитика работы дабберов, кураторов и звукорежиссеров"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'stats' 
@@ -319,7 +377,7 @@ function AppContent() {
             <span>Статистика</span>
           </button>
           <button
-            onClick={() => setActiveTab('database')}
+            onClick={() => handleNavigate('database')}
             title="Управление списком даберов, звукорежиссеров и их контактами"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'database' 
@@ -331,7 +389,7 @@ function AppContent() {
             <span>База участников</span>
           </button>
           <button
-            onClick={() => setActiveTab('settings')}
+            onClick={() => handleNavigate('settings')}
             title="Настройка путей к файлам, API ключей и других параметров"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'settings' 
@@ -376,7 +434,7 @@ function AppContent() {
             onRefresh={loadProjects}
           />
         )}
-        {activeTab === 'subtitles' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Утилиты субтитров" onApply={setStandaloneEpisode} /> : <AssEditor currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
+        {activeTab === 'subtitles' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Утилиты субтитров" onApply={setStandaloneEpisode} /> : <AssEditor currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} onRegisterUnsavedHandler={(h) => { unsavedHandlerRef.current = h; }} />)}
         {activeTab === 'release' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Сборка релиза" onApply={setStandaloneEpisode} /> : <ReleasePanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {activeTab === 'database' && <DatabasePanel />}
         {activeTab === 'stats' && <StatsPanel />}
@@ -387,6 +445,16 @@ function AppContent() {
       </main>
       <Toaster position="top-right" richColors theme="dark" />
       <ActiveDownloadsIndicator />
+
+      <UnsavedChangesModal
+        isOpen={showUnsavedModal}
+        title="Несохраненные изменения"
+        message="В распределении ролей есть несохраненные изменения. Сохранить их перед переходом?"
+        onSaveAndProceed={handleSaveAndProceed}
+        onDiscardAndProceed={handleDiscardAndProceed}
+        onCancel={handleCancelModal}
+        isSaving={isSavingPending}
+      />
     </div>
   );
 }

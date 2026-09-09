@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Users, Filter, X, AlertCircle } from "lucide-react";
+import { Users, Filter, X, AlertCircle, Camera } from "lucide-react";
 import { RawSubtitleLine, SubtitleUpdates } from "./types";
 import { SubtitleLineRow } from "./SubtitleLineRow";
 import { getCharacterColor } from "./characterColors";
@@ -11,6 +11,8 @@ interface SubtitleLineListProps {
   updates: SubtitleUpdates;
   stableNames: string[];
   showSigns: boolean;
+  showScreenshots?: boolean;
+  videoPath?: string;
   loading: boolean;
   bookmarks: number[];
   isSignLine: (line: RawSubtitleLine) => boolean;
@@ -32,6 +34,8 @@ export const SubtitleLineList: React.FC<SubtitleLineListProps> = ({
   updates,
   stableNames,
   showSigns,
+  showScreenshots = false,
+  videoPath,
   loading,
   bookmarks,
   isSignLine,
@@ -184,7 +188,11 @@ export const SubtitleLineList: React.FC<SubtitleLineListProps> = ({
       )}
 
       {/* Table Column Headers */}
-      <div className="grid grid-cols-[55px_70px_70px_100px_160px_1fr_100px] gap-3 p-3 border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-sm text-xs font-semibold text-neutral-400 uppercase tracking-wider sticky top-0 z-10">
+      <div className={`grid ${
+        showScreenshots
+          ? "grid-cols-[55px_70px_70px_84px_90px_160px_1fr_95px]"
+          : "grid-cols-[55px_70px_70px_100px_160px_1fr_100px]"
+      } gap-3 p-3 border-b border-neutral-800 bg-neutral-950/80 backdrop-blur-sm text-xs font-semibold text-neutral-400 uppercase tracking-wider sticky top-0 z-10`}>
         <div className="text-center pl-1">
           <input
             type="checkbox"
@@ -195,6 +203,12 @@ export const SubtitleLineList: React.FC<SubtitleLineListProps> = ({
         </div>
         <div>Начало</div>
         <div>Конец</div>
+        {showScreenshots && (
+          <div className="flex items-center gap-1 text-cyan-400 font-semibold" title="Скриншот момента реплики">
+            <Camera className="w-3.5 h-3.5" />
+            <span>Кадр</span>
+          </div>
+        )}
         <div>Стиль</div>
         <div>Персонаж</div>
         <div>Текст реплики</div>
@@ -215,6 +229,8 @@ export const SubtitleLineList: React.FC<SubtitleLineListProps> = ({
               updates={updates[line.rawLineIndex]}
               stableNames={stableNames}
               showSigns={showSigns}
+              showScreenshots={showScreenshots}
+              videoPath={videoPath}
               onUpdate={onLineUpdate}
               onToggleSelect={onToggleSelect}
               onPlay={onPlayFromTime}

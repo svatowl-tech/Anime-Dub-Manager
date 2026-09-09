@@ -42,6 +42,8 @@ export default function RawSubtitleEditor({
     setShiftAmountMs,
     showSigns,
     setShowSigns,
+    showScreenshots,
+    handleToggleScreenshots,
     stableNames,
     selectedLines,
     massName,
@@ -119,6 +121,8 @@ export default function RawSubtitleEditor({
           onRedo={handleRedo}
           onToggleAutoSave={() => setAutoSave(!autoSave)}
           onToggleShowSigns={() => setShowSigns(!showSigns)}
+          showScreenshots={showScreenshots}
+          onToggleScreenshots={handleToggleScreenshots}
         />
 
         <SubtitleLineList
@@ -128,6 +132,8 @@ export default function RawSubtitleEditor({
           updates={updates}
           stableNames={stableNames}
           showSigns={showSigns}
+          showScreenshots={showScreenshots}
+          videoPath={currentEpisode?.rawPath}
           loading={loading}
           bookmarks={bookmarks}
           isSignLine={isSignLine}

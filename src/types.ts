@@ -196,6 +196,8 @@ export interface Project {
   fixesMessageTemplate?: string;
   statusMessageTemplate?: string;
   nextEpisodeDate?: string;
+  soundEngineer?: Participant;
+  assignedDubbers?: Participant[];
   episodes: Episode[];
   createdAt: string;
   updatedAt: string;

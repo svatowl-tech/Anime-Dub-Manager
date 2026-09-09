@@ -36,7 +36,8 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
           createdAt: index !== -1 && items[index].createdAt ? items[index].createdAt : (projectData.createdAt || new Date().toISOString())
         };
 
-        // If episodes were passed inside project, ensure they are persisted in episodes.json
+        // If episodes were passed inside project, only persist new episodes that do not exist yet.
+        // Existing episodes are authoritative and managed exclusively by save-episode.
         if (Array.isArray(episodes) && episodes.length > 0) {
           try {
             const allEpisodes = await getData('episodes.json');
@@ -44,10 +45,7 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
             for (const ep of episodes) {
               if (!ep || !ep.id) continue;
               const epIdx = allEpisodes.findIndex(e => e.id === ep.id);
-              if (epIdx !== -1) {
-                allEpisodes[epIdx] = { ...allEpisodes[epIdx], ...ep, updatedAt: new Date().toISOString() };
-                episodesModified = true;
-              } else {
+              if (epIdx === -1) {
                 allEpisodes.push({ ...ep, projectId: item.id, updatedAt: new Date().toISOString() });
                 episodesModified = true;
               }
@@ -60,54 +58,46 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
           }
         }
 
-        // Auto-clean orphaned dubbers from globalMapping and episodes if assignedDubberIds is specified
+        // Keep assignedDubberIds in sync with any dubbers assigned in globalMapping or episodes
         if (Array.isArray(dataToSave.assignedDubberIds)) {
-          const allowedDubberIds = new Set(dataToSave.assignedDubberIds);
+          const currentDubbers = new Set(dataToSave.assignedDubberIds);
 
-          // 1. Clean globalMapping
+          // 1. Sync globalMapping dubbers into assignedDubberIds
           if (dataToSave.globalMapping) {
             try {
               const mapping = typeof dataToSave.globalMapping === 'string' ? JSON.parse(dataToSave.globalMapping) : dataToSave.globalMapping;
               if (Array.isArray(mapping)) {
-                let mappingModified = false;
                 mapping.forEach(m => {
-                  if (m.dubberId && !allowedDubberIds.has(m.dubberId)) {
-                    m.dubberId = '';
-                    mappingModified = true;
+                  if (m.dubberId && !currentDubbers.has(m.dubberId)) {
+                    currentDubbers.add(m.dubberId);
+                    dataToSave.assignedDubberIds.push(m.dubberId);
                   }
                 });
-                if (mappingModified) {
-                  dataToSave.globalMapping = JSON.stringify(mapping);
-                }
               }
             } catch (e) {
-              console.error('Error cleaning globalMapping dubbers:', e);
+              console.error('Error syncing globalMapping dubbers into assignedDubberIds:', e);
             }
           }
 
-          // 2. Clean episode assignments in episodes.json
+          // 2. Sync episode assignments into assignedDubberIds
           try {
             const allEpisodes = await getData('episodes.json');
-            let episodesModified = false;
             for (const ep of allEpisodes) {
               if (ep.projectId === item.id && Array.isArray(ep.assignments)) {
                 for (const a of ep.assignments) {
-                  if (a.dubberId && !allowedDubberIds.has(a.dubberId)) {
-                    a.dubberId = undefined;
-                    episodesModified = true;
+                  if (a.dubberId && !currentDubbers.has(a.dubberId)) {
+                    currentDubbers.add(a.dubberId);
+                    dataToSave.assignedDubberIds.push(a.dubberId);
                   }
-                  if (a.substituteId && !allowedDubberIds.has(a.substituteId)) {
-                    a.substituteId = undefined;
-                    episodesModified = true;
+                  if (a.substituteId && !currentDubbers.has(a.substituteId)) {
+                    currentDubbers.add(a.substituteId);
+                    dataToSave.assignedDubberIds.push(a.substituteId);
                   }
                 }
               }
             }
-            if (episodesModified) {
-              await saveData('episodes.json', allEpisodes);
-            }
           } catch (e) {
-            console.error('Error cleaning episode assignments:', e);
+            console.error('Error syncing episode dubbers into assignedDubberIds:', e);
           }
         }
       } else if (name === 'participant') {

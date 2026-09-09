@@ -19,9 +19,14 @@ export function useProjectAutoUpdate(selectedProject: Project | null, onRefresh:
     if (!selectedProject || !selectedProject.id) return;
     
     const projectId = selectedProject.id;
-    if (syncedProjectIds.current.has(projectId)) {
+    const sessionKey = 'anime_synced_' + projectId;
+    if (syncedProjectIds.current.has(projectId) || sessionStorage.getItem(sessionKey)) {
       return; // Already synced this project in current session
     }
+    syncedProjectIds.current.add(projectId);
+    try {
+      sessionStorage.setItem(sessionKey, '1');
+    } catch (e) {}
 
     // Background update
     const updateProject = async () => {
@@ -131,7 +136,8 @@ export function useProjectAutoUpdate(selectedProject: Project | null, onRefresh:
 
         if (metaChanged || mappingChanged) {
           console.log(`[AutoUpdate] Found project updates (meta: ${metaChanged}, chars: ${mappingChanged}), saving...`);
-          await ipcSafe.invoke('save-project', updatedProject);
+          const { episodes: _eps, soundEngineer: _se, assignedDubbers: _ad, ...cleanProject } = updatedProject;
+          await ipcSafe.invoke('save-project', cleanProject);
           onRefresh();
         }
       } catch (err) {

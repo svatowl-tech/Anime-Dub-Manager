@@ -1,5 +1,5 @@
 import React from "react";
-import { Loader2, Wrench, Clock, Layers, Undo, Redo, RefreshCcw, Eye, EyeOff, AlertCircle, Sparkles } from "lucide-react";
+import { Loader2, Wrench, Clock, Layers, Undo, Redo, RefreshCcw, Eye, EyeOff, AlertCircle, Sparkles, Camera } from "lucide-react";
 
 interface SubtitleEditorHeaderProps {
   loading: boolean;
@@ -10,6 +10,7 @@ interface SubtitleEditorHeaderProps {
   redoDisabled: boolean;
   autoSave: boolean;
   showSigns: boolean;
+  showScreenshots?: boolean;
   onRefresh: () => void;
   onAutoFix: () => void;
   onOpenHonorificsModal: () => void;
@@ -19,6 +20,7 @@ interface SubtitleEditorHeaderProps {
   onRedo: () => void;
   onToggleAutoSave: () => void;
   onToggleShowSigns: () => void;
+  onToggleScreenshots?: () => void;
 }
 
 export const SubtitleEditorHeader: React.FC<SubtitleEditorHeaderProps> = ({
@@ -30,6 +32,7 @@ export const SubtitleEditorHeader: React.FC<SubtitleEditorHeaderProps> = ({
   redoDisabled,
   autoSave,
   showSigns,
+  showScreenshots = false,
   onRefresh,
   onAutoFix,
   onOpenHonorificsModal,
@@ -39,6 +42,7 @@ export const SubtitleEditorHeader: React.FC<SubtitleEditorHeaderProps> = ({
   onRedo,
   onToggleAutoSave,
   onToggleShowSigns,
+  onToggleScreenshots,
 }) => {
   return (
     <div className="flex items-center justify-between p-3 border-b border-neutral-800 bg-neutral-900 shrink-0">
@@ -87,6 +91,19 @@ export const SubtitleEditorHeader: React.FC<SubtitleEditorHeaderProps> = ({
         >
           <Layers className="w-3.5 h-3.5 text-emerald-400" />
           Слияние сабов
+        </button>
+        <button
+          onClick={onToggleScreenshots}
+          disabled={loading || saving}
+          title={showScreenshots ? "Скрыть скриншоты реплик" : "Показывать кадр/скриншот момента реплики в списке для быстрой проверки персонажа"}
+          className={`px-3 py-1.5 rounded-lg text-xs transition-colors border flex items-center gap-2 cursor-pointer disabled:opacity-50 ${
+            showScreenshots
+              ? "bg-indigo-600/30 text-indigo-300 border-indigo-500/50 hover:bg-indigo-600/40 ring-1 ring-indigo-500/30 font-medium"
+              : "bg-neutral-800 hover:bg-neutral-700 text-white border-neutral-700"
+          }`}
+        >
+          <Camera className={`w-3.5 h-3.5 ${showScreenshots ? "text-cyan-300" : "text-cyan-400"}`} />
+          {showScreenshots ? "Скриншоты: ВКЛ" : "Включить скриншоты"}
         </button>
         <span className="text-xs text-neutral-400">{status}</span>
         {unassignedCount > 0 && (

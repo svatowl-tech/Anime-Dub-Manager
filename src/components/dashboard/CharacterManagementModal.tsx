@@ -523,13 +523,26 @@ export default function CharacterManagementModal({ isOpen, onClose, selectedProj
                                   return m;
                                 });
                               } else {
-                                const idxInOriginal = mapping.findIndex(m => m.characterName === char.characterName);
-                                if (idxInOriginal !== -1) {
-                                  updatedMapping[idxInOriginal] = { ...updatedMapping[idxInOriginal], dubberId: newDubberId };
-                                }
+                                updatedMapping = updatedMapping.map(m => m.characterName === char.characterName ? { ...m, dubberId: newDubberId } : m);
                               }
                               
-                              await ipcSafe.invoke('save-project', { ...selectedProject, globalMapping: JSON.stringify(updatedMapping) });
+                              const assignedDubberIds = Array.isArray(selectedProject.assignedDubberIds)
+                                ? [...selectedProject.assignedDubberIds]
+                                : [];
+                              if (newDubberId && !assignedDubberIds.includes(newDubberId)) {
+                                assignedDubberIds.push(newDubberId);
+                              }
+
+                              const updatedMappingStr = JSON.stringify(updatedMapping);
+                              selectedProject.globalMapping = updatedMappingStr;
+                              selectedProject.assignedDubberIds = assignedDubberIds;
+
+                              const { episodes: _eps, soundEngineer: _se, assignedDubbers: _ad, ...projToSave } = selectedProject;
+                              await ipcSafe.invoke('save-project', {
+                                ...projToSave,
+                                assignedDubberIds,
+                                globalMapping: updatedMappingStr
+                              });
                               onRefresh();
                             }}
                             className="bg-neutral-900 border border-neutral-800 text-white rounded px-2 py-1 text-xs focus:ring-1 focus:ring-blue-500"

@@ -8,28 +8,49 @@ export default function ActiveDownloadsIndicator() {
   const [isOpen, setIsOpen] = useState(false);
 
   useEffect(() => {
-    let interval: any;
+    let timerId: any = null;
+    let isMounted = true;
     
     const fetchDownloads = async () => {
+      if (document.hidden) {
+        // Postpone if document is not visible
+        timerId = setTimeout(fetchDownloads, 5000);
+        return;
+      }
+      
       try {
         const data = await ipcSafe.invoke('get-active-downloads');
-        if (data && Array.isArray(data)) {
-          // only keep downloading or active
+        if (isMounted && data && Array.isArray(data)) {
           const active = data.filter(d => d.status === 'downloading' || d.status === 'error');
           setDownloads(active);
           
-          // Show toast if completed recently (need logic to prevent spam):
-          // Actually we don't save completed state, but UI can clear it. We just filter out completed.
+          // If active downloads exist, poll faster (2s), otherwise slow down (8s)
+          const nextInterval = active.length > 0 ? 2000 : 8000;
+          timerId = setTimeout(fetchDownloads, nextInterval);
+        } else if (isMounted) {
+          timerId = setTimeout(fetchDownloads, 8000);
         }
       } catch (e) {
         console.error('Failed to fetch downloads:', e);
+        if (isMounted) timerId = setTimeout(fetchDownloads, 10000);
       }
     };
 
     fetchDownloads();
-    interval = setInterval(fetchDownloads, 2000);
+
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        clearTimeout(timerId);
+        fetchDownloads();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
     
-    return () => clearInterval(interval);
+    return () => {
+      isMounted = false;
+      clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   if (downloads.length === 0) return null;

@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { Episode, Project } from '../../types';
 import { SIGN_KEYWORDS } from '../../constants';
@@ -8,9 +8,17 @@ export const useEpisodeSync = (
   selectedProject: Project | undefined,
   onRefresh: () => void
 ) => {
+  const syncedSignatureRef = useRef<string>('');
+
   const syncEpisodeWithGlobalMapping = useCallback(async () => {
     if (!currentEpisode || !selectedProject) return;
     
+    const syncSignature = `${currentEpisode.id}_${selectedProject.globalMapping || ''}_${(currentEpisode.assignments || []).length}`;
+    if (syncedSignatureRef.current === syncSignature) {
+      return; // Already synced for this exact state
+    }
+    syncedSignatureRef.current = syncSignature;
+
     let globalMapping: any[] = [];
     try {
       const parsed = JSON.parse(selectedProject.globalMapping || '[]');

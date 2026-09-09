@@ -1746,6 +1746,52 @@ export default function Dashboard({
     const aliases: Record<string, string> = JSON.parse(selectedProject.characterAliases || '{}');
     const mainName = aliases[characterName] || characterName;
 
+    const updateProjectGlobalMapping = async (char: string, dubberId: string) => {
+      let gMap: { characterName: string; dubberId: string; isMain?: boolean }[] = [];
+      try {
+        const parsed = JSON.parse(selectedProject.globalMapping || '[]');
+        gMap = Array.isArray(parsed) ? parsed : Object.entries(parsed).map(([k, v]) => ({ characterName: k, dubberId: v as string }));
+      } catch (e) {
+        gMap = [];
+      }
+
+      const seen = new Set<string>();
+      let found = false;
+      const updatedGMap: typeof gMap = [];
+
+      for (const item of gMap) {
+        if (!item.characterName || seen.has(item.characterName)) continue;
+        seen.add(item.characterName);
+        if (item.characterName === char) {
+          found = true;
+          updatedGMap.push({ ...item, dubberId });
+        } else {
+          updatedGMap.push(item);
+        }
+      }
+      if (!found) {
+        updatedGMap.push({ characterName: char, dubberId });
+      }
+
+      const assignedDubberIds = Array.isArray(selectedProject.assignedDubberIds)
+        ? [...selectedProject.assignedDubberIds]
+        : [];
+      if (!assignedDubberIds.includes(dubberId)) {
+        assignedDubberIds.push(dubberId);
+      }
+
+      const updatedMappingStr = JSON.stringify(updatedGMap);
+      selectedProject.globalMapping = updatedMappingStr;
+      selectedProject.assignedDubberIds = assignedDubberIds;
+
+      const { episodes: _eps, soundEngineer: _se, assignedDubbers: _ad, ...projToSave } = selectedProject;
+      await ipcSafe.invoke('save-project', {
+        ...projToSave,
+        assignedDubberIds,
+        globalMapping: updatedMappingStr
+      });
+    };
+
     // Check if already assigned in this episode
     const existing = Array.isArray(currentEpisode.assignments) ? currentEpisode.assignments.find(a => a.characterName === mainName) : undefined;
     if (existing) {
@@ -1776,6 +1822,7 @@ export default function Dashboard({
           };
           
           await ipcSafe.invoke('save-episode', updatedEpisode);
+          await updateProjectGlobalMapping(mainName, selectedUserId);
           onRefresh();
           toast.success('Роль переназначена');
         }
@@ -1797,30 +1844,7 @@ export default function Dashboard({
     };
     
     await ipcSafe.invoke('save-episode', updatedEpisode);
-
-    // Also update global mapping if not already there
-    let globalMapping: {characterName: string, dubberId: string}[] = [];
-    try {
-      const parsed = JSON.parse(selectedProject.globalMapping || '[]');
-      if (Array.isArray(parsed)) {
-        globalMapping = parsed;
-      } else if (parsed && typeof parsed === 'object') {
-        globalMapping = Object.entries(parsed).map(([k, v]) => ({ characterName: k, dubberId: v as string }));
-      }
-    } catch (e) {
-      console.error("Error parsing global mapping:", e);
-    }
-    const pairExists = globalMapping.some(c => c.characterName === mainName && c.dubberId === selectedUserId);
-    
-    if (!pairExists) {
-      const emptyIdx = globalMapping.findIndex(c => c.characterName === mainName && !c.dubberId);
-      if (emptyIdx !== -1) {
-        globalMapping[emptyIdx].dubberId = selectedUserId;
-      } else {
-        globalMapping.push({ characterName: mainName, dubberId: selectedUserId });
-      }
-      await ipcSafe.invoke('save-project', { ...selectedProject, globalMapping: JSON.stringify(globalMapping) });
-    }
+    await updateProjectGlobalMapping(mainName, selectedUserId);
 
     onRefresh();
     setIsAssignModalOpen(false);

@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   Scissors,
   Upload,
   Save,
+  RotateCcw,
+  Check,
   User,
   CheckSquare,
   FileText,
@@ -38,6 +40,7 @@ import { latinToCyrillic, polivanovToHepburn } from "../lib/translit";
 import { generateStartEpisodeMessage } from "../lib/templates";
 import { ExportModal } from '../components/ExportModal';
 import { ConfirmModal } from '../components/ui/ConfirmModal';
+import { UnsavedChangesModal } from '../components/ui/UnsavedChangesModal';
 import { SIGN_KEYWORDS, GROUP_KEYWORDS } from "../constants";
 import { toast } from 'sonner';
 import { appLogger } from "../lib/appLogger";
@@ -54,11 +57,17 @@ interface AssLine {
 interface AssEditorProps {
   currentEpisode: Episode | null;
   onRefresh: () => void;
+  onRegisterUnsavedHandler?: (handler: {
+    hasChanges: () => boolean;
+    save: () => Promise<void>;
+    discard: () => void;
+  } | null) => void;
 }
 
 export default function AssEditor({
   currentEpisode,
   onRefresh,
+  onRegisterUnsavedHandler,
 }: AssEditorProps) {
   const [file, setFile] = useState<File | null>(null);
   const [lines, setLines] = useState<AssLine[]>([]);
@@ -71,6 +80,16 @@ export default function AssEditor({
   const [activeTab, setActiveTab] = useState<"roles" | "raw" | "translate" | "ocr" | "whisper" | "diarization">("roles");
   const [linkingCharacter, setLinkingCharacter] = useState<string | null>(null);
   const lastAnalyzedEpisodeId = React.useRef<string | null>(null);
+
+  // Unsaved changes state & guard
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const hasUnsavedChangesRef = useRef(false);
+  const updateHasUnsavedChanges = (val: boolean) => {
+    hasUnsavedChangesRef.current = val;
+    setHasUnsavedChanges(val);
+  };
+  const [pendingInternalTab, setPendingInternalTab] = useState<"roles" | "raw" | "translate" | "ocr" | "whisper" | "diarization" | null>(null);
+  const [showInternalUnsavedModal, setShowInternalUnsavedModal] = useState(false);
 
   // Splitter state
   const [distributeGroups, setDistributeGroups] = useState(false);
@@ -168,75 +187,162 @@ export default function AssEditor({
         assignments: cleanAssignments
       };
       
+      // Keep local currentEpisode reference updated immediately to avoid race conditions
+      currentEpisode.assignments = cleanAssignments;
+
       await ipcSafe.invoke('save-episode', updatedEpisode);
       
       // Also update global mapping if needed
       if (currentEpisode.projectId && currentEpisode.project) {
-        const currentMapping: {characterName: string, dubberId: string, isMain?: boolean}[] = currentAssignments
-          .filter(a => a.dubberId)
-          .map(a => ({ 
-            characterName: a.characterName, 
-            dubberId: a.dubberId,
-            isMain: a.isMain
-          }));
-        
-        // Merge with existing global mapping
-        const existingMappingRaw = currentEpisode.project.globalMapping || '[]';
-        const existingMapping: {characterName: string, dubberId: string, isMain?: boolean}[] = Array.isArray(JSON.parse(existingMappingRaw))
-          ? JSON.parse(existingMappingRaw)
-          : Object.entries(JSON.parse(existingMappingRaw)).map(([k, v]) => ({ characterName: k, dubberId: v as string, isMain: undefined }));
-
-        const mergedMapping = [...existingMapping];
-        
-        // Group by characterName to process character-by-character
-        const currentGrouped: Record<string, typeof currentMapping> = {};
-        currentMapping.forEach(m => {
-          if (!currentGrouped[m.characterName]) currentGrouped[m.characterName] = [];
-          currentGrouped[m.characterName].push(m);
-        });
-
-        Object.entries(currentGrouped).forEach(([charName, currentEntries]) => {
-          // Find all existing mapping entries for this character
-          const existingIndices: number[] = [];
-          mergedMapping.forEach((em, idx) => {
-            if (em.characterName === charName) {
-              existingIndices.push(idx);
-            }
-          });
-
-          if (existingIndices.length > 0) {
-            // We have existing entries. Let's update them 1-to-1 with current entries
-            currentEntries.forEach((m, i) => {
-              if (i < existingIndices.length) {
-                // Update existing entry's dubberId and isMain
-                const idx = existingIndices[i];
-                mergedMapping[idx].dubberId = m.dubberId;
-                mergedMapping[idx].isMain = m.isMain;
-              } else {
-                // We have more current assignments than existing mappings. Add as new
-                mergedMapping.push(m);
-              }
-            });
-          } else {
-            // No existing entries at all. Just add all of them
-            currentEntries.forEach(m => {
-              mergedMapping.push(m);
+        // Collect current assignments by characterName
+        const charAssignmentsMap = new Map<string, { dubberId: string, isMain?: boolean }>();
+        currentAssignments.forEach(a => {
+          if (a.characterName) {
+            charAssignmentsMap.set(a.characterName, {
+              dubberId: a.dubberId || '',
+              isMain: a.isMain
             });
           }
         });
 
+        // Parse existing global mapping
+        const existingMappingRaw = currentEpisode.project.globalMapping || '[]';
+        let existingMapping: { characterName: string; dubberId: string; isMain?: boolean; photoUrl?: string; original_name?: string }[] = [];
+        try {
+          const parsed = JSON.parse(existingMappingRaw);
+          existingMapping = Array.isArray(parsed)
+            ? parsed
+            : Object.entries(parsed).map(([k, v]) => ({ characterName: k, dubberId: v as string, isMain: undefined }));
+        } catch (e) {
+          existingMapping = [];
+        }
+
+        const mergedMapping: typeof existingMapping = [];
+        const seenNames = new Set<string>();
+
+        // 1. Process existing characters, updating dubberId/isMain if present in current assignments and deduplicating
+        existingMapping.forEach(em => {
+          if (!em.characterName || seenNames.has(em.characterName)) return;
+          seenNames.add(em.characterName);
+
+          if (charAssignmentsMap.has(em.characterName)) {
+            const current = charAssignmentsMap.get(em.characterName)!;
+            mergedMapping.push({
+              ...em,
+              dubberId: current.dubberId,
+              isMain: current.isMain !== undefined ? current.isMain : em.isMain
+            });
+          } else {
+            mergedMapping.push(em);
+          }
+        });
+
+        // 2. Add any new characters from current assignments
+        charAssignmentsMap.forEach((val, charName) => {
+          if (!seenNames.has(charName)) {
+            seenNames.add(charName);
+            mergedMapping.push({
+              characterName: charName,
+              dubberId: val.dubberId,
+              isMain: val.isMain
+            });
+          }
+        });
+
+        const updatedGlobalMappingStr = JSON.stringify(mergedMapping);
+
+        // Update in-memory project references
+        currentEpisode.project.globalMapping = updatedGlobalMappingStr;
+        const assignedDubberIds = Array.isArray(currentEpisode.project.assignedDubberIds)
+          ? [...currentEpisode.project.assignedDubberIds]
+          : [];
+        mergedMapping.forEach(m => {
+          if (m.dubberId && !assignedDubberIds.includes(m.dubberId)) {
+            assignedDubberIds.push(m.dubberId);
+          }
+        });
+        currentEpisode.project.assignedDubberIds = assignedDubberIds;
+
+        // Strip episodes, soundEngineer, and assignedDubbers to prevent sending stale nested arrays
+        const { episodes: _eps, soundEngineer: _se, assignedDubbers: _ad, ...cleanProj } = currentEpisode.project;
         const updatedProject = {
-          ...currentEpisode.project,
-          globalMapping: JSON.stringify(mergedMapping)
+          ...cleanProj,
+          assignedDubberIds,
+          globalMapping: updatedGlobalMappingStr
         };
         await ipcSafe.invoke('save-project', updatedProject);
       }
       
       onRefresh();
     } catch (error) {
-      console.error("Auto-save error:", error);
+      console.error("Save error:", error);
+      throw error;
     }
   };
+
+  const handleManualSave = async () => {
+    if (!currentEpisode) return;
+    setIsSaving(true);
+    try {
+      await saveToDatabase(assignments);
+      updateHasUnsavedChanges(false);
+      toast.success("Изменения ролей и проекта успешно сохранены!");
+    } catch (err: any) {
+      console.error("Manual save failed:", err);
+      toast.error(`Ошибка сохранения: ${err?.message || err}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDiscardChanges = () => {
+    if (!currentEpisode) return;
+    if (Array.isArray(currentEpisode.assignments)) {
+      const reverted = currentEpisode.assignments.map(a => ({
+        ...a,
+        dubber: a.dubberId ? participants.find(p => p.id === a.dubberId) : undefined,
+        substitute: a.substituteId ? participants.find(p => p.id === a.substituteId) : undefined,
+      }));
+      setAssignments(reverted);
+      setActors(reverted.map(a => a.characterName));
+    }
+    updateHasUnsavedChanges(false);
+    toast.info("Несохраненные изменения сброшены к сохраненной версии.");
+  };
+
+  const requestInternalTab = (targetTab: "roles" | "raw" | "translate" | "ocr" | "whisper" | "diarization") => {
+    if (targetTab === activeTab) return;
+    if (hasUnsavedChanges) {
+      setPendingInternalTab(targetTab);
+      setShowInternalUnsavedModal(true);
+    } else {
+      setActiveTab(targetTab);
+    }
+  };
+
+  useEffect(() => {
+    if (onRegisterUnsavedHandler) {
+      onRegisterUnsavedHandler({
+        hasChanges: () => hasUnsavedChangesRef.current,
+        save: handleManualSave,
+        discard: handleDiscardChanges,
+      });
+      return () => {
+        onRegisterUnsavedHandler(null);
+      };
+    }
+  }, [onRegisterUnsavedHandler, currentEpisode?.id, assignments]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleManualSave();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [assignments, currentEpisode]);
 
   const handleAnalyzeExisting = async (currentAssignments: RoleAssignment[] = assignments): Promise<RoleAssignment[]> => {
     if (!currentEpisode?.subPath) return [];
@@ -394,12 +500,8 @@ export default function AssEditor({
           }
         }
 
-        if (newA.dubberId && !newA.dubber) {
-          newA.dubber = participants.find(p => p.id === newA.dubberId);
-        }
-        if (newA.substituteId && !newA.substitute) {
-          newA.substitute = participants.find(p => p.id === newA.substituteId);
-        }
+        newA.dubber = newA.dubberId ? participants.find(p => p.id === newA.dubberId) : undefined;
+        newA.substitute = newA.substituteId ? participants.find(p => p.id === newA.substituteId) : undefined;
 
         return newA;
       });
@@ -416,18 +518,12 @@ export default function AssEditor({
 
       const hasChanges = JSON.stringify(cleanUpdated) !== JSON.stringify(cleanCurrent);
       
+      setAssignments(updatedAssignments);
+      setActors(updatedAssignments.map(a => a.characterName));
       if (hasChanges) {
-        console.log("AssEditor: Auto-saving assignments due to changes", {
-          cleanUpdated,
-          cleanCurrent
-        });
-        setAssignments(updatedAssignments);
-        setActors(updatedAssignments.map(a => a.characterName));
-        saveToDatabase(updatedAssignments);
+        updateHasUnsavedChanges(true);
       } else {
-        // Even if no DB changes, we still need to set the state with populated dubbers
-        setAssignments(updatedAssignments);
-        setActors(Array.isArray(currentEpisode.assignments) ? currentEpisode.assignments.map(a => a.characterName) : []);
+        updateHasUnsavedChanges(false);
       }
       
       lastAnalyzedEpisodeId.current = currentEpisode.id;
@@ -462,8 +558,8 @@ export default function AssEditor({
     }));
     
     setAssignments(newAssignments);
-    saveToDatabase(newAssignments);
-    setStatus("Имена персонажей транслитерированы.");
+    updateHasUnsavedChanges(true);
+    setStatus("Имена персонажей транслитерированы. Нажмите «Сохранить проект».");
   };
 
   const handlePolivanovToHepburn = () => {
@@ -475,8 +571,8 @@ export default function AssEditor({
     }));
     
     setAssignments(newAssignments);
-    saveToDatabase(newAssignments);
-    setStatus("Имена персонажей переведены на систему Хэпберна.");
+    updateHasUnsavedChanges(true);
+    setStatus("Имена персонажей переведены на систему Хэпберна. Нажмите «Сохранить проект».");
   };
 
   const handleExportMapping = () => {
@@ -502,7 +598,8 @@ export default function AssEditor({
         ...a,
         dubberId: newMapping[a.characterName] || a.dubberId
       })));
-      setStatus("Распределение ролей импортировано!");
+      updateHasUnsavedChanges(true);
+      setStatus("Распределение ролей импортировано. Нажмите «Сохранить проект».");
     };
     reader.readAsText(file);
   };
@@ -511,11 +608,7 @@ export default function AssEditor({
     const dubber = participants.find(p => p.id === dubberId);
     const newAssignments = assignments.map(a => a.id === assignmentId ? {...a, dubberId, dubber} : a);
     setAssignments(newAssignments);
-    
-    // Auto-save
-    if (currentEpisode) {
-      await saveToDatabase(newAssignments);
-    }
+    updateHasUnsavedChanges(true);
   };
 
   const handleAddDubberToCharacter = async (characterName: string) => {
@@ -535,10 +628,7 @@ export default function AssEditor({
     newAssignments.splice(actualIdx, 0, newAssignment);
     
     setAssignments(newAssignments);
-    
-    if (currentEpisode) {
-      await saveToDatabase(newAssignments);
-    }
+    updateHasUnsavedChanges(true);
   };
 
   useEffect(() => {
@@ -607,10 +697,7 @@ export default function AssEditor({
     }
     setAssignments(newAssignments);
     setActors(newAssignments.map(a => a.characterName));
-    
-    if (currentEpisode) {
-      await saveToDatabase(newAssignments);
-    }
+    updateHasUnsavedChanges(true);
   };
 
   interface RawSubtitleLine {
@@ -624,13 +711,10 @@ export default function AssEditor({
   }
 
   const handleSetSubstitute = async (assignmentId: string, substituteId: string) => {
-    const newAssignments = assignments.map(a => a.id === assignmentId ? {...a, substituteId} : a);
+    const substitute = participants.find(p => p.id === substituteId);
+    const newAssignments = assignments.map(a => a.id === assignmentId ? {...a, substituteId, substitute} : a);
     setAssignments(newAssignments);
-    
-    // Auto-save
-    if (currentEpisode) {
-      await saveToDatabase(newAssignments);
-    }
+    updateHasUnsavedChanges(true);
   };
 
   const checkConsecutiveDubberLines = async (currentAssignments: RoleAssignment[]) => {
@@ -665,14 +749,6 @@ export default function AssEditor({
       console.error("Error checking consecutive lines:", error);
     }
   };
-
-
-
-  useEffect(() => {
-    if (assignments.length > 0) {
-      checkConsecutiveDubberLines(assignments);
-    }
-  }, [assignments]);
 
   const handleLinkAsAlias = async (aliasName: string, mainName: string) => {
     if (!currentEpisode || !currentEpisode.project) return;
@@ -1077,100 +1153,137 @@ export default function AssEditor({
           </div>
         </div>
 
-        <div className="flex bg-neutral-900 rounded-lg p-1 border border-neutral-800">
-          <button
-            onClick={() => setActiveTab("raw")}
-            title="Переключиться на редактор разметки реплик"
-            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors relative ${
-              activeTab === "raw"
-                ? "bg-neutral-800 text-white shadow-sm"
-                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
-            }`}
-          >
-            <Edit3 className="w-4 h-4" />
-            Разметка реплик
-            {unassignedLinesCount > 0 && (
-              <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-neutral-900 animate-pulse" />
+        <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
+          {/* Manual Save / Discard Bar */}
+          <div className="flex items-center gap-2 shrink-0">
+            {hasUnsavedChanges ? (
+              <>
+                <button
+                  onClick={handleManualSave}
+                  disabled={isSaving}
+                  title="Сохранить изменения ролей и проекта (Ctrl+S)"
+                  className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-lg shadow-emerald-600/30 transition-all cursor-pointer"
+                >
+                  {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  <span>{isSaving ? "Сохранение..." : "Сохранить проект"}</span>
+                  <kbd className="hidden md:inline bg-emerald-700/60 text-[10px] px-1.5 py-0.5 rounded text-emerald-100 font-mono">
+                    Ctrl+S
+                  </kbd>
+                </button>
+                <button
+                  onClick={handleDiscardChanges}
+                  disabled={isSaving}
+                  title="Сбросить несохраненные изменения"
+                  className="flex items-center gap-1 px-2.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-medium border border-neutral-700 transition-all cursor-pointer"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-neutral-400" />
+                  <span className="hidden sm:inline">Сбросить</span>
+                </button>
+              </>
+            ) : (
+              <div className="flex items-center gap-1.5 px-3 py-2 bg-neutral-900 border border-neutral-800 rounded-lg text-xs text-neutral-400">
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="hidden sm:inline">Все изменения сохранены</span>
+                <span className="sm:hidden">Сохранено</span>
+              </div>
             )}
-          </button>
-          <button
-            onClick={() => setActiveTab("roles")}
-            title="Переключиться на распределение ролей"
-            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-              activeTab === "roles"
-                ? "bg-neutral-800 text-white shadow-sm"
-                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
-            }`}
-          >
-            <User className="w-4 h-4" />
-            Распределение ролей
-          </button>
-          <button
-            onClick={() => setActiveTab("translate")}
-            title="Переключиться на панель перевода"
-            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-              activeTab === "translate"
-                ? "bg-neutral-800 text-white shadow-sm"
-                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
-            }`}
-          >
-            <Languages className="w-4 h-4" />
-            Перевод
-          </button>
-          <button
-            onClick={() => setActiveTab("ocr")}
-            title="Переключиться на распознавание хардсаба"
-            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-              activeTab === "ocr"
-                ? "bg-neutral-800 text-white shadow-sm"
-                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
-            }`}
-          >
-            <FileText className="w-4 h-4" />
-            Распознавание хардсаба
-          </button>
-          <button
-            onClick={() => setActiveTab("whisper")}
-            title="Переключиться на распознавание речи"
-            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-              activeTab === "whisper"
-                ? "bg-neutral-800 text-white shadow-sm"
-                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
-            }`}
-          >
-            <FileAudio className="w-4 h-4" />
-            Распознавание аудио
-          </button>
-          <button
-            onClick={() => setActiveTab("diarization")}
-            title="Разделение голосов (Диаризация)"
-            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
-              activeTab === "diarization"
-                ? "bg-neutral-800 text-white shadow-sm"
-                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
-            }`}
-          >
-            <Mic className="w-4 h-4" />
-            Диаризация голосов
-          </button>
+          </div>
 
-          <div className="w-px h-6 bg-neutral-800 my-auto mx-1" />
+          <div className="flex bg-neutral-900 rounded-lg p-1 border border-neutral-800 shrink-0">
+            <button
+              onClick={() => requestInternalTab("raw")}
+              title="Переключиться на редактор разметки реплик"
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors relative ${
+                activeTab === "raw"
+                  ? "bg-neutral-800 text-white shadow-sm"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
+              }`}
+            >
+              <Edit3 className="w-4 h-4" />
+              Разметка реплик
+              {unassignedLinesCount > 0 && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-neutral-900 animate-pulse" />
+              )}
+            </button>
+            <button
+              onClick={() => requestInternalTab("roles")}
+              title="Переключиться на распределение ролей"
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === "roles"
+                  ? "bg-neutral-800 text-white shadow-sm"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
+              }`}
+            >
+              <User className="w-4 h-4" />
+              Распределение ролей
+            </button>
+            <button
+              onClick={() => requestInternalTab("translate")}
+              title="Переключиться на панель перевода"
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === "translate"
+                  ? "bg-neutral-800 text-white shadow-sm"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
+              }`}
+            >
+              <Languages className="w-4 h-4" />
+              Перевод
+            </button>
+            <button
+              onClick={() => requestInternalTab("ocr")}
+              title="Переключиться на распознавание хардсаба"
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === "ocr"
+                  ? "bg-neutral-800 text-white shadow-sm"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
+              }`}
+            >
+              <FileText className="w-4 h-4" />
+              Распознавание хардсаба
+            </button>
+            <button
+              onClick={() => requestInternalTab("whisper")}
+              title="Переключиться на распознавание речи"
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === "whisper"
+                  ? "bg-neutral-800 text-white shadow-sm"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
+              }`}
+            >
+              <FileAudio className="w-4 h-4" />
+              Распознавание аудио
+            </button>
+            <button
+              onClick={() => requestInternalTab("diarization")}
+              title="Разделение голосов (Диаризация)"
+              className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                activeTab === "diarization"
+                  ? "bg-neutral-800 text-white shadow-sm"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
+              }`}
+            >
+              <Mic className="w-4 h-4" />
+              Диаризация голосов
+            </button>
 
-          <button
-            onClick={() => setIsLogsOpen(!isLogsOpen)}
-            title="Открыть журнал операций ASS субтитров"
-            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer ${
-              isLogsOpen
-                ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/50"
-                : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
-            }`}
-          >
-            <Terminal className="w-4 h-4 text-indigo-400" />
-            <span>Логи</span>
-            {assErrorCount > 0 && (
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
-            )}
-          </button>
+            <div className="w-px h-6 bg-neutral-800 my-auto mx-1" />
+
+            <button
+              onClick={() => setIsLogsOpen(!isLogsOpen)}
+              title="Открыть журнал операций ASS субтитров"
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer ${
+                isLogsOpen
+                  ? "bg-indigo-600/30 text-indigo-300 border border-indigo-500/50"
+                  : "text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/50"
+              }`}
+            >
+              <Terminal className="w-4 h-4 text-indigo-400" />
+              <span>Логи</span>
+              {assErrorCount > 0 && (
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+              )}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1536,7 +1649,7 @@ export default function AssEditor({
                                           a.id === assignment.id ? { ...a, isMain: !a.isMain } : a
                                         );
                                         setAssignments(newAssignments);
-                                        saveToDatabase(newAssignments);
+                                        updateHasUnsavedChanges(true);
                                       }}
                                       className={`text-[10px] px-1.5 py-0.5 rounded transition-colors border ${
                                         assignment.isMain 
@@ -1837,18 +1950,19 @@ export default function AssEditor({
           globalMapping={globalMapping}
           characterAliases={characterAliases}
           onAssignDubber={(charName, dubberId) => {
+            const dubber = participants.find(p => p.id === dubberId);
             const updated = assignments.map(a => 
-              a.characterName === charName ? { ...a, dubberId } : a
+              a.characterName === charName ? { ...a, dubberId, dubber } : a
             );
             setAssignments(updated);
-            saveToDatabase(updated);
+            updateHasUnsavedChanges(true);
           }}
           onToggleMainRole={(charName, isMain) => {
             const updated = assignments.map(a => 
               a.characterName === charName ? { ...a, isMain } : a
             );
             setAssignments(updated);
-            saveToDatabase(updated);
+            updateHasUnsavedChanges(true);
           }}
           onUpdatePortrait={async (charName, photoUrl) => {
             if (!currentEpisode?.project) return;
@@ -1918,6 +2032,29 @@ export default function AssEditor({
           />
         </div>
       )}
+
+      <UnsavedChangesModal
+        isOpen={showInternalUnsavedModal}
+        title="Несохраненные изменения"
+        message="В распределении ролей есть несохраненные изменения. Сохранить их перед переходом во вкладку?"
+        onSaveAndProceed={async () => {
+          await handleManualSave();
+          if (pendingInternalTab) setActiveTab(pendingInternalTab);
+          setShowInternalUnsavedModal(false);
+          setPendingInternalTab(null);
+        }}
+        onDiscardAndProceed={() => {
+          handleDiscardChanges();
+          if (pendingInternalTab) setActiveTab(pendingInternalTab);
+          setShowInternalUnsavedModal(false);
+          setPendingInternalTab(null);
+        }}
+        onCancel={() => {
+          setShowInternalUnsavedModal(false);
+          setPendingInternalTab(null);
+        }}
+        isSaving={isSaving}
+      />
     </div>
   );
 }

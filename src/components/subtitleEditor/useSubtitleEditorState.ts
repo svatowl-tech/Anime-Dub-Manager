@@ -54,7 +54,7 @@ export function useSubtitleEditorState(
     }
   };
 
-  const [autoSave, setAutoSave] = useState(true);
+  const [autoSave, setAutoSave] = useState(false);
   const [undoStack, setUndoStack] = useState<UndoRedoState[]>([]);
   const [redoStack, setRedoStack] = useState<UndoRedoState[]>([]);
 
@@ -181,6 +181,24 @@ export function useSubtitleEditorState(
   const [selectedLines, setSelectedLines] = useState<Set<number>>(new Set());
   const [lastSelectedLine, setLastSelectedLine] = useState<number | null>(null);
   const [massName, setMassName] = useState("");
+
+  const [showScreenshots, setShowScreenshots] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('subtitle_editor_show_screenshots') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleScreenshots = useCallback(() => {
+    setShowScreenshots(prev => {
+      const next = !prev;
+      try {
+        localStorage.setItem('subtitle_editor_show_screenshots', String(next));
+      } catch {}
+      return next;
+    });
+  }, []);
 
   const { registerPlayer, unregisterPlayer } = useVideoContext();
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1118,6 +1136,9 @@ export function useSubtitleEditorState(
     setShiftAmountMs,
     showSigns,
     setShowSigns,
+    showScreenshots,
+    setShowScreenshots,
+    handleToggleScreenshots,
     stableNames,
     selectedLines,
     massName,

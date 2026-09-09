@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useMemo } from "react";
 import { Bookmark, AlertCircle, Plus, Copy, Trash2 } from "lucide-react";
 import { RawSubtitleLine } from "./types";
 import { getCharacterColor } from "./characterColors";
+import { SubtitleThumbnailCell } from "./SubtitleThumbnailCell";
 
 interface SubtitleLineRowProps {
   line: RawSubtitleLine;
@@ -10,6 +11,8 @@ interface SubtitleLineRowProps {
   updates: any;
   stableNames: string[];
   showSigns: boolean;
+  showScreenshots?: boolean;
+  videoPath?: string;
   onUpdate: (idx: number, update: any) => void;
   onToggleSelect: (idx: number, isShift: boolean) => void;
   onPlay: (time: string) => void;
@@ -28,6 +31,8 @@ export const SubtitleLineRow = React.memo(({
   isActive,
   updates,
   stableNames,
+  showScreenshots = false,
+  videoPath,
   onUpdate,
   onToggleSelect,
   onPlay,
@@ -76,7 +81,11 @@ export const SubtitleLineRow = React.memo(({
           ? undefined
           : charColor.bgRgba
       }}
-      className={`grid grid-cols-[55px_70px_70px_100px_160px_1fr_100px] gap-3 p-2 items-start rounded-lg border transition-all cursor-pointer group ${
+      className={`grid ${
+        showScreenshots
+          ? "grid-cols-[55px_70px_70px_84px_90px_160px_1fr_95px]"
+          : "grid-cols-[55px_70px_70px_100px_160px_1fr_100px]"
+      } gap-3 p-2 items-start rounded-lg border transition-all cursor-pointer group ${
         isSelected
           ? "bg-indigo-500/15 border-indigo-500/40 shadow-sm"
           : isActive
@@ -117,6 +126,17 @@ export const SubtitleLineRow = React.memo(({
           onChange={(e) => onUpdate(line.rawLineIndex, { end: e.target.value })}
         />
       </div>
+      {showScreenshots && (
+        <SubtitleThumbnailCell
+          videoPath={videoPath}
+          timeStr={currentStart}
+          characterName={currentName}
+          lineText={currentText}
+          charColor={charColor}
+          onPlay={onPlay}
+          showScreenshots={showScreenshots}
+        />
+      )}
       <div
         className="text-xs text-neutral-400 truncate"
         title={line.style}
