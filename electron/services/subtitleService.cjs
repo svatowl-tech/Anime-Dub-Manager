@@ -1088,18 +1088,39 @@ async function exportFullAssWithRoles(assFilePath, outputPath, assignments, part
   };
 
   const mapping = {};
-  for (const assignment of assignments) {
-    const targetId = assignment.substituteId || assignment.dubberId;
-    if (!targetId) continue;
-    const dubber = participantsData.find(p => p.id === targetId);
-    if (dubber) {
+  const lowerMapping = {};
+  for (const assignment of (assignments || [])) {
+    const targetId = assignment.substituteId || assignment.dubberId || assignment.substitute?.id || assignment.dubber?.id;
+    let dubberNick = null;
+    if (targetId && Array.isArray(participantsData)) {
+      const dubber = participantsData.find(p => p.id === targetId);
+      if (dubber) dubberNick = dubber.nickname;
+    }
+    if (!dubberNick && (assignment.substitute?.nickname || assignment.dubber?.nickname)) {
+      dubberNick = assignment.substitute?.nickname || assignment.dubber?.nickname;
+    }
+    if (dubberNick && assignment.characterName) {
       const charName = assignment.characterName.trim();
-      if (!mapping[charName]) {
-        mapping[charName] = [];
+      if (!mapping[charName]) mapping[charName] = [];
+      if (!mapping[charName].includes(dubberNick)) {
+        mapping[charName].push(dubberNick);
       }
-      mapping[charName].push(dubber.nickname);
+      const lower = charName.toLowerCase();
+      if (!lowerMapping[lower]) lowerMapping[lower] = [];
+      if (!lowerMapping[lower].includes(dubberNick)) {
+        lowerMapping[lower].push(dubberNick);
+      }
     }
   }
+
+  const getDubbersForName = (name) => {
+    const mainName = getMainName(name);
+    if (mapping[mainName] && mapping[mainName].length > 0) return mapping[mainName];
+    if (lowerMapping[mainName.toLowerCase()] && lowerMapping[mainName.toLowerCase()].length > 0) return lowerMapping[mainName.toLowerCase()];
+    if (mapping[name] && mapping[name].length > 0) return mapping[name];
+    if (lowerMapping[name.toLowerCase()] && lowerMapping[name.toLowerCase()].length > 0) return lowerMapping[name.toLowerCase()];
+    return null;
+  };
 
   let inEvents = false;
   let formatParts = [];
@@ -1127,10 +1148,10 @@ async function exportFullAssWithRoles(assFilePath, outputPath, assignments, part
         
         let changed = false;
         const mappedNames = currentNames.flatMap(name => {
-          const mainName = getMainName(name);
-          if (mapping[mainName] && mapping[mainName].length > 0) {
+          const dubbers = getDubbersForName(name);
+          if (dubbers && dubbers.length > 0) {
             changed = true;
-            return mapping[mainName];
+            return dubbers;
           }
           return [name];
         });

@@ -1386,7 +1386,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     setIsMessageModalOpen(true);
   }, [currentEpisode, detectedGaps, participants]);
 
-  const handleExportSoundEngineer = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean) => {
+  const handleExportSoundEngineer = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean) => {
     if (!currentEpisode) return;
     try {
       await ipcSafe.invoke('enqueue-ffmpeg-task', {
@@ -1397,7 +1397,8 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           skipConversion,
           smartExport,
           additionalProcessing,
-          autoApplyFixes
+          autoApplyFixes,
+          includeSubtitles: includeSubtitles ?? true
         },
         metadata: {
           title: `Экспорт Звукорежиссеру: ${currentEpisode.project?.title || 'Проект'} - Серия ${currentEpisode.number}`

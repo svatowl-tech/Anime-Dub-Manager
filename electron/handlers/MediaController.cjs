@@ -98,11 +98,11 @@ function registerMediaHandlers(getData, mainWindow, taskQueue) {
         break;
       }
       case 'export-sound-engineer-files': {
-        const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes } = payload;
-        taskFn = async (id, ep, tDir, sConv, sExp, addProc, autoFix, onProgress, onCommand) => {
-          return await ExportService.exportSoundEngineerFiles(ep, tDir, sConv, sExp, addProc, autoFix, config, projectsData, participantsData, onProgress, onCommand);
+        const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles } = payload;
+        taskFn = async (id, ep, tDir, sConv, sExp, addProc, autoFix, incSubs, onProgress, onCommand) => {
+          return await ExportService.exportSoundEngineerFiles(ep, tDir, sConv, sExp, addProc, autoFix, config, projectsData, participantsData, onProgress, onCommand, incSubs !== false);
         };
-        args = [episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes];
+        args = [episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles !== false];
         break;
       }
       default: throw new Error('Unknown task type');

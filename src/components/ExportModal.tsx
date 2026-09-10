@@ -10,7 +10,15 @@ interface ExportModalProps {
   onClose: () => void;
   episode: Episode;
   role: 'DABBER' | 'SOUND_ENGINEER';
-  onExport: (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean) => void;
+  onExport: (
+    targetDir: string, 
+    skipConversion: boolean, 
+    smartExport?: boolean, 
+    uploadToYandex?: boolean, 
+    additionalProcessing?: boolean, 
+    autoApplyFixes?: boolean,
+    includeSubtitles?: boolean
+  ) => void;
   isExporting?: boolean;
   progress?: number;
 }
@@ -29,11 +37,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [smartExport, setSmartExport] = useState(true);
   const [additionalProcessing, setAdditionalProcessing] = useState(false);
   const [autoApplyFixes, setAutoApplyFixes] = useState(false);
+  const [includeSubtitles, setIncludeSubtitles] = useState(true);
   const [snippetFixInfo, setSnippetFixInfo] = useState<{ hasSnippetFixes: boolean; count: number; loading: boolean }>({
     hasSnippetFixes: false,
     count: 0,
     loading: false
   });
+
+  useEffect(() => {
+    if (isOpen && episode) {
+      setIncludeSubtitles(Boolean(episode.subPath));
+    }
+  }, [isOpen, episode]);
 
   useEffect(() => {
     if (isOpen && episode && role === 'SOUND_ENGINEER' && !isWeb) {
@@ -244,6 +259,49 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   : 'Опция активна, только если размер файла фикса меньше оригинала (фрагментарный фикс). Если фикс заменяет всю дорожку целиком или фиксы отсутствуют, опция не требуется.'}
               </p>
             </div>
+
+            <div className="mb-6">
+              <label className={`flex items-center gap-3 ${episode.subPath && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
+                <div className="relative flex items-center">
+                  <input
+                    type="checkbox"
+                    checked={includeSubtitles}
+                    onChange={(e) => setIncludeSubtitles(e.target.checked)}
+                    disabled={isExporting || !episode.subPath}
+                    className="peer sr-only"
+                  />
+                  <div className={`w-5 h-5 border-2 rounded bg-neutral-950 transition-all duration-200 ${episode.subPath ? 'border-neutral-700 peer-checked:bg-blue-600 peer-checked:border-blue-600 group-hover:border-neutral-500' : 'border-neutral-800'}`} />
+                  <svg
+                    className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth="3"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`text-sm transition-colors ${episode.subPath ? 'text-neutral-300 group-hover:text-white' : 'text-neutral-500'}`}>
+                    Общие сабы с размеченными дабберами
+                  </span>
+                  {episode.subPath ? (
+                    <span className="text-[10px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 px-1.5 py-0.5 rounded">
+                      Включено
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-medium bg-neutral-800 text-neutral-500 px-1.5 py-0.5 rounded">
+                      Нет файла сабов
+                    </span>
+                  )}
+                </div>
+              </label>
+              <p className="text-[10px] text-neutral-500 mt-1 ml-8">
+                {episode.subPath 
+                  ? 'Экспортирует файл «[субтитры_общие].ass», в котором в колонке ролей/имен подставлены никнеймы назначенных дабберов'
+                  : 'К серии не прикреплены субтитры'}
+              </p>
+            </div>
           </>
         )}
         
@@ -305,7 +363,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </button>
           {!isWeb && (
           <button 
-            onClick={() => onExport(targetDir, skipConversion, smartExport, false, additionalProcessing, autoApplyFixes)} 
+            onClick={() => onExport(targetDir, skipConversion, smartExport, false, additionalProcessing, autoApplyFixes, includeSubtitles)} 
             title="Начать экспорт"
             disabled={!targetDir || isExporting}
             className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20"

@@ -36,21 +36,19 @@ export const ipcSafe = {
         !channel.includes('submit-password');
 
       const errStr = String(error?.message || error || '');
-      const isAuthError = errStr.includes('AUTH_KEY_UNREGISTERED') ||
-                          errStr.includes('AUTH_KEY_INVALID') ||
-                          errStr.includes('SESSION_REVOKED') ||
-                          errStr.includes('SESSION_EXPIRED') ||
-                          errStr.includes('Сессия Telegram устарела') ||
-                          errStr.includes('Подключение к Telegram MTProto отсутствует') ||
-                          errStr.includes('Подключение к Telegram отсутствует') ||
-                          errStr.includes('авторизуйтесь в Telegram') ||
-                          errStr.includes('ensureConnected');
+      // Only treat actual Telegram session revocation / expiration as invalidated!
+      // Ordinary unauthenticated calls or offline states should not spam "Сессия Telegram устарела".
+      const isSessionRevoked = errStr.includes('AUTH_KEY_UNREGISTERED') ||
+                               errStr.includes('AUTH_KEY_INVALID') ||
+                               errStr.includes('SESSION_REVOKED') ||
+                               errStr.includes('SESSION_EXPIRED') ||
+                               errStr.includes('Сессия Telegram устарела');
 
-      if (isOperationalTgChannel && isAuthError) {
+      if (isOperationalTgChannel && isSessionRevoked) {
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('telegram-auth-invalidated'));
         }
-        console.warn(`[Telegram MTProto] Auth required on channel "${channel}":`, error.message || errStr);
+        console.warn(`[Telegram MTProto] Auth session revoked on channel "${channel}":`, error.message || errStr);
         throw error;
       }
 

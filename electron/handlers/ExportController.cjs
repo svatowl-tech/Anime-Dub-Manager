@@ -73,7 +73,7 @@ function registerExportHandlers(getData, mainWindow) {
     };
   }));
 
-  ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes }) => {
+  ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles }) => {
     if (!episode || !targetDir) throw new Error('Missing required parameters');
     
     const config = await getData('config.json');
@@ -87,7 +87,7 @@ function registerExportHandlers(getData, mainWindow) {
       if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-progress', p.percent);
     };
 
-    return await ExportService.exportSoundEngineerFiles(episode, exportDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress);
+    return await ExportService.exportSoundEngineerFiles(episode, exportDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress, undefined, includeSubtitles !== false);
   }));
 
   ipcMain.handle('build-release', wrapIpcHandler(async (event, { episode, targetDir, customAudioPath, customRawPath }) => {

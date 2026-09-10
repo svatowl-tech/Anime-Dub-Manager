@@ -4,6 +4,7 @@ const { computeCheck } = require('telegram/Password');
 const QRCode = require('qrcode');
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
 const log = require('electron-log');
 
 // Official public Telegram credentials used for seamless out-of-the-box authorization
@@ -916,61 +917,224 @@ class TelegramMTProtoService {
     });
   }
 
-  async searchChannelPosts({ channelPeer, channelId, query = '', limit = 20 }) {
-    await this.ensureConnected();
-    try {
-      let peer = channelPeer || channelId || this.settings.defaultChannelId;
-      if (!peer) throw new Error('Укажите ID или логин канала (@channel)');
-      peer = String(peer).trim();
-      if (peer.startsWith('https://t.me/')) peer = peer.replace('https://t.me/', '@');
-      if (peer.startsWith('t.me/')) peer = peer.replace('t.me/', '@');
-      if (/^-?\d+$/.test(peer)) {
-        try { peer = BigInt(peer); } catch (e) {}
-      }
+  async fetchPublicChannelPosts(channelUsername, query = '', limit = 30, directPostId = null) {
+    const cleanUsername = String(channelUsername).replace(/^@/, '').trim();
+    if (!cleanUsername) {
+      throw new Error('Укажите логин канала (@channel)');
+    }
 
-      const messages = await this.client.getMessages(peer, {
-        limit: Math.min(limit, 50),
-        search: query ? String(query).trim() : undefined,
+    return new Promise((resolve, reject) => {
+      const url = `https://t.me/s/${encodeURIComponent(cleanUsername)}`;
+      const req = https.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
+        },
+        timeout: 10000
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const redirectTarget = res.headers.location.split('/').filter(Boolean).pop();
+          return resolve(this.fetchPublicChannelPosts(redirectTarget, query, limit, directPostId));
+        }
+
+        if (res.statusCode === 404) {
+          return resolve({
+            success: true,
+            posts: [],
+            error: `Канал @${cleanUsername} не найден или является приватным.`
+          });
+        }
+
+        if (res.statusCode !== 200) {
+          return reject(new Error(`Не удалось загрузить публичный канал @${cleanUsername} (HTTP ${res.statusCode})`));
+        }
+
+        let data = '';
+        res.on('data', chunk => { data += chunk; });
+        res.on('end', () => {
+          try {
+            const messageBlocks = data.split('class="tgme_widget_message_wrap');
+            const posts = [];
+            const cleanQuery = String(query || '').toLowerCase().trim();
+
+            for (const block of messageBlocks.slice(1)) {
+              const postMatch = block.match(/data-post="([^"]+)"/);
+              if (!postMatch) continue;
+              const fullPostId = postMatch[1];
+              const parts = fullPostId.split('/');
+              const numId = Number(parts[1]) || fullPostId;
+
+              if (directPostId && numId !== directPostId) {
+                continue;
+              }
+
+              const textMatch = block.match(/class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/);
+              let rawText = textMatch ? textMatch[1] : '';
+              let cleanText = rawText
+                .replace(/<br\s*[\/]?>/gi, '\n')
+                .replace(/<[^>]+>/g, '')
+                .replace(/&quot;/g, '"')
+                .replace(/&amp;/g, '&')
+                .replace(/&lt;/g, '<')
+                .replace(/&gt;/g, '>')
+                .replace(/&#39;/g, "'")
+                .replace(/&nbsp;/g, ' ')
+                .trim();
+
+              const dateMatch = block.match(/<time\s+datetime="([^"]+)"/);
+              const isoDate = dateMatch ? dateMatch[1] : null;
+              const dateObj = isoDate ? new Date(isoDate) : new Date();
+
+              const viewsMatch = block.match(/class="tgme_widget_message_views">([^<]+)<\/span>/);
+              const viewsStr = viewsMatch ? viewsMatch[1].trim() : '0';
+
+              const hasMedia = block.includes('tgme_widget_message_photo') || 
+                               block.includes('tgme_widget_message_video') ||
+                               block.includes('tgme_widget_message_document');
+
+              const isPinned = block.includes('tgme_widget_message_pinned');
+
+              if (cleanQuery && !cleanText.toLowerCase().includes(cleanQuery)) {
+                continue;
+              }
+
+              posts.push({
+                id: numId,
+                date: Math.floor(dateObj.getTime() / 1000),
+                dateFormatted: dateObj.toLocaleString('ru-RU', {
+                  day: '2-digit',
+                  month: '2-digit',
+                  year: 'numeric',
+                  hour: '2-digit',
+                  minute: '2-digit'
+                }),
+                text: cleanText,
+                message: cleanText,
+                views: viewsStr,
+                forwards: 0,
+                link: `https://t.me/${fullPostId}`,
+                postLink: `https://t.me/${fullPostId}`,
+                hasMedia,
+                isPinned
+              });
+            }
+
+            // Return latest posts first
+            posts.reverse();
+            resolve({
+              success: true,
+              isPublicPreview: true,
+              posts: posts.slice(0, limit)
+            });
+          } catch (parseErr) {
+            reject(parseErr);
+          }
+        });
       });
 
-      const posts = (messages || []).map(m => {
-        let channelUsername = '';
-        if (typeof peer === 'string' && peer.startsWith('@')) {
-          channelUsername = peer.slice(1);
-        }
-        const postLink = channelUsername 
-          ? `https://t.me/${channelUsername}/${m.id}`
-          : `https://t.me/c/${String(peer).replace(/^-100/, '')}/${m.id}`;
+      req.on('error', err => reject(err));
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error(`Превышено время ожидания ответа Telegram при проверке @${cleanUsername}`));
+      });
+    });
+  }
 
-        const dateObj = m.date ? new Date(m.date * 1000) : new Date();
+  async searchChannelPosts({ channelPeer, channelId, query = '', limit = 20 }) {
+    let peer = channelPeer || channelId || this.settings.defaultChannelId;
+    if (!peer) throw new Error('Укажите ID или логин канала (@channel)');
+    peer = String(peer).trim();
+    if (peer.startsWith('https://t.me/')) peer = peer.replace('https://t.me/', '@');
+    if (peer.startsWith('t.me/')) peer = peer.replace('t.me/', '@');
+
+    // Detect if a direct post link/ID was passed, e.g. @channel/123 or channel/123
+    let directPostId = null;
+    if (peer.includes('/')) {
+      const parts = peer.split('/');
+      peer = parts[0];
+      if (parts[1] && /^\d+$/.test(parts[1])) {
+        directPostId = parseInt(parts[1], 10);
+      }
+    }
+
+    const isPublicPeer = typeof peer === 'string' && (peer.startsWith('@') || /^[a-zA-Z0-9_]{3,}$/.test(peer));
+
+    // Check MTProto availability
+    let mtprotoReady = false;
+    try {
+      await this.ensureConnected();
+      mtprotoReady = true;
+    } catch (authErr) {
+      if (isPublicPeer) {
+        return await this.fetchPublicChannelPosts(peer, query, limit, directPostId);
+      }
+      throw authErr;
+    }
+
+    if (mtprotoReady) {
+      try {
+        let cleanPeer = peer;
+        if (/^-?\d+$/.test(cleanPeer)) {
+          try { cleanPeer = BigInt(cleanPeer); } catch (e) {}
+        }
+
+        let messages;
+        if (directPostId) {
+          const singleMsg = await this.client.getMessages(cleanPeer, { ids: [directPostId] });
+          messages = singleMsg ? (Array.isArray(singleMsg) ? singleMsg : [singleMsg]) : [];
+        } else {
+          messages = await this.client.getMessages(cleanPeer, {
+            limit: Math.min(limit, 50),
+            search: query ? String(query).trim() : undefined,
+          });
+        }
+
+        const posts = (messages || []).filter(Boolean).map(m => {
+          let channelUsername = '';
+          if (typeof peer === 'string' && peer.startsWith('@')) {
+            channelUsername = peer.slice(1);
+          }
+          const postLink = channelUsername 
+            ? `https://t.me/${channelUsername}/${m.id}`
+            : `https://t.me/c/${String(peer).replace(/^-100/, '')}/${m.id}`;
+
+          const dateObj = m.date ? new Date(m.date * 1000) : new Date();
+
+          return {
+            id: m.id,
+            date: m.date ? m.date : Math.floor(dateObj.getTime() / 1000),
+            dateFormatted: dateObj.toLocaleString('ru-RU', {
+              day: '2-digit',
+              month: '2-digit',
+              year: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit'
+            }),
+            text: m.message || '',
+            message: m.message || '',
+            views: m.views || 0,
+            forwards: m.forwards || 0,
+            link: postLink,
+            postLink,
+            hasMedia: !!m.media,
+            isPinned: !!m.pinned,
+          };
+        });
 
         return {
-          id: m.id,
-          date: m.date ? m.date : Math.floor(dateObj.getTime() / 1000),
-          dateFormatted: dateObj.toLocaleString('ru-RU', {
-            day: '2-digit',
-            month: '2-digit',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit'
-          }),
-          text: m.message || '',
-          message: m.message || '',
-          views: m.views || 0,
-          forwards: m.forwards || 0,
-          link: postLink,
-          postLink,
-          hasMedia: !!m.media,
-          isPinned: !!m.pinned,
+          success: true,
+          posts,
         };
-      });
-
-      return {
-        success: true,
-        posts,
-      };
-    } catch (e) {
-      await this._handleApiError(e, 'searchChannelPosts');
+      } catch (e) {
+        if (isPublicPeer) {
+          try {
+            return await this.fetchPublicChannelPosts(peer, query, limit, directPostId);
+          } catch (pubErr) {
+            // fallback
+          }
+        }
+        await this._handleApiError(e, 'searchChannelPosts');
+      }
     }
   }
 
@@ -1216,6 +1380,13 @@ class TelegramMTProtoService {
 
   async ensureConnected() {
     if (this.client && this.status === 'connected' && this.me && this.me.id) {
+      if (this.client.connected === false) {
+        try {
+          await this.client.connect();
+        } catch (reconnErr) {
+          log.warn('[MTProto] Reconnect failed:', reconnErr);
+        }
+      }
       return true;
     }
 
@@ -1227,7 +1398,7 @@ class TelegramMTProtoService {
       }
     }
 
-    throw new Error('Подключение к Telegram MTProto отсутствует. Пожалуйста, авторизуйтесь в Telegram (по QR-коду или номеру телефона) или укажите Bot Token в настройках.');
+    throw new Error('Подключение к Telegram MTProto отсутствует. Пожалуйста, авторизуйтесь в Telegram (по QR-коду или номеру телефона).');
   }
 
   getStatus() {

@@ -74,12 +74,16 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
     loadStatus();
 
     const handleAuthInvalidated = () => {
-      console.warn('Telegram auth invalidated. Reloading status...');
-      setStatus(prev => prev ? { ...prev, status: 'disconnected', me: null } : null);
+      console.warn('Telegram auth session invalidated. Reloading status...');
+      setStatus(prev => {
+        if (prev?.status === 'connected') {
+          toast.error('Сессия Telegram устарела или завершена. Пожалуйста, выполните повторный вход.');
+          setIsAuthModalOpen(true);
+        }
+        return prev ? { ...prev, status: 'disconnected', me: null } : null;
+      });
       setDialogs([]);
       loadStatus();
-      toast.error('Сессия Telegram устарела. Пожалуйста, выполните повторный вход.');
-      setIsAuthModalOpen(true);
     };
 
     window.addEventListener('telegram-auth-invalidated', handleAuthInvalidated);

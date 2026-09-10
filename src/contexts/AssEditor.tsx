@@ -638,7 +638,16 @@ export default function AssEditor({
     return () => removeListener();
   }, []);
 
-  const handleExport = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, currentAssignments?: RoleAssignment[]) => {
+  const handleExport = async (
+    targetDir: string, 
+    skipConversion: boolean, 
+    smartExport?: boolean, 
+    uploadToYandex?: boolean, 
+    additionalProcessing?: boolean, 
+    autoApplyFixesOrAssignments?: boolean | RoleAssignment[],
+    includeSubtitlesOrAssignments?: boolean | RoleAssignment[],
+    currentAssignments?: RoleAssignment[]
+  ) => {
     if (!currentEpisode) return;
     
     try {
@@ -646,12 +655,22 @@ export default function AssEditor({
       const roleName = exportRole === 'DABBER' ? 'Даберам' : 'Звукорежиссеру';
       const newStatus = exportRole === 'DABBER' ? 'RECORDING' : 'SOUND_ENGINEERING';
       
-      const assignmentsToUse = currentAssignments || assignments;
+      const autoApplyFixes = typeof autoApplyFixesOrAssignments === 'boolean' ? autoApplyFixesOrAssignments : false;
+      const includeSubtitles = typeof includeSubtitlesOrAssignments === 'boolean' ? includeSubtitlesOrAssignments : true;
+      
+      let rawAssignments: RoleAssignment[] = assignments;
+      if (Array.isArray(autoApplyFixesOrAssignments)) {
+        rawAssignments = autoApplyFixesOrAssignments;
+      } else if (Array.isArray(includeSubtitlesOrAssignments)) {
+        rawAssignments = includeSubtitlesOrAssignments;
+      } else if (currentAssignments) {
+        rawAssignments = currentAssignments;
+      }
       
       const updatedEpisode = {
         ...currentEpisode,
         status: newStatus as any,
-        assignments: assignmentsToUse.map(a => {
+        assignments: rawAssignments.map(a => {
           const { dubber, substitute, ...rest } = a;
           return rest;
         })
@@ -667,7 +686,9 @@ export default function AssEditor({
           skipConversion, 
           smartExport,
           uploadToYandex,
-          additionalProcessing
+          additionalProcessing,
+          autoApplyFixes,
+          includeSubtitles
         },
         metadata: {
           title: `Экспорт ${roleName}: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`

@@ -133,11 +133,12 @@ class ExportService {
     return { success: true, targetDir, yandexUrl: null };
   }
 
-  static async exportSoundEngineerFiles(episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress, onCommand) {
+  static async exportSoundEngineerFiles(episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress, onCommand, includeSubtitles = true) {
     if (!episode || !targetDir) throw new Error('Missing required parameters');
 
     // Handle legacy signature where autoApplyFixes was omitted
     if (typeof autoApplyFixes === 'object' && !projectsData) {
+      includeSubtitles = typeof onCommand === 'boolean' ? onCommand : true;
       onCommand = onProgress;
       onProgress = participantsData;
       participantsData = projectsData;
@@ -147,12 +148,36 @@ class ExportService {
     }
 
     log.info(`Exporting sound engineer files for episode ${episode.number} to ${targetDir}`);
-    log.info(`Export options: skipConversion=${skipConversion}, smartExport=${smartExport}, additionalProcessing=${additionalProcessing}, autoApplyFixes=${autoApplyFixes}`);
+    log.info(`Export options: skipConversion=${skipConversion}, smartExport=${smartExport}, additionalProcessing=${additionalProcessing}, autoApplyFixes=${autoApplyFixes}, includeSubtitles=${includeSubtitles}`);
     await fs.mkdir(targetDir, { recursive: true });
 
     const project = (projectsData || []).find(p => p.id === episode.projectId);
     const projectTitle = project ? project.title : 'Unknown';
     const baseVideoName = `${projectTitle}_${episode.number}`;
+
+    const epFromProject = project ? (project.episodes || []).find(e => e.number === episode.number || e.id === episode.id) : null;
+    const assignments = (episode.assignments && episode.assignments.length > 0)
+      ? episode.assignments
+      : (epFromProject && epFromProject.assignments ? epFromProject.assignments : []);
+
+    // Экспорт общих субтитров с размеченными дабберами для звукорежиссера
+    if (includeSubtitles !== false && episode.subPath) {
+      log.info(`[exportSoundEngineerFiles] Exporting general subtitles with marked dubbers: ${episode.subPath}`);
+      const ext = path.extname(episode.subPath);
+      const generalSubName = `${baseVideoName}_[субтитры_общие]${ext}`;
+      try {
+        await exportFullAssWithRoles(
+          episode.subPath,
+          path.join(targetDir, generalSubName),
+          assignments,
+          participantsData,
+          project ? project.characterAliases : null
+        );
+        log.info(`[exportSoundEngineerFiles] Successfully exported general subtitles with marked dubbers: ${generalSubName}`);
+      } catch (subErr) {
+        log.error('[exportSoundEngineerFiles] Failed to export general subtitles with marked dubbers:', subErr);
+      }
+    }
 
     if (episode.rawPath) {
       log.info(`Processing raw video for sound engineer: ${episode.rawPath}`);

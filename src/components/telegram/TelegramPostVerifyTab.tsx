@@ -73,20 +73,29 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
   const handleSearchPosts = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
-    if (!isConnected) {
-      toast.error('Подключение к Telegram MTProto отсутствует. Пожалуйста, выполните вход.', {
+    const rawPeer = isCustomPeer ? customChannelPeer.trim() : selectedChannelId;
+    if (!rawPeer) {
+      toast.error('Выберите канал для проверки или введите @username');
+      return;
+    }
+
+    // Check if input is a direct post link, e.g. https://t.me/channel/123 or t.me/channel/123
+    let targetPeer = rawPeer;
+    const directUrlMatch = rawPeer.match(/t\.me\/([a-zA-Z0-9_]+)\/(\d+)/) || searchQuery.trim().match(/t\.me\/([a-zA-Z0-9_]+)\/(\d+)/);
+    if (directUrlMatch) {
+      targetPeer = `@${directUrlMatch[1]}/${directUrlMatch[2]}`;
+    }
+
+    const isPublicChannel = targetPeer.startsWith('@') || targetPeer.includes('t.me/') || !/^-?\d+$/.test(targetPeer);
+
+    if (!isConnected && !isPublicChannel) {
+      toast.error('Для закрытых каналов (числовой ID) требуется авторизация в Telegram MTProto', {
         action: onOpenAuth ? {
           label: 'Войти',
           onClick: () => onOpenAuth()
         } : undefined
       });
       if (onOpenAuth) onOpenAuth();
-      return;
-    }
-
-    const targetPeer = isCustomPeer ? customChannelPeer.trim() : selectedChannelId;
-    if (!targetPeer) {
-      toast.error('Выберите канал для проверки или введите @username');
       return;
     }
 
@@ -112,7 +121,7 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
     } catch (err: any) {
       const errMessage = err?.message || String(err);
       if (errMessage.includes('Подключение к Telegram MTProto отсутствует') || errMessage.includes('AUTH_KEY_UNREGISTERED')) {
-        toast.error('Требуется авторизация в Telegram для поиска постов', {
+        toast.error('Для данного канала требуется авторизация в Telegram', {
           action: onOpenAuth ? {
             label: 'Войти',
             onClick: () => onOpenAuth()
@@ -164,7 +173,7 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
-                <strong>Telegram MTProto не подключен.</strong> Для поиска и автопроверки постов в Telegram-канале выполните вход.
+                <strong>Telegram MTProto не подключен.</strong> Поиск по публичным каналам (@юзернейм) работает напрямую. Для закрытых каналов и автоматизаций выполните вход.
               </span>
             </div>
             {onOpenAuth && (
