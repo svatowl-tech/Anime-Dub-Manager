@@ -57,50 +57,82 @@ class ExportService {
       const videoName = path.basename(episode.rawPath);
       const ext = path.extname(videoName);
 
+      let outVideoPath;
       if (skipConversion) {
-        let outVideoPath = path.join(targetDir, `${baseVideoName}[оригинал]${ext}`);
-        if (path.resolve(outVideoPath) !== path.resolve(episode.rawPath)) {
-          onProgress({ percent: 0 }); // Start progress
-          await copyLargeFile(episode.rawPath, outVideoPath, onProgress, 0, videoProgressEnd);
-        } else {
-          onProgress({ percent: videoProgressEnd });
-        }
+        outVideoPath = path.join(targetDir, `${baseVideoName}[оригинал]${ext}`);
       } else if (episode.isHardsub) {
         const finalName = `${baseVideoName}_[хардсаб]${ext}`;
-        let outVideoPath = path.join(targetDir, finalName);
-        
+        outVideoPath = path.join(targetDir, finalName);
         if (path.resolve(outVideoPath) === path.resolve(episode.rawPath)) {
           outVideoPath = path.join(targetDir, `${baseVideoName}_[хардсаб][обработка]${ext}`);
         }
-
-        await transcodeToMp4(episode.rawPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
-          useNvenc: config.useNvenc, 
-          gpuIndex: config.gpuIndex,
-          crf: 28,
-          additionalProcessing
-        });
       } else {
         const suffix = episode.subPath ? '_[с надписями]' : (additionalProcessing ? '_[обработка]' : '_[копия]');
-        let outVideoPath = path.join(targetDir, `${baseVideoName}${suffix}${ext}`);
-
+        outVideoPath = path.join(targetDir, `${baseVideoName}${suffix}${ext}`);
         if (path.resolve(outVideoPath) === path.resolve(episode.rawPath)) {
           outVideoPath = path.join(targetDir, `${baseVideoName}${suffix}[копия]${ext}`);
         }
+      }
 
-        if (episode.subPath) {
-          await bakeSubtitles(episode.rawPath, episode.subPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
-            useNvenc: config.useNvenc, 
-            gpuIndex: config.gpuIndex,
-            crf: 28,
-            additionalProcessing
+      // Check if video file already exists in target directory to avoid redundant re-encoding or re-copying
+      let videoAlreadyExists = false;
+      try {
+        const stat = await fs.stat(outVideoPath);
+        if (stat.size > 0) {
+          videoAlreadyExists = true;
+        }
+      } catch (e) {
+        // Also check if any existing video file for this episode already exists in targetDir
+        try {
+          const filesInTarget = await fs.readdir(targetDir);
+          const existingVid = filesInTarget.find(f => {
+            const fExt = path.extname(f).toLowerCase();
+            return ['.mp4', '.mkv', '.avi', '.mov', '.webm'].includes(fExt) && f.startsWith(baseVideoName);
           });
-        } else {
+          if (existingVid) {
+            const vidStat = await fs.stat(path.join(targetDir, existingVid));
+            if (vidStat.size > 0) {
+              videoAlreadyExists = true;
+              outVideoPath = path.join(targetDir, existingVid);
+            }
+          }
+        } catch (dirErr) {}
+      }
+
+      if (videoAlreadyExists) {
+        log.info(`[exportDabberFiles] Video file already exists at ${outVideoPath}. Skipping re-encode/copy to preserve existing video.`);
+        onProgress({ percent: videoProgressEnd });
+      } else {
+        if (skipConversion) {
+          if (path.resolve(outVideoPath) !== path.resolve(episode.rawPath)) {
+            onProgress({ percent: 0 });
+            await copyLargeFile(episode.rawPath, outVideoPath, onProgress, 0, videoProgressEnd);
+          } else {
+            onProgress({ percent: videoProgressEnd });
+          }
+        } else if (episode.isHardsub) {
           await transcodeToMp4(episode.rawPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
             useNvenc: config.useNvenc, 
             gpuIndex: config.gpuIndex,
             crf: 28,
             additionalProcessing
           });
+        } else {
+          if (episode.subPath) {
+            await bakeSubtitles(episode.rawPath, episode.subPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
+              useNvenc: config.useNvenc, 
+              gpuIndex: config.gpuIndex,
+              crf: 28,
+              additionalProcessing
+            });
+          } else {
+            await transcodeToMp4(episode.rawPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
+              useNvenc: config.useNvenc, 
+              gpuIndex: config.gpuIndex,
+              crf: 28,
+              additionalProcessing
+            });
+          }
         }
       }
     }
@@ -125,7 +157,8 @@ class ExportService {
       await splitSubsByDubber(episode.subPath, targetDir, episode.assignments, participantsData, {
         onProgress: (p) => onProgress({ percent: subProgressStart + (p.percent / 100 * (100 - subProgressStart)) }),
         baseFileName: baseVideoName,
-        characterAliases: project ? project.characterAliases : null
+        characterAliases: project ? project.characterAliases : null,
+        overwriteExisting: true
       });
       onProgress({ percent: 100 });
     }

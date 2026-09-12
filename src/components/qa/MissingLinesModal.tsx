@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   X, 
   Play, 
@@ -32,7 +32,13 @@ import {
   ScrollText,
   Terminal,
   Info,
-  XCircle
+  XCircle,
+  Video,
+  Save,
+  FileCheck,
+  Edit3,
+  Gauge,
+  UserPlus
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { 
@@ -47,7 +53,7 @@ import {
 import { AudioArtifactType } from '../../lib/qa/artifactDetector';
 import { ArtifactWaveformMarker } from './ArtifactWaveformMarker';
 import { generateSoundEngineerQAReport } from '../../lib/templates';
-import { Episode, Participant } from '../../types';
+import { Episode, Participant, SubtitleLine } from '../../types';
 
 interface MissingLinesModalProps {
   isOpen: boolean;
@@ -64,6 +70,11 @@ interface MissingLinesModalProps {
   onGenerateSoundEngineerMessage?: () => void;
   onOpenScanConfig?: () => void;
   scanReport?: QAScanReport;
+  videoUrl?: string;
+  subLines?: SubtitleLine[];
+  onUpdateSubLine?: (updatedLine: { rawLineIndex: number; name?: string; text?: string; start?: string; end?: string }) => Promise<void>;
+  onExportSubtitles?: () => Promise<void>;
+  onSaveGaps?: (updatedGaps: MissingLineDetection[]) => void;
 }
 
 export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
@@ -80,9 +91,32 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   participants,
   onGenerateSoundEngineerMessage,
   onOpenScanConfig,
-  scanReport
+  scanReport,
+  videoUrl,
+  subLines = [],
+  onUpdateSubLine,
+  onExportSubtitles,
+  onSaveGaps
 }) => {
   const [gaps, setGaps] = useState<MissingLineDetection[]>(initialGaps);
+  const [selectedGapId, setSelectedGapId] = useState<string | null>(() => initialGaps[0]?.id || null);
+
+  // Video player state
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [isVideoPlaying, setIsVideoPlaying] = useState(false);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1.0);
+  const [isLoopingSnippet, setIsLoopingSnippet] = useState(true);
+
+  // Subtitle in-place editor state
+  const [editingSubText, setEditingSubText] = useState('');
+  const [selectedReassignCharacter, setSelectedReassignCharacter] = useState('');
+  const [customCharacterName, setCustomCharacterName] = useState('');
+  const [isSavingSub, setIsSavingSub] = useState(false);
+  const [isExportingSub, setIsExportingSub] = useState(false);
+
   const activeReport: QAScanReport | undefined = scanReport || (initialGaps as any)?.scanReport;
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
   const [logFilterStage, setLogFilterStage] = useState<'all' | 'whisper' | 'error' | 'audio'>('all');
@@ -92,10 +126,17 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   const [selectedDubberFilter, setSelectedDubberFilter] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [playingSnippetId, setPlayingSnippetId] = useState<string | null>(null);
-  const [isLoopingSnippet, setIsLoopingSnippet] = useState(false);
   const [selectedSensitivity, setSelectedSensitivity] = useState<number>(currentThreshold);
   const [activeReassignGapId, setActiveReassignGapId] = useState<string | null>(null);
   const [customCharInput, setCustomCharInput] = useState<Record<string, string>>({});
+
+  const updateGaps = useCallback((updater: (prev: MissingLineDetection[]) => MissingLineDetection[]) => {
+    setGaps(prev => {
+      const next = updater(prev);
+      onSaveGaps?.(next);
+      return next;
+    });
+  }, [onSaveGaps]);
 
   const formatTimecode = (sec: number) => {
     const m = Math.floor(sec / 60);
@@ -172,7 +213,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
     const dubberId = found ? found.dubberId : undefined;
     const assignmentId = found ? found.assignmentId : undefined;
 
-    setGaps(prev => prev.map(g => {
+    updateGaps(prev => prev.map(g => {
       if (g.id !== gapId) return g;
       
       return {
@@ -188,11 +229,25 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
         comment: `[Ошибка в субтитрах] Реплика переназначена на ${trimmed}${dubberName ? ` (${dubberName})` : ''}. В исходных сабах реплика ошибочно числилась за ${g.characterName} (${g.dubberName}). Предыдущий даббер не виноват. Требуется доозвучить.`
       };
     }));
+
+    if (onUpdateSubLine) {
+      const g = gaps.find(x => x.id === gapId);
+      if (g) {
+        const rawIdx = typeof g.lineIndex === 'number' ? g.lineIndex : (g.subId ? parseInt(g.subId) : undefined);
+        if (typeof rawIdx === 'number' && !isNaN(rawIdx)) {
+          onUpdateSubLine({
+            rawLineIndex: rawIdx,
+            name: trimmed
+          }).catch(e => console.warn('Could not update sub line on reassign:', e));
+        }
+      }
+    }
+
     toast.success(`Реплика переназначена персонажу «${trimmed}» (${dubberName})`);
   };
 
   const handleCancelReassign = (gapId: string) => {
-    setGaps(prev => prev.map(g => {
+    updateGaps(prev => prev.map(g => {
       if (g.id !== gapId) return g;
       return {
         ...g,
@@ -206,6 +261,121 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
         comment: `Пропуск реплики [${g.startFormatted}]: "${g.text}"`
       };
     }));
+  };
+
+  const activeSelectedGap = useMemo(() => {
+    return gaps.find(g => g.id === selectedGapId) || gaps[0] || null;
+  }, [gaps, selectedGapId]);
+
+  useEffect(() => {
+    if (activeSelectedGap) {
+      setEditingSubText(activeSelectedGap.text || '');
+      setSelectedReassignCharacter(activeSelectedGap.reassignedCharacterName || activeSelectedGap.characterName || '');
+      setCustomCharacterName('');
+    }
+  }, [activeSelectedGap?.id]);
+
+  const activeDubberNickname = useMemo(() => {
+    const char = activeSelectedGap?.characterName || activeSelectedGap?.reassignedCharacterName;
+    if (!char || !episode?.assignments) return null;
+    const match = episode.assignments.find(a => a.characterName.trim().toLowerCase() === char.trim().toLowerCase());
+    return match?.substitute?.nickname || match?.dubber?.nickname || null;
+  }, [activeSelectedGap?.characterName, activeSelectedGap?.reassignedCharacterName, episode?.assignments]);
+
+  const activeSubLine = useMemo(() => {
+    if (!subLines || subLines.length === 0) return null;
+    if (activeSelectedGap) {
+      if (activeSelectedGap.subId) {
+        const found = subLines.find(l => String(l.rawLineIndex) === activeSelectedGap.subId || String(l.id) === activeSelectedGap.subId);
+        if (found) return found;
+      }
+      if (activeSelectedGap.lineIndex !== undefined) {
+        const found = subLines.find(l => l.rawLineIndex === activeSelectedGap.lineIndex || l.id === activeSelectedGap.lineIndex);
+        if (found) return found;
+      }
+      const found = subLines.find(l => Math.abs(l.startSec - activeSelectedGap.startSec) < 0.35);
+      if (found) return found;
+    }
+    return subLines.find(l => videoCurrentTime >= l.startSec && videoCurrentTime <= l.endSec) || null;
+  }, [subLines, activeSelectedGap, videoCurrentTime]);
+
+  const handleInspectDefectInPlayer = useCallback((gap: MissingLineDetection) => {
+    setSelectedGapId(gap.id);
+    const targetSec = gap.artifactTimestampSec ?? gap.startSec;
+    onSeekMainPlayer?.(targetSec);
+
+    if (videoRef.current) {
+      videoRef.current.currentTime = Math.max(0, targetSec - 0.4);
+      videoRef.current.play().catch(() => {});
+      setIsVideoPlaying(true);
+    }
+  }, [onSeekMainPlayer]);
+
+  const handleVideoTimeUpdate = () => {
+    if (!videoRef.current) return;
+    const cur = videoRef.current.currentTime;
+    setVideoCurrentTime(cur);
+
+    if (isLoopingSnippet && activeSelectedGap) {
+      const loopStart = Math.max(0, (activeSelectedGap.artifactTimestampSec ?? activeSelectedGap.startSec) - 0.4);
+      const loopEnd = (activeSelectedGap.artifactTimestampSec ? activeSelectedGap.artifactTimestampSec + 1.2 : activeSelectedGap.endSec) + 0.4;
+      if (cur >= loopEnd) {
+        videoRef.current.currentTime = loopStart;
+      }
+    }
+  };
+
+  const handleSaveSubChanges = async () => {
+    if (!activeSubLine) {
+      toast.error('Субтитр для редактирования не выбран или отсутствует');
+      return;
+    }
+    const finalName = selectedReassignCharacter === '__custom__' 
+      ? customCharacterName.trim() 
+      : selectedReassignCharacter.trim();
+
+    setIsSavingSub(true);
+    try {
+      if (onUpdateSubLine) {
+        await onUpdateSubLine({
+          rawLineIndex: activeSubLine.rawLineIndex,
+          name: finalName || activeSubLine.name,
+          text: editingSubText
+        });
+      }
+
+      if (activeSelectedGap) {
+        updateGaps(prev => prev.map(g => {
+          if (g.id !== activeSelectedGap.id) return g;
+          return {
+            ...g,
+            characterName: finalName || g.characterName,
+            reassignedCharacterName: finalName || g.reassignedCharacterName,
+            text: editingSubText,
+            resolutionAction: finalName && finalName !== g.characterName ? 'reassign_character' : g.resolutionAction,
+            selected: true
+          };
+        }));
+      }
+      toast.success('Правки субтитра сохранены!');
+    } catch (err: any) {
+      toast.error(`Ошибка при сохранении субтитра: ${err?.message || err}`);
+    } finally {
+      setIsSavingSub(false);
+    }
+  };
+
+  const handleExportSubtitlesAction = async () => {
+    if (!onExportSubtitles) {
+      toast.info('Экспорт субтитров недоступен');
+      return;
+    }
+    setIsExportingSub(true);
+    try {
+      await onExportSubtitles();
+    } finally {
+      setIsExportingSub(false);
+    }
   };
 
   if (!isOpen) return null;
@@ -300,7 +470,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   ).length;
 
   const handleToggleSelectAll = (select: boolean) => {
-    setGaps(prev => prev.map(g => {
+    updateGaps(prev => prev.map(g => {
       const cat = g.defectCategory || 'missing_line';
       const matchesCategory = selectedCategoryTab === 'all' || cat === selectedCategoryTab || (selectedCategoryTab === 'timing_too_long' && g.isTimingTooLongMerged);
       const matchesDubber = selectedDubberFilter === 'all' || g.dubberName === selectedDubberFilter || g.secondDubberName === selectedDubberFilter;
@@ -309,15 +479,15 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   };
 
   const handleToggleSingle = (id: string) => {
-    setGaps(prev => prev.map(g => g.id === id ? { ...g, selected: !g.selected } : g));
+    updateGaps(prev => prev.map(g => g.id === id ? { ...g, selected: !g.selected } : g));
   };
 
   const handleCommentChange = (id: string, newComment: string) => {
-    setGaps(prev => prev.map(g => g.id === id ? { ...g, comment: newComment } : g));
+    updateGaps(prev => prev.map(g => g.id === id ? { ...g, comment: newComment } : g));
   };
 
   const handleResolutionChange = (id: string, resolution: DefectResolution, characterForSub?: string) => {
-    setGaps(prev => prev.map(g => {
+    updateGaps(prev => prev.map(g => {
       if (g.id !== id) return g;
       return {
         ...g,
@@ -332,7 +502,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
       SnippetAudioPlayer.stop();
       setPlayingSnippetId(null);
     }
-    setGaps(prev => prev.filter(g => g.id !== id));
+    updateGaps(prev => prev.filter(g => g.id !== id));
   };
 
   const handlePlaySnippet = (
@@ -432,7 +602,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn">
-      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl w-full max-w-5xl h-[92vh] max-h-[900px] flex flex-col overflow-hidden text-neutral-200">
+      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl w-full max-w-[1720px] h-[95vh] max-h-[960px] flex flex-col overflow-hidden text-neutral-200">
         
         {/* Header */}
         <div className="p-5 border-b border-neutral-800 flex items-center justify-between bg-neutral-900/95 shrink-0">
@@ -547,7 +717,11 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
           </div>
         </div>
 
-        {/* Category Tabs Bar */}
+        {/* Split Layout: Defects Column (Left) + Integrated Player & Inspector (Right) */}
+        <div className="flex-1 min-h-0 flex flex-col lg:flex-row overflow-hidden">
+          {/* Left Column: Category Tabs, Filters, Defect Items List */}
+          <div className="w-full lg:w-[58%] xl:w-[60%] flex flex-col h-full border-r border-neutral-800/80 min-h-0">
+            {/* Category Tabs Bar */}
         <div className="px-5 pt-3 pb-2 border-b border-neutral-800/80 bg-neutral-950/60 flex items-center justify-between shrink-0 gap-3">
           <div className="flex items-center gap-2 overflow-x-auto scrollbar-hide py-0.5">
             <button
@@ -987,18 +1161,25 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               return (
                 <div
                   key={gap.id}
-                  className={`p-4 rounded-xl border transition-all ${
-                    gap.selected
-                      ? (gap.isSubtitleError || gap.resolutionAction === 'reassign_character'
-                          ? 'bg-purple-950/20 border-purple-500/60 hover:border-purple-400 ring-1 ring-purple-500/20 shadow-sm'
-                          : 'bg-neutral-800/50 border-neutral-700 hover:border-neutral-600')
-                      : 'bg-neutral-900/40 border-neutral-800/60 opacity-60'
+                  onClick={() => handleInspectDefectInPlayer(gap)}
+                  className={`p-4 rounded-xl border transition-all cursor-pointer ${
+                    selectedGapId === gap.id
+                      ? 'ring-2 ring-amber-500/80 bg-neutral-850 border-amber-500/60 shadow-lg'
+                      : gap.selected
+                        ? (gap.isSubtitleError || gap.resolutionAction === 'reassign_character'
+                            ? 'bg-purple-950/20 border-purple-500/60 hover:border-purple-400 ring-1 ring-purple-500/20 shadow-sm'
+                            : 'bg-neutral-800/50 border-neutral-700 hover:border-neutral-600')
+                        : 'bg-neutral-900/40 border-neutral-800/60 opacity-60'
                   }`}
                 >
                   <div className="flex items-start gap-3.5">
                     {/* Checkbox */}
                     <button
-                      onClick={() => handleToggleSingle(gap.id)}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleSingle(gap.id);
+                      }}
                       className={`mt-1 p-0.5 rounded transition-colors shrink-0 ${
                         gap.selected ? 'text-blue-400 hover:text-blue-300' : 'text-neutral-600 hover:text-neutral-400'
                       }`}
@@ -1015,12 +1196,27 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                         <div className="flex items-center gap-2 flex-wrap">
                           {/* Timecode button */}
                           <button
-                            onClick={() => onSeekMainPlayer?.(gap.startSec)}
-                            className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 text-xs font-mono font-bold hover:bg-blue-500/20 transition-colors"
-                            title="Перемотать видео на этот таймкод"
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleInspectDefectInPlayer(gap);
+                            }}
+                            className={`px-2 py-0.5 rounded text-xs font-mono font-bold transition-all flex items-center gap-1.5 ${
+                              selectedGapId === gap.id
+                                ? 'bg-amber-500 text-neutral-950 shadow-sm'
+                                : 'bg-blue-500/10 text-blue-400 border border-blue-500/20 hover:bg-blue-500/20'
+                            }`}
+                            title="Открыть и синхронизировать фрагмент в видеоплеере"
                           >
-                            ⏱ {gap.startFormatted} – {gap.endFormatted} ({gap.durationSec}с)
+                            <Video className="w-3.5 h-3.5" />
+                            <span>⏱ {gap.startFormatted} – {gap.endFormatted} ({gap.durationSec}с)</span>
                           </button>
+
+                          {selectedGapId === gap.id && (
+                            <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                              В плеере
+                            </span>
+                          )}
 
                           {/* Category Tag */}
                           {category === 'missing_line' && !gap.isSubtitleError && (
@@ -2417,6 +2613,377 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
             })
           )}
         </div>
+      </div>
+
+      {/* Right Column: Built-in Video Player & Subtitle Inspector / Editor */}
+      <div className="w-full lg:w-[42%] xl:w-[40%] flex flex-col h-full bg-neutral-950/90 overflow-y-auto custom-scrollbar p-4 space-y-4">
+        
+        {/* Top Bar for Video Column */}
+        <div className="flex items-center justify-between pb-2 border-b border-neutral-800">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+              <Video className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                Плеер проверки косяков
+                {activeSelectedGap && (
+                  <span className="text-[11px] px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 font-mono">
+                    ⏱ {activeSelectedGap.startFormatted} – {activeSelectedGap.endFormatted}
+                  </span>
+                )}
+              </h3>
+              <p className="text-[11px] text-neutral-400">
+                Синхронизирован с выбранным замечанием для мгновенного контроля
+              </p>
+            </div>
+          </div>
+
+          {/* Looping toggle */}
+          <button
+            type="button"
+            onClick={() => setIsLoopingSnippet(!isLoopingSnippet)}
+            className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition-all ${
+              isLoopingSnippet
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm'
+                : 'bg-neutral-800 text-neutral-400 hover:text-white border border-neutral-700'
+            }`}
+            title="Зацикливать воспроизведение выбранного фрагмента косяка"
+          >
+            <Repeat className={`w-3.5 h-3.5 ${isLoopingSnippet ? 'animate-pulse' : ''}`} />
+            <span>Зацикливать</span>
+          </button>
+        </div>
+
+        {/* Video Player */}
+        <div className="space-y-2">
+          <div className="relative bg-black rounded-xl overflow-hidden border border-neutral-800 shadow-md aspect-video flex items-center justify-center group">
+            {videoUrl ? (
+              <>
+                <video
+                  ref={videoRef}
+                  src={videoUrl}
+                  onTimeUpdate={handleVideoTimeUpdate}
+                  onLoadedMetadata={e => setVideoDuration(e.currentTarget.duration)}
+                  onPlay={() => setIsVideoPlaying(true)}
+                  onPause={() => setIsVideoPlaying(false)}
+                  className="w-full h-full object-contain"
+                  playsInline
+                />
+
+                {/* Subtitle Overlay in Video */}
+                {(activeSubLine?.text || activeSelectedGap?.text) && (
+                  <div className="absolute bottom-3 left-4 right-4 pointer-events-none text-center">
+                    <span className="inline-block px-3 py-1.5 rounded-lg bg-black/80 text-white font-medium text-xs md:text-sm shadow-lg border border-white/10 backdrop-blur-sm max-w-full truncate">
+                      {activeSelectedGap?.characterName && (
+                        <strong className="text-amber-400 font-bold mr-1.5">
+                          [{activeSelectedGap.characterName}]:
+                        </strong>
+                      )}
+                      {activeSubLine?.text || activeSelectedGap?.text}
+                    </span>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="p-6 text-center space-y-2">
+                <Video className="w-8 h-8 text-neutral-600 mx-auto" />
+                <p className="text-xs text-neutral-400 max-w-xs">
+                  Видеофайл для этой серии не загружен. Укажите ссылку на видео в карточке серии для полноценного видеоконтроля.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Video Player Controls */}
+          {videoUrl && (
+            <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-2.5 space-y-2">
+              {/* Scrubber progress */}
+              <div className="flex items-center gap-2 text-xs font-mono text-neutral-400">
+                <span className="w-12 text-right">{formatTimecode(videoCurrentTime)}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={videoDuration || 100}
+                  step={0.1}
+                  value={videoCurrentTime}
+                  onChange={e => {
+                    const val = parseFloat(e.target.value);
+                    setVideoCurrentTime(val);
+                    if (videoRef.current) videoRef.current.currentTime = val;
+                  }}
+                  className="flex-1 h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+                />
+                <span className="w-12">{formatTimecode(videoDuration)}</span>
+              </div>
+
+              {/* Buttons toolbar */}
+              <div className="flex items-center justify-between pt-1 border-t border-neutral-800/80">
+                <div className="flex items-center gap-1.5">
+                  {/* Play/Pause */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!videoRef.current) return;
+                      if (isVideoPlaying) videoRef.current.pause();
+                      else videoRef.current.play();
+                    }}
+                    className="p-2 rounded-lg bg-amber-500 text-neutral-950 hover:bg-amber-400 font-bold transition-all shadow-sm"
+                    title={isVideoPlaying ? "Пауза" : "Воспроизведение"}
+                  >
+                    {isVideoPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4 fill-current" />}
+                  </button>
+
+                  {/* Jump -2s */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (videoRef.current) {
+                        videoRef.current.currentTime = Math.max(0, videoRef.current.currentTime - 2);
+                      }
+                    }}
+                    className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-mono transition-colors"
+                    title="Назад на 2 секунды"
+                  >
+                    -2с
+                  </button>
+
+                  {/* Jump +2s */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (videoRef.current) {
+                        videoRef.current.currentTime = Math.min(videoDuration, videoRef.current.currentTime + 2);
+                      }
+                    }}
+                    className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs font-mono transition-colors"
+                    title="Вперед на 2 секунды"
+                  >
+                    +2с
+                  </button>
+
+                  {/* Reset to defect start */}
+                  {activeSelectedGap && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (videoRef.current) {
+                          videoRef.current.currentTime = Math.max(0, (activeSelectedGap.artifactTimestampSec ?? activeSelectedGap.startSec) - 0.2);
+                          videoRef.current.play().catch(() => {});
+                        }
+                      }}
+                      className="px-2 py-1 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-amber-300 text-xs font-semibold flex items-center gap-1 transition-colors"
+                      title="Вернуться к началу выбранного фрагмента"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>К фразе</span>
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 text-xs">
+                  {/* Speed selector */}
+                  <div className="flex items-center gap-1 bg-neutral-950 px-1.5 py-0.5 rounded border border-neutral-800 text-[11px]">
+                    <Gauge className="w-3 h-3 text-neutral-400" />
+                    {[0.75, 1.0, 1.25].map(speed => (
+                      <button
+                        key={speed}
+                        type="button"
+                        onClick={() => {
+                          setPlaybackRate(speed);
+                          if (videoRef.current) videoRef.current.playbackRate = speed;
+                        }}
+                        className={`px-1 rounded ${playbackRate === speed ? 'text-amber-400 font-bold' : 'text-neutral-500 hover:text-white'}`}
+                      >
+                        {speed}x
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Mute toggle */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (videoRef.current) {
+                        videoRef.current.muted = !isMuted;
+                        setIsMuted(!isMuted);
+                      }
+                    }}
+                    className={`p-1.5 rounded-lg border transition-colors ${
+                      isMuted
+                        ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                        : 'bg-neutral-800 text-neutral-300 border-neutral-700 hover:text-white'
+                    }`}
+                    title={isMuted ? "Включить звук" : "Выключить звук видео"}
+                  >
+                    {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Subtitle Inspector & In-Place Editor */}
+        <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-4 space-y-3.5">
+          <div className="flex items-center justify-between pb-2 border-b border-neutral-800/80">
+            <div className="flex items-center gap-2">
+              <Edit3 className="w-4 h-4 text-purple-400" />
+              <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                Редактор субтитра и персонажа
+              </h4>
+            </div>
+            {activeSubLine && (
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700">
+                Строка #{activeSubLine.rawLineIndex}
+              </span>
+            )}
+          </div>
+
+          {/* Character Assignment & Dubber mapping */}
+          <div className="space-y-2">
+            <label className="text-[11px] font-medium text-neutral-400 flex items-center justify-between">
+              <span>Персонаж и даббер:</span>
+              {activeDubberNickname && (
+                <span className="text-amber-400 font-bold">
+                  Озвучивает: {activeDubberNickname}
+                </span>
+              )}
+            </label>
+
+            <div className="grid grid-cols-1 gap-2">
+              <select
+                value={selectedReassignCharacter}
+                onChange={e => setSelectedReassignCharacter(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500"
+              >
+                <option value="">-- Выберите персонажа для реплики --</option>
+                {availableCharacters.map(char => (
+                  <option key={char.characterName} value={char.characterName}>
+                    {char.characterName} {char.dubberName ? `(${char.dubberName})` : ''}
+                  </option>
+                ))}
+                <option value="__custom__">+ Другой персонаж (ввести вручную)</option>
+              </select>
+
+              {selectedReassignCharacter === '__custom__' && (
+                <input
+                  type="text"
+                  placeholder="Имя нового персонажа..."
+                  value={customCharacterName}
+                  onChange={e => setCustomCharacterName(e.target.value)}
+                  className="w-full bg-neutral-950 border border-amber-500/50 rounded-lg px-2.5 py-1.5 text-xs text-white focus:outline-none focus:border-amber-500"
+                />
+              )}
+            </div>
+          </div>
+
+          {/* Text Diff & Subtitle text editor */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-medium text-neutral-400">Текст субтитра:</span>
+              {activeSelectedGap?.recognizedText && (
+                <button
+                  type="button"
+                  onClick={() => setEditingSubText(activeSelectedGap.recognizedText || '')}
+                  className="text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1 text-[11px] transition-colors"
+                  title="Скопировать распознанный текст Whisper в поле субтитра"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  <span>Вставить текст из озвучки</span>
+                </button>
+              )}
+            </div>
+
+            {activeSelectedGap?.recognizedText && (
+              <div className="p-2.5 rounded-lg bg-emerald-950/20 border border-emerald-500/30 text-xs text-emerald-200">
+                <div className="text-[10px] uppercase font-bold text-emerald-400 tracking-wider mb-1 flex items-center gap-1">
+                  <Mic className="w-3 h-3" /> Распознано Whisper в дорожке:
+                </div>
+                <div className="font-sans italic">«{activeSelectedGap.recognizedText}»</div>
+              </div>
+            )}
+
+            <textarea
+              rows={3}
+              value={editingSubText}
+              onChange={e => setEditingSubText(e.target.value)}
+              placeholder="Текст субтитра..."
+              className="w-full bg-neutral-950 border border-neutral-700 rounded-lg p-2.5 text-xs text-white focus:outline-none focus:border-amber-500 resize-none font-sans leading-relaxed"
+            />
+          </div>
+
+          {/* Action buttons */}
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={handleSaveSubChanges}
+              disabled={isSavingSub}
+              className="flex-1 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-neutral-950 font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-sm disabled:opacity-50"
+            >
+              <Save className="w-3.5 h-3.5" />
+              <span>{isSavingSub ? 'Сохранение...' : 'Сохранить правку в сабах'}</span>
+            </button>
+
+            {onExportSubtitles && (
+              <button
+                type="button"
+                onClick={handleExportSubtitlesAction}
+                disabled={isExportingSub}
+                className="px-3 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 font-semibold text-xs flex items-center gap-1.5 transition-all disabled:opacity-50"
+                title="Скачать обновлённые субтитры серии (.ass)"
+              >
+                <FileCheck className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Экспорт сабов</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Selected defect summary info card */}
+        {activeSelectedGap && (
+          <div className="bg-neutral-900/60 border border-neutral-800/80 rounded-xl p-3.5 text-xs space-y-2">
+            <div className="flex items-center justify-between text-[11px] text-neutral-400 border-b border-neutral-800 pb-1.5">
+              <span className="font-semibold text-white flex items-center gap-1">
+                <Info className="w-3.5 h-3.5 text-blue-400" />
+                Детали текущего замечания
+              </span>
+              <span className="font-mono text-amber-400">
+                ID: {activeSelectedGap.id.slice(0, 8)}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-[11px]">
+              <div>
+                <span className="text-neutral-500">Категория:</span>
+                <p className="font-semibold text-neutral-200 mt-0.5">
+                  {activeSelectedGap.typeLabel || activeSelectedGap.defectCategory}
+                </p>
+              </div>
+              <div>
+                <span className="text-neutral-500">Статус решения:</span>
+                <p className="font-semibold text-neutral-200 mt-0.5">
+                  {activeSelectedGap.resolutionAction === 'reassign_character' ? 'Переназначено' :
+                   activeSelectedGap.resolutionAction === 'note_sound_engineer' ? 'Отчет звукарю' :
+                   activeSelectedGap.resolutionAction === 'request_dubber_fix' ? 'Перезапись даббера' :
+                   activeSelectedGap.resolutionAction === 'silence' ? 'Замена тишиной' :
+                   activeSelectedGap.resolutionAction === 'actor_better_than_sub' ? 'Актёр лучше (обновить саб)' :
+                   activeSelectedGap.resolutionAction === 'ignore' ? 'Пропущено' : 'К исправлению'}
+                </p>
+              </div>
+            </div>
+
+            {activeSelectedGap.comment && (
+              <div className="pt-1.5 border-t border-neutral-800 text-[11px]">
+                <span className="text-neutral-500">Примечание к исправлению:</span>
+                <p className="text-neutral-300 italic mt-0.5">{activeSelectedGap.comment}</p>
+              </div>
+            )}
+          </div>
+        )}
+
+      </div>
+    </div>
 
         {/* Footer */}
         <div className="p-4 border-t border-neutral-800 bg-neutral-900/95 flex items-center justify-between shrink-0">

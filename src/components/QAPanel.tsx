@@ -94,6 +94,119 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
     });
   }, []);
 
+  // Restore persisted QA results for current episode so work is never lost on closing modal
+  useEffect(() => {
+    if (!currentEpisode?.id) {
+      setDetectedGaps([]);
+      setQaScanReport(null);
+      return;
+    }
+
+    try {
+      const storageKey = `qa_detected_gaps_${currentEpisode.id}`;
+      const reportKey = `qa_scan_report_${currentEpisode.id}`;
+      const savedGapsRaw = localStorage.getItem(storageKey);
+      const savedReportRaw = localStorage.getItem(reportKey);
+
+      if (savedGapsRaw) {
+        const parsedGaps = JSON.parse(savedGapsRaw);
+        if (Array.isArray(parsedGaps) && parsedGaps.length > 0) {
+          setDetectedGaps(parsedGaps);
+        } else {
+          setDetectedGaps([]);
+        }
+      } else {
+        setDetectedGaps([]);
+      }
+
+      if (savedReportRaw) {
+        setQaScanReport(JSON.parse(savedReportRaw));
+      } else {
+        setQaScanReport(null);
+      }
+    } catch (err) {
+      console.warn('Failed to restore QA scan results from storage:', err);
+    }
+  }, [currentEpisode?.id]);
+
+  const handleSaveDetectedGaps = useCallback((updatedGaps: MissingLineDetection[]) => {
+    setDetectedGaps(updatedGaps);
+    if (currentEpisode?.id) {
+      try {
+        localStorage.setItem(`qa_detected_gaps_${currentEpisode.id}`, JSON.stringify(updatedGaps));
+      } catch (e) {
+        console.warn('Failed to save QA gaps to localStorage:', e);
+      }
+    }
+  }, [currentEpisode?.id]);
+
+  const handleUpdateSubLineFromModal = useCallback(async (updatedLine: { rawLineIndex: number; name?: string; text?: string; start?: string; end?: string }) => {
+    if (!currentEpisode?.subPath) {
+      toast.error('Файл субтитров отсутствует в серии');
+      return;
+    }
+    try {
+      await ipcSafe.invoke('save-raw-subtitles', {
+        filePath: currentEpisode.subPath,
+        lines: [updatedLine]
+      });
+
+      setSubLines(prev => prev.map(l => {
+        if (l.rawLineIndex !== updatedLine.rawLineIndex) return l;
+        return {
+          ...l,
+          name: updatedLine.name !== undefined ? updatedLine.name : l.name,
+          text: updatedLine.text !== undefined ? updatedLine.text : l.text,
+          start: updatedLine.start !== undefined ? updatedLine.start : l.start,
+          end: updatedLine.end !== undefined ? updatedLine.end : l.end
+        };
+      }));
+    } catch (err: any) {
+      console.error('Failed to update subtitle line:', err);
+      throw err;
+    }
+  }, [currentEpisode?.subPath]);
+
+  const handleExportSubtitlesFromModal = useCallback(async () => {
+    if (!currentEpisode?.subPath) {
+      toast.error('Файл субтитров отсутствует в серии');
+      return;
+    }
+    try {
+      // Save all current in-memory lines to ensure disk is 100% in sync
+      await ipcSafe.invoke('save-raw-subtitles', {
+        filePath: currentEpisode.subPath,
+        lines: subLines,
+        overwrite: true
+      });
+
+      // Also allow saving a copy to custom location if electron dialog is available
+      if (window.electronAPI) {
+        try {
+          const res = await ipcSafe.invoke('dialog:save-file', {
+            title: 'Экспортировать исправленные субтитры',
+            defaultPath: currentEpisode.subPath.replace(/\.ass$/i, '_исправленные.ass'),
+            filters: [{ name: 'ASS Subtitles', extensions: ['ass'] }]
+          });
+          if (res && !res.canceled && res.filePath) {
+            await ipcSafe.invoke('save-raw-subtitles', {
+              filePath: res.filePath,
+              lines: subLines,
+              overwrite: true
+            });
+            toast.success(`Субтитры успешно сохранены в: ${res.filePath}`);
+            return;
+          }
+        } catch (e) {
+          // Dialog skipped or canceled
+        }
+      }
+      toast.success('Субтитры успешно сохранены и обновлены с учетом всех правок!');
+    } catch (err: any) {
+      toast.error(`Ошибка при экспорте субтитров: ${err?.message || err}`);
+    }
+  }, [currentEpisode?.subPath, subLines]);
+
   useEffect(() => {
     let active = true;
     const resolvePath = async () => {
@@ -949,6 +1062,13 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       toast.error('Нет загруженных аудиодорожек даберов для анализа');
       return;
     }
+
+    // If we already have scanned gaps for this episode, open the QA Center directly!
+    if (detectedGaps && detectedGaps.length > 0) {
+      setIsGapModalOpen(true);
+      return;
+    }
+
     setIsScanConfigModalOpen(true);
   };
 
@@ -991,6 +1111,17 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       );
 
       setDetectedGaps(gaps);
+      if (currentEpisode?.id) {
+        try {
+          localStorage.setItem(`qa_detected_gaps_${currentEpisode.id}`, JSON.stringify(gaps));
+          if ((gaps as any)?.scanReport) {
+            localStorage.setItem(`qa_scan_report_${currentEpisode.id}`, JSON.stringify((gaps as any).scanReport));
+          }
+        } catch (storageErr) {
+          console.warn('Failed to persist QA gaps to localStorage:', storageErr);
+        }
+      }
+
       if ((gaps as any)?.scanReport) {
         setQaScanReport((gaps as any).scanReport);
       }
@@ -1350,6 +1481,20 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       });
 
       onRefresh();
+
+      const updatedGapsState = detectedGaps.map(g => {
+        const found = selectedGaps.find(sg => sg.id === g.id);
+        if (found) {
+          return {
+            ...g,
+            resolved: true,
+            selected: false,
+            resolutionAction: found.resolutionAction || g.resolutionAction
+          };
+        }
+        return g;
+      });
+      handleSaveDetectedGaps(updatedGapsState);
 
       const reassignCount = selectedGaps.filter(g => g.isSubtitleError || g.resolutionAction === 'reassign_character').length;
       if (reassignCount > 0) {
@@ -2264,6 +2409,11 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           isAnalyzing={isAnalyzingGaps}
           currentThreshold={gapSensitivityThreshold}
           scanReport={qaScanReport || (detectedGaps as any)?.scanReport}
+          videoUrl={videoUrl}
+          subLines={subLines}
+          onUpdateSubLine={handleUpdateSubLineFromModal}
+          onExportSubtitles={handleExportSubtitlesFromModal}
+          onSaveGaps={handleSaveDetectedGaps}
         />
       )}
 
