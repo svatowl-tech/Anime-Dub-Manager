@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
-import { ZoomIn, ZoomOut, Play, Pause, AlertCircle, ArrowLeftRight, Loader2, Edit3 } from 'lucide-react';
+import { ZoomIn, ZoomOut, Play, Pause, AlertCircle, ArrowLeftRight, Loader2, Edit3, Sparkles } from 'lucide-react';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { getCharacterColor } from '../subtitleEditor/characterColors';
 
@@ -28,6 +28,7 @@ interface SubtitleTimelineProps {
   isPlaying: boolean;
   onSelectLine: (rawLineIndex: number) => void;
   onDrawLine?: (startSec: number, endSec: number) => void;
+  onOpenWhisperSnippet?: (startSec: number, endSec: number) => void;
   secondsToAssTime: (secs: number) => string;
   parseAssTimeToSeconds: (timeStr: string) => number;
 }
@@ -45,6 +46,7 @@ export default function SubtitleTimeline({
   isPlaying,
   onSelectLine,
   onDrawLine,
+  onOpenWhisperSnippet,
   secondsToAssTime,
   parseAssTimeToSeconds
 }: SubtitleTimelineProps) {
@@ -58,6 +60,11 @@ export default function SubtitleTimeline({
   const [isDrawingMode, setIsDrawingMode] = useState<boolean>(false);
   const [drawStartSec, setDrawStartSec] = useState<number | null>(null);
   const [drawCurrentSec, setDrawCurrentSec] = useState<number | null>(null);
+
+  // Whisper snippet selection mode
+  const [isWhisperMode, setIsWhisperMode] = useState<boolean>(false);
+  const [whisperDrawStartSec, setWhisperDrawStartSec] = useState<number | null>(null);
+  const [whisperDrawCurrentSec, setWhisperDrawCurrentSec] = useState<number | null>(null);
   
   const [activeDrag, setActiveDrag] = useState<{
     rawLineIndex: number;
@@ -300,8 +307,8 @@ export default function SubtitleTimeline({
     // Avoid triggering seek if dragging dialog boxes or resizing
     if (activeDrag) return;
     
-    // Target might be an existing subtitle box; ensure we only draw on the background
-    if ((e.target as HTMLElement).closest('.subtitle-block')) return;
+    // Target might be an existing subtitle box; ensure we only draw on the background unless in Whisper mode
+    if (!isWhisperMode && (e.target as HTMLElement).closest('.subtitle-block')) return;
 
     const scroller = scrollContainerRef.current;
     if (!scroller) return;
@@ -310,7 +317,10 @@ export default function SubtitleTimeline({
     const clickX = e.clientX - rect.left + scroller.scrollLeft;
     const targetTimeSec = Math.max(0, Math.min(totalDuration, clickX / zoom));
 
-    if (isDrawingMode) {
+    if (isWhisperMode) {
+      setWhisperDrawStartSec(targetTimeSec);
+      setWhisperDrawCurrentSec(targetTimeSec);
+    } else if (isDrawingMode) {
       setDrawStartSec(targetTimeSec);
       setDrawCurrentSec(targetTimeSec);
     } else {
@@ -320,7 +330,7 @@ export default function SubtitleTimeline({
 
   // Mouse Move Drag Listener (document level to safeguard sliding outside components)
   useEffect(() => {
-    if (!activeDrag && drawStartSec === null) return;
+    if (!activeDrag && drawStartSec === null && whisperDrawStartSec === null) return;
 
     const handleMouseMove = (e: MouseEvent) => {
       if (activeDrag) {
@@ -344,6 +354,13 @@ export default function SubtitleTimeline({
           start: secondsToAssTime(newStart),
           end: secondsToAssTime(newEnd)
         });
+      } else if (whisperDrawStartSec !== null) {
+        const scroller = scrollContainerRef.current;
+        if (!scroller) return;
+        const rect = scroller.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left + scroller.scrollLeft;
+        const targetTimeSec = Math.max(0, Math.min(totalDuration, mouseX / zoom));
+        setWhisperDrawCurrentSec(targetTimeSec);
       } else if (drawStartSec !== null) {
         const scroller = scrollContainerRef.current;
         if (!scroller) return;
@@ -357,6 +374,15 @@ export default function SubtitleTimeline({
     const handleMouseUp = () => {
       if (activeDrag) {
         setActiveDrag(null);
+      } else if (whisperDrawStartSec !== null && whisperDrawCurrentSec !== null) {
+        const start = Math.min(whisperDrawStartSec, whisperDrawCurrentSec);
+        const end = Math.max(whisperDrawStartSec, whisperDrawCurrentSec);
+        if (Math.abs(end - start) > 0.08 && onOpenWhisperSnippet) {
+          onOpenWhisperSnippet(start, end);
+        }
+        setWhisperDrawStartSec(null);
+        setWhisperDrawCurrentSec(null);
+        setIsWhisperMode(false);
       } else if (drawStartSec !== null && drawCurrentSec !== null) {
         if (Math.abs(drawCurrentSec - drawStartSec) > 0.1 && onDrawLine) {
           const start = Math.min(drawStartSec, drawCurrentSec);
@@ -376,7 +402,19 @@ export default function SubtitleTimeline({
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [activeDrag, zoom, onUpdateLine, secondsToAssTime, drawStartSec, drawCurrentSec, onDrawLine, totalDuration]);
+  }, [
+    activeDrag, 
+    zoom, 
+    onUpdateLine, 
+    secondsToAssTime, 
+    drawStartSec, 
+    drawCurrentSec, 
+    whisperDrawStartSec, 
+    whisperDrawCurrentSec, 
+    onDrawLine, 
+    onOpenWhisperSnippet, 
+    totalDuration
+  ]);
 
   // Initiate dragging handle
   const startDrag = (
@@ -439,10 +477,47 @@ export default function SubtitleTimeline({
         </div>
 
         {/* Zoom Controls Slider & Buttons */}
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {onOpenWhisperSnippet && (
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => {
+                  setIsWhisperMode(prev => !prev);
+                  setIsDrawingMode(false);
+                }}
+                className={`text-[10px] px-2.5 py-1 flex items-center gap-1.5 border rounded-md font-medium transition-all shadow-xs cursor-pointer ${
+                  isWhisperMode
+                    ? 'bg-purple-600 text-white border-purple-400 shadow-purple-500/25 ring-1 ring-purple-300'
+                    : 'bg-purple-950/40 text-purple-300 border-purple-800/60 hover:bg-purple-900/50 hover:text-purple-200'
+                }`}
+                title="Выделить фрагмент мышкой на таймлайне и распознать через Whisper"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                <span>{isWhisperMode ? 'Выделите фрагмент...' : 'Распознать через Whisper'}</span>
+              </button>
+
+              {activeLineIndex !== null && (() => {
+                const activeLine = resolvedLines.find(l => l.rawLineIndex === activeLineIndex);
+                if (!activeLine) return null;
+                return (
+                  <button
+                    onClick={() => onOpenWhisperSnippet(activeLine.currentStartSec, activeLine.currentEndSec)}
+                    className="text-[10px] px-2 py-1 bg-neutral-900 hover:bg-purple-950/50 border border-neutral-800 hover:border-purple-800 text-purple-300 rounded-md transition-colors flex items-center gap-1 cursor-pointer"
+                    title={`Распознать текущую реплику через Whisper [${activeLine.currentStartSec.toFixed(2)}s - ${activeLine.currentEndSec.toFixed(2)}s]`}
+                  >
+                    <span>Выбранная ({activeLine.duration.toFixed(1)}s)</span>
+                  </button>
+                );
+              })()}
+            </div>
+          )}
+
           {onDrawLine && (
             <button
-              onClick={() => setIsDrawingMode(prev => !prev)}
+              onClick={() => {
+                setIsDrawingMode(prev => !prev);
+                setIsWhisperMode(false);
+              }}
               className={`text-[10px] px-2 py-1 flex items-center gap-1 border rounded transition-colors ${
                 isDrawingMode
                   ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/50'
@@ -503,10 +578,36 @@ export default function SubtitleTimeline({
         }}
         onMouseDown={handleTimelineMouseDown}
       >
+        {isWhisperMode && (
+          <div className="sticky top-2 left-1/2 -translate-x-1/2 z-50 bg-purple-950/95 text-purple-200 border border-purple-500/80 px-3 py-1 rounded-full text-[11px] font-medium shadow-xl flex items-center gap-2 pointer-events-none backdrop-blur-xs w-fit">
+            <Sparkles className="w-3.5 h-3.5 text-purple-400 animate-pulse" />
+            <span>Зажмите левую кнопку мыши и протяните по дорожке для выбора фрагмента фразы</span>
+          </div>
+        )}
+
         <div
-          className={`relative select-none ${isDrawingMode ? 'cursor-crosshair' : ''}`}
+          className={`relative select-none ${isDrawingMode || isWhisperMode ? 'cursor-crosshair' : ''}`}
           style={{ width: `${timelineWidth}px`, height: '145px' }}
         >
+          {/* Whisper Snippet Range Drag Selection Box */}
+          {whisperDrawStartSec !== null && whisperDrawCurrentSec !== null && (
+            <div
+              className="absolute top-0 bottom-0 z-40 bg-purple-600/25 border-x-2 border-purple-400 pointer-events-none shadow-[0_0_20px_rgba(168,85,247,0.45)] flex flex-col justify-between p-1.5"
+              style={{
+                left: `${Math.min(whisperDrawStartSec, whisperDrawCurrentSec) * zoom}px`,
+                width: `${Math.max(3, Math.abs(whisperDrawCurrentSec - whisperDrawStartSec) * zoom)}px`,
+              }}
+            >
+              <div className="bg-purple-950/95 text-purple-200 border border-purple-500/80 rounded px-2 py-0.5 text-[10px] font-mono font-bold shadow-lg w-fit whitespace-nowrap flex items-center gap-1.5">
+                <Sparkles className="w-3 h-3 text-purple-400 animate-pulse" />
+                <span>Фрагмент Whisper: {Math.abs(whisperDrawCurrentSec - whisperDrawStartSec).toFixed(2)}s</span>
+              </div>
+              <div className="text-[9px] font-mono text-purple-200 bg-black/80 px-2 py-0.5 rounded w-fit self-center border border-purple-700/60 shadow">
+                Отпустите мышь для запуска Whisper
+              </div>
+            </div>
+          )}
+
           {/* Waveform track with secondary grid (Ruler built-in) */}
           <div className="w-full h-[70px] relative overflow-hidden bg-[#0a0a0a]">
             {audioPeaksData.isExtracting && (
@@ -626,7 +727,19 @@ export default function SubtitleTimeline({
                     >
                       [{charName || '?'}]
                     </span>
-                    <span className="truncate text-neutral-100 font-medium">{line.text || '(Пустая реплика)'}</span>
+                    <span className="truncate text-neutral-100 font-medium mr-1">{line.text || '(Пустая реплика)'}</span>
+                    {onOpenWhisperSnippet && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenWhisperSnippet(line.currentStartSec, line.currentEndSec);
+                        }}
+                        title="Распознать эту реплику через Whisper"
+                        className="p-0.5 text-purple-400/80 hover:text-purple-100 hover:bg-purple-900/80 rounded transition-all opacity-0 group-hover:opacity-100 shrink-0 cursor-pointer ml-auto"
+                      >
+                        <Sparkles className="w-2.5 h-2.5" />
+                      </button>
+                    )}
                   </div>
 
                   {/* Hover Realtime Timings Tip */}

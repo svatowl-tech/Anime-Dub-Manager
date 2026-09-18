@@ -424,6 +424,135 @@ class WhisperService {
 
     return srtContent;
   }
+
+  /**
+   * Transcribe a specific audio/video time slice with Whisper
+   * @param {string} videoPath - Path to media file
+   * @param {number} startSec - Slice start in seconds
+   * @param {number} endSec - Slice end in seconds
+   * @param {object} options - { language, model, initialPrompt }
+   */
+  async transcribeSlice(videoPath, startSec, endSec, options = {}) {
+    const { model = 'small', language = 'ja', initialPrompt = '' } = options;
+    const duration = Math.max(0.2, endSec - startSec);
+    log.info(`[WhisperService] transcribeSlice requested: ${startSec}s - ${endSec}s (${duration.toFixed(2)}s) [lang: ${language}, model: ${model}] for ${videoPath}`);
+
+    if (!videoPath) {
+      log.warn('[WhisperService] Missing videoPath in transcribeSlice');
+      return '';
+    }
+
+    let fileExists = false;
+    try {
+      await fs.access(videoPath);
+      fileExists = true;
+    } catch {
+      log.warn(`[WhisperService] Video file not accessible: ${videoPath}`);
+      return '';
+    }
+
+    const outputDir = path.dirname(videoPath);
+    const timestamp = Date.now();
+    const tempMp3Path = path.join(outputDir, `whisper_slice_${timestamp}.mp3`);
+
+    try {
+      // Extract the audio slice with ffmpeg
+      await new Promise((resolve, reject) => {
+        ffmpeg(videoPath)
+          .setStartTime(startSec)
+          .setDuration(duration)
+          .noVideo()
+          .audioCodec('libmp3lame')
+          .audioChannels(1)
+          .audioFrequency(16000)
+          .audioBitrate('64k')
+          .output(tempMp3Path)
+          .on('end', () => {
+            log.info(`[WhisperService] Sliced audio successfully: ${tempMp3Path}`);
+            resolve();
+          })
+          .on('error', (err) => {
+            log.error('[WhisperService] Slicing audio failed:', err);
+            reject(err);
+          })
+          .run();
+      });
+
+      // 1. Primary: Use Gemini API for speech-to-text if key is available
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (apiKey) {
+        try {
+          const audioBuffer = await fs.readFile(tempMp3Path);
+          const base64Audio = audioBuffer.toString('base64');
+          const langNames = {
+            'ja': 'японском',
+            'ru': 'русском',
+            'en': 'английском',
+            'zh': 'китайском',
+            'ko': 'корейском'
+          };
+          const targetLangName = langNames[language] || language;
+
+          const prompt = `Ты — профессиональный ASR расшифровщик речи (Whisper).
+Прослушай этот аудиофрагмент и в точности запиши слова, которые произносятся на ${targetLangName} языке.
+${initialPrompt ? `Контекст фразы: "${initialPrompt}"` : ''}
+ПРАВИЛА:
+- Верни ТОЛЬКО произнесенный текст фразы.
+- Никаких кавычек, комментариев, таймкодов или Markdown.`;
+
+          const response = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+            {
+              contents: [{
+                parts: [
+                  { inlineData: { mimeType: 'audio/mp3', data: base64Audio } },
+                  { text: prompt }
+                ]
+              }]
+            },
+            {
+              headers: { 'Content-Type': 'application/json' },
+              timeout: 30000
+            }
+          );
+
+          if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+            let recognized = response.data.candidates[0].content.parts[0].text.trim();
+            recognized = recognized.replace(/^["'«»`]+|["'«»`]+$/g, '').trim();
+            log.info(`[WhisperService] Slice transcribed via Gemini: "${recognized}"`);
+            return recognized;
+          }
+        } catch (geminiErr) {
+          log.warn(`[WhisperService] Gemini slice transcription error: ${geminiErr.message}. Trying local fallback...`);
+        }
+      }
+
+      // 2. Fallback: local transcription using transformers if available
+      try {
+        const tempWavPath = path.join(outputDir, `whisper_slice_${timestamp}.wav`);
+        await this.extractAudioToWav(tempMp3Path, tempWavPath);
+        const srtContent = await this.transcribeLocally(tempWavPath, language, model);
+        await fs.unlink(tempWavPath).catch(() => {});
+        
+        // Parse text from srt
+        const lines = srtContent.split('\n');
+        const textLines = lines.filter(l => l.trim() && !l.match(/^\d+$/) && !l.includes('-->'));
+        const recognized = textLines.join(' ').trim();
+        if (recognized) {
+          log.info(`[WhisperService] Slice transcribed locally: "${recognized}"`);
+          return recognized;
+        }
+      } catch (localErr) {
+        log.warn(`[WhisperService] Local slice transcription failed: ${localErr.message}`);
+      }
+
+      return '';
+    } finally {
+      try {
+        await fs.unlink(tempMp3Path);
+      } catch (e) {}
+    }
+  }
 }
 
 module.exports = WhisperService;

@@ -49,6 +49,31 @@ function registerWhisperHandlers(getData) {
     return srtPath;
   }));
 
+  ipcMain.handle('transcribe-whisper-snippet', wrapIpcHandler(async (event, { videoPath, startSec, endSec, language = 'ja', model = 'small', initialPrompt = '' }) => {
+    if (startSec === undefined || endSec === undefined) {
+      throw new Error('Не указаны временные границы фрагмента (startSec, endSec)');
+    }
+
+    const service = getWhisperService();
+    let recognizedText = '';
+
+    if (service && typeof service.transcribeSlice === 'function') {
+      recognizedText = await service.transcribeSlice(videoPath, Number(startSec), Number(endSec), {
+        model,
+        language,
+        initialPrompt
+      });
+    }
+
+    return {
+      text: recognizedText || '',
+      startSec: Number(startSec),
+      endSec: Number(endSec),
+      language,
+      model
+    };
+  }));
+
   ipcMain.handle('download-whisper-model', wrapIpcHandler(async (event, { modelName }) => {
     const service = getWhisperService();
     await service.ensureFolder();

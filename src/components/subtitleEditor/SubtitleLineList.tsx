@@ -25,6 +25,7 @@ interface SubtitleLineListProps {
   onDeleteLine: (idx: number) => void;
   onCommitName: (name: string) => void;
   onToggleBookmark: (idx: number) => void;
+  onOpenWhisperSnippet?: (startSec: number, endSec: number) => void;
 }
 
 export const SubtitleLineList: React.FC<SubtitleLineListProps> = ({
@@ -48,6 +49,7 @@ export const SubtitleLineList: React.FC<SubtitleLineListProps> = ({
   onDeleteLine,
   onCommitName,
   onToggleBookmark,
+  onOpenWhisperSnippet,
 }) => {
   const [characterFilter, setCharacterFilter] = useState<string | null>(null);
 
@@ -241,6 +243,7 @@ export const SubtitleLineList: React.FC<SubtitleLineListProps> = ({
               index={lines.indexOf(line)}
               isBookmarked={bookmarks.includes(line.rawLineIndex)}
               onToggleBookmark={onToggleBookmark}
+              onOpenWhisperSnippet={onOpenWhisperSnippet}
             />
           );
         })}

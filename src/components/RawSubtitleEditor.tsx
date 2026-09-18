@@ -9,6 +9,7 @@ import { SubtitleEditorHeader } from "./subtitleEditor/SubtitleEditorHeader";
 import { SubtitleLineList } from "./subtitleEditor/SubtitleLineList";
 import { SubtitleSidebar } from "./subtitleEditor/SubtitleSidebar";
 import { SubtitleShiftModal } from "./subtitleEditor/SubtitleShiftModal";
+import { WhisperSnippetModal } from "./subtitleEditor/WhisperSnippetModal";
 import { parseAssTimeToSeconds, secondsToAssTime } from "./subtitleEditor/utils";
 
 interface RawSubtitleEditorProps {
@@ -75,6 +76,7 @@ export default function RawSubtitleEditor({
     handleDuplicateLine,
     handleAddLine,
     handleDrawLine,
+    handleAddSubtitleAtTiming,
     handleMassPolivanovToHepburn,
     handleSave,
     handleAutoFix,
@@ -89,6 +91,32 @@ export default function RawSubtitleEditor({
     handlePlayFromTime,
     isSignLine,
   } = useSubtitleEditorState(currentEpisode, onRefresh);
+
+  const [whisperSnippetModalData, setWhisperSnippetModalData] = React.useState<{
+    isOpen: boolean;
+    startSec: number;
+    endSec: number;
+    defaultCharacterName?: string;
+    activeLineText?: string;
+  }>({
+    isOpen: false,
+    startSec: 0,
+    endSec: 0,
+  });
+
+  const handleOpenWhisperSnippet = (startSec: number, endSec: number) => {
+    const activeLine = activeLineIndex !== null ? lines.find(l => l.rawLineIndex === activeLineIndex) : null;
+    const activeText = activeLine ? (updates[activeLine.rawLineIndex]?.text ?? activeLine.text) : '';
+    const activeChar = activeLine ? (updates[activeLine.rawLineIndex]?.name ?? activeLine.name) : '';
+
+    setWhisperSnippetModalData({
+      isOpen: true,
+      startSec,
+      endSec,
+      defaultCharacterName: activeChar || '',
+      activeLineText: activeText || ''
+    });
+  };
 
   if (!currentEpisode?.subPath) {
     return (
@@ -146,6 +174,7 @@ export default function RawSubtitleEditor({
           onDeleteLine={handleDeleteLine}
           onCommitName={commitNewName}
           onToggleBookmark={handleToggleBookmark}
+          onOpenWhisperSnippet={handleOpenWhisperSnippet}
         />
 
         <SubtitleTimeline
@@ -180,6 +209,7 @@ export default function RawSubtitleEditor({
             }
           }}
           onDrawLine={handleDrawLine}
+          onOpenWhisperSnippet={handleOpenWhisperSnippet}
           secondsToAssTime={secondsToAssTime}
           parseAssTimeToSeconds={parseAssTimeToSeconds}
         />
@@ -241,6 +271,34 @@ export default function RawSubtitleEditor({
           loadRawSubtitles();
           onRefresh();
         }}
+      />
+
+      <WhisperSnippetModal
+        isOpen={whisperSnippetModalData.isOpen}
+        onClose={() => setWhisperSnippetModalData(prev => ({ ...prev, isOpen: false }))}
+        initialStartSec={whisperSnippetModalData.startSec}
+        initialEndSec={whisperSnippetModalData.endSec}
+        videoPath={currentEpisode?.rawPath}
+        characterNames={stableNames}
+        defaultCharacterName={whisperSnippetModalData.defaultCharacterName}
+        activeLineText={whisperSnippetModalData.activeLineText}
+        onAddSubtitle={(data) => {
+          handleAddSubtitleAtTiming(data.startSec, data.endSec, data.text, data.characterName, data.mode);
+        }}
+        onPlayRange={(startSec, endSec) => {
+          if (videoRef.current) {
+            videoRef.current.currentTime = startSec;
+            videoRef.current.play().catch(e => console.error('Play range error', e));
+            const durationMs = Math.max(200, (endSec - startSec) * 1000);
+            setTimeout(() => {
+              if (videoRef.current) {
+                videoRef.current.pause();
+              }
+            }, durationMs);
+          }
+        }}
+        secondsToAssTime={secondsToAssTime}
+        parseAssTimeToSeconds={parseAssTimeToSeconds}
       />
     </div>
   );

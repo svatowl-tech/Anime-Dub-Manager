@@ -687,6 +687,71 @@ export function useSubtitleEditorState(
     }, 100);
   }, [updates, pushStateForUndo]);
 
+  const handleAddSubtitleAtTiming = useCallback((
+    startSec: number,
+    endSec: number,
+    text: string,
+    characterName: string = '',
+    mode: 'new' | 'replace' = 'new'
+  ) => {
+    pushStateForUndo();
+
+    if (mode === 'replace' && activeLineIndex !== null) {
+      setUpdates(u => ({
+        ...u,
+        [activeLineIndex]: {
+          ...(u[activeLineIndex] || {}),
+          text,
+          ...(characterName ? { name: characterName } : {})
+        }
+      }));
+      return;
+    }
+
+    const newId = Date.now();
+    const startTimeStr = secondsToAssTime(startSec);
+    const endTimeStr = secondsToAssTime(endSec);
+
+    const newLine = {
+      text,
+      name: characterName,
+      style: 'Default',
+      start: startTimeStr,
+      end: endTimeStr,
+      startSec,
+      endSec,
+      rawLineIndex: newId,
+      id: undefined,
+      originalIndex: undefined
+    } as RawSubtitleLine;
+
+    setLines(prev => {
+      const newLines = [...prev, newLine];
+      newLines.sort((a, b) => {
+        const uA = updates[a.rawLineIndex];
+        const uB = updates[b.rawLineIndex];
+        const sA = uA?.start !== undefined ? parseAssTimeToSeconds(uA.start as string) : a.startSec;
+        const sB = uB?.start !== undefined ? parseAssTimeToSeconds(uB.start as string) : b.startSec;
+        return sA - sB;
+      });
+      return newLines;
+    });
+
+    setUpdates(u => ({
+      ...u,
+      [newId]: { text, name: characterName, start: startTimeStr, end: endTimeStr }
+    }));
+
+    setActiveLineIndex(newId);
+
+    setTimeout(() => {
+      const element = document.getElementById(`line-${newId}`);
+      if (element) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 150);
+  }, [updates, activeLineIndex, pushStateForUndo]);
+
   const handleMassPolivanovToHepburn = () => {
     if (lines.length === 0) return;
     
@@ -1170,6 +1235,7 @@ export function useSubtitleEditorState(
     handleDuplicateLine,
     handleAddLine,
     handleDrawLine,
+    handleAddSubtitleAtTiming,
     handleMassPolivanovToHepburn,
     handleSave,
     handleAutoFix,

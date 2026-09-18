@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useMemo } from "react";
-import { Bookmark, AlertCircle, Plus, Copy, Trash2 } from "lucide-react";
+import { Bookmark, AlertCircle, Plus, Copy, Trash2, Sparkles } from "lucide-react";
 import { RawSubtitleLine } from "./types";
 import { getCharacterColor } from "./characterColors";
 import { SubtitleThumbnailCell } from "./SubtitleThumbnailCell";
@@ -23,6 +23,7 @@ interface SubtitleLineRowProps {
   index: number;
   isBookmarked: boolean;
   onToggleBookmark: (idx: number) => void;
+  onOpenWhisperSnippet?: (startSec: number, endSec: number) => void;
 }
 
 export const SubtitleLineRow = React.memo(({
@@ -42,7 +43,8 @@ export const SubtitleLineRow = React.memo(({
   onCommitName,
   index,
   isBookmarked,
-  onToggleBookmark
+  onToggleBookmark,
+  onOpenWhisperSnippet,
 }: SubtitleLineRowProps) => {
   const currentName = updates?.name !== undefined ? updates.name : line.name;
   const currentText = updates?.text !== undefined ? updates.text : line.text;
@@ -193,6 +195,15 @@ export const SubtitleLineRow = React.memo(({
         />
       </div>
       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity justify-end pr-2">
+        {onOpenWhisperSnippet && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onOpenWhisperSnippet(line.startSec, line.endSec); }}
+            title="Распознать этот фрагмент через Whisper и перевести"
+            className="p-1.5 text-purple-400 hover:text-purple-200 bg-purple-950/40 hover:bg-purple-900/60 border border-purple-800/50 rounded cursor-pointer transition-colors"
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+          </button>
+        )}
         <button
           onClick={(e) => { e.stopPropagation(); onAdd(index); }}
           title="Добавить реплику ниже"
