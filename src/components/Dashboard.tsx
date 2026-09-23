@@ -655,15 +655,18 @@ export default function Dashboard({
     }
   };
 
+  const isFetchingTorrentMetaRef = useRef(false);
+
   const handleStartTorrentDownload = async (torrent: any) => {
-    if (!torrent || downloadStep === 'getting_meta') return;
+    if (!torrent || isFetchingTorrentMetaRef.current || downloadStep === 'getting_meta') return;
+    isFetchingTorrentMetaRef.current = true;
     setSelectedTorrentForMeta(torrent);
     setDownloadStep('getting_meta');
     
     try {
       const meta = await ipcSafe.invoke('get-torrent-metadata', {
-        torrentUrl: torrent.torrent || torrent.link || undefined,
-        magnet: torrent.magnet || undefined
+        torrentUrl: (torrent.torrent || torrent.link || '').trim() || undefined,
+        magnet: (torrent.magnet || '').trim() || undefined
       });
       setTorrentMetadata(meta);
       setDownloadStep('select_files');
@@ -671,6 +674,8 @@ export default function Dashboard({
       console.error(err);
       toast.error('Ошибка получения метаданных: ' + (err.message || String(err)));
       setDownloadStep('search');
+    } finally {
+      isFetchingTorrentMetaRef.current = false;
     }
   };
 

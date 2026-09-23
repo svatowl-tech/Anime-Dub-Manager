@@ -493,7 +493,10 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     if (!torrentId) throw new Error('Torrent URL or Magnet is required');
     log.info(`[get-torrent-metadata] Fetching metadata for: ${typeof torrentId === 'string' && torrentId.length > 80 ? torrentId.slice(0, 80) + '...' : torrentId}`);
     
-    const client = await getTorrentClient();
+    let client = await getTorrentClient();
+    if (!client || client.destroyed) {
+      client = await getTorrentClient(true);
+    }
     
     return new Promise(async (resolve, reject) => {
       let resolved = false;
@@ -523,7 +526,7 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
               if (t && t.files && t.files.length > 0) {
                 cleanup();
                 onMetadata(t);
-              } else if (attempts > 40) { // 4 seconds max
+              } else if (attempts > 50) { // 5 seconds max
                 cleanup();
                 if (!resolved) {
                   resolved = true;
@@ -577,46 +580,59 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
         await fs.mkdir(torrentsDir, { recursive: true });
 
         let lastErr = null;
-        let torrent = await getOrAddTorrent(client, torrentId, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(err => {
-          log.warn(`[get-torrent-metadata] Primary getOrAddTorrent failed for ${torrentId}: ${err.message}`);
+        let torrent = null;
+
+        // 1. Primary attempt with given torrentId
+        try {
+          torrent = await getOrAddTorrent(client, torrentId, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData);
+        } catch (err) {
+          log.warn(`[get-torrent-metadata] Primary getOrAddTorrent failed for ${torrentId}:`, err?.message || err);
           lastErr = err;
-          return null;
-        });
-        
-        if ((!torrent || torrent.destroyed) && magnet && torrentId !== magnet) {
-          log.info(`[get-torrent-metadata] Retrying with magnet link: ${magnet.slice(0, 60)}...`);
-          torrent = await getOrAddTorrent(client, magnet, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(err => {
-            lastErr = err;
-            return null;
-          });
         }
 
+        // 2. If primary failed or returned destroyed, and alternative magnet is available, retry with magnet
+        if ((!torrent || torrent.destroyed) && magnet && torrentId !== magnet) {
+          log.info(`[get-torrent-metadata] Retrying with magnet link: ${magnet.slice(0, 60)}...`);
+          try {
+            torrent = await getOrAddTorrent(client, magnet, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData);
+          } catch (err) {
+            log.warn(`[get-torrent-metadata] Magnet retry failed:`, err?.message || err);
+            lastErr = err;
+          }
+        }
+
+        // 3. If still failed and alternative torrentUrl is available, retry with torrentUrl
         if ((!torrent || torrent.destroyed) && torrentUrl && torrentId !== torrentUrl) {
           log.info(`[get-torrent-metadata] Retrying with torrentUrl: ${torrentUrl.slice(0, 60)}...`);
-          torrent = await getOrAddTorrent(client, torrentUrl, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData).catch(err => {
+          try {
+            torrent = await getOrAddTorrent(client, torrentUrl, { path: torrentsDir, announce: WELL_KNOWN_TRACKERS }, getData);
+          } catch (err) {
+            log.warn(`[get-torrent-metadata] torrentUrl retry failed:`, err?.message || err);
             lastErr = err;
-            return null;
-          });
+          }
         }
 
         if (!torrent || torrent.destroyed) {
-          const detail = lastErr?.message || 'Проверьте корректность Magnet/Torrent ссылки.';
+          const detail = lastErr?.message || 'Не удалось инициализировать торрент (проверьте корректность ссылки или доступность пиров).';
           throw new Error(`Не удалось инициализировать торрент в клиенте WebTorrent: ${detail}`);
         }
 
         if (torrent.ready || (torrent.files && torrent.files.length > 0)) {
           onMetadata(torrent);
         } else {
-          const onErr = (err) => {
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              reject(err || new Error('Ошибка при получении метаданных торрента'));
-            }
-          };
           torrent.once('metadata', () => onMetadata(torrent));
           torrent.once('ready', () => onMetadata(torrent));
-          torrent.once('error', onErr);
+          
+          // Non-fatal tracker / connection errors should NOT abort metadata resolution
+          torrent.on('error', (err) => {
+            if (torrent.destroyed && !resolved) {
+              resolved = true;
+              cleanup();
+              reject(err || new Error('Торрент был принудительно остановлен или закрыт.'));
+            } else {
+              log.warn(`[get-torrent-metadata] Non-fatal torrent notice for ${torrent.infoHash || ''}:`, err?.message || err);
+            }
+          });
         }
         
       } catch (e) {
@@ -726,6 +742,24 @@ const WELL_KNOWN_TRACKERS = [
   'wss://tracker.fastcast.nz'
 ];
 
+function decompressBuffer(buf) {
+  if (!buf || buf.length < 2) return buf;
+  const zlib = require('zlib');
+  if (buf[0] === 0x1f && buf[1] === 0x8b) {
+    try { return zlib.gunzipSync(buf); } catch (e) {}
+  }
+  if (buf[0] === 0x78) {
+    try { return zlib.inflateSync(buf); } catch (e) {}
+  }
+  try {
+    if (typeof zlib.brotliDecompressSync === 'function') {
+      const decompressed = zlib.brotliDecompressSync(buf);
+      if (decompressed && decompressed.length > 0) return decompressed;
+    }
+  } catch (e) {}
+  return buf;
+}
+
 async function resolveTorrentIdentifier(input) {
   let torrentId = input;
   if (!torrentId) return null;
@@ -739,10 +773,38 @@ async function resolveTorrentIdentifier(input) {
   }
 
   torrentId = torrentId.trim().replace(/^["']|["']$/g, '');
+  // Sanitize any XML &amp; from RSS feeds
+  torrentId = torrentId.replace(/&amp;/g, '&');
 
-  // If already a clean magnet or infoHash, return it
-  if (torrentId.startsWith('magnet:?') || /^[0-9a-fA-F]{40}$/.test(torrentId) || /^[A-Z2-7]{32}$/i.test(torrentId)) {
-    return torrentId;
+  // Handle URL-encoded magnet links (e.g. magnet%3A%3F)
+  if (torrentId.startsWith('magnet%3A') || torrentId.startsWith('magnet%3a')) {
+    try {
+      torrentId = decodeURIComponent(torrentId);
+    } catch (e) {}
+  }
+
+  // If already a clean magnet link
+  if (torrentId.startsWith('magnet:?')) {
+    // Check if hash inside is base32, convert if needed
+    const b32Match = torrentId.match(/xt=urn(?:%3A|:)btih(?:%3A|:)([A-Za-z2-7]{32})(?:&|$)/i);
+    if (b32Match) {
+      const hex = base32ToHex(b32Match[1]);
+      if (hex) {
+        torrentId = torrentId.replace(b32Match[1], hex);
+      }
+    }
+    return buildEnhancedTorrentId(torrentId);
+  }
+
+  // If raw 40 hex chars
+  if (/^[0-9a-fA-F]{40}$/.test(torrentId)) {
+    return buildEnhancedTorrentId(torrentId);
+  }
+
+  // If raw 32 base32 chars
+  if (/^[A-Z2-7]{32}$/i.test(torrentId)) {
+    const hex = base32ToHex(torrentId);
+    return buildEnhancedTorrentId(hex || torrentId);
   }
 
   // If it is a local file path
@@ -750,118 +812,112 @@ async function resolveTorrentIdentifier(input) {
     try {
       const fileBuf = await fs.readFile(torrentId);
       if (fileBuf && fileBuf.length > 0) {
-        if (fileBuf[0] === 100) return fileBuf;
-        // Check gzip compressed .torrent
-        if (fileBuf.length > 2 && fileBuf[0] === 0x1f && fileBuf[1] === 0x8b) {
-          const zlib = require('zlib');
-          const decompressed = zlib.gunzipSync(fileBuf);
-          if (decompressed && decompressed[0] === 100) return decompressed;
-        }
+        const decomp = decompressBuffer(fileBuf);
+        if (decomp && decomp[0] === 100) return decomp;
       }
     } catch(e) {}
   }
 
   // If it is an HTTP/HTTPS URL:
   if (torrentId.startsWith('http://') || torrentId.startsWith('https://')) {
-    try {
-      const axios = require('axios');
-      const zlib = require('zlib');
-      const https = require('https');
+    const axios = require('axios');
+    const https = require('https');
 
-      const res = await axios.get(torrentId, {
-        responseType: 'arraybuffer',
-        timeout: 18000,
-        maxRedirects: 10,
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          'Accept': 'application/x-bittorrent, text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8',
-          'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
-          'Accept-Encoding': 'gzip, deflate, br'
-        }
-      });
+    // Build URL candidates (primary URL + popular working mirrors for nyaa.si if blocked)
+    const urlsToTry = [torrentId];
+    if (torrentId.includes('nyaa.si')) {
+      urlsToTry.push(torrentId.replace('nyaa.si', 'nyaa.land'));
+      urlsToTry.push(torrentId.replace('nyaa.si', 'nyaa.net'));
+    }
 
-      let buf = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data);
-      if (buf && buf.length > 2) {
-        if (buf[0] === 0x1f && buf[1] === 0x8b) {
-          try { buf = zlib.gunzipSync(buf); } catch (e) {}
-        } else if (buf[0] === 0x78) {
-          try { buf = zlib.inflateSync(buf); } catch (e) {}
-        }
-      }
-
-      if (buf && buf.length > 0) {
-        if (buf[0] === 100) { // 'd' in ASCII: valid bencoded .torrent dictionary
-          log.info(`[resolveTorrentIdentifier] Successfully downloaded .torrent buffer from URL (${buf.length} bytes)`);
-          return buf;
-        }
-
-        // It returned an HTML page (like TokyoTosho details.php or Nyaa view/XXXX)
-        const text = buf.toString('utf-8');
-        
-        // 1. Try to extract Magnet URI from HTML
-        const magnetMatch = text.match(/href=["'](magnet:\?[^"']+)["']/i) || 
-                            text.match(/(magnet:\?xt=urn:btih:[a-zA-Z0-9%_\-\.\:\=\&]+)/i) ||
-                            text.match(/(magnet:\?xt=urn:btmh:[a-zA-Z0-9%_\-\.\:\=\&]+)/i);
-        if (magnetMatch) {
-          const cleanMagnet = magnetMatch[1].replace(/&amp;/g, '&');
-          log.info(`[resolveTorrentIdentifier] Extracted Magnet link from HTML page (${torrentId})`);
-          return cleanMagnet;
-        }
-
-        // 2. Try to extract direct .torrent download link inside the page
-        const torrentLinkMatch = text.match(/href=["'](https?:\/\/[^"']+\.torrent[^"']*)["']/i) ||
-                                 text.match(/href=["'](\/download\/[^"']+\.torrent[^"']*)["']/i) ||
-                                 text.match(/href=["']([^"']*download\.php\?[^"']+)["']/i);
-        if (torrentLinkMatch) {
-          let downloadUrl = torrentLinkMatch[1].replace(/&amp;/g, '&');
-          if (downloadUrl.startsWith('/')) {
-            const parsedOrigin = new URL(torrentId).origin;
-            downloadUrl = parsedOrigin + downloadUrl;
+    for (const curUrl of urlsToTry) {
+      try {
+        const res = await axios.get(curUrl, {
+          responseType: 'arraybuffer',
+          timeout: 15000,
+          maxRedirects: 10,
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'application/x-bittorrent, text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
           }
-          log.info(`[resolveTorrentIdentifier] Extracted .torrent download URL (${downloadUrl}), downloading...`);
-          const res2 = await axios.get(downloadUrl, {
-            responseType: 'arraybuffer',
-            timeout: 15000,
-            maxRedirects: 10,
-            httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-              'Accept': 'application/x-bittorrent, */*',
-              'Accept-Encoding': 'gzip, deflate, br'
+        });
+
+        let buf = decompressBuffer(Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data));
+
+        if (buf && buf.length > 0) {
+          if (buf[0] === 100) { // 'd' in ASCII: valid bencoded .torrent dictionary
+            log.info(`[resolveTorrentIdentifier] Successfully downloaded .torrent buffer from URL (${curUrl}) (${buf.length} bytes)`);
+            return buf;
+          }
+
+          // It returned an HTML page (like TokyoTosho details.php or Nyaa view/XXXX)
+          const text = buf.toString('utf-8');
+          
+          // 1. Try to extract Magnet URI from HTML
+          const magnetMatch = text.match(/href=["'](magnet:\?[^"']+)["']/i) || 
+                              text.match(/(magnet:\?xt=urn(?:%3A|:)btih(?:%3A|:)[a-zA-Z0-9%_\-\.\:\=\&]+)/i) ||
+                              text.match(/(magnet:\?xt=urn(?:%3A|:)btmh(?:%3A|:)[a-zA-Z0-9%_\-\.\:\=\&]+)/i);
+          if (magnetMatch) {
+            let cleanMagnet = magnetMatch[1].replace(/&amp;/g, '&');
+            if (cleanMagnet.includes('%3A') || cleanMagnet.includes('%3a')) {
+              try { cleanMagnet = decodeURIComponent(cleanMagnet); } catch (e) {}
             }
-          });
-          let buf2 = Buffer.isBuffer(res2.data) ? res2.data : Buffer.from(res2.data);
-          if (buf2 && buf2.length > 2) {
-            if (buf2[0] === 0x1f && buf2[1] === 0x8b) {
-              try { buf2 = zlib.gunzipSync(buf2); } catch (e) {}
-            } else if (buf2[0] === 0x78) {
-              try { buf2 = zlib.inflateSync(buf2); } catch (e) {}
+            log.info(`[resolveTorrentIdentifier] Extracted Magnet link from HTML page (${curUrl})`);
+            return buildEnhancedTorrentId(cleanMagnet);
+          }
+
+          // 2. Try to extract direct .torrent download link inside the page
+          const torrentLinkMatch = text.match(/href=["'](https?:\/\/[^"']+\.torrent[^"']*)["']/i) ||
+                                   text.match(/href=["'](\/download\/[^"']+\.torrent[^"']*)["']/i) ||
+                                   text.match(/href=["']([^"']*download\.php\?[^"']+)["']/i);
+          if (torrentLinkMatch) {
+            let downloadUrl = torrentLinkMatch[1].replace(/&amp;/g, '&');
+            if (downloadUrl.startsWith('/')) {
+              const parsedOrigin = new URL(curUrl).origin;
+              downloadUrl = parsedOrigin + downloadUrl;
+            }
+            log.info(`[resolveTorrentIdentifier] Extracted .torrent download URL (${downloadUrl}), downloading...`);
+            try {
+              const res2 = await axios.get(downloadUrl, {
+                responseType: 'arraybuffer',
+                timeout: 15000,
+                maxRedirects: 10,
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                  'Accept': 'application/x-bittorrent, */*'
+                }
+              });
+              let buf2 = decompressBuffer(Buffer.isBuffer(res2.data) ? res2.data : Buffer.from(res2.data));
+              if (buf2 && buf2[0] === 100) {
+                return buf2;
+              }
+            } catch (err2) {
+              log.warn(`[resolveTorrentIdentifier] Nested download link fetch failed: ${err2.message}`);
             }
           }
-          if (buf2 && buf2[0] === 100) {
-            return buf2;
+
+          // 3. Try to extract infoHash from HTML text
+          const hashMatch = text.match(/xt=urn(?:%3A|:)btih(?:%3A|:)([0-9a-fA-F]{40})/i) ||
+                            text.match(/data-hash=["']([0-9a-fA-F]{40})["']/i) ||
+                            text.match(/info_hash=["']([0-9a-fA-F]{40})["']/i);
+          if (hashMatch) {
+            log.info(`[resolveTorrentIdentifier] Found infoHash ${hashMatch[1]} in HTML page`);
+            return buildEnhancedTorrentId(`magnet:?xt=urn:btih:${hashMatch[1]}`);
           }
         }
-
-        // 3. Try to extract infoHash from HTML text
-        const hashMatch = text.match(/xt=urn:btih:([0-9a-fA-F]{40})/i) ||
-                          text.match(/data-hash=["']([0-9a-fA-F]{40})["']/i) ||
-                          text.match(/info_hash=["']([0-9a-fA-F]{40})["']/i);
-        if (hashMatch) {
-          log.info(`[resolveTorrentIdentifier] Found infoHash ${hashMatch[1]} in HTML page`);
-          return `magnet:?xt=urn:btih:${hashMatch[1]}`;
-        }
+      } catch (err) {
+        log.warn(`[resolveTorrentIdentifier] Attempt to resolve URL "${curUrl}" failed:`, err.message);
       }
-    } catch (err) {
-      log.warn(`[resolveTorrentIdentifier] Failed to resolve URL "${torrentId}" manually:`, err.message);
     }
 
     // Fallback: If URL has a 40-char infoHash in path/query string, extract it
     const urlHashMatch = torrentId.match(/([0-9a-fA-F]{40})/i);
     if (urlHashMatch) {
       log.info(`[resolveTorrentIdentifier] Extracted infoHash ${urlHashMatch[1]} from URL path/query`);
-      return `magnet:?xt=urn:btih:${urlHashMatch[1]}`;
+      return buildEnhancedTorrentId(`magnet:?xt=urn:btih:${urlHashMatch[1]}`);
     }
   }
 
@@ -876,7 +932,7 @@ function buildEnhancedTorrentId(torrentId) {
 
   if (torrentId.startsWith('magnet:?')) {
     // If it's already a magnet link, preserve all existing parameters and just append missing trackers
-    let enhanced = torrentId;
+    let enhanced = torrentId.replace(/&amp;/g, '&');
     for (const tracker of WELL_KNOWN_TRACKERS) {
       const encoded = encodeURIComponent(tracker);
       if (!enhanced.includes(encoded) && !enhanced.includes(tracker)) {
@@ -899,6 +955,7 @@ let torrentClientInstance = null;
 const BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 function base32ToHex(b32) {
+  if (!b32 || typeof b32 !== 'string') return null;
   let bits = 0;
   let value = 0;
   let out = "";
@@ -918,16 +975,25 @@ function base32ToHex(b32) {
 
 function parseInfoHash(id) {
   if (!id || typeof id !== 'string') return null;
+  let clean = id.trim().replace(/^["']|["']$/g, '');
+  if (clean.includes('%3A') || clean.includes('%3a') || clean.includes('%26') || clean.includes('%3D')) {
+    try {
+      clean = decodeURIComponent(clean);
+    } catch (e) {}
+  }
+  clean = clean.replace(/&amp;/g, '&');
+
   // Raw 40 hex chars
-  if (/^[0-9a-fA-F]{40}$/.test(id)) {
-    return id.toLowerCase();
+  if (/^[0-9a-fA-F]{40}$/.test(clean)) {
+    return clean.toLowerCase();
   }
   // Raw 32 base32 chars
-  if (/^[A-Z2-7]{32}$/i.test(id)) {
-    return base32ToHex(id) || id.toLowerCase();
+  if (/^[A-Z2-7]{32}$/i.test(clean)) {
+    return base32ToHex(clean) || clean.toLowerCase();
   }
   // Magnet URI
-  const match = id.match(/xt=urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
+  const match = clean.match(/xt=urn(?:%3A|:)btih(?:%3A|:)([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i) ||
+                id.match(/xt=urn(?:%3A|:)btih(?:%3A|:)([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})/i);
   if (match) {
     const hash = match[1];
     return hash.length === 32 ? base32ToHex(hash) : hash.toLowerCase();
@@ -936,49 +1002,83 @@ function parseInfoHash(id) {
 }
 
 function purgeStaleTorrents(client, targetHash, targetId) {
-  if (!client || !Array.isArray(client.torrents)) return;
+  if (!client) return;
   const hash = (targetHash || parseInfoHash(targetId) || '').toLowerCase();
+  const hashUpper = hash.toUpperCase();
 
-  for (let i = client.torrents.length - 1; i >= 0; i--) {
-    const t = client.torrents[i];
-    if (!t) {
-      client.torrents.splice(i, 1);
-      continue;
-    }
-    const tHash = (t.infoHash || '').toLowerCase();
-    const isTarget = (hash && tHash === hash) || (targetId && (t.magnetURI === targetId || tHash === String(targetId).toLowerCase()));
+  // 1. Purge from client.torrents array
+  if (Array.isArray(client.torrents)) {
+    for (let i = client.torrents.length - 1; i >= 0; i--) {
+      const t = client.torrents[i];
+      if (!t) {
+        client.torrents.splice(i, 1);
+        continue;
+      }
+      const tHash = (t.infoHash || '').toLowerCase();
+      const isTarget = (hash && tHash === hash) || (targetId && (t.magnetURI === targetId || tHash === String(targetId).toLowerCase()));
 
-    if (t.destroyed || (isTarget && t.destroyed)) {
-      try {
-        if (typeof t.destroy === 'function' && !t.destroyed) {
-          t.destroy({ destroyStore: false });
+      if (t.destroyed || isTarget) {
+        try {
+          if (typeof t.destroy === 'function' && !t.destroyed) {
+            t.destroy({ destroyStore: false });
+          }
+        } catch (e) {}
+        client.torrents.splice(i, 1);
+        if (client._torrents && tHash) {
+          delete client._torrents[tHash];
+          delete client._torrents[tHash.toUpperCase()];
         }
-      } catch (e) {}
-      client.torrents.splice(i, 1);
-      if (client._torrents && tHash && client._torrents[tHash]) {
-        delete client._torrents[tHash];
+      }
+    }
+  }
+
+  // 2. Unconditionally purge from client._torrents map
+  if (client._torrents && typeof client._torrents === 'object') {
+    if (hash) {
+      delete client._torrents[hash];
+      delete client._torrents[hashUpper];
+    }
+    for (const key of Object.keys(client._torrents)) {
+      const t = client._torrents[key];
+      const keyLower = key.toLowerCase();
+      if (!t || t.destroyed || (hash && (keyLower === hash || (t.infoHash || '').toLowerCase() === hash))) {
+        try {
+          if (t && typeof t.destroy === 'function' && !t.destroyed) {
+            t.destroy({ destroyStore: false });
+          }
+        } catch (e) {}
+        delete client._torrents[key];
       }
     }
   }
 }
 
 function findMatchingTorrent(client, targetHash, targetId) {
-  if (!client || !client.torrents) return null;
+  if (!client) return null;
   const targetLower = (targetHash || parseInfoHash(targetId) || '').toLowerCase();
 
-  for (let i = client.torrents.length - 1; i >= 0; i--) {
-    const t = client.torrents[i];
-    if (!t) {
-      client.torrents.splice(i, 1);
-      continue;
+  if (Array.isArray(client.torrents)) {
+    for (let i = client.torrents.length - 1; i >= 0; i--) {
+      const t = client.torrents[i];
+      if (!t) {
+        client.torrents.splice(i, 1);
+        continue;
+      }
+      if (t.destroyed) {
+        client.torrents.splice(i, 1);
+        continue;
+      }
+      const tHash = (t.infoHash || '').toLowerCase();
+      if (targetLower && tHash === targetLower) return t;
+      if (t.magnetURI === targetId || (typeof targetId === 'string' && tHash === targetId.toLowerCase())) return t;
     }
-    if (t.destroyed) {
-      client.torrents.splice(i, 1);
-      continue;
+  }
+
+  if (client._torrents && typeof client._torrents === 'object' && targetLower) {
+    const fromMap = client._torrents[targetLower] || client._torrents[targetLower.toUpperCase()];
+    if (fromMap && !fromMap.destroyed) {
+      return fromMap;
     }
-    const tHash = (t.infoHash || '').toLowerCase();
-    if (targetLower && tHash === targetLower) return t;
-    if (t.magnetURI === targetId || (typeof targetId === 'string' && tHash === targetId.toLowerCase())) return t;
   }
 
   if (targetLower) {
@@ -986,16 +1086,17 @@ function findMatchingTorrent(client, targetHash, targetId) {
       const byGet = client.get(targetLower);
       if (byGet && !byGet.destroyed) return byGet;
       if (byGet && byGet.destroyed) {
-        try { client.remove(targetLower); } catch (e) {}
+        purgeStaleTorrents(client, targetLower, targetId);
       }
     } catch (e) {}
   }
+
   if (targetId && typeof targetId === 'string') {
     try {
       const byGetId = client.get(targetId);
       if (byGetId && !byGetId.destroyed) return byGetId;
       if (byGetId && byGetId.destroyed) {
-        try { client.remove(targetId); } catch (e) {}
+        purgeStaleTorrents(client, targetLower, targetId);
       }
     } catch (e) {}
   }
@@ -1007,7 +1108,7 @@ const activeGetOrAddPromises = new Map();
 
 async function getOrAddTorrent(client, rawTorrentId, options, getData) {
   if (!client || client.destroyed) {
-    throw new Error('WebTorrent client не инициализирован или был остановлен');
+    client = await getTorrentClient(true);
   }
 
   if (!rawTorrentId) {
@@ -1018,24 +1119,31 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
 
   // 1. Check if we already have an active promise for this exact raw identifier
   if (activeGetOrAddPromises.has(normalizedRawId)) {
-    log.info(`[getOrAddTorrent] Reusing active promise for rawTorrentId: ${normalizedRawId}`);
-    return activeGetOrAddPromises.get(normalizedRawId);
+    log.info(`[getOrAddTorrent] Waiting for in-flight promise for rawTorrentId: ${normalizedRawId}`);
+    try {
+      const inFlightTorrent = await activeGetOrAddPromises.get(normalizedRawId);
+      if (inFlightTorrent && !inFlightTorrent.destroyed) {
+        return inFlightTorrent;
+      }
+    } catch (e) {
+      activeGetOrAddPromises.delete(normalizedRawId);
+    }
   }
 
   const addPromise = (async () => {
     // A. Resolve raw identifier to magnet/buffer/filepath
     const torrentId = await resolveTorrentIdentifier(normalizedRawId);
     if (!torrentId) {
-      throw new Error('Не передан валидный идентификатор торрента (URL, Magnet или .torrent файл).');
+      throw new Error('Не удалось преобразовать ссылку в валидный торрент или Magnet URI.');
     }
 
     const hash = parseInfoHash(torrentId);
 
     // B. Check if we already have an active non-destroyed torrent in WebTorrent client
-    let torrent = findMatchingTorrent(client, hash, torrentId);
-    if (torrent && !torrent.destroyed) {
+    let existingTorrent = findMatchingTorrent(client, hash, torrentId);
+    if (existingTorrent && !existingTorrent.destroyed) {
       log.info(`[getOrAddTorrent] Found existing active torrent in client for ${hash || torrentId}`);
-      return torrent;
+      return existingTorrent;
     }
 
     // Clean up any stale destroyed torrent from client internal collection
@@ -1075,21 +1183,18 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
       const isDuplicate = /duplicate/i.test(msg) || /already/i.test(msg) || /exist/i.test(msg);
 
       if (isDuplicate) {
-        log.warn(`[getOrAddTorrent] Caught sync duplicate torrent error for ${hash || torrentId}: ${msg}`);
+        log.warn(`[getOrAddTorrent] Caught sync duplicate torrent for ${hash || torrentId}: ${msg}`);
         const match = msg.match(/([0-9a-fA-F]{40})/i);
         const resolvedHash = match ? match[1].toLowerCase() : hash;
 
         // 1. Check if an active living torrent exists
-        const existing = findMatchingTorrent(client, resolvedHash, torrentId);
-        if (existing && !existing.destroyed) {
+        const living = findMatchingTorrent(client, resolvedHash, torrentId);
+        if (living && !living.destroyed) {
           log.info(`[getOrAddTorrent] Reusing existing healthy torrent for duplicate ${resolvedHash || torrentId}`);
-          return existing;
+          return living;
         }
 
-        // 2. Otherwise purge the stale torrent and retry adding
-        if (resolvedHash) {
-          try { client.remove(resolvedHash); } catch (e) {}
-        }
+        // 2. Otherwise forcefully purge the stale torrent and retry adding
         purgeStaleTorrents(client, resolvedHash, torrentId);
 
         try {
@@ -1097,11 +1202,12 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
         } catch (retryErr) {
           const finalCheck = findMatchingTorrent(client, resolvedHash, torrentId);
           if (finalCheck && !finalCheck.destroyed) return finalCheck;
+          log.error(`[getOrAddTorrent] Retry add failed: ${retryErr.message}`);
           throw retryErr;
         }
       } else if (typeof sourceId === 'string' && sourceId.startsWith('http') && hash) {
         log.warn(`[getOrAddTorrent] Adding URL sourceId directly to client failed, falling back to constructed magnet URI with hash ${hash}: ${msg}`);
-        const fallbackMagnet = `magnet:?xt=urn:btih:${hash}&dn=${encodeURIComponent(hash)}${WELL_KNOWN_TRACKERS.map(tr => `&tr=${encodeURIComponent(tr)}`).join('')}`;
+        const fallbackMagnet = buildEnhancedTorrentId(`magnet:?xt=urn:btih:${hash}`);
         try {
           t = client.add(fallbackMagnet, addOptions);
         } catch (magErr) {
@@ -1118,7 +1224,7 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
 
     // Attach non-fatal error handler so unhandled error events don't crash or reject
     t.on('error', (err) => {
-      log.warn(`[WebTorrent Torrent Warning] ${t.infoHash || hash || ''}:`, err?.message || err);
+      log.warn(`[WebTorrent Torrent Notice] ${t.infoHash || hash || ''}:`, err?.message || err);
     });
 
     const saveMetadata = async () => {
@@ -1163,7 +1269,7 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
     activeGetOrAddPromises.delete(normalizedRawId);
     if (err && err.message) {
       if (err.message.includes('buffer[0] = 60') || err.message.includes('not a number: buffer[0] = 60')) {
-        err.message = 'Сервер вернул HTML-страницу вместо торрент-файла (возможно, ссылка заблокирована, требует авторизации или защищена Cloudflare). Попробуйте скопировать Magnet-ссылку напрямую.';
+        err.message = 'Сервер вернул HTML-страницу вместо торрент-файла (возможно, ссылка заблокирована или защищена Cloudflare). Попробуйте скопировать Magnet-ссылку напрямую.';
       } else if (err.message.includes('not a number: buffer')) {
         err.message = 'Скачанный файл не является валидным торрент-файлом (неверный формат данных). Попробуйте использовать Magnet-ссылку.';
       } else if (err.message.includes('invalid bencode')) {
@@ -1172,14 +1278,9 @@ async function getOrAddTorrent(client, rawTorrentId, options, getData) {
     }
     throw err;
   } finally {
-    activeGetOrAddPromises.delete(normalizedRawId);
-    try {
-      const torrentId = await resolveTorrentIdentifier(normalizedRawId);
-      const hash = parseInfoHash(torrentId);
-      if (hash) {
-        activeGetOrAddPromises.delete(hash);
-      }
-    } catch (e) {}
+    setTimeout(() => {
+      activeGetOrAddPromises.delete(normalizedRawId);
+    }, 2000);
   }
 }
 
@@ -1496,7 +1597,13 @@ async function loadTorrentsState(taskQueue) {
   }
 }
 
-async function getTorrentClient() {
+async function getTorrentClient(forceNew = false) {
+  if (forceNew && torrentClientInstance) {
+    try {
+      torrentClientInstance.destroy();
+    } catch (e) {}
+    torrentClientInstance = null;
+  }
   if (!torrentClientInstance || torrentClientInstance.destroyed) {
     try {
       const WebTorrentModule = await import('webtorrent');
