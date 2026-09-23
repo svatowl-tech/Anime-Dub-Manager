@@ -545,7 +545,7 @@ export const useAssEditorActions = (
     reader.readAsText(file);
   };
 
-  const handleExport = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean, currentAssignments?: RoleAssignment[]) => {
+  const handleExport = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean, autoTiming?: boolean, currentAssignments?: RoleAssignment[]) => {
     if (!currentEpisode) return;
     
     try {
@@ -572,7 +572,8 @@ export const useAssEditorActions = (
           smartExport,
           additionalProcessing,
           autoApplyFixes,
-          includeSubtitles: includeSubtitles ?? true
+          includeSubtitles: includeSubtitles ?? true,
+          autoTiming: autoTiming ?? false
         },
         metadata: {
           title: `Экспорт ${roleName}: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`

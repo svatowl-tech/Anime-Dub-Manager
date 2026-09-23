@@ -7,7 +7,7 @@ const log = require('electron-log');
 const { trackProcess, killPidTree } = require('../lib/ProcessTracker.cjs');
 
 // Пытаемся найти встроенный FFmpeg (который мы скачиваем в assets/bin при сборке)
-const isDev = !app.isPackaged;
+const isDev = app ? !app.isPackaged : process.env.NODE_ENV !== 'production';
 const ffmpegName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
 const ffprobeName = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
 
@@ -821,29 +821,57 @@ async function applyFixesToOriginalAudio(originalPath, fixPath, outputPath, opti
   }
 
   // 1. Detect speech intervals in fixPath
-  const { duration: fixDuration, speechIntervals } = await detectSpeechIntervals(fixPath, options);
+  const { duration: fixDuration, speechIntervals: fixSpeechIntervals } = await detectSpeechIntervals(fixPath, options);
 
-  if (!speechIntervals || speechIntervals.length === 0) {
+  if (!fixSpeechIntervals || fixSpeechIntervals.length === 0) {
     log.warn(`[applyFixesToOriginalAudio] No speech detected in fix file ${fixPath}. Copying original.`);
     await fs.promises.copyFile(originalPath, outputPath);
     return { success: true, applied: false, reason: 'no_speech_detected', intervals: [] };
   }
 
-  let targetIntervals = speechIntervals;
+  // 2. Also detect speech intervals in original track to ensure full coverage (preventing leftover tails)
+  let origSpeechIntervals = [];
+  try {
+    const origDetect = await detectSpeechIntervals(originalPath, options);
+    origSpeechIntervals = origDetect.speechIntervals || [];
+  } catch (e) {
+    log.warn(`[applyFixesToOriginalAudio] Could not detect original speech intervals:`, e.message);
+  }
+
+  let targetIntervals = fixSpeechIntervals;
   let delayMs = 0;
 
   // If targetSec was passed and the fix was recorded from 0s as a short standalone take (< 45s)
-  if (options.targetSec !== undefined && options.targetSec > 0 && fixDuration < 45 && speechIntervals[0].startSec < 5) {
+  if (options.targetSec !== undefined && options.targetSec > 0 && fixDuration < 45 && fixSpeechIntervals[0].startSec < 5) {
     delayMs = Math.round(options.targetSec * 1000);
-    targetIntervals = speechIntervals.map(interval => ({
+    targetIntervals = fixSpeechIntervals.map(interval => ({
       startSec: options.targetSec + interval.startSec,
       endSec: options.targetSec + interval.endSec,
       durationSec: interval.durationSec
     }));
   }
 
-  // Zero out the original track during all target intervals
-  const volumeClauses = targetIntervals.map(inter => {
+  // Compute mute window that covers BOTH fix phrase and original phrase (eliminates tails)
+  const muteWindows = targetIntervals.map(fixInter => {
+    let mStart = fixInter.startSec;
+    let mEnd = fixInter.endSec;
+
+    // Find any overlapping or nearby original speech interval (within 1.0s)
+    for (const origInter of origSpeechIntervals) {
+      if (origInter.startSec <= fixInter.endSec + 0.3 && origInter.endSec >= fixInter.startSec - 0.3) {
+        mStart = Math.min(mStart, origInter.startSec);
+        mEnd = Math.max(mEnd, origInter.endSec);
+      }
+    }
+
+    return {
+      startSec: Math.max(0, mStart - 0.04),
+      endSec: mEnd + 0.04
+    };
+  });
+
+  // Zero out the original track during all computed mute intervals
+  const volumeClauses = muteWindows.map(inter => {
     const s = Math.max(0, inter.startSec).toFixed(3);
     const e = Math.max(0, inter.endSec).toFixed(3);
     return `between(t,${s},${e})`;

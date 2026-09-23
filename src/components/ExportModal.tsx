@@ -17,7 +17,8 @@ interface ExportModalProps {
     uploadToYandex?: boolean, 
     additionalProcessing?: boolean, 
     autoApplyFixes?: boolean,
-    includeSubtitles?: boolean
+    includeSubtitles?: boolean,
+    autoTiming?: boolean
   ) => void;
   isExporting?: boolean;
   progress?: number;
@@ -38,6 +39,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [additionalProcessing, setAdditionalProcessing] = useState(false);
   const [autoApplyFixes, setAutoApplyFixes] = useState(false);
   const [includeSubtitles, setIncludeSubtitles] = useState(true);
+  const [autoTiming, setAutoTiming] = useState(false);
   const [snippetFixInfo, setSnippetFixInfo] = useState<{ hasSnippetFixes: boolean; count: number; loading: boolean }>({
     hasSnippetFixes: false,
     count: 0,
@@ -302,6 +304,49 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   : 'К серии не прикреплены субтитры'}
               </p>
             </div>
+
+            <div className="mb-6 p-3 bg-violet-950/20 border border-violet-900/30 rounded-xl">
+              <label className={`flex items-start gap-3 ${episode.subPath && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
+                <div className="relative flex items-center mt-0.5">
+                  <input
+                    type="checkbox"
+                    checked={autoTiming}
+                    onChange={(e) => setAutoTiming(e.target.checked)}
+                    disabled={isExporting || !episode.subPath}
+                    className="peer sr-only"
+                  />
+                  <div className={`w-5 h-5 border-2 rounded bg-neutral-950 transition-all duration-200 ${episode.subPath ? 'border-violet-700/60 peer-checked:bg-violet-600 peer-checked:border-violet-500 group-hover:border-violet-500' : 'border-neutral-800'}`} />
+                  <svg
+                    className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth="3"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className={`text-sm font-semibold transition-colors ${episode.subPath ? 'text-violet-200 group-hover:text-white' : 'text-neutral-500'}`}>
+                      Автоматический тайминг и разведение фраз
+                    </span>
+                    {episode.subPath ? (
+                      <span className="text-[10px] font-bold bg-violet-500/20 text-violet-300 border border-violet-500/30 px-1.5 py-0.5 rounded">
+                        Закадр
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-medium bg-neutral-800 text-neutral-500 px-1.5 py-0.5 rounded">
+                        Нет сабов
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
+                    Сопоставляет дорожки дабберов с ролями в субтитрах по никнеймам, подгоняет начала фраз к субтитрам и разводит перекрытия (коллизии), сохраняя только оригинальные наложения из сабов. Исходники сохраняются в «бэкап».
+                  </p>
+                </div>
+              </label>
+            </div>
           </>
         )}
         
@@ -363,7 +408,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           </button>
           {!isWeb && (
           <button 
-            onClick={() => onExport(targetDir, skipConversion, smartExport, false, additionalProcessing, autoApplyFixes, includeSubtitles)} 
+            onClick={() => onExport(targetDir, skipConversion, smartExport, false, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming)} 
             title="Начать экспорт"
             disabled={!targetDir || isExporting}
             className="px-6 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-indigo-500/20"

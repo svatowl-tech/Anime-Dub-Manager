@@ -4,6 +4,7 @@ const fsSync = require('fs');
 const log = require('electron-log');
 const { bakeSubtitles, transcodeToMp4, muxRelease, applyFixesToOriginalAudio } = require('./ffmpegService.cjs');
 const { splitSubsByDubber, extractSignsAss, exportFullAssWithRoles } = require('./subtitleService.cjs');
+const AutoTimingService = require('./AutoTimingService.cjs');
 
 /**
  * Helper to copy a file and report progress.
@@ -166,7 +167,7 @@ class ExportService {
     return { success: true, targetDir, yandexUrl: null };
   }
 
-  static async exportSoundEngineerFiles(episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress, onCommand, includeSubtitles = true) {
+  static async exportSoundEngineerFiles(episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress, onCommand, includeSubtitles = true, autoTiming = false) {
     if (!episode || !targetDir) throw new Error('Missing required parameters');
 
     // Handle legacy signature where autoApplyFixes was omitted
@@ -178,10 +179,11 @@ class ExportService {
       projectsData = config;
       config = autoApplyFixes;
       autoApplyFixes = false;
+      autoTiming = false;
     }
 
     log.info(`Exporting sound engineer files for episode ${episode.number} to ${targetDir}`);
-    log.info(`Export options: skipConversion=${skipConversion}, smartExport=${smartExport}, additionalProcessing=${additionalProcessing}, autoApplyFixes=${autoApplyFixes}, includeSubtitles=${includeSubtitles}`);
+    log.info(`Export options: skipConversion=${skipConversion}, smartExport=${smartExport}, additionalProcessing=${additionalProcessing}, autoApplyFixes=${autoApplyFixes}, includeSubtitles=${includeSubtitles}, autoTiming=${autoTiming}`);
     await fs.mkdir(targetDir, { recursive: true });
 
     const project = (projectsData || []).find(p => p.id === episode.projectId);
@@ -295,7 +297,7 @@ class ExportService {
     }
 
     const dubberFiles = {};
-    for (const upload of episode.uploads) {
+    for (const upload of (episode.uploads || [])) {
       if (upload.type === 'DUBBER_FILE' || upload.type === 'FIXES') {
         const dubberId = upload.uploadedById;
         if (!dubberFiles[dubberId]) dubberFiles[dubberId] = { original: [], fixes: [] };
@@ -316,85 +318,171 @@ class ExportService {
       return `${baseVideoName}_[${nick}]${fixSuffix}${ext}`;
     };
 
-    for (const dubberId in dubberFiles) {
-      const { original, fixes } = dubberFiles[dubberId];
-      const latestOriginal = original.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
-      const latestFix = fixes.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    // ----------------------------------------------------
+    // AUDIO PROCESSING PIPELINE FOR SOUND ENGINEER
+    // ----------------------------------------------------
+    if (autoTiming && episode.subPath) {
+      // 1. TIMING-FIRST PIPELINE:
+      // Auto-timing & collision resolution runs FIRST on ALL tracks (originals and fixes).
+      // Then fixes are smartly merged, tails are completely eradicated, and extended fix overlaps are cleared.
+      log.info(`[exportSoundEngineerFiles] [PIPELINE: TIMING FIRST] Auto-timing & collision resolution running first for all dubber tracks...`);
 
-      if (autoApplyFixes && latestOriginal && latestFix) {
+      const rawDubberUploads = (episode.uploads || []).filter(u => u.type === 'DUBBER_FILE' || u.type === 'FIXES');
+
+      // Backup raw untimed tracks
+      const rawBackupDir = path.join(targetDir, 'бэкап', 'исходные_дорожки_до_автотайминга');
+      await fs.mkdir(rawBackupDir, { recursive: true });
+      for (const u of rawDubberUploads) {
         try {
-          const origStat = await fs.stat(latestOriginal.path);
-          const fixStat = await fs.stat(latestFix.path);
+          const isFix = u.type === 'FIXES';
+          await fs.copyFile(u.path, path.join(rawBackupDir, getExportName(u, isFix)));
+        } catch (e) {}
+      }
 
-          if (fixStat.size < origStat.size) {
-            // Snippet fix: auto-apply to original, zeroing out original audio at fix timings
-            const backupDir = path.join(targetDir, 'бэкап');
-            await fs.mkdir(backupDir, { recursive: true });
+      try {
+        const matchResult = await AutoTimingService.matchActorsWithAudioTracks(
+          episode.subPath,
+          rawDubberUploads,
+          participantsData,
+          project ? project.characterAliases : null,
+          assignments
+        );
 
-            // Preserve originals in backup directory
-            await fs.copyFile(latestOriginal.path, path.join(backupDir, getExportName(latestOriginal, false)));
-            await fs.copyFile(latestFix.path, path.join(backupDir, getExportName(latestFix, true)));
+        if (matchResult.matchedTracks.length > 0) {
+          // Step 1: Align all matched tracks (both regular and fixes) and resolve global project collisions
+          const timingResult = await AutoTimingService.alignProjectAndResolveCollisions({
+            subPath: episode.subPath,
+            matchedTracks: matchResult.matchedTracks,
+            options: { minGapSec: 0.12, leadInSec: 0.05 }
+          });
 
-            const mainOutPath = path.join(targetDir, getExportName(latestOriginal, false));
+          // Step 2: Smartly merge fixes into the timed original tracks, erase tails and adjust longer fix collisions
+          const mergedResult = AutoTimingService.smartApplyFixesToTimedTracks(timingResult, {
+            minGapSec: 0.12
+          });
 
-            // Determine if there are QA comments / timestamps for this dubber
-            let targetSec = undefined;
-            const dubberAssignments = (episode.assignments || []).filter(a => a.dubberId === dubberId || a.substituteId === dubberId);
-            for (const a of dubberAssignments) {
-              if (a.comments) {
-                try {
-                  const comments = JSON.parse(a.comments);
-                  if (Array.isArray(comments) && comments.length > 0 && comments[0].timestamp !== undefined) {
-                    targetSec = comments[0].timestamp;
-                  }
-                } catch (e) {}
+          // Step 3: Render final assembled tracks to target directory
+          await AutoTimingService.renderAutoTimedTracks(mergedResult, targetDir, baseVideoName);
+          log.info(`[exportSoundEngineerFiles] Timing-first pipeline completed successfully!`);
+        } else {
+          log.warn('[exportSoundEngineerFiles] No tracks matched with subtitle actors in AutoTiming.');
+        }
+      } catch (autoTimingErr) {
+        log.error('[exportSoundEngineerFiles] AutoTiming execution error:', autoTimingErr);
+      }
+    } else {
+      // 2. STANDARD / MANUAL EXPORT PIPELINE (When autoTiming is disabled or no subtitles)
+      const audioFilesToProcess = [];
+
+      for (const dubberId in dubberFiles) {
+        const { original, fixes } = dubberFiles[dubberId];
+        const latestOriginal = original.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+        const latestFix = fixes.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+
+        if (autoApplyFixes && latestOriginal && latestFix) {
+          try {
+            const origStat = await fs.stat(latestOriginal.path);
+            const fixStat = await fs.stat(latestFix.path);
+
+            if (fixStat.size < origStat.size) {
+              const backupDir = path.join(targetDir, 'бэкап');
+              await fs.mkdir(backupDir, { recursive: true });
+
+              await fs.copyFile(latestOriginal.path, path.join(backupDir, getExportName(latestOriginal, false)));
+              await fs.copyFile(latestFix.path, path.join(backupDir, getExportName(latestFix, true)));
+
+              const mainOutPath = path.join(targetDir, getExportName(latestOriginal, false));
+
+              let targetSec = undefined;
+              const dubberAssignments = (episode.assignments || []).filter(a => a.dubberId === dubberId || a.substituteId === dubberId);
+              for (const a of dubberAssignments) {
+                if (a.comments) {
+                  try {
+                    const comments = JSON.parse(a.comments);
+                    if (Array.isArray(comments) && comments.length > 0 && comments[0].timestamp !== undefined) {
+                      targetSec = comments[0].timestamp;
+                    }
+                  } catch (e) {}
+                }
               }
+
+              log.info(`[autoApplyFixes] Dubber ${getNick(dubberId)}: applying fix snippet into ${latestOriginal.path}`);
+              const result = await applyFixesToOriginalAudio(latestOriginal.path, latestFix.path, mainOutPath, { targetSec });
+
+              const reportPath = path.join(backupDir, 'ИНФО_О_ФИКСАХ.txt');
+              const intervalsText = result.intervals && result.intervals.length > 0
+                ? result.intervals.map(i => `  • ${i.startSec.toFixed(2)} сек — ${i.endSec.toFixed(2)} сек (длительность ${i.durationSec.toFixed(2)} сек)`).join('\n')
+                : '  • Сведение дорожки фикса с оригиналом\n';
+              const reportEntry = `[${new Date().toLocaleString()}] Даббер: ${getNick(dubberId)}\n` +
+                `Файл оригинала: ${path.basename(latestOriginal.path)} (${(origStat.size / (1024 * 1024)).toFixed(2)} МБ)\n` +
+                `Файл фикса: ${path.basename(latestFix.path)} (${(fixStat.size / (1024 * 1024)).toFixed(2)} МБ)\n` +
+                `Примененные фразы фиксов:\n${intervalsText}\n` +
+                `Резервные копии сохранены в этой папке («бэкап»), а готовая дорожка с вшитыми фиксами помещена в основную папку экспорта.\n` +
+                `------------------------------------------------------------\n\n`;
+              await fs.appendFile(reportPath, reportEntry).catch(() => {});
+
+              audioFilesToProcess.push({
+                path: mainOutPath,
+                uploadedById: dubberId,
+                id: latestOriginal.id
+              });
+            } else {
+              log.info(`[autoApplyFixes] Dubber ${getNick(dubberId)}: fix size >= original, exporting full replacement track.`);
+              const targetFixPath = path.join(targetDir, getExportName(latestFix, true));
+              await fs.copyFile(latestFix.path, targetFixPath);
+              audioFilesToProcess.push({
+                path: targetFixPath,
+                uploadedById: dubberId,
+                id: latestFix.id
+              });
             }
-
-            log.info(`[autoApplyFixes] Dubber ${getNick(dubberId)}: applying fix snippet ${latestFix.path} into ${latestOriginal.path}`);
-            const result = await applyFixesToOriginalAudio(latestOriginal.path, latestFix.path, mainOutPath, { targetSec });
-
-            // Write report in backup directory
-            const reportPath = path.join(backupDir, 'ИНФО_О_ФИКСАХ.txt');
-            const intervalsText = result.intervals && result.intervals.length > 0
-              ? result.intervals.map(i => `  • ${i.startSec.toFixed(2)} сек — ${i.endSec.toFixed(2)} сек (длительность ${i.durationSec.toFixed(2)} сек)`).join('\n')
-              : '  • Сведение дорожки фикса с оригиналом\n';
-            const reportEntry = `[${new Date().toLocaleString()}] Даббер: ${getNick(dubberId)}\n` +
-              `Файл оригинала: ${path.basename(latestOriginal.path)} (${(origStat.size / (1024 * 1024)).toFixed(2)} МБ)\n` +
-              `Файл фикса: ${path.basename(latestFix.path)} (${(fixStat.size / (1024 * 1024)).toFixed(2)} МБ)\n` +
-              `Примененные фразы фиксов:\n${intervalsText}\n` +
-              `Резервные копии сохранены в этой папке («бэкап»), а готовая дорожка с вшитыми фиксами помещена в основную папку экспорта.\n` +
-              `------------------------------------------------------------\n\n`;
-            await fs.appendFile(reportPath, reportEntry).catch(() => {});
-          } else {
-            // Fix replaces entire track: dubber already did the work, export fix directly
-            log.info(`[autoApplyFixes] Dubber ${getNick(dubberId)}: fix size >= original, exporting full replacement track.`);
-            await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+          } catch (e) {
+            log.error(`Auto-apply fix error for dubber ${getNick(dubberId)}, falling back to standard copy:`, e);
+            const targetOrigPath = path.join(targetDir, getExportName(latestOriginal, false));
+            await fs.copyFile(latestOriginal.path, targetOrigPath);
+            if (latestFix) {
+              await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+            }
+            audioFilesToProcess.push({
+              path: targetOrigPath,
+              uploadedById: dubberId,
+              id: latestOriginal.id
+            });
           }
-        } catch (e) {
-          log.error(`Auto-apply fix error for dubber ${getNick(dubberId)}, falling back to standard copy:`, e);
-          await fs.copyFile(latestOriginal.path, path.join(targetDir, getExportName(latestOriginal, false)));
-          await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
-        }
-      } else if (smartExport && latestOriginal && latestFix) {
-        try {
-          const origStat = await fs.stat(latestOriginal.path);
-          const fixStat = await fs.stat(latestFix.path);
+        } else if (smartExport && latestOriginal && latestFix) {
+          try {
+            const origStat = await fs.stat(latestOriginal.path);
+            const fixStat = await fs.stat(latestFix.path);
 
-          if (fixStat.size < origStat.size) {
-            await fs.copyFile(latestOriginal.path, path.join(targetDir, getExportName(latestOriginal, false)));
-            await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
-          } else {
-            await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+            if (fixStat.size < origStat.size) {
+              const origOut = path.join(targetDir, getExportName(latestOriginal, false));
+              await fs.copyFile(latestOriginal.path, origOut);
+              await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+              audioFilesToProcess.push({ path: origOut, uploadedById: dubberId, id: latestOriginal.id });
+            } else {
+              const fixOut = path.join(targetDir, getExportName(latestFix, true));
+              await fs.copyFile(latestFix.path, fixOut);
+              audioFilesToProcess.push({ path: fixOut, uploadedById: dubberId, id: latestFix.id });
+            }
+          } catch (e) {
+            log.error('Smart export stat error:', e);
+            const origOut = path.join(targetDir, getExportName(latestOriginal, false));
+            await fs.copyFile(latestOriginal.path, origOut);
+            if (latestFix) await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+            audioFilesToProcess.push({ path: origOut, uploadedById: dubberId, id: latestOriginal.id });
           }
-        } catch (e) {
-          log.error('Smart export stat error:', e);
-          await fs.copyFile(latestOriginal.path, path.join(targetDir, getExportName(latestOriginal, false)));
-          await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
+        } else {
+          if (latestOriginal) {
+            const origOut = path.join(targetDir, getExportName(latestOriginal, false));
+            await fs.copyFile(latestOriginal.path, origOut);
+            audioFilesToProcess.push({ path: origOut, uploadedById: dubberId, id: latestOriginal.id });
+          }
+          if (latestFix) {
+            const fixOut = path.join(targetDir, getExportName(latestFix, true));
+            await fs.copyFile(latestFix.path, fixOut);
+            if (!latestOriginal) audioFilesToProcess.push({ path: fixOut, uploadedById: dubberId, id: latestFix.id });
+          }
         }
-      } else {
-        if (latestOriginal) await fs.copyFile(latestOriginal.path, path.join(targetDir, getExportName(latestOriginal, false)));
-        if (latestFix) await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
       }
     }
 

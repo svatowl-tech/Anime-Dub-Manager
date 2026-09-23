@@ -646,6 +646,7 @@ export default function AssEditor({
     additionalProcessing?: boolean, 
     autoApplyFixesOrAssignments?: boolean | RoleAssignment[],
     includeSubtitlesOrAssignments?: boolean | RoleAssignment[],
+    autoTiming?: boolean,
     currentAssignments?: RoleAssignment[]
   ) => {
     if (!currentEpisode) return;
@@ -657,6 +658,7 @@ export default function AssEditor({
       
       const autoApplyFixes = typeof autoApplyFixesOrAssignments === 'boolean' ? autoApplyFixesOrAssignments : false;
       const includeSubtitles = typeof includeSubtitlesOrAssignments === 'boolean' ? includeSubtitlesOrAssignments : true;
+      const isAutoTiming = typeof autoTiming === 'boolean' ? autoTiming : false;
       
       let rawAssignments: RoleAssignment[] = assignments;
       if (Array.isArray(autoApplyFixesOrAssignments)) {
@@ -688,7 +690,8 @@ export default function AssEditor({
           uploadToYandex,
           additionalProcessing,
           autoApplyFixes,
-          includeSubtitles
+          includeSubtitles,
+          autoTiming: isAutoTiming
         },
         metadata: {
           title: `Экспорт ${roleName}: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`
