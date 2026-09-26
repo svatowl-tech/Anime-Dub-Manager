@@ -245,6 +245,84 @@ async function startServer() {
   app.get('/api/web-proxy', handleWebProxyRequest);
   app.get('/api/web-proxy/asset', handleWebProxyAgentRequest);
 
+  // Media file serving endpoint for web preview mode (audio/video streaming)
+  app.get('/api/media-file', async (req, res) => {
+    try {
+      const rawPath = req.query.path as string;
+      if (!rawPath) return res.status(400).send('Missing path parameter');
+      
+      let filePath = rawPath;
+      if (filePath.startsWith('file://')) {
+        try {
+          filePath = fileURLToPath(filePath);
+        } catch {
+          filePath = filePath.replace(/^file:\/\//, '');
+        }
+      }
+
+      // Check candidates on server filesystem
+      const candidates = [
+        filePath,
+        path.join(process.cwd(), filePath),
+        path.join(__dirname, 'mock_user_data', filePath),
+        path.join(process.cwd(), 'mock_user_data', filePath),
+        path.join(__dirname, filePath)
+      ];
+
+      let foundPath: string | null = null;
+      for (const cand of candidates) {
+        try {
+          const stat = await fs.stat(cand);
+          if (stat.isFile()) {
+            foundPath = cand;
+            break;
+          }
+        } catch {}
+      }
+
+      if (!foundPath) {
+        return res.status(404).send('File not found');
+      }
+
+      // Stream file with Range support
+      res.sendFile(path.resolve(foundPath));
+    } catch (err: any) {
+      res.status(500).send(err.message);
+    }
+  });
+
+  app.head('/api/media-file', async (req, res) => {
+    try {
+      const rawPath = req.query.path as string;
+      if (!rawPath) return res.status(400).end();
+      let filePath = rawPath;
+      if (filePath.startsWith('file://')) {
+        try { filePath = fileURLToPath(filePath); } catch { filePath = filePath.replace(/^file:\/\//, ''); }
+      }
+      const candidates = [
+        filePath,
+        path.join(process.cwd(), filePath),
+        path.join(__dirname, 'mock_user_data', filePath),
+        path.join(process.cwd(), 'mock_user_data', filePath),
+        path.join(__dirname, filePath)
+      ];
+      let foundPath: string | null = null;
+      for (const cand of candidates) {
+        try {
+          const stat = await fs.stat(cand);
+          if (stat.isFile()) {
+            foundPath = cand;
+            break;
+          }
+        } catch {}
+      }
+      if (!foundPath) return res.status(404).end();
+      res.status(200).end();
+    } catch {
+      res.status(500).end();
+    }
+  });
+
   // API Route to call IPC handlers from the browser frontend
   app.post('/api/ipc/:channel', async (req, res) => {
     const { channel } = req.params;

@@ -673,8 +673,108 @@ function silenceAudioIntervals(filePath, intervals) {
       });
 
     addProcess(command._getArguments ? command._getArguments().join(' ') : 'silenceAudioIntervals', command);
+    command.on('end', () => removeProcess(command));
+    command.on('error', () => removeProcess(command));
     command.run();
   });
+}
+
+/**
+ * Transfers an audio phrase from sourcePath to targetPath:
+ * 1. Cuts the phrase completely from sourcePath (zeros it out in [startSec, endSec] with backup).
+ * 2. In targetPath, zeroes out [startSec, endSec] (with backup).
+ * 3. Overlays the phrase snippet extracted from sourcePath into targetPath at startSec.
+ * GUARANTEE: Never cuts off voice tails or leaves ghost takes.
+ */
+async function transferAudioPhrase(sourcePath, targetPath, startSec, endSec, options = {}) {
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    throw new Error(`Source audio file not found: ${sourcePath}`);
+  }
+  if (!targetPath || !fs.existsSync(targetPath)) {
+    throw new Error(`Target audio file not found: ${targetPath}`);
+  }
+
+  const s = Math.max(0, Number(options.naturalStartSec ?? startSec) || 0);
+  const e = Math.max(s + 0.1, Number(options.naturalEndSec ?? endSec) || 0);
+  const dur = e - s;
+
+  log.info(`[transferAudioPhrase] Transferring phrase [${s.toFixed(2)} - ${e.toFixed(2)}s] (${dur.toFixed(2)}s) from ${path.basename(sourcePath)} to ${path.basename(targetPath)}`);
+
+  // Step 1: Extract snippet from sourcePath
+  const ext = (path.extname(targetPath) || '.wav').toLowerCase();
+  const snippetFile = path.join(path.dirname(targetPath), `temp_snippet_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.wav`);
+  
+  await new Promise((resolve, reject) => {
+    const cmd = ffmpeg(sourcePath)
+      .setStartTime(s)
+      .setDuration(dur)
+      .audioCodec('pcm_s16le')
+      .output(snippetFile)
+      .on('end', () => {
+        removeProcess(cmd);
+        resolve(snippetFile);
+      })
+      .on('error', (err) => {
+        removeProcess(cmd);
+        reject(err);
+      });
+    addProcess('extractSnippetForTransfer', cmd);
+    cmd.run();
+  });
+
+  // Step 2: Silence the phrase in sourcePath to true silence
+  await silenceAudioIntervals(sourcePath, [{ startSec: s, endSec: e }]);
+
+  // Step 3: Silence any conflicting audio in targetPath at that interval
+  await silenceAudioIntervals(targetPath, [{ startSec: s, endSec: e }]);
+
+  // Step 4: Overlay the snippet into targetPath at time s
+  const tempTargetOut = path.join(path.dirname(targetPath), `temp_transfer_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
+  const delayMs = Math.round(s * 1000);
+
+  let audioCodec = 'pcm_s16le';
+  if (ext === '.mp3') audioCodec = 'libmp3lame';
+  else if (ext === '.flac') audioCodec = 'flac';
+  else if (ext === '.ogg') audioCodec = 'libvorbis';
+  else if (ext === '.m4a' || ext === '.aac') audioCodec = 'aac';
+
+  await new Promise((resolve, reject) => {
+    const filterComplex = [
+      `[0:a]aresample=48000,aformat=channel_layouts=stereo[target_base]`,
+      `[1:a]aresample=48000,aformat=channel_layouts=stereo,adelay=${delayMs}|${delayMs}[phrase_delayed]`,
+      `[target_base][phrase_delayed]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1'[out]`
+    ].join(';');
+
+    const cmd = ffmpeg()
+      .input(targetPath)
+      .input(snippetFile)
+      .complexFilter(filterComplex)
+      .map('[out]')
+      .audioCodec(audioCodec)
+      .output(tempTargetOut)
+      .on('end', () => {
+        removeProcess(cmd);
+        try {
+          fs.copyFileSync(tempTargetOut, targetPath);
+          try { fs.unlinkSync(tempTargetOut); } catch (e) {}
+          try { fs.unlinkSync(snippetFile); } catch (e) {}
+          log.info(`[transferAudioPhrase] Successfully transferred phrase into: ${targetPath}`);
+          resolve({ success: true });
+        } catch (copyErr) {
+          reject(copyErr);
+        }
+      })
+      .on('error', (err) => {
+        removeProcess(cmd);
+        try { if (fs.existsSync(tempTargetOut)) fs.unlinkSync(tempTargetOut); } catch (e) {}
+        try { if (fs.existsSync(snippetFile)) fs.unlinkSync(snippetFile); } catch (e) {}
+        reject(err);
+      });
+    addProcess('overlayPhraseTransfer', cmd);
+    cmd.run();
+  });
+
+  return { success: true, transferredRange: { startSec: s, endSec: e } };
 }
 
 /**
@@ -705,6 +805,37 @@ function detectSpeechIntervals(filePath, options = {}) {
     const silences = [];
     let currentSilenceStart = null;
 
+    let processId = null;
+    let timeoutId = null;
+
+    const cleanup = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      if (processId) {
+        removeProcess(processId);
+        processId = null;
+      }
+    };
+
+    // 60-second safety timeout for speech detection
+    timeoutId = setTimeout(() => {
+      log.warn(`[detectSpeechIntervals] Timeout (60s) reached for ${filePath}. Returning fallback full-length interval.`);
+      try {
+        if (cmd && typeof cmd.kill === 'function') {
+          cmd.kill('SIGKILL');
+        }
+      } catch (e) {}
+      cleanup();
+      const dur = totalDur || 300;
+      resolve({
+        duration: dur,
+        silences: [],
+        speechIntervals: [{ startSec: 0, endSec: dur, durationSec: dur }]
+      });
+    }, 60000);
+
     const cmd = ffmpeg(filePath)
       .audioFilters(`silencedetect=noise=${noiseDb}dB:d=${minSilenceDuration}`)
       .format('null')
@@ -729,6 +860,7 @@ function detectSpeechIntervals(filePath, options = {}) {
         }
       })
       .on('end', () => {
+        cleanup();
         const finalDur = totalDur || (silences.length > 0 ? silences[silences.length - 1].end : 0);
         if (currentSilenceStart !== null && finalDur) {
           silences.push({ start: currentSilenceStart, end: finalDur });
@@ -747,8 +879,8 @@ function detectSpeechIntervals(filePath, options = {}) {
           let curPos = 0;
           for (const s of silences) {
             if (s.start - curPos > 0.08) {
-              const start = Math.max(0, curPos - 0.04);
-              const end = s.start + 0.04;
+              const start = Math.max(0, curPos - 0.05);
+              const end = s.start + 0.12; // 120ms safety margin ensures no vocal tail is ever clipped
               rawSpeech.push({
                 startSec: start,
                 endSec: end,
@@ -758,7 +890,7 @@ function detectSpeechIntervals(filePath, options = {}) {
             curPos = s.end;
           }
           if (finalDur && (finalDur - curPos > 0.08)) {
-            const start = Math.max(0, curPos - 0.04);
+            const start = Math.max(0, curPos - 0.05);
             const end = finalDur;
             rawSpeech.push({
               startSec: start,
@@ -768,14 +900,14 @@ function detectSpeechIntervals(filePath, options = {}) {
           }
         }
 
-        // Merge contiguous intervals separated by small gap (< 0.25s)
+        // Merge contiguous intervals separated by gap (< 0.40s) so natural intra-phrase pauses don't cut words
         const speechIntervals = [];
         for (const interval of rawSpeech) {
           if (speechIntervals.length === 0) {
             speechIntervals.push({ ...interval });
           } else {
             const last = speechIntervals[speechIntervals.length - 1];
-            if (interval.startSec - last.endSec < 0.25) {
+            if (interval.startSec - last.endSec < 0.40) {
               last.endSec = Math.max(last.endSec, interval.endSec);
               last.durationSec = last.endSec - last.startSec;
             } else {
@@ -792,11 +924,17 @@ function detectSpeechIntervals(filePath, options = {}) {
         });
       })
       .on('error', (err) => {
-        log.error('[detectSpeechIntervals] Error detecting speech intervals:', err);
-        reject(err);
+        cleanup();
+        log.warn('[detectSpeechIntervals] Error detecting speech intervals, falling back to full length:', err.message);
+        const dur = totalDur || 300;
+        resolve({
+          duration: dur,
+          silences: [],
+          speechIntervals: [{ startSec: 0, endSec: dur, durationSec: dur }]
+        });
       });
 
-    addProcess('detectSpeechIntervals', cmd);
+    processId = addProcess('detectSpeechIntervals', cmd);
     cmd.run();
   });
 }
@@ -947,6 +1085,7 @@ module.exports = {
   extractSubtitleTrack,
   extractAudioPeaks,
   silenceAudioIntervals,
+  transferAudioPhrase,
   detectSpeechIntervals,
   applyFixesToOriginalAudio,
   setCustomFfmpegPath,

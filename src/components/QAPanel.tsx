@@ -14,7 +14,7 @@ import { ConfirmModal } from './ui/ConfirmModal';
 import { useVideoContext } from '../contexts/VideoContext';
 import { SIGN_KEYWORDS } from '../constants';
 import { analyzeAudioForPreview, NormalizationMetrics, getCachedNormalization } from '../lib/qa/audioNormalizer';
-import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval, GapDetectionOptions, QAScanReport } from '../lib/qa/missingLinesDetector';
+import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval, transferAudioBufferPhrase, findFullPhraseSilenceBoundaries, GapDetectionOptions, QAScanReport } from '../lib/qa/missingLinesDetector';
 import { QAScanConfigModal } from './qa/QAScanConfigModal';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import WaveSurfer from 'wavesurfer.js';
@@ -420,6 +420,16 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         audioUrl = selectedFile.path.startsWith('file://') || selectedFile.path.startsWith('http') ? selectedFile.path : `file://${selectedFile.path}`;
       }
 
+      const isPlayable = audioUrl && (
+        audioUrl.startsWith('blob:') ||
+        audioUrl.startsWith('http://') ||
+        audioUrl.startsWith('https://') ||
+        audioUrl.startsWith('data:') ||
+        audioUrl.startsWith('/api/') ||
+        (window.electronAPI && audioUrl.startsWith('file://'))
+      );
+      if (!isPlayable) return;
+
       const cacheKey = `${track.id}_${selectedFile.id || selectedFile.path}`;
       const existing = getCachedNormalization(cacheKey);
       if (existing && existing.status === 'ready') {
@@ -543,6 +553,17 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         } else {
           audioUrl = selectedFile.path.startsWith('file://') || selectedFile.path.startsWith('http') ? selectedFile.path : `file://${selectedFile.path}`;
         }
+
+        const isPlayable = audioUrl && (
+          audioUrl.startsWith('blob:') ||
+          audioUrl.startsWith('http://') ||
+          audioUrl.startsWith('https://') ||
+          audioUrl.startsWith('data:') ||
+          audioUrl.startsWith('/api/') ||
+          (window.electronAPI && audioUrl.startsWith('file://'))
+        );
+        if (!isPlayable) return;
+
         const audio = new Audio(audioUrl);
         audio.volume = Math.min(1.0, Math.max(0, volumes[track.id] ?? 0.8));
         audioRefs.current[track.id] = audio;
@@ -572,6 +593,17 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         } else {
           audioUrl = selectedFile.path.startsWith('file://') || selectedFile.path.startsWith('http') ? selectedFile.path : `file://${selectedFile.path}`;
         }
+
+        const isPlayable = audioUrl && (
+          audioUrl.startsWith('blob:') ||
+          audioUrl.startsWith('http://') ||
+          audioUrl.startsWith('https://') ||
+          audioUrl.startsWith('data:') ||
+          audioUrl.startsWith('/api/') ||
+          (window.electronAPI && audioUrl.startsWith('file://'))
+        );
+        if (!isPlayable) return;
+
         // Update source if it changed
         if (audioRefs.current[track.id].src !== audioUrl) {
           audioRefs.current[track.id].src = audioUrl;
@@ -1170,6 +1202,14 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
       const commentsByTrackId: Record<string, Comment[]> = {};
       const commentsByAssignmentId: Record<string, Comment[]> = {};
       const intervalsToSilenceByFilePath: Record<string, { startSec: number; endSec: number }[]> = {};
+      const phrasesToTransfer: Array<{
+        sourcePath: string;
+        targetPath: string;
+        startSec: number;
+        endSec: number;
+        naturalStartSec?: number;
+        naturalEndSec?: number;
+      }> = [];
       const subUpdates: { rawLineIndex: number; name?: string; text?: string }[] = [];
 
       const getFilePathForTrack = (trackId: string): string | null => {
@@ -1257,19 +1297,20 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         // 2. Unwanted speech outside subtitles
         else if (category === 'unwanted_speech') {
           if (gap.resolutionAction === 'silence') {
+            let actualRange = { startSec: gap.startSec, endSec: gap.endSec };
             if (gap.audioBuffer) {
-              silenceAudioBufferInterval(gap.audioBuffer, gap.startSec, gap.endSec);
+              actualRange = silenceAudioBufferInterval(gap.audioBuffer, gap.startSec, gap.endSec, { expandToSilence: true });
             }
             const filePath = getFilePathForTrack(gap.trackId);
             if (filePath) {
               if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
-              intervalsToSilenceByFilePath[filePath].push({ startSec: gap.startSec, endSec: gap.endSec });
+              intervalsToSilenceByFilePath[filePath].push(actualRange);
             }
 
             const comment: Comment = {
               id: Math.random().toString(36).substr(2, 9),
-              text: gap.comment || `Лишняя речь вне сабов [${gap.startFormatted} - ${gap.endFormatted}]: заменена тишиной`,
-              timestamp: gap.startSec,
+              text: gap.comment || `Лишняя речь вне сабов [${gap.startFormatted} - ${gap.endFormatted}]: заменена тишиной (до тишины)`,
+              timestamp: actualRange.startSec,
               author: 'Куратор (Авто)',
               subId: gap.subId
             };
@@ -1279,7 +1320,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           }
         }
 
-        // 3. Dubber collisions
+        // 3. Dubber collisions (конфликты двух даберов на одном сабе)
         else if (category === 'actor_collision') {
           if (gap.resolutionAction === 'fix_subs') {
             const targetName = gap.selectedCharacterForSub || gap.characterName;
@@ -1288,17 +1329,21 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
             }
           } else if (gap.resolutionAction === 'keep_first') {
             if (gap.secondTrackId) {
+              let actualRange = { 
+                startSec: gap.secondNaturalSilenceStartSec ?? gap.startSec, 
+                endSec: gap.secondNaturalSilenceEndSec ?? gap.endSec 
+              };
               if (gap.secondAudioBuffer) {
-                silenceAudioBufferInterval(gap.secondAudioBuffer, gap.startSec, gap.endSec);
+                actualRange = silenceAudioBufferInterval(gap.secondAudioBuffer, gap.startSec, gap.endSec, { expandToSilence: true });
               }
               const filePath = getFilePathForTrack(gap.secondTrackId);
               if (filePath) {
                 if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
-                intervalsToSilenceByFilePath[filePath].push({ startSec: gap.startSec, endSec: gap.endSec });
+                intervalsToSilenceByFilePath[filePath].push(actualRange);
               }
               const comment: Comment = {
                 id: Math.random().toString(36).substr(2, 9),
-                text: `Дублирование реплики #${(gap.lineIndex ?? 0) + 1} заменено тишиной (реплика отдана ${gap.dubberName})`,
+                text: `Дублирование реплики #${(gap.lineIndex ?? 0) + 1} удалено до естественной тишины (реплика отдана ${gap.dubberName}, хвосты сохранены)`,
                 timestamp: gap.startSec,
                 author: 'Куратор (Авто)',
                 subId: gap.subId
@@ -1308,23 +1353,173 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
             }
           } else if (gap.resolutionAction === 'keep_second') {
             if (gap.trackId) {
+              let actualRange = { 
+                startSec: gap.naturalSilenceStartSec ?? gap.startSec, 
+                endSec: gap.naturalSilenceEndSec ?? gap.endSec 
+              };
               if (gap.audioBuffer) {
-                silenceAudioBufferInterval(gap.audioBuffer, gap.startSec, gap.endSec);
+                actualRange = silenceAudioBufferInterval(gap.audioBuffer, gap.startSec, gap.endSec, { expandToSilence: true });
               }
               const filePath = getFilePathForTrack(gap.trackId);
               if (filePath) {
                 if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
-                intervalsToSilenceByFilePath[filePath].push({ startSec: gap.startSec, endSec: gap.endSec });
+                intervalsToSilenceByFilePath[filePath].push(actualRange);
               }
               const comment: Comment = {
                 id: Math.random().toString(36).substr(2, 9),
-                text: `Дублирование реплики #${(gap.lineIndex ?? 0) + 1} заменено тишиной (реплика отдана ${gap.secondDubberName || 'второму даберу'})`,
+                text: `Дублирование реплики #${(gap.lineIndex ?? 0) + 1} удалено до естественной тишины (реплика отдана ${gap.secondDubberName || 'второму даберу'}, хвосты сохранены)`,
                 timestamp: gap.startSec,
                 author: 'Куратор (Авто)',
                 subId: gap.subId
               };
               if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
               commentsByTrackId[gap.trackId].push(comment);
+            }
+          } else if (gap.resolutionAction === 'transfer_second_to_first') {
+            let actualRange = { 
+              startSec: gap.secondNaturalSilenceStartSec ?? gap.startSec, 
+              endSec: gap.secondNaturalSilenceEndSec ?? gap.endSec 
+            };
+            if (gap.secondAudioBuffer && gap.audioBuffer) {
+              const res = transferAudioBufferPhrase(gap.secondAudioBuffer, gap.audioBuffer, gap.startSec, gap.endSec);
+              actualRange = { startSec: res.naturalStartSec, endSec: res.naturalEndSec };
+            }
+            const sourcePath = gap.secondTrackId ? getFilePathForTrack(gap.secondTrackId) : null;
+            const targetPath = gap.trackId ? getFilePathForTrack(gap.trackId) : null;
+            if (sourcePath && targetPath) {
+              phrasesToTransfer.push({
+                sourcePath,
+                targetPath,
+                startSec: actualRange.startSec,
+                endSec: actualRange.endSec,
+                naturalStartSec: actualRange.startSec,
+                naturalEndSec: actualRange.endSec
+              });
+            }
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: `Реплика #${(gap.lineIndex ?? 0) + 1} перенесена целиком от ${gap.secondDubberName} в дорожку ${gap.dubberName} (до тишины, без обрезки хвостов)`,
+              timestamp: gap.startSec,
+              author: 'Куратор (Авто)',
+              subId: gap.subId
+            };
+            if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+            commentsByTrackId[gap.trackId].push(comment);
+          } else if (gap.resolutionAction === 'transfer_first_to_second') {
+            let actualRange = { 
+              startSec: gap.naturalSilenceStartSec ?? gap.startSec, 
+              endSec: gap.naturalSilenceEndSec ?? gap.endSec 
+            };
+            if (gap.audioBuffer && gap.secondAudioBuffer) {
+              const res = transferAudioBufferPhrase(gap.audioBuffer, gap.secondAudioBuffer, gap.startSec, gap.endSec);
+              actualRange = { startSec: res.naturalStartSec, endSec: res.naturalEndSec };
+            }
+            const sourcePath = gap.trackId ? getFilePathForTrack(gap.trackId) : null;
+            const targetPath = gap.secondTrackId ? getFilePathForTrack(gap.secondTrackId) : null;
+            if (sourcePath && targetPath) {
+              phrasesToTransfer.push({
+                sourcePath,
+                targetPath,
+                startSec: actualRange.startSec,
+                endSec: actualRange.endSec,
+                naturalStartSec: actualRange.startSec,
+                naturalEndSec: actualRange.endSec
+              });
+            }
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: `Реплика #${(gap.lineIndex ?? 0) + 1} перенесена целиком от ${gap.dubberName} в дорожку ${gap.secondDubberName} (до тишины, без обрезки хвостов)`,
+              timestamp: gap.startSec,
+              author: 'Куратор (Авто)',
+              subId: gap.subId
+            };
+            if (gap.secondTrackId) {
+              if (!commentsByTrackId[gap.secondTrackId]) commentsByTrackId[gap.secondTrackId] = [];
+              commentsByTrackId[gap.secondTrackId].push(comment);
+            }
+          }
+        }
+
+        // 4. Actor Overlaps (наезды хвостов фраз)
+        else if (category === 'actor_overlap') {
+          if (gap.resolutionAction === 'note_sound_engineer' || gap.resolutionAction === 'auto_shift') {
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: `[Наезд/Стык] Хвост реплики ${gap.dubberName} заходит на начало ${gap.secondDubberName || 'второго дабера'} на ~${gap.overlapSec || 0.2}с. Развести стык в DAW (хвосты сохранены в полном объёме, ничего не обрезано).`,
+              timestamp: gap.startSec,
+              author: 'Куратор (Контроль стыков)',
+              subId: gap.subId
+            };
+            if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+            commentsByTrackId[gap.trackId].push(comment);
+          } else if (gap.resolutionAction === 'keep_first') {
+            if (gap.secondTrackId) {
+              let actualRange = { 
+                startSec: gap.secondNaturalSilenceStartSec ?? gap.startSec, 
+                endSec: gap.secondNaturalSilenceEndSec ?? gap.endSec 
+              };
+              if (gap.secondAudioBuffer) {
+                actualRange = silenceAudioBufferInterval(gap.secondAudioBuffer, gap.startSec, gap.endSec, { expandToSilence: true });
+              }
+              const filePath = getFilePathForTrack(gap.secondTrackId);
+              if (filePath) {
+                if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
+                intervalsToSilenceByFilePath[filePath].push(actualRange);
+              }
+              const comment: Comment = {
+                id: Math.random().toString(36).substr(2, 9),
+                text: `Наезд устранен: фраза ${gap.secondDubberName} удалена целиком до естественной тишины (реплика отдана ${gap.dubberName}, хвосты сохранены)`,
+                timestamp: gap.startSec,
+                author: 'Куратор (Авто)',
+                subId: gap.subId
+              };
+              if (!commentsByTrackId[gap.secondTrackId]) commentsByTrackId[gap.secondTrackId] = [];
+              commentsByTrackId[gap.secondTrackId].push(comment);
+            }
+          } else if (gap.resolutionAction === 'keep_second') {
+            if (gap.trackId) {
+              let actualRange = { 
+                startSec: gap.naturalSilenceStartSec ?? gap.startSec, 
+                endSec: gap.naturalSilenceEndSec ?? gap.endSec 
+              };
+              if (gap.audioBuffer) {
+                actualRange = silenceAudioBufferInterval(gap.audioBuffer, gap.startSec, gap.endSec, { expandToSilence: true });
+              }
+              const filePath = getFilePathForTrack(gap.trackId);
+              if (filePath) {
+                if (!intervalsToSilenceByFilePath[filePath]) intervalsToSilenceByFilePath[filePath] = [];
+                intervalsToSilenceByFilePath[filePath].push(actualRange);
+              }
+              const comment: Comment = {
+                id: Math.random().toString(36).substr(2, 9),
+                text: `Наезд устранен: фраза ${gap.dubberName} удалена целиком до естественной тишины (реплика отдана ${gap.secondDubberName || 'второму даберу'}, хвосты сохранены)`,
+                timestamp: gap.startSec,
+                author: 'Куратор (Авто)',
+                subId: gap.subId
+              };
+              if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+              commentsByTrackId[gap.trackId].push(comment);
+            }
+          } else if (gap.resolutionAction === 'transfer_second_to_first') {
+            let actualRange = { 
+              startSec: gap.secondNaturalSilenceStartSec ?? gap.startSec, 
+              endSec: gap.secondNaturalSilenceEndSec ?? gap.endSec 
+            };
+            if (gap.secondAudioBuffer && gap.audioBuffer) {
+              const res = transferAudioBufferPhrase(gap.secondAudioBuffer, gap.audioBuffer, gap.startSec, gap.endSec);
+              actualRange = { startSec: res.naturalStartSec, endSec: res.naturalEndSec };
+            }
+            const sourcePath = gap.secondTrackId ? getFilePathForTrack(gap.secondTrackId) : null;
+            const targetPath = gap.trackId ? getFilePathForTrack(gap.trackId) : null;
+            if (sourcePath && targetPath) {
+              phrasesToTransfer.push({
+                sourcePath,
+                targetPath,
+                startSec: actualRange.startSec,
+                endSec: actualRange.endSec,
+                naturalStartSec: actualRange.startSec,
+                naturalEndSec: actualRange.endSec
+              });
             }
           }
         }
@@ -1383,12 +1578,21 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
         }
       });
 
-      // Execute audio silencing on physical files in Electron
+      // Execute audio silencing on physical files in Electron (always expanded to natural silence)
       for (const [filePath, intervals] of Object.entries(intervalsToSilenceByFilePath)) {
         try {
           await ipcSafe.invoke('silence-audio-intervals', { filePath, intervals });
         } catch (silenceErr) {
           console.warn(`Could not silence audio intervals in ${filePath}:`, silenceErr);
+        }
+      }
+
+      // Execute phrase transfers between physical files in Electron (cut to natural silence and transferred)
+      for (const transferItem of phrasesToTransfer) {
+        try {
+          await ipcSafe.invoke('transfer-audio-phrase', transferItem);
+        } catch (transferErr) {
+          console.warn(`Could not transfer audio phrase between files:`, transferErr);
         }
       }
 
@@ -1547,7 +1751,8 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           autoTiming: autoTiming ?? false
         },
         metadata: {
-          title: `Экспорт Звукорежиссеру: ${currentEpisode.project?.title || 'Проект'} - Серия ${currentEpisode.number}`
+          title: `Экспорт Звукорежиссеру: ${currentEpisode.project?.title || 'Проект'} - Серия ${currentEpisode.number}`,
+          targetDir
         }
       });
       setIsExportModalOpen(false);

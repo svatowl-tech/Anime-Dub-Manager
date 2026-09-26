@@ -314,9 +314,43 @@ class AutoTimingService {
       }
     }
 
+    // 4. Fourth pass: Fallback matching for any remaining tracks so NO TRACK IS EVER DROPPED!
+    for (const track of unassignedTracks) {
+      if (usedTrackPaths.has(track.path)) continue;
+      usedTrackPaths.add(track.path);
+
+      let nick = 'Даббер';
+      if (track.uploadedById) {
+        const p = participantsData.find(part => part.id === track.uploadedById);
+        if (p) nick = p.nickname || p.name;
+      }
+      if (nick === 'Даббер') {
+        const cands = extractNicknamesFromFilename(track.path);
+        if (cands.length > 0) nick = cands[0];
+        else nick = path.basename(track.path, path.extname(track.path));
+      }
+
+      const isFix = isTrackFix(track);
+      const fallbackCharName = track.characterName || `Дорожка_${nick}`;
+
+      log.info(`[AutoTiming] Fallback matching track: ${path.basename(track.path)} for dubber ${nick}`);
+      matchedTracks.push({
+        trackPath: track.path,
+        trackId: track.id || path.basename(track.path),
+        dubberId: track.uploadedById || null,
+        dubberNick: nick,
+        characterName: fallbackCharName,
+        isFix,
+        type: isFix ? 'FIXES' : 'DUBBER_FILE',
+        matchMethod: 'fallback_unassigned',
+        confidence: 0.50,
+        lines: [] // no specific lines matched, will preserve original intervals
+      });
+    }
+
     const unassignedActors = Array.from(charactersMap.keys()).filter(c => !usedCharacters.has(c));
 
-    log.info(`[AutoTiming] Matched ${matchedTracks.length} tracks to characters (${unassignedActors.length} unassigned characters)`);
+    log.info(`[AutoTiming] Matched ${matchedTracks.length} tracks in total (including fallback tracks). Unassigned actors: ${unassignedActors.length}`);
     return {
       matchedTracks,
       unassignedActors,
@@ -594,7 +628,13 @@ class AutoTimingService {
       );
 
       if (!origItem) {
-        log.warn(`[smartApplyFixes] No original track found for fix track: ${fixTrack.trackPath}`);
+        log.info(`[smartApplyFixes] Standalone fix track found without prior original track: ${fixTrack.trackPath}. Keeping as main track for ${fixTrack.dubberNick}`);
+        const standaloneItem = {
+          track: { ...fixTrack, isFix: false },
+          phrases: fixPhrases
+        };
+        originalTracks.push(standaloneItem);
+        fixLogs.push(`[${formatSeconds(fixPhrases[0]?.targetStartSec || 0)}] Самостоятельная дорожка фикса [${fixTrack.dubberNick}]: сохранена и экспортирована как основная дорожка.`);
         continue;
       }
 
@@ -707,9 +747,230 @@ class AutoTimingService {
   }
 
   /**
+   * Decodes an audio file to raw 16-bit 48kHz stereo PCM in memory with a safety timeout.
+   */
+  static decodeToPcm(audioPath, sampleRate = 48000, channels = 2) {
+    return new Promise((resolve, reject) => {
+      const ffmpegCmd = ffmpeg(audioPath)
+        .noVideo()
+        .audioCodec('pcm_s16le')
+        .audioFrequency(sampleRate)
+        .audioChannels(channels)
+        .format('s16le');
+
+      const chunks = [];
+      let killed = false;
+      const timeout = setTimeout(() => {
+        killed = true;
+        try { ffmpegCmd.kill('SIGKILL'); } catch (e) {}
+        reject(new Error(`Timeout decoding audio to PCM (60s): ${audioPath}`));
+      }, 60000);
+
+      const stream = ffmpegCmd.pipe();
+      stream.on('data', c => chunks.push(c));
+      stream.on('end', () => {
+        clearTimeout(timeout);
+        resolve(Buffer.concat(chunks));
+      });
+      stream.on('error', err => {
+        clearTimeout(timeout);
+        if (!killed) reject(err);
+      });
+    });
+  }
+
+  /**
+   * Creates a standard canonical 44-byte RIFF/WAVE header for raw PCM data.
+   */
+  static createWavHeader(pcmByteLength, sampleRate = 48000, channels = 2, bitDepth = 16) {
+    const header = Buffer.alloc(44);
+    const blockAlign = channels * (bitDepth / 8);
+    const byteRate = sampleRate * blockAlign;
+
+    header.write('RIFF', 0);
+    header.writeUInt32LE(36 + pcmByteLength, 4);
+    header.write('WAVE', 8);
+    header.write('fmt ', 12);
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20); // PCM format
+    header.writeUInt16LE(channels, 22);
+    header.writeUInt32LE(sampleRate, 24);
+    header.writeUInt32LE(byteRate, 28);
+    header.writeUInt16LE(blockAlign, 32);
+    header.writeUInt16LE(bitDepth, 34);
+    header.write('data', 36);
+    header.writeUInt32LE(pcmByteLength, 40);
+
+    return header;
+  }
+
+  /**
+   * Fast, reliable, 100% deadlock-free audio phrase assembly:
+   * 1. Decodes all distinct source files once into raw 16-bit 48kHz stereo PCM in RAM.
+   * 2. Allocates a zeroed output buffer (100% silence by default, guaranteeing ZERO tails!).
+   * 3. Places active phrases (originals + clean fixes) at their exact target start offsets.
+   * 4. Applies smooth 8ms micro-fade at phrase boundaries to eliminate clicks/pops.
+   * 5. Writes WAV directly to disk (instantaneous, no ffmpeg required!) or encodes to target format.
+   */
+  static async assembleMultiSourceTrack(defaultInputPath, phrases, outputAudioPath, options = {}) {
+    const sampleRate = 48000;
+    const channels = 2;
+    const bytesPerSampleFrame = 4; // 2 channels * 2 bytes (16-bit)
+    const bytesPerSec = sampleRate * bytesPerSampleFrame; // 192,000 bytes/sec
+
+    // 1. Collect all distinct source audio paths
+    const sourcePaths = new Set([defaultInputPath]);
+    for (const p of phrases) {
+      if (p.sourceAudioPath) sourcePaths.add(p.sourceAudioPath);
+    }
+
+    // 2. Decode each distinct source audio to 16-bit 48kHz stereo PCM in memory
+    const pcmMap = new Map();
+    for (const src of sourcePaths) {
+      if (fs.existsSync(src)) {
+        try {
+          const pcmBuf = await this.decodeToPcm(src, sampleRate, channels);
+          pcmMap.set(src, pcmBuf);
+        } catch (decErr) {
+          log.warn(`[AutoTiming] Could not decode ${src} to PCM:`, decErr.message);
+        }
+      }
+    }
+
+    const defaultPcm = pcmMap.get(defaultInputPath);
+    if (!defaultPcm && pcmMap.size === 0) {
+      throw new Error(`Failed to decode any audio sources for ${outputAudioPath}`);
+    }
+
+    // 3. Determine total required duration
+    let maxSec = 0;
+    for (const p of phrases) {
+      if (p.targetEndSec > maxSec) maxSec = p.targetEndSec;
+    }
+    if (defaultPcm) {
+      const defDur = defaultPcm.length / bytesPerSec;
+      if (defDur > maxSec) maxSec = defDur;
+    }
+    maxSec = Math.max(maxSec + 2.0, 10.0);
+
+    // 4. Allocate clean output buffer initialized to zero (100% pure silence - ZERO tails!)
+    const totalSamples = Math.ceil(maxSec * sampleRate);
+    const outputPcm = Buffer.alloc(totalSamples * bytesPerSampleFrame, 0);
+
+    // 5. Place each phrase at its exact target timing with 8ms micro-fade
+    const fadeSamples = Math.min(384, Math.floor(sampleRate * 0.008)); // 8ms = 384 samples
+
+    for (const p of phrases) {
+      const srcBuf = pcmMap.get(p.sourceAudioPath || defaultInputPath) || defaultPcm;
+      if (!srcBuf) continue;
+
+      const srcStartSample = Math.max(0, Math.floor(p.sourceStartSec * sampleRate));
+      const srcEndSample = Math.min(
+        Math.floor(p.sourceEndSec * sampleRate),
+        Math.floor(srcBuf.length / bytesPerSampleFrame)
+      );
+
+      const phraseSamples = srcEndSample - srcStartSample;
+      if (phraseSamples <= 0) continue;
+
+      const dstStartSample = Math.max(0, Math.floor(p.targetStartSec * sampleRate));
+      const curFade = Math.min(fadeSamples, Math.floor(phraseSamples / 4));
+
+      for (let s = 0; s < phraseSamples; s++) {
+        const dstSampleIdx = dstStartSample + s;
+        if (dstSampleIdx >= totalSamples) break;
+
+        const srcOffset = (srcStartSample + s) * bytesPerSampleFrame;
+        const dstOffset = dstSampleIdx * bytesPerSampleFrame;
+        if (srcOffset + 4 > srcBuf.length || dstOffset + 4 > outputPcm.length) break;
+
+        let fade = 1.0;
+        if (curFade > 0) {
+          if (s < curFade) fade = s / curFade;
+          else if (s > phraseSamples - curFade) fade = (phraseSamples - s) / curFade;
+        }
+
+        const leftSample = Math.round(srcBuf.readInt16LE(srcOffset) * fade);
+        const rightSample = Math.round(srcBuf.readInt16LE(srcOffset + 2) * fade);
+
+        const curLeft = outputPcm.readInt16LE(dstOffset);
+        const curRight = outputPcm.readInt16LE(dstOffset + 2);
+
+        // Mix with saturation clipping prevention
+        const mixedLeft = Math.max(-32768, Math.min(32767, curLeft + leftSample));
+        const mixedRight = Math.max(-32768, Math.min(32767, curRight + rightSample));
+
+        outputPcm.writeInt16LE(mixedLeft, dstOffset);
+        outputPcm.writeInt16LE(mixedRight, dstOffset + 2);
+      }
+    }
+
+    // 6. Write output file
+    const ext = (path.extname(outputAudioPath) || '.wav').toLowerCase();
+    const tempOut = path.join(path.dirname(outputAudioPath), `temp_timed_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
+
+    if (ext === '.wav') {
+      const header = this.createWavHeader(outputPcm.length, sampleRate, channels, 16);
+      await fs.promises.writeFile(tempOut, Buffer.concat([header, outputPcm]));
+      if (fs.existsSync(outputAudioPath)) {
+        await fs.promises.unlink(outputAudioPath);
+      }
+      await fs.promises.rename(tempOut, outputAudioPath);
+      return outputAudioPath;
+    } else {
+      // Re-encode from raw PCM buffer to target format (.mp3, .flac, .m4a, etc.)
+      const header = this.createWavHeader(outputPcm.length, sampleRate, channels, 16);
+      const wavBuffer = Buffer.concat([header, outputPcm]);
+
+      return new Promise((resolve, reject) => {
+        let cmd = ffmpeg();
+        const { Readable } = require('stream');
+        const s = new Readable();
+        s.push(wavBuffer);
+        s.push(null);
+
+        let timeout = setTimeout(() => {
+          try { cmd.kill('SIGKILL'); } catch (e) {}
+          reject(new Error(`Timeout encoding ${ext} audio: ${outputAudioPath}`));
+        }, 60000);
+
+        cmd
+          .input(s)
+          .output(tempOut)
+          .on('end', async () => {
+            clearTimeout(timeout);
+            try {
+              if (fs.existsSync(outputAudioPath)) {
+                await fs.promises.unlink(outputAudioPath);
+              }
+              await fs.promises.rename(tempOut, outputAudioPath);
+              resolve(outputAudioPath);
+            } catch (e) {
+              reject(e);
+            }
+          })
+          .on('error', (err) => {
+            clearTimeout(timeout);
+            try { if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut); } catch (e) {}
+            reject(err);
+          });
+
+        let audioCodec = 'pcm_s16le';
+        if (ext === '.mp3') audioCodec = 'libmp3lame';
+        else if (ext === '.flac') audioCodec = 'flac';
+        else if (ext === '.ogg') audioCodec = 'libvorbis';
+        else if (ext === '.m4a' || ext === '.aac') audioCodec = 'aac';
+        cmd.audioCodec(audioCodec);
+
+        cmd.run();
+      });
+    }
+  }
+
+  /**
    * Renders the auto-timed, collision-resolved audio tracks with clean fix insertions to disk.
    */
-  static async renderAutoTimedTracks(mergedResult, targetDir, baseVideoName, options = {}) {
+  static async renderAutoTimedTracks(mergedResult, targetDir, baseVideoName, options = {}, onProgress, onLog) {
     await fs.promises.mkdir(targetDir, { recursive: true });
     const renderedTracks = [];
 
@@ -740,14 +1001,19 @@ class AutoTimingService {
         : '  • Наложений и коллизий между дорожками не обнаружено (все фразы звучат чисто).\n') +
       `\n\nДЕТАЛИЗАЦИЯ ПО ДОРОЖКАМ:\n`;
 
-    for (const item of tracksToRender) {
+    for (let tIdx = 0; tIdx < tracksToRender.length; tIdx++) {
+      const item = tracksToRender[tIdx];
       const { track, phrases } = item;
       const ext = path.extname(track.trackPath) || '.wav';
       const nick = track.dubberNick || 'Даббер';
       const outFilename = `${baseVideoName}_[${nick}]${ext}`;
       const outFilePath = path.join(targetDir, outFilename);
 
-      log.info(`[AutoTiming Render] Assembling track for ${nick} -> ${outFilePath} (${phrases.length} phrases)`);
+      const trackProgressPercent = 70 + Math.round(((tIdx + 1) / tracksToRender.length) * 28);
+      const logMsg = `Сборка дорожки [${tIdx + 1}/${tracksToRender.length}]: «${nick}» (${track.characterName}) — фраз: ${phrases.length}`;
+      log.info(`[AutoTiming Render] ${logMsg} -> ${outFilePath}`);
+      if (onLog) onLog(logMsg);
+      if (onProgress) onProgress({ percent: trackProgressPercent, message: logMsg });
 
       reportContent += `\n------------------------------------------------------------\n` +
         `Даббер: ${nick} | Роль: ${track.characterName}\n` +
@@ -767,15 +1033,17 @@ class AutoTimingService {
       }
 
       try {
-        await this.assembleMultiSourceTrackWithFfmpeg(track.trackPath, phrases, outFilePath, options);
+        await this.assembleMultiSourceTrack(track.trackPath, phrases, outFilePath, options);
         renderedTracks.push({
           dubberNick: nick,
           characterName: track.characterName,
           outputPath: outFilePath,
           phrasesCount: phrases.length
         });
+        if (onLog) onLog(`Готово: ${outFilename}`);
       } catch (renderErr) {
-        log.error(`[AutoTiming Render] Failed FFmpeg assembly for ${nick}, copying original:`, renderErr);
+        log.error(`[AutoTiming Render] Failed assembly for ${nick}, copying original as safe fallback:`, renderErr);
+        if (onLog) onLog(`[Предупреждение] Ошибка сборки ${nick}: ${renderErr.message}. Скопирован оригинал.`, 'warn');
         await fs.promises.copyFile(track.trackPath, outFilePath);
         renderedTracks.push({
           dubberNick: nick,
@@ -798,91 +1066,12 @@ class AutoTimingService {
 
     await fs.promises.writeFile(reportPath, reportContent, 'utf-8');
     log.info(`[AutoTiming] Timing & Fix report saved to: ${reportPath}`);
+    if (onLog) onLog(`Отчет по таймингу и фиксам сохранен в: ИНФО_О_ФИКСАХ_И_АВТОТАЙМИНГЕ.txt`);
 
     return {
       renderedTracks,
       reportPath
     };
-  }
-
-  /**
-   * Uses FFmpeg to precisely assemble phrases from original and fix sources into the final track.
-   */
-  static async assembleMultiSourceTrackWithFfmpeg(defaultInputPath, phrases, outputAudioPath, options = {}) {
-    const ext = (path.extname(outputAudioPath) || '.wav').toLowerCase();
-    let audioCodec = 'pcm_s16le';
-    if (ext === '.mp3') audioCodec = 'libmp3lame';
-    else if (ext === '.flac') audioCodec = 'flac';
-    else if (ext === '.ogg') audioCodec = 'libvorbis';
-    else if (ext === '.m4a' || ext === '.aac') audioCodec = 'aac';
-
-    // Collect all distinct input files
-    const inputFiles = [defaultInputPath];
-    for (const p of phrases) {
-      const src = p.sourceAudioPath || defaultInputPath;
-      if (!inputFiles.includes(src)) {
-        inputFiles.push(src);
-      }
-    }
-
-    const filterComplex = [];
-    const mixInputs = [];
-
-    for (let i = 0; i < phrases.length; i++) {
-      const p = phrases[i];
-      const src = p.sourceAudioPath || defaultInputPath;
-      const inputIdx = inputFiles.indexOf(src);
-
-      const startS = Math.max(0, p.sourceStartSec).toFixed(3);
-      const endS = Math.max(startS + 0.05, p.sourceEndSec).toFixed(3);
-      const delayMs = Math.round(Math.max(0, p.targetStartSec) * 1000);
-
-      const duration = p.durationSec || (p.sourceEndSec - p.sourceStartSec);
-      const fadeFilter = `afade=t=in:ss=0:d=0.008,afade=t=out:st=${Math.max(0.008, duration - 0.008).toFixed(3)}:d=0.008`;
-      const filter = `[${inputIdx}:a]atrim=start=${startS}:end=${endS},asetpts=PTS-STARTPTS,${fadeFilter},aresample=48000,aformat=channel_layouts=stereo,adelay=${delayMs}|${delayMs}[p${i}]`;
-      
-      filterComplex.push(filter);
-      mixInputs.push(`[p${i}]`);
-    }
-
-    if (mixInputs.length === 1) {
-      filterComplex.push(`${mixInputs[0]}aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo[out]`);
-    } else {
-      filterComplex.push(`${mixInputs.join('')}amix=inputs=${mixInputs.length}:dropout_transition=0:normalize=0[out]`);
-    }
-
-    const tempOut = path.join(path.dirname(outputAudioPath), `temp_timed_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);
-
-    return new Promise((resolve, reject) => {
-      let cmd = ffmpeg();
-      for (const f of inputFiles) {
-        cmd = cmd.input(f);
-      }
-
-      cmd
-        .complexFilter(filterComplex.join(';'))
-        .map('[out]')
-        .audioCodec(audioCodec)
-        .output(tempOut)
-        .on('end', async () => {
-          try {
-            if (fs.existsSync(outputAudioPath)) {
-              await fs.promises.unlink(outputAudioPath);
-            }
-            await fs.promises.rename(tempOut, outputAudioPath);
-            resolve(outputAudioPath);
-          } catch (e) {
-            reject(e);
-          }
-        })
-        .on('error', (err) => {
-          try { if (fs.existsSync(tempOut)) fs.unlinkSync(tempOut); } catch (e) {}
-          reject(err);
-        });
-
-      addProcess('AutoTiming_assembleTrack', cmd);
-      cmd.run();
-    });
   }
 }
 

@@ -123,13 +123,17 @@ export const generateSoundEngineerQAReport = (
       report += `${idx + 1}. [${col.startFormatted} - ${col.endFormatted}] Реплика: "${col.text}"\n`;
       report += `   • Записали оба: ${col.dubberName} и ${col.secondDubberName || 'второй даббер'}\n`;
       if (col.resolutionAction === 'keep_first') {
-        report += `   👉 Решение: оставить ${col.dubberName}, заглушить ${col.secondDubberName}\n`;
+        report += `   👉 Решение: оставить ${col.dubberName}, дубль ${col.secondDubberName} вырезать до тишины\n`;
       } else if (col.resolutionAction === 'keep_second') {
-        report += `   👉 Решение: оставить ${col.secondDubberName}, заглушить ${col.dubberName}\n`;
+        report += `   👉 Решение: оставить ${col.secondDubberName}, дубль ${col.dubberName} вырезать до тишины\n`;
+      } else if (col.resolutionAction === 'transfer_second_to_first') {
+        report += `   👉 Решение: перенести дубль от ${col.secondDubberName} в дорожку ${col.dubberName} целиком до тишины\n`;
+      } else if (col.resolutionAction === 'transfer_first_to_second') {
+        report += `   👉 Решение: перенести дубль от ${col.dubberName} в дорожку ${col.secondDubberName} целиком до тишины\n`;
       } else if (col.resolutionAction === 'fix_subs' && col.selectedCharacterForSub) {
         report += `   👉 Решение: по сабам это персонаж ${col.selectedCharacterForSub}\n`;
       } else {
-        report += `   👉 Рекомендация: выбрать основную дорожку, вторую заглушить\n`;
+        report += `   👉 Рекомендация: выбрать основную дорожку, вторую заглушить до тишины\n`;
       }
       report += `\n`;
     });

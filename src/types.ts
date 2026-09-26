@@ -210,6 +210,8 @@ export interface Task {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'aborted';
   progress: number;
   eta: number | null;
+  step?: string;
+  logs?: string[];
   error: string | null;
   createdAt: string;
   startedAt: string | null;

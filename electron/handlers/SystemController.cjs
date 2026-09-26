@@ -5,7 +5,7 @@ const { exec } = require('child_process');
 const log = require('electron-log');
 const AdmZip = require('adm-zip');
 const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
-const { setCustomFfmpegPath, getActiveProcesses, silenceAudioIntervals } = require('../services/ffmpegService.cjs');
+const { setCustomFfmpegPath, getActiveProcesses, silenceAudioIntervals, transferAudioPhrase } = require('../services/ffmpegService.cjs');
 
 function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow) || BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
@@ -247,6 +247,11 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
   ipcMain.handle('silence-audio-intervals', wrapIpcHandler(async (event, { filePath, intervals }) => {
     if (!filePath) throw new Error('Missing audio file path');
     return await silenceAudioIntervals(filePath, intervals || []);
+  }));
+
+  ipcMain.handle('transfer-audio-phrase', wrapIpcHandler(async (event, { sourcePath, targetPath, startSec, endSec, naturalStartSec, naturalEndSec }) => {
+    if (!sourcePath || !targetPath) throw new Error('Missing sourcePath or targetPath for phrase transfer');
+    return await transferAudioPhrase(sourcePath, targetPath, startSec, endSec, { naturalStartSec, naturalEndSec });
   }));
 
   ipcMain.handle('get-gpus', wrapIpcHandler(async () => {

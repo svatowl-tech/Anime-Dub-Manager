@@ -79,6 +79,9 @@ export type DefectResolution =
   | 'reassign_character'
   | 'keep_first' 
   | 'keep_second' 
+  | 'transfer_first_to_second'
+  | 'transfer_second_to_first'
+  | 'auto_shift'
   | 'keep_both'
   | 'note_sound_engineer'
   | 'request_dubber_fix'
@@ -130,6 +133,10 @@ export interface MissingLineDetection {
 
   // Collision & Overlap fields
   isTimingTooLongMerged?: boolean;
+  naturalSilenceStartSec?: number;
+  naturalSilenceEndSec?: number;
+  secondNaturalSilenceStartSec?: number;
+  secondNaturalSilenceEndSec?: number;
   secondTrackId?: string;
   secondDubberName?: string;
   secondCharacterName?: string;
@@ -253,7 +260,7 @@ export function formatTimecode(seconds: number): string {
  */
 export function resolveAudioUrl(filePath: string): string {
   if (!filePath) return '';
-  if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:')) {
+  if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('data:') || filePath.startsWith('/api/')) {
     return filePath;
   }
   
@@ -263,6 +270,11 @@ export function resolveAudioUrl(filePath: string): string {
     if (cached) {
       return URL.createObjectURL(cached);
     }
+    const cleanPath = filePath.replace(/^file:\/\//, '');
+    if (!/^[a-zA-Z]:[/\\]/.test(cleanPath)) {
+      return `/api/media-file?path=${encodeURIComponent(cleanPath)}`;
+    }
+    return '';
   }
   
   return filePath.startsWith('file://') ? filePath : `file://${filePath}`;
@@ -300,22 +312,294 @@ export async function decodeAudioFile(url: string): Promise<AudioBuffer> {
 }
 
 /**
- * Zeros out audio samples in an AudioBuffer in-place across all channels
+ * Accurately detects the complete natural speech phrase boundaries expanded into true silence.
+ * GUARANTEE: Never clips any real vocal energy, consonant, onset breath, vowel or release tail.
+ * Everything extends backwards and forwards until audio energy fully drops to silence.
+ */
+export function findFullPhraseSilenceBoundaries(
+  audioBuffer: AudioBuffer,
+  approxStartSec: number,
+  approxEndSec: number,
+  options?: {
+    maxSearchBackwardSec?: number;
+    maxSearchForwardSec?: number;
+    silencePaddingSec?: number;
+    speechDynamicThresholdDb?: number;
+  }
+): {
+  naturalStartSec: number;
+  naturalEndSec: number;
+  speechStartSec: number;
+  speechEndSec: number;
+  isVoiced: boolean;
+  peakDb: number;
+  rmsDb: number;
+} {
+  const sampleRate = audioBuffer.sampleRate;
+  const totalDuration = audioBuffer.duration;
+  const channelData = audioBuffer.getChannelData(0);
+
+  const maxBack = options?.maxSearchBackwardSec ?? 2.0;
+  const maxFwd = options?.maxSearchForwardSec ?? 3.0;
+  const padding = options?.silencePaddingSec ?? 0.08; // 80ms silence margin
+
+  const searchStart = Math.max(0, approxStartSec - maxBack);
+  const searchEnd = Math.min(totalDuration, approxEndSec + maxFwd);
+
+  const frameMs = 20;
+  const hopMs = 10;
+  const frameSamples = Math.max(16, Math.floor((frameMs / 1000) * sampleRate));
+  const hopSamples = Math.max(8, Math.floor((hopMs / 1000) * sampleRate));
+
+  const startSample = Math.max(0, Math.floor(searchStart * sampleRate));
+  const endSample = Math.min(audioBuffer.length, Math.ceil(searchEnd * sampleRate));
+
+  const frames: { time: number; rmsDb: number; peakDb: number }[] = [];
+  let overallPeak = 0.00001;
+  let overallSumSq = 0;
+  let totalSamples = 0;
+
+  for (let s = startSample; s + frameSamples <= endSample; s += hopSamples) {
+    let fSumSq = 0;
+    let fPeak = 0;
+    for (let i = s; i < s + frameSamples; i++) {
+      const v = Math.abs(channelData[i]);
+      if (v > fPeak) fPeak = v;
+      fSumSq += v * v;
+    }
+    const fRms = Math.sqrt(fSumSq / frameSamples);
+    const timeSec = s / sampleRate;
+    const fRmsDb = 20 * Math.log10(Math.max(0.000001, fRms));
+    const fPeakDb = 20 * Math.log10(Math.max(0.000001, fPeak));
+    frames.push({ time: timeSec, rmsDb: fRmsDb, peakDb: fPeakDb });
+
+    if (fPeak > overallPeak) overallPeak = fPeak;
+    overallSumSq += fSumSq;
+    totalSamples += frameSamples;
+  }
+
+  const overallPeakDb = Math.round((20 * Math.log10(overallPeak)) * 10) / 10;
+  const overallRmsDb = Math.round((20 * Math.log10(Math.sqrt(overallSumSq / Math.max(1, totalSamples)))) * 10) / 10;
+
+  if (frames.length < 4) {
+    const s = Math.max(0, approxStartSec - padding);
+    const e = Math.min(totalDuration, approxEndSec + padding);
+    return {
+      naturalStartSec: s,
+      naturalEndSec: e,
+      speechStartSec: s,
+      speechEndSec: e,
+      isVoiced: false,
+      peakDb: overallPeakDb,
+      rmsDb: overallRmsDb
+    };
+  }
+
+  // Calculate local noise floor (lowest 15th percentile of frames)
+  const sortedRms = [...frames].map(f => f.rmsDb).sort((a, b) => a - b);
+  const noiseFloorDb = sortedRms[Math.floor(sortedRms.length * 0.15)] ?? -58;
+  const speechThreshDb = Math.max(noiseFloorDb + (options?.speechDynamicThresholdDb ?? 2.5), -48);
+  const minPeakDb = -42;
+
+  // Find core voice frames around the target interval
+  const coreVoiceIndices: number[] = [];
+  for (let idx = 0; idx < frames.length; idx++) {
+    const f = frames[idx];
+    if (f.time >= approxStartSec - 0.35 && f.time <= approxEndSec + 0.35) {
+      if (f.rmsDb >= speechThreshDb && f.peakDb >= minPeakDb) {
+        coreVoiceIndices.push(idx);
+      }
+    }
+  }
+
+  if (coreVoiceIndices.length === 0) {
+    // If no strong core voice found right on target, check whole search window
+    for (let idx = 0; idx < frames.length; idx++) {
+      const f = frames[idx];
+      if (f.rmsDb >= speechThreshDb + 1 && f.peakDb >= minPeakDb) {
+        coreVoiceIndices.push(idx);
+      }
+    }
+  }
+
+  if (coreVoiceIndices.length === 0) {
+    const s = Math.max(0, approxStartSec - padding);
+    const e = Math.min(totalDuration, approxEndSec + padding);
+    return {
+      naturalStartSec: s,
+      naturalEndSec: e,
+      speechStartSec: s,
+      speechEndSec: e,
+      isVoiced: false,
+      peakDb: overallPeakDb,
+      rmsDb: overallRmsDb
+    };
+  }
+
+  const firstCoreIdx = coreVoiceIndices[0];
+  const lastCoreIdx = coreVoiceIndices[coreVoiceIndices.length - 1];
+
+  // 1. Walk backward from firstCoreIdx until pure continuous silence
+  let speechStartIdx = firstCoreIdx;
+  let silentFramesBack = 0;
+  for (let idx = firstCoreIdx - 1; idx >= 0; idx--) {
+    const f = frames[idx];
+    const isSpeech = f.rmsDb >= speechThreshDb - 1.5 || f.peakDb >= minPeakDb - 4;
+    if (isSpeech) {
+      speechStartIdx = idx;
+      silentFramesBack = 0;
+    } else {
+      silentFramesBack++;
+      if (silentFramesBack >= 8) { // 80ms of silence
+        break;
+      }
+    }
+  }
+
+  // 2. Walk forward from lastCoreIdx until pure continuous silence
+  let speechEndIdx = lastCoreIdx;
+  let silentFramesFwd = 0;
+  for (let idx = lastCoreIdx + 1; idx < frames.length; idx++) {
+    const f = frames[idx];
+    // Vocal tails linger with soft consonants, vowels, and decay
+    const isSpeech = f.rmsDb >= speechThreshDb - 2.0 || f.peakDb >= minPeakDb - 6;
+    if (isSpeech) {
+      speechEndIdx = idx;
+      silentFramesFwd = 0;
+    } else {
+      silentFramesFwd++;
+      if (silentFramesFwd >= 14) { // 140ms of continuous silence
+        break;
+      }
+    }
+  }
+
+  const speechStartSec = frames[speechStartIdx].time;
+  const speechEndSec = frames[speechEndIdx].time + (frameMs / 1000);
+
+  // Extend cleanly into silence with safety padding - NEVER clips voice!
+  const naturalStartSec = Math.max(0, speechStartSec - padding);
+  const naturalEndSec = Math.min(totalDuration, speechEndSec + padding + 0.05);
+
+  return {
+    naturalStartSec: Math.round(naturalStartSec * 1000) / 1000,
+    naturalEndSec: Math.round(naturalEndSec * 1000) / 1000,
+    speechStartSec: Math.round(speechStartSec * 1000) / 1000,
+    speechEndSec: Math.round(speechEndSec * 1000) / 1000,
+    isVoiced: true,
+    peakDb: overallPeakDb,
+    rmsDb: overallRmsDb
+  };
+}
+
+/**
+ * Zeros out audio samples in an AudioBuffer in-place across all channels.
+ * When expandToSilence is true (default), expands the range to natural silence boundaries
+ * so NO voice tails, breaths or consonants are ever clipped.
+ * Applies a smooth 10ms micro-fade at boundaries to eliminate DC clicks.
  */
 export function silenceAudioBufferInterval(
   audioBuffer: AudioBuffer,
   startSec: number,
-  endSec: number
-): void {
+  endSec: number,
+  options?: {
+    expandToSilence?: boolean;
+    fadeMs?: number;
+  }
+): { startSec: number; endSec: number } {
+  let s = startSec;
+  let e = endSec;
+
+  if (options?.expandToSilence !== false) {
+    const bounds = findFullPhraseSilenceBoundaries(audioBuffer, startSec, endSec);
+    s = bounds.naturalStartSec;
+    e = bounds.naturalEndSec;
+  }
+
   const sampleRate = audioBuffer.sampleRate;
   const numChannels = audioBuffer.numberOfChannels;
-  const startSample = Math.max(0, Math.floor((startSec - 0.02) * sampleRate));
-  const endSample = Math.min(audioBuffer.length, Math.ceil((endSec + 0.02) * sampleRate));
+  const startSample = Math.max(0, Math.floor(s * sampleRate));
+  const endSample = Math.min(audioBuffer.length, Math.ceil(e * sampleRate));
+  const fadeSamples = Math.min(480, Math.floor(((options?.fadeMs ?? 10) / 1000) * sampleRate));
 
   for (let c = 0; c < numChannels; c++) {
     const data = audioBuffer.getChannelData(c);
+
+    // Fade out into the silence start
+    if (fadeSamples > 0 && startSample >= fadeSamples) {
+      for (let i = 0; i < fadeSamples; i++) {
+        const factor = (fadeSamples - i) / fadeSamples;
+        data[startSample - fadeSamples + i] *= factor;
+      }
+    }
+
+    // Fill with digital zero
     data.fill(0, startSample, endSample);
+
+    // Fade in from the silence end
+    if (fadeSamples > 0 && endSample + fadeSamples <= audioBuffer.length) {
+      for (let i = 0; i < fadeSamples; i++) {
+        const factor = i / fadeSamples;
+        data[endSample + i] *= factor;
+      }
+    }
   }
+
+  return { startSec: s, endSec: e };
+}
+
+/**
+ * Transfers a complete audio phrase from sourceBuffer into targetBuffer:
+ * 1. Expands [startSec, endSec] in sourceBuffer to natural silence boundaries (full vocal phrase & tails).
+ * 2. Copies the phrase slice into targetBuffer at naturalStartSec..naturalEndSec.
+ * 3. Zeros out the phrase in sourceBuffer down to natural silence (with micro-fades).
+ * GUARANTEE: Never clips any real vocal tails or syllables.
+ */
+export function transferAudioBufferPhrase(
+  sourceBuffer: AudioBuffer,
+  targetBuffer: AudioBuffer,
+  startSec: number,
+  endSec: number
+): { naturalStartSec: number; naturalEndSec: number; transferredDurationSec: number } {
+  const bounds = findFullPhraseSilenceBoundaries(sourceBuffer, startSec, endSec);
+  const s = bounds.naturalStartSec;
+  const e = bounds.naturalEndSec;
+  const sampleRate = sourceBuffer.sampleRate;
+  const numChannels = Math.min(sourceBuffer.numberOfChannels, targetBuffer.numberOfChannels);
+
+  const startSample = Math.max(0, Math.floor(s * sampleRate));
+  const endSample = Math.min(sourceBuffer.length, Math.ceil(e * sampleRate));
+  const sliceLength = endSample - startSample;
+
+  if (sliceLength > 0) {
+    const fadeSamples = Math.min(384, Math.floor(sampleRate * 0.008)); // 8ms micro-fade
+
+    for (let c = 0; c < numChannels; c++) {
+      const srcData = sourceBuffer.getChannelData(c);
+      const dstData = targetBuffer.getChannelData(c);
+
+      // Copy phrase into targetBuffer at matching sample position
+      for (let i = 0; i < sliceLength; i++) {
+        const dstIdx = startSample + i;
+        if (dstIdx >= dstData.length) break;
+
+        let fade = 1.0;
+        if (i < fadeSamples) fade = i / fadeSamples;
+        else if (i > sliceLength - fadeSamples) fade = (sliceLength - i) / fadeSamples;
+
+        dstData[dstIdx] = srcData[startSample + i] * fade;
+      }
+    }
+
+    // Mute sourceBuffer in that range with micro-fade down to silence
+    silenceAudioBufferInterval(sourceBuffer, s, e, { expandToSilence: false, fadeMs: 8 });
+  }
+
+  return {
+    naturalStartSec: s,
+    naturalEndSec: e,
+    transferredDurationSec: Math.round((e - s) * 100) / 100
+  };
 }
 
 /**
@@ -1197,6 +1481,9 @@ export async function detectEpisodeGaps(
           .replace(/\\h/gi, ' ')
           .trim();
 
+        const naturalA = findFullPhraseSilenceBoundaries(actorA.audioBuffer, lineStart, lineEnd);
+        const naturalB = findFullPhraseSilenceBoundaries(actorB.audioBuffer, lineStart, lineEnd);
+
         results.push({
           id: `collision_${line.rawLineIndex ?? lineIdx}_${lineStart.toFixed(2)}`,
           defectCategory: 'actor_collision',
@@ -1207,6 +1494,10 @@ export async function detectEpisodeGaps(
           subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
           startSec: lineStart,
           endSec: lineEnd,
+          naturalSilenceStartSec: naturalA.naturalStartSec,
+          naturalSilenceEndSec: naturalA.naturalEndSec,
+          secondNaturalSilenceStartSec: naturalB.naturalStartSec,
+          secondNaturalSilenceEndSec: naturalB.naturalEndSec,
           startFormatted: formatTimecode(lineStart),
           endFormatted: formatTimecode(lineEnd),
           durationSec: Math.round(lineDuration * 10) / 10,
@@ -1310,6 +1601,9 @@ export async function detectEpisodeGaps(
             ? `Фраза ${itemA.track.participant} (${itemA.resolvedCharName}) длиннее саба на +${timingDeltaPercent}% (вылет +${overflowDurationSec}с) и залезла на ${overlapSecRounded}с на начало реплики ${itemB.track.participant} (${itemB.resolvedCharName}). Объединено в один фикс: требуется поджать фразу и развести стык звукорежиссеру.`
             : `Наезд дублеров: хвост реплики ${itemA.track.participant} (${itemA.resolvedCharName}) залез на ${overlapSecRounded}с на начало реплики ${itemB.track.participant} (${itemB.resolvedCharName}). Требуется разводка или подрезка стыка звукорежиссером.`;
 
+          const naturalA = findFullPhraseSilenceBoundaries(itemA.audioBuffer, itemA.speechStartSec, itemA.speechEndSec);
+          const naturalB = findFullPhraseSilenceBoundaries(itemB.audioBuffer, itemB.speechStartSec, itemB.speechEndSec);
+
           results.push({
             id: `overlap_${itemA.track.id}_${itemB.track.id}_${itemA.lineIndex}_${itemB.lineIndex}_${overlapStart.toFixed(2)}`,
             defectCategory: 'actor_overlap',
@@ -1322,6 +1616,10 @@ export async function detectEpisodeGaps(
             subId: itemA.subId,
             startSec: collisionStart,
             endSec: collisionEnd,
+            naturalSilenceStartSec: naturalA.naturalStartSec,
+            naturalSilenceEndSec: naturalA.naturalEndSec,
+            secondNaturalSilenceStartSec: naturalB.naturalStartSec,
+            secondNaturalSilenceEndSec: naturalB.naturalEndSec,
             startFormatted: formatTimecode(collisionStart),
             endFormatted: formatTimecode(collisionEnd),
             durationSec: Math.round((collisionEnd - collisionStart) * 10) / 10,

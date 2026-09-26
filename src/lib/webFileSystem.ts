@@ -71,6 +71,11 @@ export function getFileFromCache(name: string): File | undefined {
   return fileHandlesCache.get(cleanName);
 }
 
+if (typeof window !== 'undefined') {
+  (window as any).getFileFromCache = getFileFromCache;
+  (window as any).registerFileInCache = registerFileInCache;
+}
+
 export async function selectBrowserDirectory(): Promise<string> {
   if (!('showDirectoryPicker' in window)) {
     throw new Error('Ваш браузер не поддерживает File System Access API. Пожалуйста, используйте Chrome, Edge или Opera.');
@@ -240,25 +245,48 @@ function downloadFallback(fileName: string, content: string | Blob) {
 
 export async function resolveLocalPath(filePath: string): Promise<string> {
   if (!filePath) return '';
-  if (filePath.startsWith('http') || filePath.startsWith('blob:') || filePath.startsWith('data:')) {
+  if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('data:')) {
     return filePath;
   }
   
   const cleanPath = filePath.replace(/^file:\/\//, '');
+
+  // 1. Поиск по имени файла или пути в in-memory кэше сессии
+  const nameOnly = cleanPath.replace(/\\/g, '/').split('/').pop() || cleanPath;
+  const cached = getFileFromCache(nameOnly) || getFileFromCache(cleanPath);
+  if (cached) {
+    return URL.createObjectURL(cached);
+  }
+
+  // 2. Поиск в File System Access API (если пользователь выбрал папку проекта)
   try {
     const file = await readFromLocalFolder(cleanPath);
     if (file instanceof File) {
       return URL.createObjectURL(file);
     }
-    return cleanPath;
   } catch (e) {
-    // Попробуем просто имя файла поискать в кэше
-    const nameOnly = cleanPath.replace(/\\/g, '/').split('/').pop() || cleanPath;
-    const cached = getFileFromCache(nameOnly);
-    if (cached) {
-      return URL.createObjectURL(cached);
-    }
-    return filePath; // Фоллбек
+    // Не найдено в локальной папке
   }
+
+  // 3. Проверка доступности файла на сервере через медиа-эндпоинт
+  if (typeof window !== 'undefined' && window.location) {
+    try {
+      const serverMediaUrl = `/api/media-file?path=${encodeURIComponent(cleanPath)}`;
+      const checkRes = await fetch(serverMediaUrl, { method: 'HEAD' });
+      if (checkRes.ok) {
+        return serverMediaUrl;
+      }
+    } catch (e) {
+      // Игнорируем сетевые ошибки проверки
+    }
+  }
+
+  // 4. Если это локальный путь Windows (например C:\...) или недостижимый путь в браузере,
+  // возвращаем пустую строку, чтобы предотвратить сбой fetch("C:\...")
+  if (/^[a-zA-Z]:[/\\]/.test(cleanPath)) {
+    return '';
+  }
+
+  return cleanPath;
 }
 

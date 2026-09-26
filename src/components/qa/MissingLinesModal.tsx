@@ -438,7 +438,11 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   const silenceActionsCount = selectedGaps.filter(g => 
     (g.defectCategory === 'unwanted_speech' && g.resolutionAction === 'silence') ||
     (g.defectCategory === 'actor_collision' && (g.resolutionAction === 'keep_first' || g.resolutionAction === 'keep_second')) ||
-    (g.defectCategory === 'actor_overlap' && g.resolutionAction === 'silence')
+    (g.defectCategory === 'actor_overlap' && (g.resolutionAction === 'keep_first' || g.resolutionAction === 'keep_second'))
+  ).length;
+
+  const transferActionsCount = selectedGaps.filter(g => 
+    g.resolutionAction === 'transfer_second_to_first' || g.resolutionAction === 'transfer_first_to_second'
   ).length;
 
   const fixSubsActionsCount = selectedGaps.filter(g => 
@@ -1701,7 +1705,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                                 </div>
                               </div>
 
-                              {/* Strategy 2: Ошибка даббера */}
+                              {/* Strategy 2: Выбор даббера */}
                               <div className={`p-2.5 rounded-lg border transition-all ${
                                 (gap.resolutionAction === 'keep_first' || gap.resolutionAction === 'keep_second') 
                                   ? 'bg-amber-950/40 border-amber-500/60' 
@@ -1709,10 +1713,10 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                               }`}>
                                 <div className="flex items-center gap-1.5 font-bold text-xs text-white mb-1.5">
                                   <Scissors className="w-3.5 h-3.5 text-amber-400" />
-                                  <span>Ошибка даббера (заменить лишнее тишиной)</span>
+                                  <span>Выбор даббера (второго убрать до тишины)</span>
                                 </div>
                                 <p className="text-[11px] text-neutral-400 mb-2">
-                                  Оставить нужного актёра, а ошибку второго заглушить:
+                                  Оставить нужного, а дубль второго вырезать строго до тишины (без обрезки хвостов):
                                 </p>
                                 <div className="flex flex-wrap gap-1.5">
                                   <button
@@ -1723,9 +1727,9 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                                         ? 'bg-amber-500 text-neutral-950 shadow-sm'
                                         : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
                                     }`}
-                                    title={`Оставить ${gap.dubberName}, а реплику у ${gap.secondDubberName} заменить тишиной`}
+                                    title={`Оставить ${gap.dubberName}, а реплику у ${gap.secondDubberName} вырезать целиком до тишины`}
                                   >
-                                    Оставить {gap.dubberName}, глушить {gap.secondDubberName}
+                                    Оставить {gap.dubberName}, убрать {gap.secondDubberName}
                                   </button>
                                   <button
                                     type="button"
@@ -1735,9 +1739,50 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                                         ? 'bg-amber-500 text-neutral-950 shadow-sm'
                                         : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
                                     }`}
-                                    title={`Оставить ${gap.secondDubberName}, а реплику у ${gap.dubberName} заменить тишиной`}
+                                    title={`Оставить ${gap.secondDubberName}, а реплику у ${gap.dubberName} вырезать целиком до тишины`}
                                   >
-                                    Оставить {gap.secondDubberName}, глушить {gap.dubberName}
+                                    Оставить {gap.secondDubberName}, убрать {gap.dubberName}
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Strategy 3: Перенос фразы целиком между дорожками */}
+                              <div className={`p-2.5 rounded-lg border transition-all md:col-span-2 ${
+                                (gap.resolutionAction === 'transfer_second_to_first' || gap.resolutionAction === 'transfer_first_to_second') 
+                                  ? 'bg-emerald-950/40 border-emerald-500/60' 
+                                  : 'bg-neutral-950/30 border-neutral-800'
+                              }`}>
+                                <div className="flex items-center gap-1.5 font-bold text-xs text-white mb-1.5">
+                                  <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>Перенос реплики целиком между дорожками (до естественной тишины)</span>
+                                </div>
+                                <p className="text-[11px] text-neutral-400 mb-2">
+                                  Полностью вырезает фразу из дорожки-источника до естественной тишины и вставляет целиком с хвостами в целевую дорожку (хвосты 100% сохранены):
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResolutionChange(gap.id, 'transfer_second_to_first')}
+                                    className={`px-3 py-1 rounded text-[11px] font-bold transition-all flex items-center gap-1.5 ${
+                                      gap.resolutionAction === 'transfer_second_to_first'
+                                        ? 'bg-emerald-500 text-neutral-950 shadow-sm'
+                                        : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                                    }`}
+                                    title={`Взять реплику от ${gap.secondDubberName} и перенести в дорожку ${gap.dubberName} (вырезав у ${gap.secondDubberName} до тишины)`}
+                                  >
+                                    Взять у {gap.secondDubberName} ➔ перенести в дорожку {gap.dubberName}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleResolutionChange(gap.id, 'transfer_first_to_second')}
+                                    className={`px-3 py-1 rounded text-[11px] font-bold transition-all flex items-center gap-1.5 ${
+                                      gap.resolutionAction === 'transfer_first_to_second'
+                                        ? 'bg-emerald-500 text-neutral-950 shadow-sm'
+                                        : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                                    }`}
+                                    title={`Взять реплику от ${gap.dubberName} и перенести в дорожку ${gap.secondDubberName} (вырезав у ${gap.dubberName} до тишины)`}
+                                  >
+                                    Взять у {gap.dubberName} ➔ перенести в дорожку {gap.secondDubberName}
                                   </button>
                                 </div>
                               </div>
@@ -1866,22 +1911,66 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                                     ? 'bg-indigo-600 text-white shadow-sm'
                                     : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
                                 }`}
+                                title="Звукорежиссер разведет наезд вручную в DAW без обрезки голоса"
                               >
                                 <Headphones className="w-3.5 h-3.5 text-indigo-300" />
-                                {gap.isTimingTooLongMerged ? 'В записку звукарю (поджать фразу и развести стык)' : 'В записку звукарю (развести стык)'}
+                                {gap.isTimingTooLongMerged ? 'В записку звукарю (развести стык)' : 'В записку звукарю (развести стык)'}
                               </button>
 
                               <button
                                 type="button"
-                                onClick={() => handleResolutionChange(gap.id, 'silence')}
+                                onClick={() => handleResolutionChange(gap.id, 'auto_shift')}
                                 className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
-                                  gap.resolutionAction === 'silence'
+                                  gap.resolutionAction === 'auto_shift'
                                     ? 'bg-amber-500 text-neutral-950 shadow-sm'
                                     : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
                                 }`}
+                                title="Сдвигает начало второй фразы вперед за окончание первой фразы, 100% сохраняя голос и все хвосты"
                               >
-                                <Scissors className="w-3.5 h-3.5 text-amber-400" />
-                                Заглушить хвост первого тишиной
+                                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                                Авто-разведение (сдвинуть фразу, сохранив все хвосты)
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleResolutionChange(gap.id, 'keep_first')}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                                  gap.resolutionAction === 'keep_first'
+                                    ? 'bg-rose-500 text-white shadow-sm'
+                                    : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                                }`}
+                                title={`Фраза ${gap.secondDubberName} была ошибкой / дублем: вырезать её целиком до естественной тишины`}
+                              >
+                                <Scissors className="w-3.5 h-3.5 text-rose-400" />
+                                Оставить {gap.dubberName}, дубль {gap.secondDubberName} убрать до тишины
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleResolutionChange(gap.id, 'keep_second')}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                                  gap.resolutionAction === 'keep_second'
+                                    ? 'bg-rose-500 text-white shadow-sm'
+                                    : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                                }`}
+                                title={`Фраза ${gap.dubberName} была ошибкой / дублем: вырезать её целиком до естественной тишины`}
+                              >
+                                <Scissors className="w-3.5 h-3.5 text-rose-400" />
+                                Оставить {gap.secondDubberName}, дубль {gap.dubberName} убрать до тишины
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleResolutionChange(gap.id, 'transfer_second_to_first')}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 ${
+                                  gap.resolutionAction === 'transfer_second_to_first'
+                                    ? 'bg-emerald-500 text-neutral-950 shadow-sm'
+                                    : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                                }`}
+                                title={`Перенести фразу от ${gap.secondDubberName} в дорожку ${gap.dubberName} целиком до тишины`}
+                              >
+                                <ArrowRightLeft className="w-3.5 h-3.5 text-emerald-400" />
+                                Перенести от {gap.secondDubberName} ➔ в {gap.dubberName} (до тишины)
                               </button>
 
                               <button
@@ -2966,7 +3055,12 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                   {activeSelectedGap.resolutionAction === 'reassign_character' ? 'Переназначено' :
                    activeSelectedGap.resolutionAction === 'note_sound_engineer' ? 'Отчет звукарю' :
                    activeSelectedGap.resolutionAction === 'request_dubber_fix' ? 'Перезапись даббера' :
-                   activeSelectedGap.resolutionAction === 'silence' ? 'Замена тишиной' :
+                   activeSelectedGap.resolutionAction === 'silence' ? 'Замена тишиной (до тишины)' :
+                   activeSelectedGap.resolutionAction === 'keep_first' ? 'Оставить 1-го (до тишины)' :
+                   activeSelectedGap.resolutionAction === 'keep_second' ? 'Оставить 2-го (до тишины)' :
+                   activeSelectedGap.resolutionAction === 'transfer_second_to_first' ? 'Перенос дубля 2➔1 (до тишины)' :
+                   activeSelectedGap.resolutionAction === 'transfer_first_to_second' ? 'Перенос дубля 1➔2 (до тишины)' :
+                   activeSelectedGap.resolutionAction === 'auto_shift' ? 'Авто-разведение' :
                    activeSelectedGap.resolutionAction === 'actor_better_than_sub' ? 'Актёр лучше (обновить саб)' :
                    activeSelectedGap.resolutionAction === 'ignore' ? 'Пропущено' : 'К исправлению'}
                 </p>

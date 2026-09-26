@@ -116,6 +116,8 @@ class TaskQueue extends EventEmitter {
       status: 'pending',
       progress: 0,
       eta: null,
+      step: '',
+      logs: [],
       error: null,
       createdAt: new Date().toISOString(),
       startedAt: null,
@@ -173,6 +175,22 @@ class TaskQueue extends EventEmitter {
             percent = progressData.progress;
           }
           task.progress = Math.min(100, Math.max(0, Math.round(percent)));
+
+          if (progressData && typeof progressData === 'object') {
+            if (progressData.message) {
+              task.step = progressData.message;
+            } else if (progressData.step) {
+              task.step = progressData.step;
+            }
+
+            if (progressData.log) {
+              task.logs = task.logs || [];
+              task.logs.push(progressData.log);
+              if (task.logs.length > 500) task.logs.shift();
+            } else if (Array.isArray(progressData.logs)) {
+              task.logs = progressData.logs.slice(-500);
+            }
+          }
           
           // Calculate ETA
           if (progressData && typeof progressData === 'object' && progressData.eta !== undefined && progressData.eta !== null) {
@@ -187,7 +205,17 @@ class TaskQueue extends EventEmitter {
             task.eta = 0;
           }
 
-          this.emit('task-progress', { id: task.id, progress: task.progress, eta: task.eta, task });
+          const safeTask = { ...task };
+          delete safeTask.taskFn;
+          this.emit('task-progress', { 
+            id: task.id, 
+            progress: task.progress, 
+            eta: task.eta, 
+            step: task.step, 
+            log: progressData?.log, 
+            logs: task.logs, 
+            task: safeTask 
+          });
         },
         (command) => {
           this.activeTasks.set(task.id, { command, task });
@@ -271,6 +299,8 @@ class TaskQueue extends EventEmitter {
       status: t.status,
       progress: t.progress,
       eta: t.eta,
+      step: t.step || '',
+      logs: t.logs || [],
       error: t.error,
       createdAt: t.createdAt,
       startedAt: t.startedAt,

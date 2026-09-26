@@ -79,6 +79,9 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
 
     wavesurferRef.current.on('error', (err: any) => {
       if (err.name === 'AbortError' || err.message?.includes('aborted')) return;
+      if (err instanceof TypeError || (err.message && (err.message.includes('fetch') || err.message.includes('Failed to fetch')))) {
+        return;
+      }
       console.error('WaveSurfer error:', err);
     });
 
@@ -96,7 +99,7 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
              lower.endsWith('.avi') || 
              lower.endsWith('.mov') || 
              lower.endsWith('.webm') || 
-             lower.endsWith('.flv') ||
+             lower.endsWith('.flv') || 
              lower.endsWith('.m4v');
     };
 
@@ -108,7 +111,7 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
       if (wavesurferRef.current) {
         try {
           const silentWav = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
-          wavesurferRef.current.load(silentWav, [peaks], duration);
+          wavesurferRef.current.load(silentWav, [peaks], duration).catch(() => {});
         } catch (err) {
           console.error('TrackWaveform sync load error:', err);
         }
@@ -117,7 +120,7 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
 
     if (selectedFile && selectedFile.path && !isVideoFile(selectedFile.path)) {
       (async () => {
-        let audioUrl = selectedFile.path;
+        let audioUrl = '';
         if (!window.electronAPI) {
           const cleanName = selectedFile.path.replace(/\\/g, '/').split('/').pop() || selectedFile.path;
           const cached = (window as any).getFileFromCache?.(cleanName);
@@ -134,8 +137,26 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
           audioUrl = selectedFile.path.startsWith('file://') || selectedFile.path.startsWith('http') ? selectedFile.path : `file://${selectedFile.path}`;
         }
 
+        const isPlayableUrl = audioUrl && (
+          audioUrl.startsWith('blob:') || 
+          audioUrl.startsWith('http://') || 
+          audioUrl.startsWith('https://') || 
+          audioUrl.startsWith('data:') || 
+          audioUrl.startsWith('/api/') ||
+          (window.electronAPI && audioUrl.startsWith('file://'))
+        );
+
+        if (!isPlayableUrl) {
+          loadSyntheticPeaks();
+          return;
+        }
+
         wavesurferRef.current?.load(audioUrl).catch(err => {
           if (err.name === 'AbortError' || err.message?.includes('aborted')) return;
+          if (err instanceof TypeError || (err.message && err.message.includes('fetch'))) {
+            loadSyntheticPeaks();
+            return;
+          }
           console.warn('Quality-track WAV load failed, using synthetic peaks fallback:', err);
           loadSyntheticPeaks();
         });

@@ -827,7 +827,8 @@ export default function Dashboard({
           title: `Экспорт ${roleName}: ${currentEpisode.project?.title || 'Проект'} - Серия ${currentEpisode.number}`,
           episodeId: currentEpisode.id,
           roleName: exportRole, // 'DABBER' or 'SOUND_ENGINEER'
-          projectId: currentEpisode.projectId
+          projectId: currentEpisode.projectId,
+          targetDir
         }
       });
 
