@@ -190,6 +190,25 @@ class AutoTimingService {
       return bn.includes('fix') || bn.includes('фикс');
     };
 
+    // Helper to extract target fix lines from assignment comments
+    const extractFixTargets = (assignment) => {
+      if (!assignment || !assignment.comments) return [];
+      try {
+        const parsed = typeof assignment.comments === 'string' ? JSON.parse(assignment.comments) : assignment.comments;
+        if (Array.isArray(parsed)) {
+          const list = parsed.map(c => ({
+            subId: c.subId ? String(c.subId) : undefined,
+            timestamp: c.timestamp !== undefined ? Number(c.timestamp) : undefined,
+            lineIndex: c.lineIndex !== undefined ? Number(c.lineIndex) : undefined,
+            text: c.text
+          })).filter(c => c.timestamp !== undefined || c.subId || c.lineIndex !== undefined);
+          list.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+          return list;
+        }
+      } catch (e) {}
+      return [];
+    };
+
     // 1. First pass: Match audio tracks using explicit assignments
     for (const assignment of existingAssignments) {
       if (!assignment.dubberId) continue;
@@ -212,8 +231,9 @@ class AutoTimingService {
 
         if (matched) {
           usedTrackPaths.add(track.path);
-          usedCharacters.add(charName);
           const isFix = isTrackFix(track);
+          if (!isFix) usedCharacters.add(charName);
+          const fixTargetLines = isFix ? extractFixTargets(assignment) : [];
           matchedTracks.push({
             trackPath: track.path,
             trackId: track.id || path.basename(track.path),
@@ -224,7 +244,8 @@ class AutoTimingService {
             type: isFix ? 'FIXES' : 'DUBBER_FILE',
             matchMethod: 'assignment_and_nick',
             confidence: 1.0,
-            lines: charactersMap.get(charName)?.lines || []
+            lines: charactersMap.get(charName)?.lines || [],
+            fixTargetLines
           });
         }
       }
@@ -234,6 +255,7 @@ class AutoTimingService {
     for (const track of (audioFiles || [])) {
       if (usedTrackPaths.has(track.path)) continue;
       const candidates = extractNicknamesFromFilename(track.path);
+      const isFix = isTrackFix(track);
       
       let matchedParticipant = null;
       for (const p of participantsData) {
@@ -247,7 +269,7 @@ class AutoTimingService {
         // Find which character is assigned to this participant or match directly
         let targetChar = null;
         for (const [cName, cInfo] of charactersMap.entries()) {
-          if (!usedCharacters.has(cName)) {
+          if (!usedCharacters.has(cName) || isFix) {
             if (candidates.some(c => isNameMatch(c, cName)) || isNameMatch(matchedParticipant.nickname, cName)) {
               targetChar = cName;
               break;
@@ -257,15 +279,18 @@ class AutoTimingService {
 
         if (!targetChar) {
           const epAssign = existingAssignments.find(a => a.dubberId === matchedParticipant.id);
-          if (epAssign && !usedCharacters.has(epAssign.characterName)) {
+          if (epAssign && (!usedCharacters.has(epAssign.characterName) || isFix)) {
             targetChar = epAssign.characterName;
           }
         }
 
         if (targetChar) {
           usedTrackPaths.add(track.path);
-          usedCharacters.add(targetChar);
-          const isFix = isTrackFix(track);
+          if (!isFix) usedCharacters.add(targetChar);
+          const relatedAssign = existingAssignments.find(a => 
+            a.dubberId === matchedParticipant.id || a.characterName === targetChar
+          );
+          const fixTargetLines = isFix ? extractFixTargets(relatedAssign) : [];
           matchedTracks.push({
             trackPath: track.path,
             trackId: track.id || path.basename(track.path),
@@ -276,7 +301,8 @@ class AutoTimingService {
             type: isFix ? 'FIXES' : 'DUBBER_FILE',
             matchMethod: 'filename_nick_matched',
             confidence: 0.95,
-            lines: charactersMap.get(targetChar)?.lines || []
+            lines: charactersMap.get(targetChar)?.lines || [],
+            fixTargetLines
           });
           continue;
         }
@@ -285,7 +311,7 @@ class AutoTimingService {
       // 3. Third pass: Match filename directly against character names in subtitles
       let matchedDirectChar = null;
       for (const [cName, cInfo] of charactersMap.entries()) {
-        if (!usedCharacters.has(cName)) {
+        if (!usedCharacters.has(cName) || isFix) {
           if (candidates.some(c => isNameMatch(c, cName))) {
             matchedDirectChar = cName;
             break;
@@ -295,8 +321,11 @@ class AutoTimingService {
 
       if (matchedDirectChar) {
         usedTrackPaths.add(track.path);
-        usedCharacters.add(matchedDirectChar);
-        const isFix = isTrackFix(track);
+        if (!isFix) usedCharacters.add(matchedDirectChar);
+        const relatedAssign = existingAssignments.find(a => 
+          a.characterName === matchedDirectChar || (track.uploadedById && a.dubberId === track.uploadedById)
+        );
+        const fixTargetLines = isFix ? extractFixTargets(relatedAssign) : [];
         matchedTracks.push({
           trackPath: track.path,
           trackId: track.id || path.basename(track.path),
@@ -307,7 +336,8 @@ class AutoTimingService {
           type: isFix ? 'FIXES' : 'DUBBER_FILE',
           matchMethod: 'filename_character_direct',
           confidence: 0.90,
-          lines: charactersMap.get(matchedDirectChar)?.lines || []
+          lines: charactersMap.get(matchedDirectChar)?.lines || [],
+          fixTargetLines
         });
       } else {
         unassignedTracks.push(track);
@@ -428,8 +458,8 @@ class AutoTimingService {
       let intervals = [];
       try {
         const detectRes = await detectSpeechIntervals(track.trackPath, {
-          noiseDb: options.noiseDb || -36,
-          minSilenceDuration: options.minSilenceDuration || 0.18
+          noiseDb: options.noiseDb || -45,
+          minSilenceDuration: options.minSilenceDuration || 0.30
         });
         intervals = detectRes.speechIntervals || [];
       } catch (err) {
@@ -439,25 +469,93 @@ class AutoTimingService {
 
       const charLines = track.lines || [];
       const phrases = [];
+      const fixTargets = track.fixTargetLines || [];
+
+      // Check whether this track's intervals reflect timeline timecodes or sequential takes
+      let isTrackInTimeline = false;
+      if (intervals.length > 0) {
+        const firstStart = intervals[0].startSec;
+        const lastEnd = intervals[intervals.length - 1].endSec;
+        const totalSpan = lastEnd - firstStart;
+
+        if (track.isFix) {
+          // For fix tracks: check if timestamps match any fix targets or character lines within 15s
+          const targets = fixTargets.length > 0 ? fixTargets : charLines;
+          const matchCount = intervals.filter(inv => 
+            targets.some(t => {
+              const tSec = t.timestamp !== undefined ? t.timestamp : t.startSec;
+              return tSec !== undefined && Math.abs(tSec - inv.startSec) < 15.0;
+            })
+          ).length;
+          if (matchCount >= Math.ceil(intervals.length / 2) && firstStart > 5.0) {
+            isTrackInTimeline = true;
+          }
+        } else {
+          // Regular track: if first voice is after 15s or total span > 45s, it is recorded in timeline
+          if (firstStart > 15.0 || totalSpan > 45.0) {
+            isTrackInTimeline = true;
+          }
+        }
+      }
 
       for (let k = 0; k < intervals.length; k++) {
         const interval = intervals[k];
-        
-        // Find best matching subtitle line by closest timestamp or index
         let subLine = null;
-        if (charLines.length > 0) {
-          // If the audio has absolute timestamps (e.g. interval.startSec > 10)
-          if (interval.startSec > 5) {
+
+        if (track.isFix) {
+          if (isTrackInTimeline) {
+            // Timeline fix: match closest subtitle line by timestamp
             let bestDiff = Infinity;
             for (const cl of charLines) {
               const diff = Math.abs(cl.startSec - interval.startSec);
-              if (diff < bestDiff) {
+              if (diff < bestDiff && diff < 25.0) {
                 bestDiff = diff;
                 subLine = cl;
               }
             }
           } else {
-            subLine = charLines[k] || charLines[0];
+            // Sequential fix takes: match k-th take to k-th fix target (from curator comments)
+            if (fixTargets.length > 0 && k < fixTargets.length) {
+              const target = fixTargets[k];
+              if (target.subId) {
+                subLine = charLines.find(cl => String(cl.id) === String(target.subId) || String(cl.rawLineIndex) === String(target.subId));
+              }
+              if (!subLine && target.timestamp !== undefined) {
+                subLine = charLines.find(cl => Math.abs(cl.startSec - target.timestamp) < 2.0);
+              }
+              if (!subLine && typeof target.lineIndex === 'number') {
+                subLine = charLines.find(cl => cl.rawLineIndex === target.lineIndex);
+              }
+              if (!subLine && target.timestamp !== undefined) {
+                subLine = { 
+                  startSec: target.timestamp, 
+                  endSec: target.timestamp + interval.durationSec, 
+                  id: target.subId || `fix_${k}`, 
+                  text: target.text || '' 
+                };
+              }
+            }
+            if (!subLine && charLines.length > 0) {
+              subLine = charLines[k] || charLines[charLines.length - 1];
+            }
+          }
+        } else {
+          // Regular track
+          if (isTrackInTimeline) {
+            // Match closest subtitle line within reasonable tolerance (20s)
+            let bestDiff = Infinity;
+            for (const cl of charLines) {
+              const diff = Math.abs(cl.startSec - interval.startSec);
+              if (diff < bestDiff && diff < 20.0) {
+                bestDiff = diff;
+                subLine = cl;
+              }
+            }
+          } else {
+            // Sequential takes: k-th take is k-th line
+            if (charLines.length > 0) {
+              subLine = charLines[k] || charLines[charLines.length - 1];
+            }
           }
         }
 
@@ -465,7 +563,12 @@ class AutoTimingService {
         const subEnd = subLine ? subLine.endSec : interval.endSec;
         const subId = subLine ? String(subLine.id ?? subLine.rawLineIndex ?? k) : `track_${track.trackId}_${k}`;
 
-        const initialStart = Math.max(0, subStart - leadInSec);
+        // Initial target timing:
+        // In timeline tracks, keep original placement (interval.startSec).
+        // In sequential tracks, position at subtitle start minus leadInSec.
+        const initialStart = isTrackInTimeline 
+          ? interval.startSec 
+          : Math.max(0, subStart - leadInSec);
         const initialEnd = initialStart + interval.durationSec;
 
         const phraseObj = {
@@ -686,6 +789,8 @@ class AutoTimingService {
             durationSec: fixDuration,
             targetStartSec: oldOrigPhrase.targetStartSec,
             targetEndSec: oldOrigPhrase.targetStartSec + fixDuration,
+            oldTargetStartSec: oldOrigPhrase.targetStartSec,
+            oldTargetEndSec: oldOrigPhrase.targetEndSec,
             isReplacedByFix: true,
             origDurationSec: origDuration,
             fixDurationSec: fixDuration
@@ -853,28 +958,69 @@ class AutoTimingService {
     }
     maxSec = Math.max(maxSec + 2.0, 10.0);
 
-    // 4. Allocate clean output buffer initialized to zero (100% pure silence - ZERO tails!)
     const totalSamples = Math.ceil(maxSec * sampleRate);
     const outputPcm = Buffer.alloc(totalSamples * bytesPerSampleFrame, 0);
 
-    // 5. Place each phrase at its exact target timing with 8ms micro-fade
+    // 4. Check if defaultInputPath is a timeline recording
+    // If it's a timeline recording (> 45s or phrases span > 40s), copy defaultPcm as pristine base!
+    // This guarantees that NO undetected phrases, whispers, laughs, ambient breaths and tails are EVER cut!
+    let isTimelineTrack = false;
+    if (defaultPcm) {
+      const defDur = defaultPcm.length / bytesPerSec;
+      if (defDur >= 45.0) {
+        isTimelineTrack = true;
+      } else if (phrases.length > 0) {
+        const span = Math.max(...phrases.map(p => p.sourceEndSec)) - Math.min(...phrases.map(p => p.sourceStartSec));
+        if (span > 40.0) isTimelineTrack = true;
+      }
+    }
+
+    if (defaultPcm && isTimelineTrack) {
+      defaultPcm.copy(outputPcm, 0, 0, Math.min(defaultPcm.length, outputPcm.length));
+    }
+
     const fadeSamples = Math.min(384, Math.floor(sampleRate * 0.008)); // 8ms = 384 samples
 
     for (const p of phrases) {
       const srcBuf = pcmMap.get(p.sourceAudioPath || defaultInputPath) || defaultPcm;
       if (!srcBuf) continue;
 
-      const srcStartSample = Math.max(0, Math.floor(p.sourceStartSec * sampleRate));
+      if (isTimelineTrack && !p.isReplacedByFix && (!p.collisionResolved || Math.abs(p.shiftDeltaSec) <= 0.03)) {
+        // Phrase is already in its exact pristine position in outputPcm! No modification needed!
+        continue;
+      }
+
+      // If in timeline and replacing with fix or shifting collision:
+      // First, zero out the old phrase range down to silence with generous safety padding
+      if (isTimelineTrack) {
+        const oldStartSec = Math.max(0, (p.oldTargetStartSec ?? p.sourceStartSec) - 0.08);
+        const oldEndSec = Math.max(p.oldTargetEndSec ?? p.sourceEndSec, p.targetEndSec) + 0.15;
+        const muteStartSample = Math.max(0, Math.floor(oldStartSec * sampleRate));
+        const muteEndSample = Math.min(totalSamples, Math.ceil(oldEndSec * sampleRate));
+
+        for (let s = muteStartSample; s < muteEndSample; s++) {
+          const off = s * bytesPerSampleFrame;
+          if (off + 4 <= outputPcm.length) {
+            outputPcm.writeInt16LE(0, off);
+            outputPcm.writeInt16LE(0, off + 2);
+          }
+        }
+      }
+
+      // Extract phrase from srcBuf with safety margin into silence so NO tails/breaths are cut
+      const safetyPreSec = 0.06;
+      const safetyPostSec = 0.20; // 200ms safety tail ensures no vocal release is ever clipped
+      const srcStartSample = Math.max(0, Math.floor((p.sourceStartSec - safetyPreSec) * sampleRate));
       const srcEndSample = Math.min(
-        Math.floor(p.sourceEndSec * sampleRate),
+        Math.floor((p.sourceEndSec + safetyPostSec) * sampleRate),
         Math.floor(srcBuf.length / bytesPerSampleFrame)
       );
 
       const phraseSamples = srcEndSample - srcStartSample;
       if (phraseSamples <= 0) continue;
 
-      const dstStartSample = Math.max(0, Math.floor(p.targetStartSec * sampleRate));
-      const curFade = Math.min(fadeSamples, Math.floor(phraseSamples / 4));
+      const dstStartSample = Math.max(0, Math.floor((p.targetStartSec - safetyPreSec) * sampleRate));
+      const curFade = Math.min(fadeSamples, Math.floor(phraseSamples / 6));
 
       for (let s = 0; s < phraseSamples; s++) {
         const dstSampleIdx = dstStartSample + s;
@@ -893,15 +1039,19 @@ class AutoTimingService {
         const leftSample = Math.round(srcBuf.readInt16LE(srcOffset) * fade);
         const rightSample = Math.round(srcBuf.readInt16LE(srcOffset + 2) * fade);
 
-        const curLeft = outputPcm.readInt16LE(dstOffset);
-        const curRight = outputPcm.readInt16LE(dstOffset + 2);
-
-        // Mix with saturation clipping prevention
-        const mixedLeft = Math.max(-32768, Math.min(32767, curLeft + leftSample));
-        const mixedRight = Math.max(-32768, Math.min(32767, curRight + rightSample));
-
-        outputPcm.writeInt16LE(mixedLeft, dstOffset);
-        outputPcm.writeInt16LE(mixedRight, dstOffset + 2);
+        if (isTimelineTrack) {
+          // If we muted the area, write the replacement sample cleanly
+          outputPcm.writeInt16LE(leftSample, dstOffset);
+          outputPcm.writeInt16LE(rightSample, dstOffset + 2);
+        } else {
+          // Mix with saturation prevention for non-timeline
+          const curLeft = outputPcm.readInt16LE(dstOffset);
+          const curRight = outputPcm.readInt16LE(dstOffset + 2);
+          const mixedLeft = Math.max(-32768, Math.min(32767, curLeft + leftSample));
+          const mixedRight = Math.max(-32768, Math.min(32767, curRight + rightSample));
+          outputPcm.writeInt16LE(mixedLeft, dstOffset);
+          outputPcm.writeInt16LE(mixedRight, dstOffset + 2);
+        }
       }
     }
 

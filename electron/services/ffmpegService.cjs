@@ -789,8 +789,8 @@ function detectSpeechIntervals(filePath, options = {}) {
     if (!filePath || !fs.existsSync(filePath)) {
       return reject(new Error(`Audio file not found: ${filePath}`));
     }
-    const noiseDb = options.noiseDb !== undefined ? options.noiseDb : -38;
-    const minSilenceDuration = options.minSilenceDuration !== undefined ? options.minSilenceDuration : 0.25;
+    const noiseDb = options.noiseDb !== undefined ? options.noiseDb : -45;
+    const minSilenceDuration = options.minSilenceDuration !== undefined ? options.minSilenceDuration : 0.30;
 
     let totalDur = 0;
     try {
@@ -879,8 +879,8 @@ function detectSpeechIntervals(filePath, options = {}) {
           let curPos = 0;
           for (const s of silences) {
             if (s.start - curPos > 0.08) {
-              const start = Math.max(0, curPos - 0.05);
-              const end = s.start + 0.12; // 120ms safety margin ensures no vocal tail is ever clipped
+              const start = Math.max(0, curPos - 0.08);
+              const end = s.start + 0.22; // 220ms safety margin ensures no vocal tail or quiet consonant is ever clipped
               rawSpeech.push({
                 startSec: start,
                 endSec: end,
@@ -890,7 +890,7 @@ function detectSpeechIntervals(filePath, options = {}) {
             curPos = s.end;
           }
           if (finalDur && (finalDur - curPos > 0.08)) {
-            const start = Math.max(0, curPos - 0.05);
+            const start = Math.max(0, curPos - 0.08);
             const end = finalDur;
             rawSpeech.push({
               startSec: start,
@@ -900,14 +900,14 @@ function detectSpeechIntervals(filePath, options = {}) {
           }
         }
 
-        // Merge contiguous intervals separated by gap (< 0.40s) so natural intra-phrase pauses don't cut words
+        // Merge contiguous intervals separated by gap (< 0.50s) so natural intra-phrase pauses don't cut words
         const speechIntervals = [];
         for (const interval of rawSpeech) {
           if (speechIntervals.length === 0) {
             speechIntervals.push({ ...interval });
           } else {
             const last = speechIntervals[speechIntervals.length - 1];
-            if (interval.startSec - last.endSec < 0.40) {
+            if (interval.startSec - last.endSec < 0.50) {
               last.endSec = Math.max(last.endSec, interval.endSec);
               last.durationSec = last.endSec - last.startSec;
             } else {
@@ -1003,8 +1003,8 @@ async function applyFixesToOriginalAudio(originalPath, fixPath, outputPath, opti
     }
 
     return {
-      startSec: Math.max(0, mStart - 0.04),
-      endSec: mEnd + 0.04
+      startSec: Math.max(0, mStart - 0.08),
+      endSec: mEnd + 0.18
     };
   });
 
