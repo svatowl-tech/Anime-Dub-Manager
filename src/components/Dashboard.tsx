@@ -1579,31 +1579,37 @@ export default function Dashboard({
 
 
   const handleCreateProject = async (projectData: any) => {
-    const newProject = {
-      id: Date.now().toString(),
-      title: projectData.title,
-      originalTitle: projectData.originalTitle,
-      releaseType: projectData.releaseType,
-      emoji: projectData.emoji,
-      isOngoing: projectData.isOngoing,
-      synopsis: projectData.synopsis,
-      posterUrl: projectData.posterUrl,
-      typeAndSeason: projectData.typeAndSeason,
-      totalEpisodes: projectData.totalEpisodes,
-      globalMapping: JSON.stringify(projectData.characters.map((c: any) => ({ characterName: c.name, dubberId: c.dubberId, photoUrl: c.photoUrl }))),
-      links: JSON.stringify({ tg: '', vk: '', anime365: '', shikimori: '', kodik: '' }),
-      status: 'ACTIVE' as const,
-      lastActiveEpisode: 1,
-      assignedDubberIds: [],
-      episodes: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    
-    await ipcSafe.invoke('save-project', newProject);
-    onRefresh();
-    onProjectSelect(newProject.id);
-    setIsNewProjectModalOpen(false);
+    try {
+      const newProject = {
+        id: Date.now().toString(),
+        title: projectData.title,
+        originalTitle: projectData.originalTitle || '',
+        releaseType: projectData.releaseType || 'VOICEOVER',
+        emoji: projectData.emoji || '❤️',
+        isOngoing: projectData.isOngoing ?? true,
+        synopsis: projectData.synopsis || '',
+        posterUrl: projectData.posterUrl || '',
+        typeAndSeason: projectData.typeAndSeason || '',
+        totalEpisodes: projectData.totalEpisodes || 12,
+        globalMapping: JSON.stringify(Array.isArray(projectData.characters) ? projectData.characters.map((c: any) => ({ characterName: c.name, dubberId: c.dubberId, photoUrl: c.photoUrl })) : []),
+        links: JSON.stringify({ tg: '', vk: '', anime365: '', shikimori: '', kodik: '' }),
+        status: 'ACTIVE' as const,
+        lastActiveEpisode: 1,
+        assignedDubberIds: [],
+        episodes: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      await ipcSafe.invoke('save-project', newProject);
+      toast.success('Проект успешно создан!');
+      onRefresh();
+      onProjectSelect(newProject.id);
+      setIsNewProjectModalOpen(false);
+    } catch (e) {
+      console.error("Failed to create project:", e);
+      toast.error('Ошибка при создании проекта');
+    }
   };
 
   const handleDeleteProject = async () => {
@@ -2540,6 +2546,8 @@ export default function Dashboard({
           )}
         </div>
       )}
+        </div>
+      )}
 
 
       {/* New Project Modal */}
@@ -3412,8 +3420,6 @@ export default function Dashboard({
               </div>
             </div>
           </div>
-        </div>
-      )}
         </div>
       )}
 

@@ -94,19 +94,13 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   // QR Code Expiry Countdown
   useEffect(() => {
     let interval: any;
-    if (isQrActive && qrExpiresIn > 0 && !isQr2FARequired) {
+    if (isQrActive && !isQr2FARequired) {
       interval = setInterval(() => {
-        setQrExpiresIn(prev => {
-          if (prev <= 1) {
-            handleRefreshQr();
-            return 30;
-          }
-          return prev - 1;
-        });
+        setQrExpiresIn(prev => (prev > 1 ? prev - 1 : 1));
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [isQrActive, qrExpiresIn, isQr2FARequired]);
+  }, [isQrActive, isQr2FARequired]);
 
   // Clean up QR polling on unmount
   useEffect(() => {

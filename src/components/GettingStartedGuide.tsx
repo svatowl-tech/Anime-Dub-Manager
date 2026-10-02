@@ -31,8 +31,9 @@ export default function GettingStartedGuide({ onStart }: GettingStartedGuideProp
         ))}
       </div>
       <button 
+        type="button"
         onClick={onStart}
-        className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold transition-colors"
+        className="flex items-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-bold transition-colors cursor-pointer"
       >
         Создать первый проект <ChevronRight className="w-4 h-4" />
       </button>
