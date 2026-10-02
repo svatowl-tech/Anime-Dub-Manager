@@ -116,18 +116,34 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
           toast.info('Публикаций по данному запросу пока не найдено в канале');
         }
       } else {
-        throw new Error(res?.error || 'Не удалось выполнить поиск');
+        const errorMsg = res?.error || 'Не удалось выполнить поиск';
+        setFoundPosts([]);
+        if (errorMsg.includes('MTProto') || errorMsg.includes('авториз') || errorMsg.includes('t.me') || errorMsg.includes('таймаут')) {
+          toast.error(errorMsg, {
+            duration: 6000,
+            action: onOpenAuth ? {
+              label: 'Войти в Telegram',
+              onClick: () => onOpenAuth()
+            } : undefined
+          });
+        } else {
+          toast.error(errorMsg);
+        }
       }
     } catch (err: any) {
       const errMessage = err?.message || String(err);
-      if (errMessage.includes('Подключение к Telegram MTProto отсутствует') || errMessage.includes('AUTH_KEY_UNREGISTERED')) {
-        toast.error('Для данного канала требуется авторизация в Telegram', {
+      setFoundPosts([]);
+      if (errMessage.includes('Подключение к Telegram MTProto отсутствует') || errMessage.includes('AUTH_KEY_UNREGISTERED') || errMessage.includes('авториз') || errMessage.includes('таймаут')) {
+        toast.error(errMessage, {
+          duration: 6000,
           action: onOpenAuth ? {
             label: 'Войти',
             onClick: () => onOpenAuth()
           } : undefined
         });
-        if (onOpenAuth) onOpenAuth();
+        if (onOpenAuth && (errMessage.includes('AUTH_KEY_UNREGISTERED') || errMessage.includes('Сессия'))) {
+          onOpenAuth();
+        }
       } else {
         toast.error(`Ошибка поиска постов: ${errMessage}`);
       }

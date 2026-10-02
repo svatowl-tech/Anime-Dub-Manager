@@ -128,6 +128,18 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
   ipcMain.handle('telegram-bot-test-connection', wrapIpcHandler(async (event, { botToken } = {}) => {
     return await service.testBotConnection(botToken);
   }));
+
+  ipcMain.handle('telegram-mtproto-get-logs', wrapIpcHandler(async (event, { limit } = {}) => {
+    return service.getLogs(limit || 150);
+  }));
+
+  ipcMain.handle('telegram-mtproto-clear-logs', wrapIpcHandler(async () => {
+    return service.clearLogs();
+  }));
+
+  ipcMain.handle('telegram-mtproto-test-connection', wrapIpcHandler(async () => {
+    return await service.testConnection();
+  }));
 }
 
 async function cleanupTelegramHandlers() {

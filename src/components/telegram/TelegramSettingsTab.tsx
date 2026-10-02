@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Settings, 
   Key, 
@@ -14,11 +14,27 @@ import {
   Bot,
   LogIn,
   Copy,
-  Check
+  Check,
+  Terminal,
+  Activity,
+  Trash2,
+  Radio,
+  Zap,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { TelegramMTProtoSettings, TelegramMTProtoStatus } from '../../types';
+
+interface TelegramLogEntry {
+  timestamp: string;
+  time: string;
+  level: 'info' | 'warn' | 'error';
+  tag: string;
+  message: string;
+  details?: any;
+}
 
 interface TelegramSettingsTabProps {
   status: TelegramMTProtoStatus | null;
@@ -62,6 +78,76 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
     status?.botMe?.username ? `@${status.botMe.username}` : ''
   );
   const [copiedTag, setCopiedTag] = useState<string | null>(null);
+
+  // Diagnostics & Logs State
+  const [logs, setLogs] = useState<TelegramLogEntry[]>([]);
+  const [isLoadingLogs, setIsLoadingLogs] = useState<boolean>(false);
+  const [autoRefreshLogs, setAutoRefreshLogs] = useState<boolean>(true);
+  const [logFilter, setLogFilter] = useState<'all' | 'error' | 'auth' | 'qr' | 'search'>('all');
+  const [isTestingConnection, setIsTestingConnection] = useState<boolean>(false);
+  const [connectionTestResult, setConnectionTestResult] = useState<any>(null);
+  const [isLogsExpanded, setIsLogsExpanded] = useState<boolean>(true);
+  const logsEndRef = useRef<HTMLDivElement>(null);
+
+  const fetchLogs = async () => {
+    try {
+      const res = await ipcSafe.invoke('telegram-mtproto-get-logs', { limit: 200 });
+      if (Array.isArray(res)) {
+        setLogs(res);
+      }
+    } catch (e) {
+      console.warn('Could not fetch MTProto logs:', e);
+    }
+  };
+
+  useEffect(() => {
+    fetchLogs();
+  }, []);
+
+  useEffect(() => {
+    let interval: any;
+    if (autoRefreshLogs && isLogsExpanded) {
+      interval = setInterval(fetchLogs, 2000);
+    }
+    return () => clearInterval(interval);
+  }, [autoRefreshLogs, isLogsExpanded]);
+
+  const handleClearLogs = async () => {
+    try {
+      await ipcSafe.invoke('telegram-mtproto-clear-logs');
+      setLogs([]);
+      toast.success('Журнал логов MTProto очищен');
+    } catch (err: any) {
+      toast.error('Не удалось очистить логи');
+    }
+  };
+
+  const handleCopyLogs = () => {
+    const text = logs.map(l => `[${l.time}] [${l.level.toUpperCase()}] [${l.tag}] ${l.message} ${l.details ? JSON.stringify(l.details) : ''}`).join('\n');
+    navigator.clipboard.writeText(text);
+    toast.success('Журнал процессов скопирован в буфер обмена');
+  };
+
+  const handleTestConnection = async () => {
+    setIsTestingConnection(true);
+    setConnectionTestResult(null);
+    try {
+      const res = await ipcSafe.invoke('telegram-mtproto-test-connection');
+      setConnectionTestResult(res);
+      if (res && res.success && res.connected) {
+        toast.success(`Связь с Telegram установлена! Пинг: ${res.latencyMs}мс (DC ${res.dcId || '2/4'})`);
+        await onRefreshStatus();
+      } else {
+        toast.error(`Проверка связи: ${res?.error || 'Нет соединения'}`);
+      }
+      await fetchLogs();
+    } catch (err: any) {
+      toast.error(`Ошибка проверки: ${err.message || String(err)}`);
+      setConnectionTestResult({ success: false, connected: false, error: err.message });
+    } finally {
+      setIsTestingConnection(false);
+    }
+  };
 
   const handleTestBot = async () => {
     if (!botToken.trim()) {
@@ -134,12 +220,21 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
 
   const isConnected = status?.status === 'connected';
 
+  const filteredLogs = logs.filter(l => {
+    if (logFilter === 'all') return true;
+    if (logFilter === 'error') return l.level === 'error' || l.level === 'warn';
+    if (logFilter === 'auth') return l.tag.toLowerCase().includes('auth');
+    if (logFilter === 'qr') return l.tag.toLowerCase().includes('qr');
+    if (logFilter === 'search') return l.tag.toLowerCase().includes('search') || l.tag.toLowerCase().includes('public') || l.tag.toLowerCase().includes('preview');
+    return true;
+  });
+
   return (
     <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-neutral-950">
       <div className="max-w-3xl mx-auto space-y-6">
         {/* MTProto Status Card */}
         {isConnected ? (
-          <div className="bg-emerald-950/40 border border-emerald-800/60 rounded-2xl p-5 flex items-center justify-between gap-4">
+          <div className="bg-emerald-950/40 border border-emerald-800/60 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 font-bold">
                 {status?.me?.firstName ? status.me.firstName.charAt(0) : 'TG'}
@@ -157,18 +252,34 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={handleLogout}
-              disabled={isLoggingOut}
-              className="px-3.5 py-2 bg-red-950 hover:bg-red-900 text-red-300 hover:text-red-100 rounded-xl text-xs font-semibold border border-red-800/60 transition flex items-center gap-1.5 cursor-pointer"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              Выйти из MTProto
-            </button>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <button
+                type="button"
+                onClick={handleTestConnection}
+                disabled={isTestingConnection}
+                className="px-3.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-xl text-xs font-semibold border border-neutral-700 transition flex items-center gap-1.5 cursor-pointer"
+              >
+                {isTestingConnection ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
+                ) : (
+                  <Radio className="w-3.5 h-3.5 text-emerald-400" />
+                )}
+                Проверить связь
+              </button>
+
+              <button
+                type="button"
+                onClick={handleLogout}
+                disabled={isLoggingOut}
+                className="px-3.5 py-2 bg-red-950 hover:bg-red-900 text-red-300 hover:text-red-100 rounded-xl text-xs font-semibold border border-red-800/60 transition flex items-center gap-1.5 cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                Выйти
+              </button>
+            </div>
           </div>
         ) : (
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 flex items-center justify-between gap-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 font-bold">
                 <Smartphone className="w-5 h-5" />
@@ -179,23 +290,162 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
                   <span className="text-amber-400 text-[11px]">Offline</span>
                 </div>
                 <div className="text-[11px] text-neutral-400 mt-0.5">
-                  Авторизуйтесь по QR-коду или используйте Telegram Bot Token для постов
+                  Авторизуйтесь по QR-коду или проверьте журнал процессов для выявления причин
                 </div>
               </div>
             </div>
 
-            {onOpenAuth && (
+            <div className="flex items-center gap-2 w-full sm:w-auto">
               <button
                 type="button"
-                onClick={onOpenAuth}
-                className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md"
+                onClick={handleTestConnection}
+                disabled={isTestingConnection}
+                className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl text-xs font-semibold border border-neutral-700 transition flex items-center gap-1.5 cursor-pointer"
               >
-                <LogIn className="w-3.5 h-3.5" />
-                Войти в MTProto
+                {isTestingConnection ? (
+                  <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
+                ) : (
+                  <Radio className="w-3.5 h-3.5 text-amber-400" />
+                )}
+                Тест связи
               </button>
-            )}
+
+              {onOpenAuth && (
+                <button
+                  type="button"
+                  onClick={onOpenAuth}
+                  className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-md"
+                >
+                  <LogIn className="w-3.5 h-3.5" />
+                  Войти в MTProto
+                </button>
+              )}
+            </div>
           </div>
         )}
+
+        {/* Real-time Connection Diagnostics Result Card */}
+        {connectionTestResult && (
+          <div className={`p-4 rounded-2xl border text-xs ${connectionTestResult.connected ? 'bg-emerald-950/30 border-emerald-800/60 text-emerald-200' : 'bg-red-950/30 border-red-800/60 text-red-200'}`}>
+            <div className="flex items-center justify-between font-bold mb-1.5">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4" />
+                <span>Результат диагностики Telegram MTProto</span>
+              </div>
+              <span className="font-mono text-[11px]">{connectionTestResult.latencyMs} мс</span>
+            </div>
+            <div className="space-y-1 text-[11px] opacity-90 font-mono">
+              <div>Статус: {connectionTestResult.connected ? '✅ Подключено и авторизовано' : '❌ Нет авторизованного соединения'}</div>
+              {connectionTestResult.dcId && <div>Дата-центр: DC {connectionTestResult.dcId}</div>}
+              {connectionTestResult.me && <div>Аккаунт: @{connectionTestResult.me.username || connectionTestResult.me.id} ({connectionTestResult.me.firstName})</div>}
+              {connectionTestResult.error && <div className="text-red-300 mt-1">Ошибка: {connectionTestResult.error}</div>}
+            </div>
+          </div>
+        )}
+
+        {/* Diagnostic Logs Viewer (Журнал процессов MTProto) */}
+        <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden">
+          <div className="p-4 border-b border-neutral-800 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setIsLogsExpanded(!isLogsExpanded)}
+              className="flex items-center gap-2 text-xs font-bold uppercase text-neutral-300 hover:text-white cursor-pointer"
+            >
+              <Terminal className="w-4 h-4 text-sky-400" />
+              <span>Журнал процессов и логи MTProto ({logs.length})</span>
+              {isLogsExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAutoRefreshLogs(!autoRefreshLogs)}
+                className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border transition flex items-center gap-1 cursor-pointer ${autoRefreshLogs ? 'bg-sky-500/20 text-sky-300 border-sky-500/40' : 'bg-neutral-800 text-neutral-400 border-neutral-700'}`}
+              >
+                <Activity className={`w-3 h-3 ${autoRefreshLogs ? 'animate-pulse text-sky-400' : ''}`} />
+                {autoRefreshLogs ? 'Авто (2с)' : 'Пауза'}
+              </button>
+
+              <button
+                type="button"
+                onClick={fetchLogs}
+                disabled={isLoadingLogs}
+                className="p-1.5 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-lg transition cursor-pointer"
+                title="Обновить журнал"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={handleCopyLogs}
+                className="p-1.5 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded-lg transition cursor-pointer"
+                title="Скопировать логи"
+              >
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={handleClearLogs}
+                className="p-1.5 hover:bg-neutral-800 text-neutral-400 hover:text-red-400 rounded-lg transition cursor-pointer"
+                title="Очистить логи"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {isLogsExpanded && (
+            <div className="p-4 space-y-3">
+              {/* Log Filters */}
+              <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                <span className="text-neutral-500 font-semibold mr-1">Фильтр:</span>
+                {(['all', 'auth', 'qr', 'search', 'error'] as const).map(f => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setLogFilter(f)}
+                    className={`px-2 py-0.5 rounded-md font-mono transition cursor-pointer ${logFilter === f ? 'bg-sky-600 text-white font-bold' : 'bg-neutral-800 text-neutral-400 hover:text-white'}`}
+                  >
+                    {f === 'all' ? 'Все' : f === 'auth' ? 'Авторизация' : f === 'qr' ? 'QR-код' : f === 'search' ? 'Поиск каналов' : 'Ошибки'}
+                  </button>
+                ))}
+              </div>
+
+              {/* Console log window */}
+              <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-3 h-52 overflow-y-auto font-mono text-[11px] space-y-1.5 select-text">
+                {filteredLogs.length === 0 ? (
+                  <div className="text-neutral-500 py-6 text-center">Журнал пуст. Выполните действие в приложении для формирования записей.</div>
+                ) : (
+                  filteredLogs.map((log, idx) => {
+                    const isErr = log.level === 'error';
+                    const isWarn = log.level === 'warn';
+                    const isQr = log.tag === 'QR';
+                    const isAuth = log.tag === 'Auth';
+                    const isSearch = log.tag === 'Search' || log.tag === 'Public Preview';
+
+                    return (
+                      <div key={idx} className={`leading-relaxed break-all ${isErr ? 'text-red-400' : isWarn ? 'text-amber-300' : 'text-neutral-300'}`}>
+                        <span className="text-neutral-500">[{log.time}]</span>{' '}
+                        <span className={`px-1 rounded text-[10px] font-bold ${isErr ? 'bg-red-950 text-red-300 border border-red-800/40' : isWarn ? 'bg-amber-950 text-amber-300 border border-amber-800/40' : isQr ? 'bg-purple-950 text-purple-300' : isAuth ? 'bg-emerald-950 text-emerald-300' : isSearch ? 'bg-sky-950 text-sky-300' : 'bg-neutral-800 text-neutral-400'}`}>
+                          {log.tag}
+                        </span>{' '}
+                        <span>{log.message}</span>
+                        {log.details && (
+                          <span className="text-neutral-500 text-[10px] block pl-4">
+                            {typeof log.details === 'object' ? JSON.stringify(log.details) : log.details}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+                <div ref={logsEndRef} />
+              </div>
+            </div>
+          )}
+        </div>
 
         <form onSubmit={handleSave} className="space-y-6">
           {/* Section: Telegram Bot API Token */}

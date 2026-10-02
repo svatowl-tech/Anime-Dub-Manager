@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const https = require('https');
+const net = require('net');
 const log = require('electron-log');
 
 // Official public Telegram credentials used for seamless out-of-the-box authorization
@@ -41,6 +42,12 @@ class TelegramMTProtoService {
     this.isCodeViaApp = true;
     this.me = null;
 
+    // Mutex promise to prevent concurrent connection attempts / collisions
+    this._connectingPromise = null;
+
+    // Internal In-Memory Ring Buffer for diagnostic logs
+    this.logs = [];
+
     // QR Code Authentication State
     this.qrAuthActive = false;
     this.qrToken = null;
@@ -71,17 +78,86 @@ class TelegramMTProtoService {
     };
   }
 
+  _addLog(level, tag, message, details = null) {
+    const timestamp = new Date().toISOString();
+    const timeShort = new Date().toLocaleTimeString('ru-RU');
+    const logItem = { timestamp, time: timeShort, level, tag, message, details };
+    
+    this.logs.push(logItem);
+    if (this.logs.length > 500) {
+      this.logs.shift();
+    }
+
+    const logStr = `[MTProto ${tag}] ${message}${details ? ' ' + (typeof details === 'object' ? JSON.stringify(details) : details) : ''}`;
+    if (level === 'error') {
+      log.error(logStr);
+      console.error(logStr);
+    } else if (level === 'warn') {
+      log.warn(logStr);
+      console.warn(logStr);
+    } else {
+      log.info(logStr);
+      console.log(logStr);
+    }
+  }
+
+  getLogs(limit = 150) {
+    return (this.logs || []).slice(-Math.min(limit, 500));
+  }
+
+  clearLogs() {
+    this.logs = [];
+    this._addLog('info', 'System', 'Журнал логов MTProto очищен пользователем');
+    return { success: true };
+  }
+
+  async testConnection() {
+    const startTime = Date.now();
+    try {
+      this._addLog('info', 'Test', 'Запуск проверки соединения с Telegram MTProto...');
+      await this.ensureConnected();
+      const latencyMs = Date.now() - startTime;
+      const dcId = (this.client && this.client.session) ? this.client.session.dcId : null;
+      this._addLog('info', 'Test', `Проверка связи успешна! Задержка: ${latencyMs}мс, DC: ${dcId || 'N/A'}, Аккаунт: @${this.me?.username || this.me?.id || 'N/A'}`);
+      return {
+        success: true,
+        connected: true,
+        latencyMs,
+        dcId,
+        me: this.me,
+        status: this.status,
+        hasSession: !!this.settings.sessionString
+      };
+    } catch (err) {
+      const latencyMs = Date.now() - startTime;
+      this._addLog('warn', 'Test', `Тест подключения не прошел: ${err.message}`);
+      return {
+        success: false,
+        connected: false,
+        latencyMs,
+        error: err.message,
+        hasSession: !!this.settings.sessionString
+      };
+    }
+  }
+
   async init() {
     try {
+      this._addLog('info', 'Init', 'Initializing Telegram MTProto service...');
       const saved = await this.dataManager.getData('telegram_mtproto_settings.json');
       if (saved && typeof saved === 'object') {
         this.settings = { ...this.settings, ...saved };
       }
       if (this.settings.sessionString) {
-        await this.connectWithSavedSession();
+        this._addLog('info', 'Init', 'Saved session detected, initiating background connection...');
+        this.connectWithSavedSession().catch(err => {
+          this._addLog('warn', 'Init', `Background connect notice: ${err.message}`);
+        });
+      } else {
+        this._addLog('info', 'Init', 'No saved sessionString found. Ready for QR/phone login.');
       }
     } catch (e) {
-      log.error('[MTProto] Error during init:', e);
+      this._addLog('error', 'Init', `Error during init: ${e.message}`);
     }
   }
 
@@ -109,110 +185,177 @@ class TelegramMTProtoService {
   }
 
   async connectWithSavedSession() {
+    if (this._connectingPromise) {
+      this._addLog('info', 'Auth', 'Auto-reconnect already in progress, awaiting existing promise...');
+      return await this._connectingPromise;
+    }
+
+    if (this.client && this.status === 'connected' && this.me && this.me.id && this.client.connected) {
+      return true;
+    }
+
     if (!this.settings.sessionString) {
       this.status = 'disconnected';
       this.me = null;
       return false;
     }
-    try {
-      const apiId = Number(this.settings.apiId || DEFAULT_TELEGRAM_API_ID);
-      const apiHash = String(this.settings.apiHash || DEFAULT_TELEGRAM_API_HASH).trim();
-      
-      if (!apiId || !apiHash) {
-        throw new Error('API_ID or API_HASH is missing. Re-authentication required.');
-      }
-      this.session = new StringSession(this.settings.sessionString);
 
-      this.client = this._createTelegramClient(this.session, apiId, apiHash);
+    this._connectingPromise = (async () => {
+      try {
+        const apiId = Number(this.settings.apiId || DEFAULT_TELEGRAM_API_ID);
+        const apiHash = String(this.settings.apiHash || DEFAULT_TELEGRAM_API_HASH).trim();
+        
+        if (!apiId || !apiHash) {
+          throw new Error('API_ID or API_HASH is missing. Re-authentication required.');
+        }
 
-      await this.client.connect();
-      const isAuth = await this.client.isUserAuthorized().catch(() => false);
-      if (!isAuth) {
-        log.warn('[MTProto] Session is not authorized on Telegram servers.');
-        this.status = 'disconnected';
-        this.me = null;
-        return false;
-      }
-      const me = await this.client.getMe();
-      if (me && me.id) {
-        this.me = {
-          id: me.id ? me.id.toString() : '',
-          firstName: me.firstName || '',
-          lastName: me.lastName || '',
-          username: me.username || '',
-          phone: me.phone || '',
-        };
-        this.status = 'connected';
-        log.info('[MTProto] Connected as:', me.username || me.id);
-        return true;
-      } else {
-        this.status = 'disconnected';
-        this.me = null;
-      }
-    } catch (e) {
-      log.error('[MTProto] Failed connecting with saved session:', e);
-      this.status = 'disconnected';
-      this.me = null;
-      this.session = null;
-      if (this.client) {
+        this._addLog('info', 'Auth', `Connecting with saved session (apiId: ${apiId}, sessionLen: ${this.settings.sessionString.length})...`);
+
+        if (this.client) {
+          try { await this.client.disconnect(); } catch (e) {}
+          this.client = null;
+        }
+
+        this.session = new StringSession(this.settings.sessionString);
+        this.client = this._createTelegramClient(this.session, apiId, apiHash);
+
+        await this.client.connect();
+        this._addLog('info', 'Auth', 'MTProto transport connected. Verifying authorization with Telegram DC...');
+
+        // Verify authorization by fetching current user with DC migration resilience
+        let me = null;
         try {
-          await this.client.disconnect();
-        } catch (err) {}
-        this.client = null;
+          me = await this._invokeWithMigration(async () => {
+            return await this.client.getMe();
+          });
+        } catch (authCheckErr) {
+          const checkMsg = authCheckErr.message || String(authCheckErr);
+          this._addLog('warn', 'Auth', `getMe verification notice: ${checkMsg}`);
+          if (
+            checkMsg.includes('AUTH_KEY_UNREGISTERED') ||
+            checkMsg.includes('AUTH_KEY_INVALID') ||
+            checkMsg.includes('SESSION_REVOKED') ||
+            checkMsg.includes('SESSION_EXPIRED')
+          ) {
+            this._addLog('error', 'Auth', 'Saved session is revoked or expired on Telegram servers. Clearing session...');
+            this.status = 'disconnected';
+            this.me = null;
+            this.settings.sessionString = '';
+            await this.saveSettings({ sessionString: '' });
+            return false;
+          }
+          throw authCheckErr;
+        }
+
+        if (me && me.id) {
+          this.me = {
+            id: me.id.toString(),
+            firstName: me.firstName || '',
+            lastName: me.lastName || '',
+            username: me.username || '',
+            phone: me.phone || this.settings.phoneNumber || '',
+          };
+          this.status = 'connected';
+          
+          // Save updated session (which may have migrated to home DC)
+          if (this.client.session) {
+            const savedStr = this.client.session.save();
+            if (savedStr && savedStr !== this.settings.sessionString) {
+              this.settings.sessionString = savedStr;
+              await this.saveSettings({ sessionString: savedStr, phoneNumber: this.me.phone });
+            }
+          }
+
+          this._addLog('info', 'Auth', `Connected and authorized as: @${this.me.username || this.me.id} (${this.me.firstName})`);
+          return true;
+        } else {
+          this.status = 'disconnected';
+          this.me = null;
+          return false;
+        }
+      } catch (e) {
+        const errMsg = e.message || String(e);
+        this._addLog('error', 'Auth', `Failed connecting with saved session: ${errMsg}`);
+        this.status = 'disconnected';
+        this.me = null;
+        if (
+          errMsg.includes('AUTH_KEY_UNREGISTERED') ||
+          errMsg.includes('AUTH_KEY_INVALID') ||
+          errMsg.includes('SESSION_REVOKED') ||
+          errMsg.includes('SESSION_EXPIRED')
+        ) {
+          this.settings.sessionString = '';
+          await this.saveSettings({ sessionString: '' });
+        }
+        return false;
+      } finally {
+        this._connectingPromise = null;
       }
-      const errMsg = e.message || String(e);
-      if (
-        errMsg.includes('AUTH_KEY_UNREGISTERED') ||
-        errMsg.includes('AUTH_KEY_INVALID') ||
-        errMsg.includes('SESSION_REVOKED') ||
-        errMsg.includes('SESSION_EXPIRED')
-      ) {
-        log.warn('[MTProto] Stored session is expired or revoked. Clearing sessionString...');
-        this.settings.sessionString = '';
-        await this.saveSettings({ sessionString: '' });
-      }
-    }
-    return false;
+    })();
+
+    return await this._connectingPromise;
   }
 
   /**
    * Helper to execute Telegram MTProto calls with automatic DC migration
    * (following WTelegramClient's proven 303 *_MIGRATE_X handling).
    */
-  async _invokeWithMigration(callFn, maxRetries = 3) {
+  async _invokeWithMigration(callFn, maxRetries = 4) {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
         return await callFn();
       } catch (err) {
         const errMsg = err.message || String(err);
-        const migrateMatch = errMsg.match(/(?:PHONE|USER|NETWORK)_MIGRATE_(\d+)/i) || 
+        this._addLog('warn', 'MTProto RPC', `RPC attempt ${attempt + 1} notice: ${errMsg}`);
+        
+        // 1. Data Center Migration
+        const migrateMatch = errMsg.match(/(?:PHONE|USER|NETWORK|CHANNEL|FILE|STATS)_MIGRATE_(\d+)/i) || 
                              (err.newDc ? [null, err.newDc] : null);
         if (migrateMatch && migrateMatch[1]) {
           const targetDc = Number(migrateMatch[1]);
-          log.info(`[MTProto] Telegram requested DC migration to DC ${targetDc} (attempt ${attempt + 1}/${maxRetries})...`);
+          this._addLog('info', 'MTProto DC', `Migrating to DC ${targetDc} (attempt ${attempt + 1}/${maxRetries})...`);
           if (this.client) {
             await this.client._switchDC(targetDc);
             if (this.client.session && this.status === 'connected') {
               const newSession = this.client.session.save();
               this.settings.sessionString = newSession;
               await this.saveSettings({ sessionString: newSession });
+              this._addLog('info', 'MTProto DC', `Migrated to DC ${targetDc} and updated sessionString.`);
             }
           }
           continue;
         }
+
+        // 2. Auth Restart
         if (errMsg.includes('AUTH_RESTART') && attempt < maxRetries - 1) {
-          log.info('[MTProto] AUTH_RESTART encountered, retrying after 1s...');
+          this._addLog('info', 'MTProto RPC', 'AUTH_RESTART received, waiting 1s before retry...');
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
+
+        // 3. Flood Wait
         if (errMsg.includes('FLOOD_WAIT_') && attempt < maxRetries - 1) {
           const sec = Number(errMsg.match(/FLOOD_WAIT_(\d+)/)?.[1] || 0);
-          if (sec > 0 && sec <= 5) {
-            log.info(`[MTProto] Short flood wait (${sec}s), sleeping before retry...`);
+          if (sec > 0 && sec <= 6) {
+            this._addLog('info', 'MTProto RPC', `Short flood wait (${sec}s), sleeping before retry...`);
             await new Promise(r => setTimeout(r, sec * 1000));
             continue;
           }
         }
+
+        // 4. Disconnected / Socket Closed
+        if ((errMsg.includes('disconnected') || errMsg.includes('CONNECTION_LOST') || errMsg.includes('Cannot send requests while disconnected')) && attempt < maxRetries - 1) {
+          this._addLog('warn', 'MTProto RPC', 'Socket disconnected, attempting reconnect...');
+          if (this.client) {
+            try {
+              await this.client.connect();
+              continue;
+            } catch (reconnErr) {
+              this._addLog('error', 'MTProto RPC', `Reconnect failed: ${reconnErr.message}`);
+            }
+          }
+        }
+
         throw err;
       }
     }
@@ -422,19 +565,34 @@ class TelegramMTProtoService {
     if (!res) throw new Error('Пустой ответ от сервера Telegram');
 
     const className = res.className || res._ || res.constructor?.name || '';
+    this._addLog('info', 'QR', `Обработка ответа токена: ${className || 'Unknown'}`);
 
-    if (res instanceof Api.auth.LoginTokenSuccess || className.includes('LoginTokenSuccess') || (res.authorization && res.authorization.user)) {
-      log.info('[MTProto QR] LoginTokenSuccess confirmed!');
+    if (res instanceof Api.auth.LoginTokenSuccess || className.includes('LoginTokenSuccess') || (res.authorization && (res.authorization.user || res.authorization))) {
+      this._addLog('info', 'QR', 'Успешная авторизация (LoginTokenSuccess) подтверждена Telegram сервером!');
       return await this._completeAuthSuccess(res.authorization || res);
     }
 
     if (res instanceof Api.auth.LoginTokenMigrateTo || className.includes('LoginTokenMigrateTo')) {
       const targetDcId = res.dcId || res.dc_id;
-      log.info('[MTProto QR] Telegram requested DC migration to DC:', targetDcId);
+      this._addLog('info', 'QR', `Telegram запросил миграцию на DC ${targetDcId}. Переключение соединения...`);
       await this.client._switchDC(targetDcId);
-      const migratedRes = await this.client.invoke(new Api.auth.ImportLoginToken({
-        token: res.token,
-      }));
+      this._addLog('info', 'QR', `DC переключен на ${targetDcId}. Импорт токена входа (ImportLoginToken)...`);
+      let migratedRes;
+      try {
+        migratedRes = await this._invokeWithMigration(async () => {
+          return await this.client.invoke(new Api.auth.ImportLoginToken({
+            token: res.token,
+          }));
+        });
+      } catch (importErr) {
+        const importMsg = importErr.message || String(importErr);
+        if (importMsg.includes('SESSION_PASSWORD_NEEDED') || importMsg.includes('2FA')) {
+          this._addLog('info', 'QR', 'Требуется ввод облачного пароля 2FA Cloud Password после миграции DC');
+          this.qrStatus = 'password_required';
+          return { requiresPassword: true };
+        }
+        throw importErr;
+      }
       return await this._handleLoginTokenResult(migratedRes, apiId, apiHash);
     }
 
@@ -449,7 +607,8 @@ class TelegramMTProtoService {
         color: { dark: '#000000', light: '#ffffff' }
       });
       this.qrStatus = 'waiting_scan';
-      log.info(`[MTProto QR] QR code active (expires in ${Math.max(0, res.expires - Math.floor(Date.now() / 1000))}s)`);
+      const timeLeft = Math.max(0, res.expires - Math.floor(Date.now() / 1000));
+      this._addLog('info', 'QR', `QR-код активен (срок действия: ${timeLeft}с)`);
       return {
         success: true,
         qrUrl: this.qrUrl,
@@ -465,6 +624,8 @@ class TelegramMTProtoService {
     const apiId = Number(customApiId || this.settings.apiId || DEFAULT_TELEGRAM_API_ID);
     const apiHash = String(customApiHash || this.settings.apiHash || DEFAULT_TELEGRAM_API_HASH).trim();
 
+    this._addLog('info', 'QR', `startQrCodeAuth requested (apiId: ${apiId})...`);
+
     this.settings.apiId = apiId;
     this.settings.apiHash = apiHash;
     await this.saveSettings({ apiId, apiHash });
@@ -472,7 +633,7 @@ class TelegramMTProtoService {
     // WTelegramClient pattern: If connection is already alive and QR loop is actively running,
     // do NOT drop connection or destroy session! Simply export the latest token on the same socket.
     if (this.client && this.client.connected && this.qrAuthActive && this.qrStatus === 'waiting_scan' && this.qrDataUrl) {
-      log.info('[MTProto QR] Existing QR session is active, serving current QR code');
+      this._addLog('info', 'QR', 'Existing QR session is active, serving current QR code');
       return {
         success: true,
         qrUrl: this.qrUrl,
@@ -495,6 +656,7 @@ class TelegramMTProtoService {
     this.session = new StringSession('');
     this.client = this._createTelegramClient(this.session, apiId, apiHash);
 
+    this._addLog('info', 'QR', 'Connecting new client for QR login...');
     await this.client.connect();
 
     // Raw update handler for UpdateLoginToken event (fires when mobile device scans the code)
@@ -510,7 +672,7 @@ class TelegramMTProtoService {
         );
 
         if (isUpdateLoginToken) {
-          log.info('[MTProto QR] Received UpdateLoginToken raw event from Telegram! Waking up QR loop...');
+          this._addLog('info', 'QR', 'Received UpdateLoginToken event from Telegram! Waking up QR loop...');
           if (typeof this._qrTcsResolve === 'function') {
             const resolveFn = this._qrTcsResolve;
             this._qrTcsResolve = null;
@@ -518,7 +680,7 @@ class TelegramMTProtoService {
           }
         }
       } catch (evErr) {
-        log.warn('[MTProto QR] Update event handler notice:', evErr.message);
+        this._addLog('warn', 'QR', `Update event notice: ${evErr.message}`);
       }
     };
 
@@ -527,6 +689,7 @@ class TelegramMTProtoService {
     }
 
     // Initial ExportLoginToken call
+    this._addLog('info', 'QR', 'Invoking ExportLoginToken...');
     const initialRes = await this.client.invoke(new Api.auth.ExportLoginToken({
       apiId,
       apiHash,
@@ -542,7 +705,7 @@ class TelegramMTProtoService {
 
     // Start background QR active wait-and-refresh loop following WTelegramClient's Task.WhenAny pattern
     this._runQrCodeAuthLoop(apiId, apiHash).catch((err) => {
-      log.error('[MTProto QR] Loop error:', err);
+      this._addLog('error', 'QR', `Loop error: ${err.message}`);
     });
 
     return {
@@ -554,7 +717,7 @@ class TelegramMTProtoService {
   }
 
   async _runQrCodeAuthLoop(apiId, apiHash) {
-    log.info('[MTProto QR] Starting active QR loop (2.5s polling / push wake-up)...');
+    this._addLog('info', 'QR', 'Starting active QR wait loop (polling every 2.5s or push trigger)...');
     while (this.qrAuthActive && this.qrStatus === 'waiting_scan') {
       // Sleep until EITHER the mobile device scanned (UpdateLoginToken) OR 2.5s active polling tick
       await new Promise((resolve) => {
@@ -586,14 +749,14 @@ class TelegramMTProtoService {
 
         const handleRes = await this._handleLoginTokenResult(nextRes, apiId, apiHash);
         if (handleRes && handleRes.me) {
-          log.info('[MTProto QR] Successfully completed authentication from loop!');
+          this._addLog('info', 'QR', `Successfully completed authentication from loop for @${handleRes.me.username || handleRes.me.id}!`);
           break;
         }
       } catch (err) {
         const errMsg = err.message || String(err);
         if (errMsg.includes('SESSION_PASSWORD_NEEDED') || errMsg.includes('2FA')) {
           this.qrStatus = 'password_required';
-          log.info('[MTProto QR] 2FA password required');
+          this._addLog('info', 'QR', '2FA cloud password required.');
           break;
         } else if (errMsg.includes('FLOOD_WAIT')) {
           const sec = Number(errMsg.match(/FLOOD_WAIT_(\d+)/)?.[1] || 0);
@@ -603,10 +766,10 @@ class TelegramMTProtoService {
           }
           this.qrStatus = 'error';
           this.qrError = errMsg;
-          log.error('[MTProto QR] Flood wait error:', errMsg);
+          this._addLog('error', 'QR', `Flood wait error: ${errMsg}`);
           break;
         } else {
-          log.warn('[MTProto QR] Polling check notice:', errMsg);
+          this._addLog('warn', 'QR', `Polling check notice: ${errMsg}`);
         }
       }
     }
@@ -614,7 +777,8 @@ class TelegramMTProtoService {
 
   async _completeAuthSuccess(auth) {
     try {
-      const user = auth?.user || (auth instanceof Api.User ? auth : null);
+      this._addLog('info', 'Auth', 'Завершение процедуры авторизации в Telegram MTProto...');
+      const user = auth?.user || auth?.authorization?.user || auth?.authorization || (auth instanceof Api.User ? auth : null);
 
       // Perform DC check on current user with resilience
       let me = user;
@@ -623,29 +787,61 @@ class TelegramMTProtoService {
           return await this.client.getMe();
         });
       } catch (e) {
-        log.warn('[MTProto Auth] getMe notice after auth:', e.message);
+        this._addLog('warn', 'Auth', `Уведомление getMe: ${e.message}. Используем данные из авторизации.`);
         me = user || null;
       }
 
-      const sessionStr = this.client.session.save();
-      this.settings.sessionString = sessionStr;
+      const sessionStr = this.client && this.client.session ? this.client.session.save() : '';
+      if (sessionStr) {
+        this.settings.sessionString = sessionStr;
+      }
 
+      const activeUser = me || user;
       this.me = {
-        id: (me && me.id) ? me.id.toString() : (user && user.id ? user.id.toString() : ''),
-        firstName: (me && me.firstName) || (user && user.firstName) || '',
-        lastName: (me && me.lastName) || (user && user.lastName) || '',
-        username: (me && me.username) || (user && user.username) || '',
-        phone: (me && me.phone) || (user && user.phone) || this.phoneNumber || '',
+        id: (activeUser && activeUser.id) ? activeUser.id.toString() : (this.me?.id || 'telegram_user'),
+        firstName: (activeUser && activeUser.firstName) || this.me?.firstName || 'Пользователь',
+        lastName: (activeUser && activeUser.lastName) || this.me?.lastName || '',
+        username: (activeUser && activeUser.username) || this.me?.username || '',
+        phone: (activeUser && activeUser.phone) || this.phoneNumber || this.settings.phoneNumber || '',
       };
+
       this.status = 'connected';
       this.qrStatus = 'authenticated';
       this.qrAuthActive = false;
 
-      await this.saveSettings({ sessionString: sessionStr, phoneNumber: this.me.phone || this.phoneNumber });
-      log.info('[MTProto] Successfully authenticated as:', this.me.username || this.me.id);
+      await this.saveSettings({
+        sessionString: this.settings.sessionString,
+        phoneNumber: this.me.phone || this.phoneNumber,
+        apiId: this.settings.apiId,
+        apiHash: this.settings.apiHash,
+      });
+
+      this._addLog('info', 'Auth', `Авторизация успешна! Вход выполнен: @${this.me.username || this.me.id} (${this.me.firstName}), сессия сохранена.`);
       return { success: true, me: this.me };
     } catch (e) {
-      log.error('[MTProto] _completeAuthSuccess error:', e);
+      this._addLog('error', 'Auth', `Ошибка _completeAuthSuccess: ${e.message}`);
+      
+      const fallbackUser = auth?.user || auth?.authorization?.user || auth?.authorization || (auth instanceof Api.User ? auth : null);
+      if (!this.me && fallbackUser) {
+        this.me = {
+          id: fallbackUser.id ? fallbackUser.id.toString() : 'telegram_user',
+          firstName: fallbackUser.firstName || 'Пользователь',
+          lastName: fallbackUser.lastName || '',
+          username: fallbackUser.username || '',
+          phone: fallbackUser.phone || this.phoneNumber || this.settings.phoneNumber || '',
+        };
+      }
+      
+      if (this.client && this.client.session) {
+        try {
+          const s = this.client.session.save();
+          if (s) {
+            this.settings.sessionString = s;
+            await this.saveSettings({ sessionString: s });
+          }
+        } catch (saveErr) {}
+      }
+
       this.status = 'connected';
       this.qrStatus = 'authenticated';
       this.qrAuthActive = false;
@@ -662,6 +858,7 @@ class TelegramMTProtoService {
       throw new Error('Введите пароль 2FA');
     }
 
+    this._addLog('info', 'Auth', 'Submitting 2FA Cloud Password...');
     try {
       const passwordSrpResult = await this._invokeWithMigration(async () => {
         return await this.client.invoke(new Api.account.GetPassword());
@@ -673,9 +870,11 @@ class TelegramMTProtoService {
         }));
       });
 
+      this._addLog('info', 'Auth', '2FA Password check succeeded!');
       return await this._completeAuthSuccess(checkRes.user || checkRes);
     } catch (e) {
       const errMsg = e.message || String(e);
+      this._addLog('error', 'Auth', `2FA verification failed: ${errMsg}`);
       if (errMsg.includes('PASSWORD_HASH_INVALID')) {
         throw new Error('Неверный пароль 2FA двухфакторной защиты Telegram.');
       }
@@ -757,7 +956,9 @@ class TelegramMTProtoService {
       try {
         const bigId = BigInt(peer);
         try {
-          return await this.client.getInputEntity(bigId);
+          return await this._invokeWithMigration(async () => {
+            return await this.client.getInputEntity(bigId);
+          });
         } catch {
           return bigId;
         }
@@ -767,8 +968,11 @@ class TelegramMTProtoService {
     }
 
     try {
-      return await this.client.getInputEntity(peer);
-    } catch {
+      return await this._invokeWithMigration(async () => {
+        return await this.client.getInputEntity(peer);
+      });
+    } catch (e) {
+      this._addLog('warn', 'Peer', `_resolvePeer fallback notice for "${peer}": ${e.message}`);
       return peer;
     }
   }
@@ -972,14 +1176,10 @@ class TelegramMTProtoService {
       if (pin && sentMsg && sentMsg.id) {
         try {
           await this._invokeWithMigration(async () => {
-            return await this.client.invoke(new Api.messages.TogglePinnedMessage({
-              peer: peer,
-              id: sentMsg.id,
-              silent: silent,
-            }));
+            return await this.client.pinMessage(peer, sentMsg.id, { notify: !silent });
           });
         } catch (pinErr) {
-          log.warn('[MTProto] Could not pin message:', pinErr);
+          log.warn('[MTProto] Could not pin message:', pinErr.message);
         }
       }
 
@@ -1035,33 +1235,42 @@ class TelegramMTProtoService {
   async fetchPublicChannelPosts(channelUsername, query = '', limit = 30, directPostId = null) {
     const cleanUsername = String(channelUsername).replace(/^@/, '').trim();
     if (!cleanUsername) {
-      throw new Error('Укажите логин канала (@channel)');
+      return { success: false, posts: [], error: 'Укажите логин канала (@channel)' };
     }
 
-    return new Promise((resolve, reject) => {
+    this._addLog('info', 'Public Preview', `Запрос веб-предпросмотра t.me/s/${cleanUsername} (query: "${query || ''}")...`);
+
+    return new Promise((resolve) => {
       const url = `https://t.me/s/${encodeURIComponent(cleanUsername)}`;
       const req = https.get(url, {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7'
         },
-        timeout: 10000
+        timeout: 3500 // Быстрый тайм-аут 3.5 сек чтобы приложение не зависало
       }, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           const redirectTarget = res.headers.location.split('/').filter(Boolean).pop();
+          this._addLog('info', 'Public Preview', `Редирект на @${redirectTarget}`);
           return resolve(this.fetchPublicChannelPosts(redirectTarget, query, limit, directPostId));
         }
 
         if (res.statusCode === 404) {
+          this._addLog('warn', 'Public Preview', `Канал @${cleanUsername} не найден или является приватным (404)`);
           return resolve({
-            success: true,
+            success: false,
             posts: [],
             error: `Канал @${cleanUsername} не найден или является приватным.`
           });
         }
 
         if (res.statusCode !== 200) {
-          return reject(new Error(`Не удалось загрузить публичный канал @${cleanUsername} (HTTP ${res.statusCode})`));
+          this._addLog('warn', 'Public Preview', `Ответ HTTP ${res.statusCode} при запросе @${cleanUsername}`);
+          return resolve({
+            success: false,
+            posts: [],
+            error: `Не удалось загрузить веб-предпросмотр канала @${cleanUsername} (HTTP ${res.statusCode})`
+          });
         }
 
         let data = '';
@@ -1136,21 +1345,40 @@ class TelegramMTProtoService {
 
             // Return latest posts first
             posts.reverse();
+            this._addLog('info', 'Public Preview', `Успешно спарсено ${posts.length} постов из веб-предпросмотра @${cleanUsername}`);
             resolve({
               success: true,
               isPublicPreview: true,
               posts: posts.slice(0, limit)
             });
           } catch (parseErr) {
-            reject(parseErr);
+            this._addLog('error', 'Public Preview', `Ошибка парсинга HTML: ${parseErr.message}`);
+            resolve({
+              success: false,
+              posts: [],
+              error: `Ошибка парсинга страницы канала: ${parseErr.message}`
+            });
           }
         });
       });
 
-      req.on('error', err => reject(err));
+      req.on('error', err => {
+        this._addLog('warn', 'Public Preview', `Сетевая ошибка при запросе t.me: ${err.message}`);
+        resolve({
+          success: false,
+          posts: [],
+          error: `Сетевая ошибка предпросмотра Telegram: ${err.message}`
+        });
+      });
+
       req.on('timeout', () => {
         req.destroy();
-        reject(new Error(`Превышено время ожидания ответа Telegram при проверке @${cleanUsername}`));
+        this._addLog('warn', 'Public Preview', `Тайм-аут веб-предпросмотра t.me/s/${cleanUsername} (3.5с)`);
+        resolve({
+          success: false,
+          posts: [],
+          error: `Превышено время ожидания ответа Telegram (t.me) при проверке @${cleanUsername}. Сеть или провайдер блокируют веб-предпросмотр. Авторизуйтесь в MTProto для стабильной работы.`
+        });
       });
     });
   }
@@ -1172,37 +1400,40 @@ class TelegramMTProtoService {
       }
     }
 
+    const cleanUsername = peer.startsWith('@') ? peer.slice(1) : peer;
     const isPublicPeer = typeof peer === 'string' && (peer.startsWith('@') || /^[a-zA-Z0-9_]{3,}$/.test(peer));
 
-    // Check MTProto availability
-    let mtprotoReady = false;
-    try {
-      await this.ensureConnected();
-      mtprotoReady = true;
-    } catch (authErr) {
-      if (isPublicPeer) {
-        return await this.fetchPublicChannelPosts(peer, query, limit, directPostId);
+    this._addLog('info', 'Search', `searchChannelPosts: peer="${peer}", query="${query}", directPostId=${directPostId || 'none'}`);
+
+    // Check MTProto connection & auto-reconnect if needed
+    let mtprotoReady = (this.client && this.status === 'connected' && this.me && this.me.id);
+    if (!mtprotoReady && this.settings.sessionString) {
+      try {
+        this._addLog('info', 'Search', 'MTProto клиент не подключен, пробуем авто-подключение по сохраненной сессии...');
+        const reconnected = await this.connectWithSavedSession();
+        mtprotoReady = (reconnected && this.status === 'connected');
+      } catch (connErr) {
+        this._addLog('warn', 'Search', `Попытка авто-подключения завершилась: ${connErr.message}`);
       }
-      throw authErr;
     }
 
     if (mtprotoReady) {
       try {
-        let cleanPeer = peer;
-        if (/^-?\d+$/.test(cleanPeer)) {
-          try { cleanPeer = BigInt(cleanPeer); } catch (e) {}
-        }
+        this._addLog('info', 'Search', `Разрешение пира "${peer}" через MTProto...`);
+        const resolvedPeer = await this._resolvePeer(peer);
 
-        let messages;
-        if (directPostId) {
-          const singleMsg = await this.client.getMessages(cleanPeer, { ids: [directPostId] });
-          messages = singleMsg ? (Array.isArray(singleMsg) ? singleMsg : [singleMsg]) : [];
-        } else {
-          messages = await this.client.getMessages(cleanPeer, {
-            limit: Math.min(limit, 50),
-            search: query ? String(query).trim() : undefined,
-          });
-        }
+        this._addLog('info', 'Search', `Запрос сообщений через Telegram MTProto (limit: ${limit})...`);
+        const messages = await this._invokeWithMigration(async () => {
+          if (directPostId) {
+            const singleMsg = await this.client.getMessages(resolvedPeer, { ids: [directPostId] });
+            return singleMsg ? (Array.isArray(singleMsg) ? singleMsg : [singleMsg]) : [];
+          } else {
+            return await this.client.getMessages(resolvedPeer, {
+              limit: Math.min(limit, 50),
+              search: query ? String(query).trim() : undefined,
+            });
+          }
+        });
 
         const posts = (messages || []).filter(Boolean).map(m => {
           let channelUsername = '';
@@ -1236,21 +1467,52 @@ class TelegramMTProtoService {
           };
         });
 
+        this._addLog('info', 'Search', `Успешно получено ${posts.length} постов через Telegram MTProto!`);
         return {
           success: true,
           posts,
         };
-      } catch (e) {
-        if (isPublicPeer) {
-          try {
-            return await this.fetchPublicChannelPosts(peer, query, limit, directPostId);
-          } catch (pubErr) {
-            // fallback
-          }
-        }
-        await this._handleApiError(e, 'searchChannelPosts');
+      } catch (mtErr) {
+        this._addLog('warn', 'Search', `MTProto запрос постов для "${peer}" вызвал ошибку: ${mtErr.message}`);
+        // Fall through to public preview fallback if public peer
       }
     }
+
+    // Fallback: If public peer, try public channel web preview
+    if (isPublicPeer) {
+      this._addLog('info', 'Search', `MTProto не готов или вернул ошибку. Запуск веб-предпросмотра для @${cleanUsername}...`);
+      const publicResult = await this.fetchPublicChannelPosts(cleanUsername, query, limit, directPostId);
+      if (publicResult && publicResult.success && Array.isArray(publicResult.posts) && publicResult.posts.length > 0) {
+        return publicResult;
+      }
+
+      // Check if Bot API can verify channel
+      if (this.settings.botToken) {
+        try {
+          this._addLog('info', 'Search', `Попытка проверки канала @${cleanUsername} через Bot API...`);
+          const botResp = await fetch(`https://api.telegram.org/bot${this.settings.botToken}/getChat?chat_id=@${encodeURIComponent(cleanUsername)}`);
+          const botData = await botResp.json();
+          if (botData && botData.ok) {
+            this._addLog('info', 'Search', `Канал @${cleanUsername} найден через Bot API: "${botData.result?.title}"`);
+          }
+        } catch (botErr) {
+          this._addLog('warn', 'Search', `Bot API check error: ${botErr.message}`);
+        }
+      }
+
+      // Return informative result without throwing unhandled exceptions
+      return {
+        success: false,
+        posts: publicResult?.posts || [],
+        error: publicResult?.error || `Не удалось загрузить публикации @${cleanUsername}. Для доступа к закрытым и публичным каналам выполните авторизацию в Telegram MTProto.`
+      };
+    }
+
+    return {
+      success: false,
+      posts: [],
+      error: 'Для данного канала требуется активная авторизация в Telegram MTProto.'
+    };
   }
 
   async getChatAudioFiles({ chatPeer, chatId, limit = 40 }) {
@@ -1438,8 +1700,10 @@ class TelegramMTProtoService {
       const finalPath = path.join(saveDir, originalName);
       log.info(`[MTProto] Downloading audio message #${targetMsgId} to ${finalPath}`);
 
-      const buffer = await this.client.downloadMedia(msg.media, {
-        workers: 1,
+      const buffer = await this._invokeWithMigration(async () => {
+        return await this.client.downloadMedia(msg, {
+          workers: 1,
+        });
       });
 
       if (!buffer) {

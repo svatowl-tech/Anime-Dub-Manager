@@ -163,18 +163,30 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
         const status = await ipcSafe.invoke('telegram-mtproto-check-qr');
         if (!status) return;
 
-        if (status.status === 'authenticated' && status.me) {
+        // Also fetch latest backend logs to show live progress
+        try {
+          const backendLogs = await ipcSafe.invoke('telegram-mtproto-get-logs', { limit: 5 });
+          if (Array.isArray(backendLogs) && backendLogs.length > 0) {
+            const latest = backendLogs[backendLogs.length - 1];
+            if (latest && latest.message) {
+              addLog(`[${latest.tag}] ${latest.message}`, latest.level === 'error');
+            }
+          }
+        } catch (lErr) {}
+
+        if (status.status === 'authenticated' || (status.me && (status.status === 'connected' || status.status === 'authenticated'))) {
           clearInterval(qrPollIntervalRef.current);
           setIsQrActive(false);
-          addLog(`Вход по QR-коду выполнен: ${status.me.firstName || status.me.username || 'Успешно'}`);
-          toast.success('Успешная авторизация в Telegram!');
+          const userName = status.me?.firstName || status.me?.username || status.me?.id || 'Пользователь';
+          addLog(`Вход по QR-коду успешно выполнен: ${userName}`);
+          toast.success(`Успешная авторизация в Telegram: ${userName}`);
           onSuccess();
         } else if (status.status === 'password_required') {
           clearInterval(qrPollIntervalRef.current);
           setIsQr2FARequired(true);
           setQrStatusText('QR-код подтвержден! Введите облачный 2FA пароль для завершения.');
-          addLog('QR-код подтвержден. Требуется ввод пароля 2FA Cloud Password');
-          toast.info('Введите пароль 2FA от Telegram');
+          addLog('QR-код подтвержден на телефоне. Требуется ввод 2FA Cloud Password');
+          toast.info('Введите пароль 2FA двухфакторной защиты Telegram');
         } else if (status.qrDataUrl && status.qrDataUrl !== qrDataUrl) {
           setQrDataUrl(status.qrDataUrl);
           setQrExpiresIn(30);

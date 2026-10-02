@@ -1426,6 +1426,29 @@ function handleIpcMock(channel: string, args: any[]): any {
     };
   }
 
+  if (channel === 'telegram-mtproto-get-logs') {
+    return [
+      { timestamp: new Date().toISOString(), time: new Date().toLocaleTimeString('ru-RU'), level: 'info', tag: 'Init', message: 'Telegram MTProto сервис инициализирован', details: null },
+      { timestamp: new Date().toISOString(), time: new Date().toLocaleTimeString('ru-RU'), level: 'info', tag: 'Auth', message: 'Сессия проверена с серверами Telegram', details: null },
+      { timestamp: new Date().toISOString(), time: new Date().toLocaleTimeString('ru-RU'), level: 'info', tag: 'Search', message: 'Готовность к поиску и чтению публикаций', details: null }
+    ];
+  }
+
+  if (channel === 'telegram-mtproto-clear-logs') {
+    return { success: true };
+  }
+
+  if (channel === 'telegram-mtproto-test-connection') {
+    return {
+      success: true,
+      connected: true,
+      latencyMs: 142,
+      dcId: 4,
+      status: 'connected',
+      hasSession: true
+    };
+  }
+
   if (channel === 'telegram-mtproto-logout') {
     return { success: true };
   }
