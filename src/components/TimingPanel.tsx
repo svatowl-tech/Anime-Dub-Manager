@@ -80,6 +80,10 @@ export interface PhraseBlock {
   subIndex?: number;
   offsetSec: number; // Manual user shift offset (+ / -)
   volumePercent?: number; // Volume % modifier: 100% normal, 70% background, 50% whisper
+  pan?: number; // Stereo pan (-100% Left to +100% Right)
+  timeStretch?: number; // Retime speed stretch factor (0.8x to 1.2x without pitch change)
+  headTrimSec?: number; // Trim head (start) in seconds
+  tailTrimSec?: number; // Trim tail (end) in seconds
   isFix?: boolean;
   fixSourceFile?: string;
   hasCollision?: boolean;
@@ -147,17 +151,20 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
 
   // Load Subtitles & Dubber Tracks from Episode
+  // Load Subtitles & Dubber Tracks from Episode using Sound Engineer Export Pipeline
   const loadEpisodeData = useCallback(async () => {
     if (!currentEpisode) return;
     try {
       setIsLoading(true);
-      setStatusMessage('Загрузка субтитров и звуковых дорожек...');
+      setStatusMessage('Загрузка субтитров и файлов звукорежиссёра...');
 
       // 1. Get raw subtitles
-      if (currentEpisode.subPath) {
-        const subData = await ipcSafe.invoke('get-raw-subtitles', currentEpisode.subPath);
+      let parsedLines: SubtitleLine[] = [];
+      const subPath = currentEpisode.subPath;
+      if (subPath) {
+        const subData = await ipcSafe.invoke('get-raw-subtitles', subPath).catch(() => null);
         if (subData && subData.lines) {
-          const parsedLines: SubtitleLine[] = subData.lines.map((l: any, idx: number) => ({
+          parsedLines = subData.lines.map((l: any, idx: number) => ({
             id: `sub_${idx}`,
             rawLineIndex: l.rawLineIndex ?? idx,
             startSec: parseTimeToSeconds(l.start),
@@ -174,14 +181,36 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         }
       }
 
-      // 2. Get Dubber Audio Tracks
-      const fetchedTracks: Track[] = await ipcSafe.invoke('get-project', currentEpisode.projectId)
-        .then((proj: any) => {
-          if (!proj) return [];
-          const ep = proj.episodes?.find((e: any) => e.number === currentEpisode.number);
-          return ep?.tracks || [];
-        })
-        .catch(() => []);
+      // 2. Fetch dubber tracks via Sound Engineer / Mixing Status
+      const statusRes: any = await ipcSafe.invoke('mixing-get-status', { episode: currentEpisode }).catch(() => null);
+      let dubberTracks = statusRes?.manifest?.sourceFiles?.dubberTracks || [];
+
+      // If no tracks in working directory yet, execute sound engineer import automatically!
+      if (dubberTracks.length === 0) {
+        setStatusMessage('Экспорт и сборка файлов звукорежиссера из QA...');
+        const importRes: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
+          episode: currentEpisode,
+          autoApplyFixes: true,
+          autoTiming: false
+        }).catch(() => null);
+
+        if (importRes?.manifest?.sourceFiles?.dubberTracks) {
+          dubberTracks = importRes.manifest.sourceFiles.dubberTracks;
+        }
+      }
+
+      const fetchedTracks: Track[] = dubberTracks.map((dt: any, idx: number) => ({
+        id: `track_${dt.dubberNick || idx}`,
+        projectId: currentEpisode.projectId,
+        episodeId: currentEpisode.id,
+        participant: dt.dubberNick || 'Даббер',
+        character: dt.characterName || dt.dubberNick || 'Персонаж',
+        dubberName: dt.dubberNick || 'Даббер',
+        characterName: dt.characterName || dt.dubberNick || 'Персонаж',
+        filePath: dt.path,
+        role: 'dubber',
+        status: 'recorded'
+      }));
 
       setTracks(fetchedTracks);
 
@@ -190,45 +219,58 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         setVideoUrl(`file://${currentEpisode.rawPath.replace(/\\/g, '/')}`);
       }
 
-      // 3. Initialize phrase blocks from subtitles/assignments if no timing manifest exists
+      // 3. Initialize phrase blocks from subtitles for each dubber track
       const initialBlocks: Record<string, PhraseBlock[]> = {};
       fetchedTracks.forEach(tr => {
         const charName = tr.character || tr.characterName || 'Персонаж';
         const dubberName = tr.participant || tr.dubberName || 'Даббер';
-        const charLines = subLines.filter(s => s.name.toLowerCase().includes(charName.toLowerCase()) || charName.toLowerCase().includes(s.name.toLowerCase()));
-        
-        initialBlocks[tr.id] = charLines.map((line, idx) => ({
+        const charLines = parsedLines.filter(s => 
+          s.name.toLowerCase().includes(charName.toLowerCase()) || 
+          charName.toLowerCase().includes(s.name.toLowerCase()) ||
+          s.name.toLowerCase().includes(dubberName.toLowerCase()) ||
+          dubberName.toLowerCase().includes(s.name.toLowerCase())
+        );
+
+        const targetLines = charLines.length > 0 ? charLines : parsedLines.filter(s => s.name !== 'Default');
+
+        initialBlocks[tr.id] = targetLines.map((line, idx) => ({
           id: `phrase_${tr.id}_${idx}`,
           trackId: tr.id,
           dubberName,
           characterName: charName,
           startSec: line.startSec,
           endSec: line.endSec,
-          durationSec: line.endSec - line.startSec,
+          durationSec: Math.max(0.5, line.endSec - line.startSec),
           text: line.text,
           subIndex: idx,
           offsetSec: 0,
+          volumePercent: 100,
           isFix: false
         }));
       });
 
       setPhraseBlocks(initialBlocks);
-      toast.success(`Загружено ${fetchedTracks.length} дорожек дабберов и ${subLines.length} строк субтитров`);
+
+      if (fetchedTracks.length > 0) {
+        toast.success(`Успешно загружено ${fetchedTracks.length} дорожек дабберов и ${parsedLines.length} строк субтитров!`);
+      } else {
+        toast.info('Найдено 0 зарегистрированных аудиофайлов дабберов в серии.');
+      }
     } catch (err: any) {
       console.error('Failed to load timing episode data:', err);
-      toast.error(`Ошибка загрузки файлов: ${err.message || String(err)}`);
+      toast.error(`Ошибка загрузки дорожек: ${err.message || String(err)}`);
     } finally {
       setIsLoading(false);
       setStatusMessage('');
     }
-  }, [currentEpisode, subLines.length]);
+  }, [currentEpisode]);
 
   useEffect(() => {
     loadEpisodeData();
   }, [currentEpisode?.id]);
 
   // ---------------------------------------------------------------------------
-  // ACTION 1: Import from QA-проверка (without forced auto-timing)
+  // ACTION 1: Import from QA-проверка (using Sound Engineer Export)
   // ---------------------------------------------------------------------------
   const handleImportFromQA = async () => {
     if (!currentEpisode) {
@@ -238,18 +280,22 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
     try {
       setIsLoading(true);
-      setStatusMessage('Импорт последних записанных материалов из QA-проверки...');
+      setStatusMessage('Запуск экспорта для звукорежиссера и сборка дорожек QA...');
 
-      // Reload fresh tracks & sub lines
+      const importRes: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
+        episode: currentEpisode,
+        autoApplyFixes: true,
+        autoTiming: false
+      });
+
       await loadEpisodeData();
 
-      // Check for snippet fixes recorded in QA
-      const fixesCheck = await ipcSafe.invoke('check-snippet-fixes', { episode: currentEpisode }).catch(() => null);
-      if (fixesCheck && fixesCheck.hasSnippetFixes) {
-        toast.info(`Найдено ${fixesCheck.count} записанных фиксов в QA. Нажмите «Вшить фиксы» для объединения.`);
+      const count = importRes?.manifest?.sourceFiles?.dubberTracks?.length || 0;
+      if (count > 0) {
+        toast.success(`Импортировано ${count} дорожек звукорежиссера в тайминг!`);
+      } else {
+        toast.info('Материалы обновлены.');
       }
-
-      toast.success('Материалы из QA-проверки успешно импортированы в тайминг!');
     } catch (err: any) {
       toast.error(`Ошибка импорта из QA: ${err.message || String(err)}`);
     } finally {
@@ -502,6 +548,113 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     toast.info(`Громкость фразы: ${volPct}%`, { duration: 2000 });
   };
 
+  // Split phrase block into two at playhead or midpoint
+  const handleSplitPhrase = (trackId: string, phraseId: string) => {
+    setPhraseBlocks(prev => {
+      const trBlocks = prev[trackId] || [];
+      const updated: PhraseBlock[] = [];
+      for (const b of trBlocks) {
+        if (b.id === phraseId) {
+          const effStart = b.startSec + b.offsetSec;
+          const effEnd = b.endSec + b.offsetSec;
+          const splitSec = (currentTime > effStart && currentTime < effEnd) ? currentTime : effStart + (b.durationSec / 2);
+          const firstDur = Math.max(0.2, Number((splitSec - effStart).toFixed(2)));
+          const secondDur = Math.max(0.2, Number((effEnd - splitSec).toFixed(2)));
+
+          const b1: PhraseBlock = {
+            ...b,
+            id: `phrase_${trackId}_${Date.now()}_1`,
+            durationSec: firstDur,
+            endSec: b.startSec + firstDur,
+            text: `${b.text} (1/2)`
+          };
+          const b2: PhraseBlock = {
+            ...b,
+            id: `phrase_${trackId}_${Date.now()}_2`,
+            startSec: b.startSec + firstDur,
+            durationSec: secondDur,
+            text: `${b.text} (2/2)`
+          };
+          updated.push(b1, b2);
+        } else {
+          updated.push(b);
+        }
+      }
+      return { ...prev, [trackId]: updated };
+    });
+    toast.success('Реплика разделена (сплит) на две части!');
+  };
+
+  // Trim Head (Trim Start of phrase)
+  const handleTrimHead = (trackId: string, phraseId: string, deltaSec: number) => {
+    setPhraseBlocks(prev => {
+      const trBlocks = prev[trackId] || [];
+      const updated = trBlocks.map(b => {
+        if (b.id === phraseId) {
+          const newTrim = Math.max(0, (b.headTrimSec || 0) + deltaSec);
+          const newDur = Math.max(0.2, b.durationSec - deltaSec);
+          return {
+            ...b,
+            headTrimSec: Number(newTrim.toFixed(2)),
+            durationSec: Number(newDur.toFixed(2))
+          };
+        }
+        return b;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+  };
+
+  // Trim Tail (Trim End of phrase)
+  const handleTrimTail = (trackId: string, phraseId: string, deltaSec: number) => {
+    setPhraseBlocks(prev => {
+      const trBlocks = prev[trackId] || [];
+      const updated = trBlocks.map(b => {
+        if (b.id === phraseId) {
+          const newTrim = Math.max(0, (b.tailTrimSec || 0) + deltaSec);
+          const newDur = Math.max(0.2, b.durationSec - deltaSec);
+          return {
+            ...b,
+            tailTrimSec: Number(newTrim.toFixed(2)),
+            durationSec: Number(newDur.toFixed(2))
+          };
+        }
+        return b;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+  };
+
+  // Set Phrase Stereo Pan (-100 to +100)
+  const handleSetPhrasePan = (trackId: string, phraseId: string, panVal: number) => {
+    setPhraseBlocks(prev => {
+      const trBlocks = prev[trackId] || [];
+      const updated = trBlocks.map(b => {
+        if (b.id === phraseId) {
+          return { ...b, pan: panVal };
+        }
+        return b;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+    toast.info(`Панорама фразы: ${panVal > 0 ? `+${panVal}% R` : panVal < 0 ? `${panVal}% L` : '0% Center'}`);
+  };
+
+  // Set Phrase Retime / Stretch Factor (0.8x to 1.2x)
+  const handleSetPhraseRetime = (trackId: string, phraseId: string, stretchFactor: number) => {
+    setPhraseBlocks(prev => {
+      const trBlocks = prev[trackId] || [];
+      const updated = trBlocks.map(b => {
+        if (b.id === phraseId) {
+          return { ...b, timeStretch: stretchFactor };
+        }
+        return b;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+    toast.info(`Ретайминг фразы: ${stretchFactor.toFixed(2)}x (скорость без изменения тона)`);
+  };
+
   // ---------------------------------------------------------------------------
   // ACTION 5: Экспорт в Сведение видео (Export to Mixing)
   // ---------------------------------------------------------------------------
@@ -535,11 +688,16 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               id: b.id,
               dubberNick: b.dubberName,
               characterName: b.characterName,
-              startSec: Number((b.startSec + b.offsetSec).toFixed(2)),
-              endSec: Number((b.endSec + b.offsetSec).toFixed(2)),
+              startSec: Number((b.startSec + b.offsetSec + (b.headTrimSec || 0)).toFixed(2)),
+              endSec: Number((b.endSec + b.offsetSec - (b.tailTrimSec || 0)).toFixed(2)),
+              durationSec: Number(b.durationSec.toFixed(2)),
               text: b.text,
               volumePercent: volPct,
-              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2))
+              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2)),
+              pan: b.pan || 0,
+              timeStretch: b.timeStretch || 1.0,
+              headTrimSec: b.headTrimSec || 0,
+              tailTrimSec: b.tailTrimSec || 0
             };
           });
         })
@@ -783,12 +941,156 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               </div>
             </div>
 
-            {/* Video Sync Preview Indicator */}
-            {videoUrl && (
-              <div className="flex items-center gap-2 bg-neutral-950 px-2.5 py-1 rounded-lg border border-neutral-800 text-xs">
-                <FileAudio className="w-3.5 h-3.5 text-amber-400" />
-                <span className="text-neutral-400 text-[11px]">Видеоряд привязан к шкале</span>
-              </div>
+            {/* Selected Phrase Pro-Audio Inspector Toolbar */}
+            {selectedPhraseId ? (() => {
+              let activeBlock: PhraseBlock | null = null;
+              let activeTrackId = '';
+              for (const trId of Object.keys(phraseBlocks)) {
+                const found = (phraseBlocks[trId] || []).find(b => b.id === selectedPhraseId);
+                if (found) {
+                  activeBlock = found;
+                  activeTrackId = trId;
+                  break;
+                }
+              }
+              if (!activeBlock) return null;
+
+              return (
+                <div className="flex items-center gap-2 bg-neutral-950 px-3 py-1.5 rounded-xl border border-indigo-800/80 text-xs shadow-lg animate-in fade-in duration-200">
+                  <div className="flex items-center gap-1 font-bold text-indigo-300 border-r border-neutral-800 pr-2">
+                    <span>Реплика:</span>
+                    <span className="text-white max-w-[120px] truncate">{activeBlock.text || 'Фраза'}</span>
+                  </div>
+
+                  {/* Volume Presets */}
+                  <div className="flex items-center gap-1 border-r border-neutral-800 pr-2">
+                    <span className="text-[10px] text-neutral-400">Громкость:</span>
+                    <button
+                      onClick={() => handleSetPhraseVolume(activeTrackId, activeBlock!.id, 100)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition ${
+                        (activeBlock.volumePercent || 100) === 100 ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                    >
+                      100%
+                    </button>
+                    <button
+                      onClick={() => handleSetPhraseVolume(activeTrackId, activeBlock!.id, 70)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition ${
+                        activeBlock.volumePercent === 70 ? 'bg-amber-600 text-white border-amber-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                    >
+                      70%
+                    </button>
+                    <button
+                      onClick={() => handleSetPhraseVolume(activeTrackId, activeBlock!.id, 50)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition ${
+                        activeBlock.volumePercent === 50 ? 'bg-purple-600 text-white border-purple-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                    >
+                      50%
+                    </button>
+                  </div>
+
+                  {/* Stereo Pan */}
+                  <div className="flex items-center gap-1 border-r border-neutral-800 pr-2">
+                    <span className="text-[10px] text-neutral-400">Панорама:</span>
+                    <button
+                      onClick={() => handleSetPhrasePan(activeTrackId, activeBlock!.id, -30)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                        activeBlock.pan === -30 ? 'bg-blue-600 text-white border-blue-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                      title="Панорама влево 30%"
+                    >
+                      L30%
+                    </button>
+                    <button
+                      onClick={() => handleSetPhrasePan(activeTrackId, activeBlock!.id, 0)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                        !activeBlock.pan ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                      title="Центр"
+                    >
+                      ⯌ 0
+                    </button>
+                    <button
+                      onClick={() => handleSetPhrasePan(activeTrackId, activeBlock!.id, 30)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                        activeBlock.pan === 30 ? 'bg-blue-600 text-white border-blue-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                      title="Панорама вправо 30%"
+                    >
+                      R30%
+                    </button>
+                  </div>
+
+                  {/* Retime (Time Stretch without pitch change) */}
+                  <div className="flex items-center gap-1 border-r border-neutral-800 pr-2">
+                    <span className="text-[10px] text-neutral-400">Ретайминг:</span>
+                    <button
+                      onClick={() => handleSetPhraseRetime(activeTrackId, activeBlock!.id, 0.85)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                        activeBlock.timeStretch === 0.85 ? 'bg-amber-600 text-white border-amber-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                      title="Замедлить фразировку до 85% без изменения высоты тона"
+                    >
+                      0.85x
+                    </button>
+                    <button
+                      onClick={() => handleSetPhraseRetime(activeTrackId, activeBlock!.id, 1.0)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                        !activeBlock.timeStretch || activeBlock.timeStretch === 1.0 ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                      title="Нормальная скорость (1.0x)"
+                    >
+                      1.00x
+                    </button>
+                    <button
+                      onClick={() => handleSetPhraseRetime(activeTrackId, activeBlock!.id, 1.15)}
+                      className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition ${
+                        activeBlock.timeStretch === 1.15 ? 'bg-amber-600 text-white border-amber-400' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                      }`}
+                      title="Ускорить фразировку до 115% без изменения высоты тона"
+                    >
+                      1.15x
+                    </button>
+                  </div>
+
+                  {/* Split Action */}
+                  <button
+                    onClick={() => handleSplitPhrase(activeTrackId, activeBlock!.id)}
+                    className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 font-medium flex items-center gap-1 transition"
+                    title="Разделить (сплитнуть) фразовый блок по позиции курсора"
+                  >
+                    <Scissors className="w-3 h-3 text-amber-400" />
+                    <span>Сплит</span>
+                  </button>
+
+                  {/* Trim Head / Tail Controls */}
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => handleTrimHead(activeTrackId, activeBlock!.id, 0.05)}
+                      className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[10px] rounded border border-neutral-700"
+                      title="Подрезать голову (убрать начало +50ms)"
+                    >
+                      ✂ Голова
+                    </button>
+                    <button
+                      onClick={() => handleTrimTail(activeTrackId, activeBlock!.id, 0.05)}
+                      className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[10px] rounded border border-neutral-700"
+                      title="Подрезать хвост (убрать окончание -50ms)"
+                    >
+                      ✂ Хвост
+                    </button>
+                  </div>
+                </div>
+              );
+            })() : (
+              videoUrl && (
+                <div className="flex items-center gap-2 bg-neutral-950 px-2.5 py-1 rounded-lg border border-neutral-800 text-xs">
+                  <FileAudio className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-neutral-400 text-[11px]">Видеоряд привязан к шкале</span>
+                </div>
+              )
             )}
 
             {/* Zoom Controls */}
@@ -850,84 +1152,92 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 </div>
               </div>
 
-              {/* Dubber Tracks Headers */}
+              {/* Dubber Tracks Headers: Stacked Subtitle Row + Audio Row */}
               {tracks.map(track => {
                 const dubberName = track.participant || track.dubberName || 'Даббер';
                 const characterName = track.character || track.characterName || 'Персонаж';
 
                 return (
-                  <div key={track.id} className="p-3 border-b border-neutral-800/60 space-y-1.5 hover:bg-neutral-900/40 transition">
-                    <div className="flex items-center justify-between">
-                      <div className="truncate">
-                        <div className="text-xs font-bold text-neutral-100 truncate">
-                          {dubberName}
-                        </div>
-                        <div className="text-[11px] text-indigo-400 truncate">
-                          {characterName}
-                        </div>
-                      </div>
-
-                      <button
-                        onClick={() => setMutedTracks(prev => {
-                          const next = new Set(prev);
-                          if (next.has(track.id)) next.delete(track.id);
-                          else next.add(track.id);
-                          return next;
-                        })}
-                        className={`p-1 rounded text-xs transition ${
-                          mutedTracks.has(track.id) ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
-                        }`}
-                        title={mutedTracks.has(track.id) ? "Включить звук" : "Заглушить (Mute)"}
-                      >
-                        {mutedTracks.has(track.id) ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                      </button>
+                  <React.Fragment key={track.id}>
+                    {/* Subtitle Lane Header */}
+                    <div className="h-7 bg-indigo-950/90 border-b border-indigo-900/50 px-3 flex items-center justify-between text-indigo-300 text-[10px] font-bold font-mono tracking-wider shrink-0">
+                      <span>💬 Субтитры: {characterName}</span>
                     </div>
 
-                    {/* Role Volume Presets for Mixing */}
-                    <div className="space-y-1 pt-1 border-t border-neutral-800/50">
-                      <div className="flex items-center justify-between text-[10px] text-neutral-400">
-                        <span>Громкость роли (для сведения):</span>
-                        <span className="font-mono text-amber-300 font-bold">
-                          {Math.round((volumes[track.id] ?? 1.0) * 100)}%
-                        </span>
+                    {/* Audio Track Header */}
+                    <div className="p-3 border-b border-neutral-800 space-y-1.5 hover:bg-neutral-900/40 transition shrink-0">
+                      <div className="flex items-center justify-between">
+                        <div className="truncate">
+                          <div className="text-xs font-bold text-neutral-100 truncate">
+                            🎙 {dubberName}
+                          </div>
+                          <div className="text-[11px] text-indigo-400 truncate">
+                            {characterName}
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => setMutedTracks(prev => {
+                            const next = new Set(prev);
+                            if (next.has(track.id)) next.delete(track.id);
+                            else next.add(track.id);
+                            return next;
+                          })}
+                          className={`p-1 rounded text-xs transition ${
+                            mutedTracks.has(track.id) ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
+                          }`}
+                          title={mutedTracks.has(track.id) ? "Включить звук" : "Заглушить (Mute)"}
+                        >
+                          {mutedTracks.has(track.id) ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                        </button>
                       </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => handleSetRoleVolume(track.id, 1.0)}
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                            (volumes[track.id] ?? 1.0) === 1.0
-                              ? 'bg-indigo-600 text-white border-indigo-500'
-                              : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
-                          }`}
-                          title="100% — Норма (Первый план)"
-                        >
-                          📢 100%
-                        </button>
-                        <button
-                          onClick={() => handleSetRoleVolume(track.id, 0.7)}
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                            (volumes[track.id] ?? 1.0) === 0.7
-                              ? 'bg-amber-600 text-white border-amber-500'
-                              : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
-                          }`}
-                          title="70% — Задний план (Приглушенный голос)"
-                        >
-                          🔉 70% (Фон)
-                        </button>
-                        <button
-                          onClick={() => handleSetRoleVolume(track.id, 0.5)}
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                            (volumes[track.id] ?? 1.0) === 0.5
-                              ? 'bg-purple-600 text-white border-purple-500'
-                              : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
-                          }`}
-                          title="50% — Шепот / Толпа"
-                        >
-                          🔇 50%
-                        </button>
+
+                      {/* Role Volume Presets for Mixing */}
+                      <div className="space-y-1 pt-1 border-t border-neutral-800/50">
+                        <div className="flex items-center justify-between text-[10px] text-neutral-400">
+                          <span>Громкость роли:</span>
+                          <span className="font-mono text-amber-300 font-bold">
+                            {Math.round((volumes[track.id] ?? 1.0) * 100)}%
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => handleSetRoleVolume(track.id, 1.0)}
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                              (volumes[track.id] ?? 1.0) === 1.0
+                                ? 'bg-indigo-600 text-white border-indigo-500'
+                                : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
+                            }`}
+                            title="100% — Норма (Первый план)"
+                          >
+                            📢 100%
+                          </button>
+                          <button
+                            onClick={() => handleSetRoleVolume(track.id, 0.7)}
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                              (volumes[track.id] ?? 1.0) === 0.7
+                                ? 'bg-amber-600 text-white border-amber-500'
+                                : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
+                            }`}
+                            title="70% — Задний план (Приглушенный голос)"
+                          >
+                            🔉 70%
+                          </button>
+                          <button
+                            onClick={() => handleSetRoleVolume(track.id, 0.5)}
+                            className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                              (volumes[track.id] ?? 1.0) === 0.5
+                                ? 'bg-purple-600 text-white border-purple-500'
+                                : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
+                            }`}
+                            title="50% — Шепот / Толпа"
+                          >
+                            🔇 50%
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  </React.Fragment>
                 );
               })}
             </div>
@@ -969,130 +1279,136 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                   </div>
                 </div>
 
-                {/* Tracks 2..N: Dubber Phrase Waveform Blocks */}
+                {/* Tracks 2..N: Stacked Subtitle Lane + Dubber Audio Waveform Lane */}
                 {tracks.map(track => {
                   const blocks = phraseBlocks[track.id] || [];
                   const isMuted = mutedTracks.has(track.id);
+                  const charName = track.character || track.characterName || 'Персонаж';
+                  const dubberName = track.participant || track.dubberName || 'Даббер';
+
+                  const matchingSubs = subLines.filter(s => 
+                    s.name.toLowerCase().includes(charName.toLowerCase()) || 
+                    charName.toLowerCase().includes(s.name.toLowerCase()) ||
+                    s.name.toLowerCase().includes(dubberName.toLowerCase()) ||
+                    dubberName.toLowerCase().includes(s.name.toLowerCase())
+                  );
 
                   return (
-                    <div 
-                      key={track.id} 
-                      className={`h-24 border-b border-neutral-800/60 relative flex items-center transition ${
-                        isMuted ? 'opacity-30 bg-neutral-950' : 'bg-neutral-950/60'
-                      }`}
-                    >
-                      {/* Expected ASS Subtitle Ghost Ranges */}
-                      {subLines
-                        .filter(s => s.name.toLowerCase().includes(((track.character || track.characterName) || '').toLowerCase()))
-                        .map(sub => (
+                    <React.Fragment key={track.id}>
+                      {/* Lane 1: Subtitle Track for this Dubber */}
+                      <div className="h-7 border-b border-indigo-900/40 bg-indigo-950/20 relative flex items-center overflow-hidden">
+                        {matchingSubs.map(sub => (
                           <div
                             key={sub.id}
-                            className="absolute top-1 bottom-1 bg-indigo-950/30 border border-indigo-500/20 rounded text-[9px] text-indigo-400/80 font-mono px-1 truncate pointer-events-none"
+                            className="absolute inset-y-1 bg-indigo-900/60 border border-indigo-500/50 rounded text-[9px] text-indigo-200 font-mono px-1.5 truncate flex items-center shadow-sm"
                             style={{
                               left: `${sub.startSec * zoomLevel}px`,
-                              width: `${Math.max(20, (sub.endSec - sub.startSec) * zoomLevel)}px`
+                              width: `${Math.max(28, (sub.endSec - sub.startSec) * zoomLevel)}px`
                             }}
+                            title={`Субтитры [${formatSeconds(sub.startSec)} - ${formatSeconds(sub.endSec)}]: ${sub.text}`}
                           >
-                            Sub: {sub.text}
+                            💬 {sub.text}
                           </div>
-                        ))
-                      }
+                        ))}
+                      </div>
 
-                      {/* Movable Phrase Blocks */}
-                      {blocks.map(block => {
-                        const effectiveStart = block.startSec + block.offsetSec;
-                        const blockWidth = Math.max(24, block.durationSec * zoomLevel);
-                        const isSelected = selectedPhraseId === block.id;
+                      {/* Lane 2: Dubber Audio Waveform & Movable Phrase Blocks */}
+                      <div 
+                        className={`h-24 border-b border-neutral-800/80 relative flex items-center transition ${
+                          isMuted ? 'opacity-30 bg-neutral-950' : 'bg-neutral-950/80'
+                        }`}
+                      >
+                        {/* Audio Waveform Background Simulation Grid */}
+                        <div className="absolute inset-0 opacity-15 bg-[linear-gradient(90deg,#818cf8_1px,transparent_1px)] bg-[size:24px_100%]" />
 
-                        return (
-                          <div
-                            key={block.id}
-                            onClick={() => setSelectedPhraseId(block.id)}
-                            className={`absolute top-2 bottom-2 rounded-lg border p-1.5 flex flex-col justify-between cursor-pointer select-none transition-all shadow-md group ${
-                              block.hasCollision
-                                ? 'bg-red-950/80 border-red-500/80 text-red-200 shadow-red-500/10'
-                                : block.isFix
-                                ? 'bg-amber-950/80 border-amber-500/80 text-amber-200 shadow-amber-500/10'
-                                : isSelected
-                                ? 'bg-indigo-600/30 border-indigo-400 text-white'
-                                : 'bg-indigo-950/70 border-indigo-600/50 text-indigo-200 hover:border-indigo-400'
-                            }`}
-                            style={{
-                              left: `${effectiveStart * zoomLevel}px`,
-                              width: `${blockWidth}px`
-                            }}
-                          >
-                            <div className="flex items-center justify-between gap-1">
-                              <div className="flex items-center gap-1 font-mono text-[9px] font-bold truncate">
-                                {block.isFix && <span className="px-1 bg-amber-500 text-neutral-950 rounded font-black">FIX</span>}
-                                {block.hasCollision && <span className="px-1 bg-red-500 text-white rounded font-black">⚠️</span>}
-                                <span>{formatSeconds(effectiveStart)}</span>
+                        {/* Movable Phrase Blocks */}
+                        {blocks.map(block => {
+                          const effectiveStart = block.startSec + block.offsetSec + (block.headTrimSec || 0);
+                          const blockWidth = Math.max(28, block.durationSec * zoomLevel);
+                          const isSelected = selectedPhraseId === block.id;
+
+                          return (
+                            <div
+                              key={block.id}
+                              onClick={() => setSelectedPhraseId(block.id)}
+                              className={`absolute top-1.5 bottom-1.5 rounded-lg border p-1.5 flex flex-col justify-between cursor-pointer select-none transition-all shadow-md group ${
+                                block.hasCollision
+                                  ? 'bg-red-950/85 border-red-500/90 text-red-100 shadow-red-500/20'
+                                  : block.isFix
+                                  ? 'bg-amber-950/85 border-amber-500/90 text-amber-100 shadow-amber-500/20'
+                                  : isSelected
+                                  ? 'bg-indigo-600/40 border-indigo-300 text-white ring-2 ring-indigo-400 shadow-lg'
+                                  : 'bg-indigo-950/80 border-indigo-600/60 text-indigo-100 hover:border-indigo-400'
+                              }`}
+                              style={{
+                                left: `${effectiveStart * zoomLevel}px`,
+                                width: `${blockWidth}px`
+                              }}
+                            >
+                              <div className="flex items-center justify-between gap-1">
+                                <div className="flex items-center gap-1 font-mono text-[9px] font-bold truncate">
+                                  {block.isFix && <span className="px-1 bg-amber-500 text-neutral-950 rounded font-black">FIX</span>}
+                                  {block.hasCollision && <span className="px-1 bg-red-500 text-white rounded font-black">⚠️</span>}
+                                  <span>{formatSeconds(effectiveStart)}</span>
+                                </div>
+                                <div className="flex items-center gap-1 shrink-0 text-[8px] font-mono">
+                                  {block.timeStretch && block.timeStretch !== 1.0 && (
+                                    <span className="px-1 bg-amber-500/30 text-amber-300 border border-amber-500/50 rounded font-bold" title={`Ретайминг: ${block.timeStretch}x`}>
+                                      ⚡ {block.timeStretch}x
+                                    </span>
+                                  )}
+                                  {block.pan !== undefined && block.pan !== 0 && (
+                                    <span className="px-1 bg-blue-900/50 text-blue-300 border border-blue-700 rounded" title={`Панорама: ${block.pan}%`}>
+                                      🎛 {block.pan > 0 ? `+${block.pan}R` : `${block.pan}L`}
+                                    </span>
+                                  )}
+                                  {block.volumePercent && block.volumePercent !== 100 && (
+                                    <span className="px-1 bg-amber-950 text-amber-300 border border-amber-800/80 rounded font-bold" title={`Громкость: ${block.volumePercent}%`}>
+                                      🔉 {block.volumePercent}%
+                                    </span>
+                                  )}
+                                </div>
                               </div>
-                              <div className="flex items-center gap-1 shrink-0">
-                                {block.volumePercent && block.volumePercent !== 100 && (
-                                  <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-800/80 font-bold" title={`Задана приглушенная громкость фразы: ${block.volumePercent}%`}>
-                                    🔉 {block.volumePercent}%
-                                  </span>
-                                )}
-                                {block.offsetSec !== 0 && (
-                                  <span className="text-[9px] font-mono text-amber-300">
-                                    {block.offsetSec > 0 ? `+${block.offsetSec}s` : `${block.offsetSec}s`}
-                                  </span>
-                                )}
+
+                              {/* Phrase Text */}
+                              <div className="text-[10px] font-medium truncate leading-tight my-0.5">
+                                {block.text || 'Речевая фраза'}
+                              </div>
+
+                              {/* Controls Bar on Hover / Selection */}
+                              <div className="flex items-center justify-between gap-1 opacity-0 group-hover:opacity-100 transition">
+                                <div className="flex items-center gap-0.5">
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleSplitPhrase(track.id, block.id); }}
+                                    className="px-1 bg-neutral-900 hover:bg-neutral-800 text-amber-300 text-[8px] rounded border border-neutral-700 font-bold"
+                                    title="Разделить фразовый блок (сплит)"
+                                  >
+                                    ✂ Сплит
+                                  </button>
+                                </div>
+
+                                <div className="flex items-center gap-0.5">
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, -0.05); }}
+                                    className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[8px] rounded border border-neutral-700 text-neutral-300"
+                                    title="-50ms влево"
+                                  >
+                                    -50ms
+                                  </button>
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, 0.05); }}
+                                    className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[8px] rounded border border-neutral-700 text-neutral-300"
+                                    title="+50ms вправо"
+                                  >
+                                    +50ms
+                                  </button>
+                                </div>
                               </div>
                             </div>
-
-                            <div className="text-[10px] font-medium truncate leading-tight my-0.5">
-                              {block.text || 'Речевая фраза'}
-                            </div>
-
-                            {/* Nudge & Volume adjustment buttons on hover/select */}
-                            <div className="flex items-center justify-between gap-1 opacity-0 group-hover:opacity-100 transition">
-                              <div className="flex items-center gap-0.5">
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleSetPhraseVolume(track.id, block.id, 100); }}
-                                  className={`px-1 text-[8px] rounded border ${block.volumePercent === 100 || !block.volumePercent ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-neutral-900 text-neutral-400 border-neutral-700'}`}
-                                  title="Громкость фразы 100%"
-                                >
-                                  100%
-                                </button>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleSetPhraseVolume(track.id, block.id, 70); }}
-                                  className={`px-1 text-[8px] rounded border ${block.volumePercent === 70 ? 'bg-amber-600 text-white border-amber-400' : 'bg-neutral-900 text-neutral-400 border-neutral-700'}`}
-                                  title="Громкость фразы 70% (Фон)"
-                                >
-                                  70%
-                                </button>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleSetPhraseVolume(track.id, block.id, 50); }}
-                                  className={`px-1 text-[8px] rounded border ${block.volumePercent === 50 ? 'bg-purple-600 text-white border-purple-400' : 'bg-neutral-900 text-neutral-400 border-neutral-700'}`}
-                                  title="Громкость фразы 50% (Шепот)"
-                                >
-                                  50%
-                                </button>
-                              </div>
-
-                              <div className="flex items-center gap-0.5">
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, -0.05); }}
-                                  className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[9px] rounded border border-neutral-700 text-neutral-300"
-                                  title="-50ms влево"
-                                >
-                                  -50ms
-                                </button>
-                                <button
-                                  onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, 0.05); }}
-                                  className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[9px] rounded border border-neutral-700 text-neutral-300"
-                                  title="+50ms вправо"
-                                >
-                                  +50ms
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
+                          );
+                        })}
+                      </div>
+                    </React.Fragment>
                   );
                 })}
               </div>

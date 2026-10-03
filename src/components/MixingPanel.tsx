@@ -347,6 +347,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
           } else {
             setImportProgress(data.percent);
           }
+          if (data.percent === 100) {
+            loadStatus();
+          }
         }
         if (data.message) {
           setImportStatusMessage(data.message);
@@ -363,11 +366,26 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       }
     });
 
+    const unsubTask = ipcSafe.on('task-completed', (data: any) => {
+      if (data) {
+        mixLog('debug', 'Фон', 'Получено уведомление о завершении фоновой задачи. Обновление состояния сведения...');
+        loadStatus();
+      }
+    });
+
+    const handleFocus = () => {
+      loadStatus();
+    };
+
+    window.addEventListener('focus', handleFocus);
+
     return () => {
       if (unsubProgress) unsubProgress();
       if (unsubLog) unsubLog();
+      if (unsubTask) unsubTask();
+      window.removeEventListener('focus', handleFocus);
     };
-  }, [mixLog]);
+  }, [loadStatus, mixLog]);
 
   // Ensure video element is ALWAYS muted so video audio never conflicts or duplicates audio tracks
   useEffect(() => {
@@ -605,6 +623,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       if (res && res.manifest) {
         setManifest(res.manifest);
       }
+      await loadStatus();
     } catch (e: any) {
       toast.error(`Не удалось сохранить структуру конвейера: ${e.message || String(e)}`);
     }
@@ -876,6 +895,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     } finally {
       setActiveProcessingStepId(null);
       setStepProgress(prev => ({ ...prev, [stepId]: 0 }));
+      await loadStatus();
     }
   };
 
@@ -907,6 +927,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       toast.error(`Ошибка при сведении: ${e.message || String(e)}`);
     } finally {
       setActiveProcessingStepId(null);
+      await loadStatus();
     }
   };
 

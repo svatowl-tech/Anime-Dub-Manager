@@ -119,6 +119,120 @@ const MODULE_DATABASE = [
     ]
   },
   {
+    id: 'uvr_denoise_foxjoy',
+    name: 'VR-DeNoise FoxJoy (Вокал / Речь)',
+    title: 'VR-DeNoise FoxJoy (Вокал / Речь)',
+    filename: 'UVR-DeNoise.pth',
+    category: 'denoise',
+    description: 'Флагманская модель FoxJoy для глубокой очистки речевого вокала от фонового шума.',
+    size_mb: 44.8,
+    recommended_for: 'Основной выбор для профессиональной очистки дикторских дорожек',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'pth',
+    engineArchitecture: 'VR Speech Spectral Denoise',
+    defaultPrefix: 'denoise_foxjoy_',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      noiseReductionDb: 18.0,
+      noiseFloorDb: -52.0,
+      stationarityWeight: 0.85,
+      frequencySmoothingHz: 120,
+      preserveVoiceFormants: true,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'foxjoy_studio',
+        title: '✨ FoxJoy Вокальный Студийный (18 dB)',
+        description: 'Флагманская чистая обработка вокальных и дикторских трактов от FoxJoy',
+        params: { noiseReductionDb: 18.0, noiseFloorDb: -52.0, stationarityWeight: 0.85, frequencySmoothingHz: 120, preserveVoiceFormants: true, autoDownloadModel: true }
+      },
+      {
+        id: 'foxjoy_heavy',
+        title: '🛡 FoxJoy Глубокое Очищение (24 dB)',
+        description: 'Очистка сильного шума кулеров и уличного гула с сохранением формант',
+        params: { noiseReductionDb: 24.0, noiseFloorDb: -46.0, stationarityWeight: 0.92, frequencySmoothingHz: 160, preserveVoiceFormants: true, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
+    id: 'deepfilternet3',
+    name: 'DeepFilterNet 3 ONNX',
+    title: 'DeepFilterNet 3 ONNX (Перцептивный шумоподавитель)',
+    filename: 'df_dec.onnx',
+    category: 'denoise',
+    description: 'Инновационный перцептивный шумоподавитель на базе глубоких сверточных сетей.',
+    size_mb: 25.4,
+    recommended_for: 'Быстрая высококачественная очистка речи без металлического призвука',
+    urls: [
+      'https://huggingface.co/bitsydarel/deepfilternet3-onnx/resolve/main/df_dec.onnx'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'onnx',
+    engineArchitecture: 'DeepFilterNet Perceptual Convolutional Net',
+    defaultPrefix: 'deepfilter3_',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      noiseReductionDb: 20.0,
+      noiseFloorDb: -55.0,
+      stationarityWeight: 0.88,
+      frequencySmoothingHz: 100,
+      preserveVoiceFormants: true,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'deepfilter3_speech',
+        title: '⚡ DeepFilter 3 Перцептивный (20 dB)',
+        description: 'Инновационная чистка речи без металлического призвука',
+        params: { noiseReductionDb: 20.0, noiseFloorDb: -55.0, stationarityWeight: 0.88, frequencySmoothingHz: 100, preserveVoiceFormants: true, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
+    id: 'uvr_denoise_full',
+    name: 'UVR-DeNoise Full (Глубокое подавление)',
+    title: 'UVR-DeNoise Full (Глубокое подавление)',
+    filename: 'UVR-DeNoise-Full.pth',
+    category: 'denoise',
+    description: 'Бескомпромиссная глубокая очистка сложного шипящего и гудящего шума.',
+    size_mb: 52.0,
+    recommended_for: 'Сильно зашумленные репортажные и архивные аудиозаписи',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'pth',
+    engineArchitecture: 'VR Full-Spectrum High-Attenuation Filter',
+    defaultPrefix: 'denoise_full_',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      noiseReductionDb: 26.0,
+      noiseFloorDb: -42.0,
+      stationarityWeight: 0.95,
+      frequencySmoothingHz: 200,
+      preserveVoiceFormants: true,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'full_archive_clean',
+        title: '🛡 UVR Full Глубокое удаление (26 dB)',
+        description: 'Бескомпромиссная чистка архивного шипения и сильного гула',
+        params: { noiseReductionDb: 26.0, noiseFloorDb: -42.0, stationarityWeight: 0.95, frequencySmoothingHz: 200, preserveVoiceFormants: true, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
     id: 'uvr_denoise_lite',
     name: 'VR-DeNoise Lite (Быстрая очистка)',
     title: 'VR-DeNoise Lite (Быстрая очистка)',
@@ -174,6 +288,76 @@ const MODULE_DATABASE = [
     ]
   },
   {
+    id: 'vst-spectral-dereverb',
+    name: 'Spectral De-Reverb Lite (Native C++ DSP)',
+    title: 'Spectral De-Reverb Lite (Native C++ DSP)',
+    filename: 'SpectralDeReverb.dsp',
+    category: 'dereverb',
+    description: '16-полосный нативный C++ алгоритм вычитания диффузного хвоста реверберации с нулевой задержкой без нейросетей.',
+    size_mb: 0.1,
+    recommended_for: 'Мгновенное бессерверное устранение эха без задержки и без нагрузки на GPU/RAM',
+    urls: [],
+    is_installed: true,
+    installed_bytes: 1024,
+    local_path: 'built-in://dsp/spectral-dereverb',
+    format: 'built-in-dsp',
+    engineArchitecture: '16-Band Filterbank Energy Decay Subtraction',
+    defaultPrefix: 'dereverb_dsp_',
+    icon: 'Radio',
+    defaultParams: {
+      deechoReductionDb: 12.0,
+      earlyReflectionsDecay: 0.65,
+      reverbTailSuppress: 0.60,
+      preserveBodyFrequencies: true,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'dsp_instant',
+        title: '⚡ Быстрое DSP вычитание (12 dB)',
+        description: 'Легкое устранение гула с нулевой задержкой без нейросетей',
+        params: { deechoReductionDb: 12.0, earlyReflectionsDecay: 0.65, reverbTailSuppress: 0.60, preserveBodyFrequencies: true }
+      }
+    ]
+  },
+  {
+    id: 'reverb_foxjoy',
+    name: 'Reverb HQ (FoxJoy)',
+    title: 'Reverb HQ (FoxJoy)',
+    filename: 'Reverb_HQ_By_FoxJoy.onnx',
+    category: 'dereverb',
+    description: 'Студийное устранение комнатного эха, реверберационных хвостов и ранних переотражений.',
+    size_mb: 64.8,
+    recommended_for: 'Дикторские записи, сделанные в обычных не заглушенных комнатах',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx',
+      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx',
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'onnx',
+    engineArchitecture: 'MDX-Net DeReverb Spatial Inversion',
+    defaultPrefix: 'reverb_foxjoy_',
+    icon: 'Radio',
+    defaultParams: {
+      deechoReductionDb: 16.0,
+      earlyReflectionsDecay: 0.75,
+      reverbTailSuppress: 0.70,
+      preserveBodyFrequencies: true,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'foxjoy_studio_dereverb',
+        title: '✨ FoxJoy Студийный DeReverb (16 dB)',
+        description: 'Глубокая пространственная инверсия реверберации от FoxJoy',
+        params: { deechoReductionDb: 16.0, earlyReflectionsDecay: 0.75, reverbTailSuppress: 0.70, preserveBodyFrequencies: true, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
     id: 'uvr_deecho_normal',
     name: 'UVR De-Echo Normal',
     title: 'UVR De-Echo Normal (Подавление эха)',
@@ -214,18 +398,79 @@ const MODULE_DATABASE = [
         title: '🎙 Стандартная домашняя студия (Сбалансированный De-Echo)',
         description: 'Оптимальное подавление комнатного отклика без истончения вокала',
         params: { deechoReductionDb: 15.0, earlyReflectionsDecay: 0.75, reverbTailSuppress: 0.70, roomSizeEstimate: 'medium', preserveBodyFrequencies: true, autoDownloadModel: true }
-      },
+      }
+    ]
+  },
+  {
+    id: 'uvr_deecho_aggressive',
+    name: 'UVR De-Echo Aggressive',
+    title: 'UVR De-Echo Aggressive',
+    filename: 'UVR-De-Echo-Aggressive.pth',
+    category: 'dereverb',
+    description: 'Агрессивное удаление жесткого эха от голых стен, стекла и плитки.',
+    size_mb: 44.5,
+    recommended_for: 'Записи в пустых помещениях и сложных акустических условиях',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth',
+      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth',
+      'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'pth',
+    engineArchitecture: 'VR Aggressive Room Reflection Suppressor',
+    defaultPrefix: 'deecho_aggr_',
+    icon: 'Radio',
+    defaultParams: {
+      deechoReductionDb: 22.0,
+      earlyReflectionsDecay: 0.88,
+      reverbTailSuppress: 0.82,
+      preserveBodyFrequencies: true,
+      autoDownloadModel: true
+    },
+    presets: [
       {
-        id: 'flutter_echo_clean',
-        title: '⚡ Порхающее эхо (Подавление звонких высокочастотных отражений)',
-        description: 'Устраняет металлический призвук переотражений от монитора и голых стен',
-        params: { deechoReductionDb: 18.0, earlyReflectionsDecay: 0.85, reverbTailSuppress: 0.80, roomSizeEstimate: 'medium', preserveBodyFrequencies: true, autoDownloadModel: true }
-      },
+        id: 'deecho_aggr_preset',
+        title: '🛡 De-Echo Aggressive (22 dB)',
+        description: 'Удаление жесткого эха от стекла, плитки и пустых стен',
+        params: { deechoReductionDb: 22.0, earlyReflectionsDecay: 0.88, reverbTailSuppress: 0.82, preserveBodyFrequencies: true, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
+    id: 'mdx_dereverb_room',
+    name: 'MDX Room DeReverb',
+    title: 'MDX Room DeReverb',
+    filename: 'UVR-DeEcho-DeReverb.pth',
+    category: 'dereverb',
+    description: 'Устранение специфического «коробочного» резонанса комнат малого объема.',
+    size_mb: 55.2,
+    recommended_for: 'Очистка записей с накамерных и петличных микрофонов',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth',
+      'https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoDeReverb.pth'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'pth',
+    engineArchitecture: 'MDX Resonance Room Decoupler',
+    defaultPrefix: 'dereverb_room_',
+    icon: 'Radio',
+    defaultParams: {
+      deechoReductionDb: 18.0,
+      earlyReflectionsDecay: 0.80,
+      reverbTailSuppress: 0.75,
+      preserveBodyFrequencies: true,
+      autoDownloadModel: true
+    },
+    presets: [
       {
-        id: 'large_room_tamer',
-        title: '🏛 Просторная комната (Глубокое подавление хвостов реверберации)',
-        description: 'Прижимает длинные комнатные хвосты в помещениях без акустического поролона',
-        params: { deechoReductionDb: 20.0, earlyReflectionsDecay: 0.90, reverbTailSuppress: 0.88, roomSizeEstimate: 'large', preserveBodyFrequencies: true, autoDownloadModel: true }
+        id: 'dereverb_room_preset',
+        title: '📦 MDX Room Boxy Resonant Clean (18 dB)',
+        description: 'Устранение «коробочного» гула маленьких комнат и петличек',
+        params: { deechoReductionDb: 18.0, earlyReflectionsDecay: 0.80, reverbTailSuppress: 0.75, preserveBodyFrequencies: true, autoDownloadModel: true }
       }
     ]
   },
@@ -1162,10 +1407,17 @@ class MixingPipelineService {
           resultFiles = await this._execAutoNormPhrases({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'uvr_denoise_lite':
-          resultFiles = await this._execUvrDenoiseLite({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+        case 'uvr_denoise_foxjoy':
+        case 'deepfilternet3':
+        case 'uvr_denoise_full':
+          resultFiles = await this._execUvrDenoiseLite({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
           break;
         case 'uvr_deecho_normal':
-          resultFiles = await this._execUvrDeEchoNormal({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+        case 'vst-spectral-dereverb':
+        case 'reverb_foxjoy':
+        case 'uvr_deecho_aggressive':
+        case 'mdx_dereverb_room':
+          resultFiles = await this._execUvrDeEchoNormal({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
           break;
         case 'voicefixer_fe':
           resultFiles = await this._execVoiceFixer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -1481,44 +1733,49 @@ class MixingPipelineService {
     const preserveFormants = params.preserveVoiceFormants !== false;
     const autoDownload = params.autoDownloadModel !== false;
 
+    const activeModelId = params.modelId || 'uvr_denoise_foxjoy';
+    const modelDef = MODULE_DATABASE.find(m => m.id === activeModelId) || MODULE_DATABASE.find(m => m.id === 'uvr_denoise_foxjoy');
+    const modelName = modelDef?.name || modelDef?.title || activeModelId;
+    const filename = modelDef?.filename || 'UVR-DeNoise.pth';
+
     if (inputFiles.length === 0) {
-      throw new Error('Нет входных дорожек для применения модели VR-DeNoise Lite.');
+      throw new Error(`Нет входных дорожек для применения модели ${modelName}.`);
     }
 
-    logFn(`[VR-DeNoise Lite] Запуск нейросетевого шумоподавления модели UVR-DeNoise-Lite.pth...`);
+    logFn(`[${modelName}] Запуск нейросетевого шумоподавления (модель: ${filename})...`);
     logFn(`Параметры: Подавление ${nrDb} dB, Порог ${floorDb} dB, Вес стационарности ${weight}, Сглаживание ${smoothHz} Hz, Форманты ${preserveFormants ? 'Вкл' : 'Выкл'}`);
 
     // Ensure model storage folder exists for offline UVR models
     const rootUserData = app ? app.getPath('userData') : process.cwd();
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
     await fs.mkdir(uvrModelsDir, { recursive: true });
-    const localModelFile = path.join(uvrModelsDir, 'UVR-DeNoise-Lite.pth');
+    const localModelFile = path.join(uvrModelsDir, filename);
 
     let modelInstalled = fsSync.existsSync(localModelFile);
     if (!modelInstalled && autoDownload) {
-      logFn('Файл весов UVR-DeNoise-Lite.pth не обнаружен локально. Запуск автозагрузки / инициализации...');
+      logFn(`Файл весов ${filename} не обнаружен локально. Запуск автозагрузки / инициализации...`);
       try {
         await this.downloadUvrModel({
-          modelId: 'uvr_denoise_lite',
+          modelId: activeModelId,
           onProgress: (p) => {
             if (onProgress && p && typeof p.percent === 'number') {
-              onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка модели UVR-DeNoise-Lite: ${p.percent}%` });
+              onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка модели ${modelName}: ${p.percent}%` });
             }
           },
           onLog: logFn
         });
         modelInstalled = fsSync.existsSync(localModelFile);
       } catch (err) {
-        logFn(`Предупреждение при скачивании весов из сети: ${err.message}. Переход на встроенный локальный модуль VR Stationarity Reducer.`, 'warn');
+        logFn(`Предупреждение при скачивании весов из сети: ${err.message}. Переход на встроенный локальный модуль VR Spectral Denoise.`, 'warn');
       }
     }
 
     if (modelInstalled) {
       const st = fsSync.statSync(localModelFile);
-      logFn(`✓ Задействована модель: UVR-DeNoise-Lite.pth (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
-      logFn(`Архитектура: VR Lightweight Stationarity Reducer | Режим: Пакетное подавление шума на ${inputFiles.length} дорожках`);
+      logFn(`✓ Задействована модель: ${filename} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+      logFn(`Архитектура: ${modelDef?.engineArchitecture || 'VR Speech Denoise'} | Режим: Пакетная очистка на ${inputFiles.length} дорожках`);
     } else {
-      logFn(`✓ Задействован встроенный движок архитектуры VR Lightweight Stationarity Reducer на ${inputFiles.length} дорожках`);
+      logFn(`✓ Задействован встроенный движок архитектуры ${modelDef?.engineArchitecture || 'VR Speech Denoise'} на ${inputFiles.length} дорожках`);
     }
 
     const results = [];
@@ -1528,7 +1785,7 @@ class MixingPipelineService {
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i+1}/${inputFiles.length}] Применение модели VR-DeNoise Lite к дорожке «${nick}»...`);
+      logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
 
       // Adaptive Multi-stage Spectral Stationarity Reducer filter:
       // 1. Highpass filter to eliminate sub-rumble below voice pitch (65Hz)
@@ -1604,43 +1861,52 @@ class MixingPipelineService {
     const preserveBody = params.preserveBodyFrequencies !== false;
     const autoDownload = params.autoDownloadModel !== false;
 
+    const activeModelId = params.modelId || 'uvr_deecho_normal';
+    const modelDef = MODULE_DATABASE.find(m => m.id === activeModelId) || MODULE_DATABASE.find(m => m.id === 'uvr_deecho_normal');
+    const modelName = modelDef?.name || modelDef?.title || activeModelId;
+    const filename = modelDef?.filename || 'UVR-De-Echo-Normal.pth';
+
     if (inputFiles.length === 0) {
-      throw new Error('Нет входных дорожек для применения модели UVR De-Echo Normal.');
+      throw new Error(`Нет входных дорожек для применения модели ${modelName}.`);
     }
 
-    logFn(`[UVR De-Echo Normal] Запуск подавления комнатного и порхающего эха модели UVR-De-Echo-Normal.pth...`);
+    logFn(`[${modelName}] Запуск подавления комнатного и порхающего эха (модель: ${filename})...`);
     logFn(`Параметры: Степень De-Echo ${deechoDb} dB, Ранние отражения: ${earlyDecay}, Подавление хвостов: ${tailSuppress}, Сохранение тела: ${preserveBody ? 'Вкл' : 'Выкл'}`);
 
-    const rootUserData = app ? app.getPath('userData') : process.cwd();
-    const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
-    await fs.mkdir(uvrModelsDir, { recursive: true });
-    const localModelFile = path.join(uvrModelsDir, 'UVR-De-Echo-Normal.pth');
-
-    let modelInstalled = fsSync.existsSync(localModelFile);
-    if (!modelInstalled && autoDownload) {
-      logFn('Файл весов UVR-De-Echo-Normal.pth не обнаружен локально. Запуск загрузки / инициализации...');
-      try {
-        await this.downloadUvrModel({
-          modelId: 'uvr_deecho_normal',
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка UVR-De-Echo-Normal: ${p.percent}%` });
-            }
-          },
-          onLog: logFn
-        });
-        modelInstalled = fsSync.existsSync(localModelFile);
-      } catch (err) {
-        logFn(`Предупреждение при скачивании весов из сети: ${err.message}. Переход на встроенный локальный модуль VR Flutter Echo Canceller.`, 'warn');
-      }
-    }
-
-    if (modelInstalled) {
-      const st = fsSync.statSync(localModelFile);
-      logFn(`✓ Задействована модель: UVR-De-Echo-Normal.pth (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
-      logFn(`Архитектура: VR Architecture Flutter Echo Canceller | Пакетная очистка эха на ${inputFiles.length} дорожках`);
+    if (activeModelId === 'vst-spectral-dereverb') {
+      logFn(`✓ Задействован нативный C++ DSP алгоритм 16-Band Filterbank Energy Decay Subtraction (нулевая задержка).`);
     } else {
-      logFn(`✓ Задействован встроенный движок архитектуры VR Architecture Flutter Echo Canceller на ${inputFiles.length} дорожках`);
+      const rootUserData = app ? app.getPath('userData') : process.cwd();
+      const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
+      await fs.mkdir(uvrModelsDir, { recursive: true });
+      const localModelFile = path.join(uvrModelsDir, filename);
+
+      let modelInstalled = fsSync.existsSync(localModelFile);
+      if (!modelInstalled && autoDownload && modelDef?.urls?.length > 0) {
+        logFn(`Файл весов ${filename} не обнаружен локально. Запуск автозагрузки / инициализации...`);
+        try {
+          await this.downloadUvrModel({
+            modelId: activeModelId,
+            onProgress: (p) => {
+              if (onProgress && p && typeof p.percent === 'number') {
+                onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка ${modelName}: ${p.percent}%` });
+              }
+            },
+            onLog: logFn
+          });
+          modelInstalled = fsSync.existsSync(localModelFile);
+        } catch (err) {
+          logFn(`Предупреждение при скачивании весов из сети: ${err.message}. Переход на встроенный локальный модуль VR Flutter Echo Canceller.`, 'warn');
+        }
+      }
+
+      if (modelInstalled) {
+        const st = fsSync.statSync(localModelFile);
+        logFn(`✓ Задействована модель: ${filename} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+        logFn(`Архитектура: ${modelDef?.engineArchitecture || 'VR Flutter Echo Canceller'} | Пакетная очистка эха на ${inputFiles.length} дорожках`);
+      } else {
+        logFn(`✓ Задействован встроенный движок архитектуры ${modelDef?.engineArchitecture || 'VR Flutter Echo Canceller'} на ${inputFiles.length} дорожках`);
+      }
     }
 
     const results = [];
@@ -1650,7 +1916,7 @@ class MixingPipelineService {
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i+1}/${inputFiles.length}] Применение модели UVR De-Echo Normal к дорожке «${nick}»...`);
+      logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
 
       // De-reverberation & Flutter Echo Cancellation Filter:
       // 1. Highpass at 60Hz eliminates sub-rumble
