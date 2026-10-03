@@ -146,9 +146,13 @@ function registerMixingHandlers(getData, mainWindow) {
       dest = saveResult.filePath;
     }
 
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+
     return await MixingPipelineService.saveFinalVideo({
       episode,
       targetDir,
+      baseDir,
       destinationPath: dest
     });
   }));

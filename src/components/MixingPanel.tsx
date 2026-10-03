@@ -45,7 +45,8 @@ import {
   AlertCircle,
   XCircle,
   FileDown,
-  RotateCcw
+  RotateCcw,
+  Folder
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { 
@@ -277,16 +278,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }
   }, [currentEpisode, mixLog]);
 
-  // Set default target directory
+  // Reset custom target dir when episode changes so default project path is used
   useEffect(() => {
-    if (currentEpisode && !customTargetDir) {
-      const pTitle = sanitizeFolderName(currentEpisode.project?.title || 'Project');
-      const epNum = currentEpisode.number !== undefined ? currentEpisode.number : 1;
-      const target = `Сведение/${pTitle}_Серия_${epNum}`;
-      setCustomTargetDir(target);
-      mixLog('debug', 'Папка', `Установлена рабочая директория по умолчанию: ${target}`);
-    }
-  }, [currentEpisode, customTargetDir, mixLog]);
+    setCustomTargetDir('');
+  }, [currentEpisode?.id]);
 
   // Resolve video URL for HTML5 video element
   useEffect(() => {
@@ -780,11 +775,12 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       setIsImporting(true);
       setImportProgress(5);
       setImportStatusMessage('Подготовка экспорта звукорежиссеру...');
-      mixLog('info', 'Импорт', `Запуск экспорта/импорта файлов звукорежиссера (тайминг: ${importAutoTiming}, фиксы: ${importAutoFixes}, субтитры: ${importSubtitles})...`);
+      const effectiveTarget = (customTargetDir && customTargetDir.trim()) ? customTargetDir.trim() : (workingDir || undefined);
+      mixLog('info', 'Импорт', `Запуск экспорта/импорта файлов звукорежиссера (папка: ${effectiveTarget || 'автоматически'}, тайминг: ${importAutoTiming}, фиксы: ${importAutoFixes}, субтитры: ${importSubtitles})...`);
 
       const res: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
         episode: currentEpisode,
-        targetDir: customTargetDir || undefined,
+        targetDir: effectiveTarget,
         autoTiming: importAutoTiming,
         autoApplyFixes: importAutoFixes,
         includeSubtitles: importSubtitles,
@@ -2180,13 +2176,37 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 <label className="text-neutral-300 font-medium block mb-1">
                   Целевая папка сведения:
                 </label>
-                <input 
-                  type="text"
-                  value={customTargetDir}
-                  onChange={(e) => setCustomTargetDir(e.target.value)}
-                  placeholder="Сведение/Название_Серия_1"
-                  className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-neutral-200 font-mono text-xs focus:outline-none focus:border-blue-500"
-                />
+                <div className="flex gap-2">
+                  <input 
+                    type="text"
+                    value={customTargetDir}
+                    onChange={(e) => setCustomTargetDir(e.target.value)}
+                    placeholder={workingDir || "По умолчанию: папка Сведение"}
+                    className="flex-1 px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-neutral-200 font-mono text-xs focus:outline-none focus:border-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const selected = await ipcSafe.invoke('select-directory');
+                        if (selected) {
+                          setCustomTargetDir(selected);
+                          mixLog('info', 'Папка', `Выбрана целевая папка: ${selected}`);
+                        }
+                      } catch (err) {}
+                    }}
+                    className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-xs transition-colors shrink-0 flex items-center gap-1.5"
+                    title="Выбрать папку на диске"
+                  >
+                    <Folder className="w-3.5 h-3.5" />
+                    <span>Обзор...</span>
+                  </button>
+                </div>
+                {workingDir && !customTargetDir && (
+                  <p className="text-[10px] text-neutral-400 mt-1 font-mono truncate">
+                    Папка по умолчанию: {workingDir}
+                  </p>
+                )}
               </div>
 
               <div className="p-3 bg-neutral-950 rounded-lg border border-neutral-800 space-y-2.5">

@@ -711,17 +711,83 @@ class MixingPipelineService {
     });
   }
 
+  getBaseRoot(baseDir = '', episode = null) {
+    if (baseDir && typeof baseDir === 'string' && baseDir.trim()) {
+      return path.resolve(baseDir.trim());
+    }
+    // Try to derive base root from episode rawPath or subPath (e.g. I:\YandexDisk\Озвучка\Project\Episode_11\raw_video.mkv)
+    const refPath = episode?.rawPath || episode?.subPath;
+    if (refPath && typeof refPath === 'string' && path.isAbsolute(refPath)) {
+      try {
+        const epDir = path.dirname(refPath);
+        const projDir = path.dirname(epDir);
+        const parentDir = path.dirname(projDir);
+        if (parentDir && parentDir !== projDir && parentDir !== path.parse(parentDir).root) {
+          return parentDir;
+        }
+        if (projDir && projDir !== path.parse(projDir).root) {
+          return projDir;
+        }
+      } catch (e) {}
+    }
+    if (app && typeof app.getPath === 'function') {
+      try {
+        return app.getPath('userData');
+      } catch (e) {}
+    }
+    try {
+      const os = require('os');
+      return path.join(os.homedir(), '.anime-dub-manager');
+    } catch (e) {
+      return process.cwd();
+    }
+  }
+
   getDefaultTargetDir(episode, baseDir = '') {
-    const root = baseDir || (app ? app.getPath('userData') : process.cwd());
-    const projectTitle = (episode?.project?.title || 'Project').replace(/[\\/:*?"<>|]/g, '_');
+    const root = this.getBaseRoot(baseDir, episode);
+    const projectTitle = (episode?.project?.title || 'Project').replace(/[\/:*?"<>|]/g, '_');
     const epNum = episode?.number !== undefined ? episode.number : 1;
     return path.join(root, 'Сведение', `${projectTitle}_Серия_${epNum}`);
+  }
+
+  resolveWorkingDir(targetDir, episode, baseDir = '') {
+    const root = this.getBaseRoot(baseDir, episode);
+    if (!targetDir || typeof targetDir !== 'string' || !targetDir.trim()) {
+      return this.getDefaultTargetDir(episode, root);
+    }
+    const trimmed = targetDir.trim();
+    if (!path.isAbsolute(trimmed)) {
+      // Relative path: resolve relative to base root, NEVER relative to process.cwd() (C:\Program Files...)!
+      return path.resolve(root, trimmed);
+    }
+    return trimmed;
+  }
+
+  async ensureDirectory(dirPath, logFn = null) {
+    try {
+      await fs.mkdir(dirPath, { recursive: true });
+      return dirPath;
+    } catch (err) {
+      if (err.code === 'EPERM' || err.code === 'EACCES') {
+        const errDetail = `Ошибка доступа EPERM/EACCES при создании папки «${dirPath}». Пробуем безопасную пользовательскую директорию...`;
+        if (logFn) logFn(errDetail, 'warn');
+        log.warn(`[Mixing] ${errDetail}: ${err.message}`);
+        const fallbackRoot = (app && typeof app.getPath === 'function')
+          ? app.getPath('userData')
+          : path.join(require('os').homedir(), '.anime-dub-manager');
+        const fallbackDir = path.join(fallbackRoot, 'Сведение', path.basename(dirPath));
+        await fs.mkdir(fallbackDir, { recursive: true });
+        if (logFn) logFn(`Директория перенаправлена в безопасную пользовательскую папку: «${fallbackDir}»`, 'info');
+        return fallbackDir;
+      }
+      throw err;
+    }
   }
 
   async getStatus({ episode, targetDir, baseDir }) {
     if (!episode) throw new Error('Episode parameter is required');
 
-    const workingDir = targetDir || this.getDefaultTargetDir(episode, baseDir);
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
     const manifestPath = path.join(workingDir, 'mixing_manifest.json');
 
     let manifest = null;
@@ -769,12 +835,12 @@ class MixingPipelineService {
 
   async savePipelineConfig({ episode, targetDir, baseDir, pipeline }) {
     if (!episode) throw new Error('Episode parameter is required');
-    const workingDir = targetDir || this.getDefaultTargetDir(episode, baseDir);
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
     const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
     const manifest = statusData.manifest;
 
     manifest.pipeline = pipeline;
-    await fs.mkdir(workingDir, { recursive: true });
+    await this.ensureDirectory(workingDir);
     await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
     return {
@@ -922,11 +988,11 @@ class MixingPipelineService {
     onProgress,
     onLog
   }) {
-    const workingDir = targetDir || this.getDefaultTargetDir(episode, baseDir);
-    await fs.mkdir(workingDir, { recursive: true });
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+    await this.ensureDirectory(workingDir);
 
     const rawDir = path.join(workingDir, '00_исходные');
-    await fs.mkdir(rawDir, { recursive: true });
+    await this.ensureDirectory(rawDir);
 
     const logFn = (msg, level = 'info') => {
       log.info(`[Mixing Import] ${msg}`);
@@ -1040,7 +1106,7 @@ class MixingPipelineService {
   }
 
   async runStep({ episode, targetDir, baseDir, stepId, onProgress, onLog }) {
-    const workingDir = targetDir || this.getDefaultTargetDir(episode, baseDir);
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
     const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
     const manifest = statusData.manifest;
 
@@ -2125,7 +2191,7 @@ class MixingPipelineService {
   }
 
   async runAllSteps({ episode, targetDir, baseDir, onProgress, onLog }) {
-    const workingDir = targetDir || this.getDefaultTargetDir(episode, baseDir);
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
     const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
     const manifest = statusData.manifest;
 
@@ -2193,17 +2259,17 @@ class MixingPipelineService {
     return await this.getStatus({ episode, targetDir: workingDir, baseDir });
   }
 
-  async saveFinalVideo({ episode, targetDir, destinationPath }) {
+  async saveFinalVideo({ episode, targetDir, baseDir, destinationPath }) {
     if (!destinationPath) throw new Error('Укажите путь сохранения видео');
-    const workingDir = targetDir || this.getDefaultTargetDir(episode);
-    const statusData = await this.getStatus({ episode, targetDir: workingDir });
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
     const finalVideo = statusData.manifest.finalVideo;
 
     if (!finalVideo || !finalVideo.path || !fsSync.existsSync(finalVideo.path)) {
       throw new Error('Финальное сведенное видео не найдено. Сначала выполните модуль сведение видео.');
     }
 
-    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await this.ensureDirectory(path.dirname(destinationPath));
     await fs.copyFile(finalVideo.path, destinationPath);
     log.info(`[Mixing] Final video copied to ${destinationPath}`);
 
@@ -2678,11 +2744,11 @@ class MixingPipelineService {
     onProgress,
     onLog
   }) {
-    const workingDir = targetDir || this.getDefaultTargetDir(episode, baseDir);
-    await fs.mkdir(workingDir, { recursive: true });
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+    await this.ensureDirectory(workingDir);
 
     const rawDir = path.join(workingDir, '00_исходные');
-    await fs.mkdir(rawDir, { recursive: true });
+    await this.ensureDirectory(rawDir);
 
     const logFn = (msg, level = 'info', meta = null) => {
       const tag = '[Mixing:ExternalImport]';
