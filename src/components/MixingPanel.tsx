@@ -215,6 +215,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   // Player state
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const trackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const mixAudioElementsRef = useRef<HTMLAudioElement[]>([]);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<{
     id: string;
@@ -222,6 +223,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     path: string;
     label: string;
     stepId?: string;
+    isModuleMix?: boolean;
+    mixFiles?: MixingFileItem[];
   } | null>(null);
 
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
@@ -234,6 +237,17 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [isVideoMuted, setIsVideoMuted] = useState<boolean>(false);
   const [trackVolume, setTrackVolume] = useState<number>(0.95);
   const [isTrackMuted, setIsTrackMuted] = useState<boolean>(false);
+
+  // Helper to stop and clear multi-track module mix audio
+  const stopAndClearModuleMix = useCallback(() => {
+    mixAudioElementsRef.current.forEach(audio => {
+      try {
+        audio.pause();
+        audio.src = '';
+      } catch (e) {}
+    });
+    mixAudioElementsRef.current = [];
+  }, []);
 
   // Load mixing status for current episode
   const loadStatus = useCallback(async () => {
@@ -355,36 +369,88 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     };
   }, [mixLog]);
 
-  // Update volume & muting on audio/video elements
+  // Ensure video element is ALWAYS muted so video audio never conflicts or duplicates audio tracks
   useEffect(() => {
     if (videoRef.current) {
-      videoRef.current.volume = isVideoMuted ? 0 : Math.min(1, Math.max(0, videoVolume));
+      videoRef.current.muted = true;
+      videoRef.current.volume = 0;
     }
-  }, [videoVolume, isVideoMuted]);
+  }, [videoSrc]);
 
   useEffect(() => {
+    const vol = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
     if (trackAudioRef.current) {
-      const vol = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
       trackAudioRef.current.volume = Math.min(1, vol);
     }
+    mixAudioElementsRef.current.forEach(a => {
+      a.volume = Math.min(1, vol);
+    });
   }, [trackVolume, isTrackMuted]);
+
+  // Select original audio source for playback
+  const selectOriginalAudioTrack = useCallback(async () => {
+    const origPath = manifest?.sourceFiles?.originalAudio?.path;
+    if (!origPath) {
+      toast.error('Оригинальный аудиофайл серии ещё не загружен или отсутствует');
+      return;
+    }
+
+    let resolvedSrc = origPath;
+    if (window.electronAPI) {
+      if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('file://') && !resolvedSrc.startsWith('blob:')) {
+        resolvedSrc = `file://${resolvedSrc}`;
+      }
+    } else {
+      try {
+        resolvedSrc = await resolveLocalPath(origPath);
+      } catch (e) {}
+    }
+
+    stopAndClearModuleMix();
+
+    if (trackAudioRef.current) {
+      trackAudioRef.current.pause();
+      trackAudioRef.current.src = resolvedSrc;
+      trackAudioRef.current.currentTime = currentTime;
+      if (isPlaying) {
+        trackAudioRef.current.play().catch(() => {});
+      }
+    }
+
+    setSelectedAudioTrack({
+      id: 'original_audio_source',
+      name: 'Оригинальный звук серии (Японский исходник)',
+      path: resolvedSrc,
+      label: 'Оригинал',
+    });
+
+    toast.info('Включена оригинальная звуковая дорожка серии', { duration: 2500 });
+  }, [manifest?.sourceFiles?.originalAudio?.path, currentTime, isPlaying, stopAndClearModuleMix]);
 
   // Handle Play / Pause synchronization
   const togglePlay = useCallback(() => {
     if (isPlaying) {
       if (videoRef.current) videoRef.current.pause();
       if (trackAudioRef.current) trackAudioRef.current.pause();
+      mixAudioElementsRef.current.forEach(a => a.pause());
       setIsPlaying(false);
     } else {
       if (videoRef.current) {
+        videoRef.current.muted = true;
+        videoRef.current.volume = 0;
         videoRef.current.play().catch(e => console.warn('Video play warning:', e));
       }
-      if (trackAudioRef.current && selectedAudioTrack) {
+
+      if (!selectedAudioTrack && manifest?.sourceFiles?.originalAudio?.path) {
+        selectOriginalAudioTrack();
+      } else if (selectedAudioTrack?.isModuleMix) {
+        mixAudioElementsRef.current.forEach(a => a.play().catch(e => console.warn('Mix audio play warning:', e)));
+      } else if (trackAudioRef.current && selectedAudioTrack) {
         trackAudioRef.current.play().catch(e => console.warn('Track audio play warning:', e));
       }
       setIsPlaying(true);
     }
-  }, [isPlaying, selectedAudioTrack]);
+  }, [isPlaying, selectedAudioTrack, manifest?.sourceFiles?.originalAudio?.path, selectOriginalAudioTrack]);
 
   // Sync seek position
   const handleSeek = (time: number) => {
@@ -395,6 +461,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     if (trackAudioRef.current) {
       trackAudioRef.current.currentTime = time;
     }
+    mixAudioElementsRef.current.forEach(a => {
+      a.currentTime = time;
+    });
   };
 
   // Video event handlers
@@ -410,6 +479,18 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         trackAudioRef.current.currentTime = vTime;
       }
     }
+
+    // Keep module mix audio elements in tight sync with video
+    if (mixAudioElementsRef.current.length > 0) {
+      mixAudioElementsRef.current.forEach(a => {
+        if (!a.paused) {
+          const diff = Math.abs(a.currentTime - vTime);
+          if (diff > 0.15) {
+            a.currentTime = vTime;
+          }
+        }
+      });
+    }
   };
 
   const handleVideoLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
@@ -418,6 +499,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
   // Select an audio file for inspection in the player
   const selectTrackForInspection = async (item: MixingFileItem, label: string, stepId?: string) => {
+    stopAndClearModuleMix();
+
     let resolvedSrc = item.path;
     if (window.electronAPI) {
       if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('file://') && !resolvedSrc.startsWith('blob:')) {
@@ -447,6 +530,67 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     });
 
     toast.info(`Выбран для прослушивания: ${item.name}`, { duration: 2500 });
+  };
+
+  // Select module mix for multi-track playback
+  const selectModuleMixForInspection = async (step: PipelineStep) => {
+    if (!step.outputFiles || step.outputFiles.length === 0) {
+      toast.error('У этого модуля ещё нет сохраненных обработанных дорожек');
+      return;
+    }
+
+    const meta = getModuleMeta(step.moduleId);
+
+    // Stop single track audio
+    if (trackAudioRef.current) {
+      trackAudioRef.current.pause();
+      trackAudioRef.current.src = '';
+    }
+
+    // Clear previous mix elements
+    stopAndClearModuleMix();
+
+    if (step.outputFiles.length === 1) {
+      selectTrackForInspection(step.outputFiles[0], `${meta?.title || step.moduleId}: ${step.outputFiles[0].name}`, step.stepId);
+      return;
+    }
+
+    const audioElements: HTMLAudioElement[] = [];
+    for (const file of step.outputFiles) {
+      let resolvedSrc = file.path;
+      if (window.electronAPI) {
+        if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('file://') && !resolvedSrc.startsWith('blob:')) {
+          resolvedSrc = `file://${resolvedSrc}`;
+        }
+      } else {
+        try {
+          resolvedSrc = await resolveLocalPath(file.path);
+        } catch (e) {}
+      }
+
+      const audio = new Audio(resolvedSrc);
+      audio.currentTime = currentTime;
+      audio.volume = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
+      audioElements.push(audio);
+    }
+
+    mixAudioElementsRef.current = audioElements;
+
+    setSelectedAudioTrack({
+      id: `module_mix_${step.stepId}`,
+      name: `Микс всех дорожек модуля «${meta?.title || step.moduleId}» (${step.outputFiles.length} шт.)`,
+      path: '',
+      label: `Микс модуля (${step.outputFiles.length} шт.)`,
+      stepId: step.stepId,
+      isModuleMix: true,
+      mixFiles: step.outputFiles
+    });
+
+    if (isPlaying) {
+      audioElements.forEach(a => a.play().catch(e => console.warn('Mix track play warning:', e)));
+    }
+
+    toast.success(`В плеере включен совместный микс всех ${step.outputFiles.length} дорожек модуля!`, { duration: 3000 });
   };
 
   // Save modified pipeline
@@ -1364,8 +1508,24 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                         </div>
                       </div>
 
-                      {/* Step Actions: Up, Down, Settings, Run, Delete */}
+                      {/* Step Actions: Listen Module Mix, Up, Down, Settings, Run, Delete */}
                       <div className="flex items-center gap-1 shrink-0">
+                        {/* Listen Module Mix */}
+                        {step.outputFiles && step.outputFiles.length > 0 && (
+                          <button
+                            onClick={() => selectModuleMixForInspection(step)}
+                            className={`px-2.5 py-1 rounded text-xs font-semibold flex items-center gap-1.5 transition border ${
+                              selectedAudioTrack?.id === `module_mix_${step.stepId}`
+                                ? 'bg-purple-600 text-white border-purple-400 shadow-md ring-1 ring-purple-400 font-bold'
+                                : 'bg-purple-950/70 hover:bg-purple-900/90 text-purple-200 border-purple-800/80 shadow-sm'
+                            }`}
+                            title="Прослушать в плеере совместный микс всех обработанных этим модулем дорожек"
+                          >
+                            <Volume2 className="w-3.5 h-3.5 text-purple-300" />
+                            <span>Прослушать модуль ({step.outputFiles.length})</span>
+                          </button>
+                        )}
+
                         {/* Move Up */}
                         <button
                           onClick={() => handleMoveStepUp(idx)}
@@ -1646,12 +1806,29 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
                     {/* Output Artifacts on Disk (Inspected via Preview) */}
                     {step.outputFiles && step.outputFiles.length > 0 && (
-                      <div className="bg-neutral-950/40 p-2.5 rounded-lg border border-neutral-800/80 space-y-1">
+                      <div className="bg-neutral-950/40 p-2.5 rounded-lg border border-neutral-800/80 space-y-1.5">
                         <div className="text-[10px] uppercase font-semibold text-neutral-400 flex items-center justify-between">
                           <span>Сохраненные результаты на диске ({step.outputFiles.length}):</span>
                           <span className="text-emerald-400">✓ Записано на диск</span>
                         </div>
-                        <div className="flex flex-wrap gap-1.5 pt-1">
+                        <div className="flex flex-wrap gap-1.5 pt-0.5">
+                          {/* Full Module Mix Option */}
+                          {step.outputFiles.length > 1 && (
+                            <button
+                              onClick={() => selectModuleMixForInspection(step)}
+                              className={`px-2.5 py-1 rounded text-[11px] font-bold flex items-center gap-1.5 border transition ${
+                                selectedAudioTrack?.id === `module_mix_${step.stepId}`
+                                  ? 'bg-purple-600 text-white border-purple-400 shadow-md ring-1 ring-purple-400'
+                                  : 'bg-purple-900/40 hover:bg-purple-800/60 text-purple-300 border-purple-700/60'
+                              }`}
+                              title="Прослушать в плеере совместный микс всех обработанных этим модулем дорожек"
+                            >
+                              <Volume2 className="w-3.5 h-3.5 text-purple-300" />
+                              <span>🔊 Все дорожки (Микс модуля — {step.outputFiles.length} шт.)</span>
+                            </button>
+                          )}
+
+                          {/* Individual Output Files */}
                           {step.outputFiles.map((of, oIdx) => {
                             const isSelected = selectedAudioTrack?.id === of.path;
                             return (
@@ -1693,6 +1870,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 ref={videoRef}
                 src={videoSrc}
                 className="w-full h-full object-contain"
+                muted={true}
                 onTimeUpdate={handleVideoTimeUpdate}
                 onLoadedMetadata={handleVideoLoadedMetadata}
                 onEnded={() => setIsPlaying(false)}
@@ -1715,23 +1893,43 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             </div>
           </div>
 
-          {/* Currently Inspected Track Banner */}
+          {/* Currently Inspected Track Banner & Quick Switcher */}
           <div className="bg-neutral-900 border border-neutral-800 p-3 rounded-xl flex items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-2.5 truncate">
-              <div className="p-1.5 bg-purple-600/20 text-purple-400 rounded-lg shrink-0">
-                <Headphones className="w-4 h-4" />
+              <div className={`p-1.5 rounded-lg shrink-0 ${
+                selectedAudioTrack?.isModuleMix ? 'bg-amber-500/20 text-amber-300' : 'bg-purple-600/20 text-purple-400'
+              }`}>
+                {selectedAudioTrack?.isModuleMix ? <Volume2 className="w-4 h-4" /> : <Headphones className="w-4 h-4" />}
               </div>
               <div className="truncate">
-                <span className="text-neutral-400 text-[11px] block">Прослушиваемый файл модуля:</span>
-                <span className="font-semibold text-neutral-100 truncate">
+                <span className="text-neutral-400 text-[11px] block">
+                  {selectedAudioTrack?.isModuleMix ? 'Прослушивается совместный микс модуля:' : 'Прослушиваемый файл модуля:'}
+                </span>
+                <span className="font-semibold text-neutral-100 truncate block">
                   {selectedAudioTrack ? selectedAudioTrack.name : 'Исходный звук видеоряда'}
                 </span>
               </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
-              <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${
-                selectedAudioTrack ? 'bg-purple-900/40 text-purple-300 border border-purple-800/50' : 'bg-neutral-800 text-neutral-400'
+            {/* Source Switcher: Original vs Module */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                onClick={selectOriginalAudioTrack}
+                className={`px-2.5 py-1 rounded text-[11px] font-medium transition border ${
+                  selectedAudioTrack?.id === 'original_audio_source' || (!selectedAudioTrack && manifest?.sourceFiles?.originalAudio?.path)
+                    ? 'bg-amber-600 text-white border-amber-500 font-bold shadow-sm'
+                    : 'bg-neutral-800/80 hover:bg-neutral-700/80 text-neutral-300 border-neutral-700/60'
+                }`}
+                title="Переключить плеер на оригинальную японскую дорожку видеоряда"
+              >
+                📻 Оригинал
+              </button>
+              <span className={`px-2 py-1 rounded text-[10px] font-medium border ${
+                selectedAudioTrack?.isModuleMix
+                  ? 'bg-purple-900/60 text-purple-200 border-purple-700 font-bold'
+                  : selectedAudioTrack && selectedAudioTrack.id !== 'original_audio_source'
+                  ? 'bg-purple-900/40 text-purple-300 border border-purple-800/50'
+                  : 'bg-neutral-800 text-neutral-400 border-neutral-700'
               }`}>
                 {selectedAudioTrack ? selectedAudioTrack.label : 'Оригинал'}
               </span>
@@ -1785,84 +1983,38 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 </button>
               </div>
 
-              {/* Mode: Solo vs Play with Video (Pure Layering) */}
-              <div className="flex items-center gap-2 bg-neutral-950 p-1 rounded-lg border border-neutral-800 text-xs">
-                <button
-                  onClick={() => setPlayWithVideo(true)}
-                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition ${
-                    playWithVideo ? 'bg-purple-600 text-white' : 'text-neutral-400 hover:text-white'
-                  }`}
-                  title="Синхронное наложение выбранного файла на видеоряд"
-                >
-                  Вместе с видео 🎬
-                </button>
-                <button
-                  onClick={() => setPlayWithVideo(false)}
-                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition ${
-                    !playWithVideo ? 'bg-purple-600 text-white' : 'text-neutral-400 hover:text-white'
-                  }`}
-                  title="Слушать только выбранный файл (Соло)"
-                >
-                  Соло 🎧
-                </button>
+              <div className="text-[11px] text-neutral-400 bg-neutral-950 px-2.5 py-1 rounded-lg border border-neutral-800 flex items-center gap-1.5">
+                <VolumeX className="w-3.5 h-3.5 text-amber-400" />
+                <span>Звук видео заглушен (100% изоляция файла)</span>
               </div>
             </div>
 
-            {/* Volume Mixers (Pure Layering, 0ms latency) */}
-            <div className="grid grid-cols-2 gap-4 pt-2 border-t border-neutral-800">
-              {/* Original Video Audio Volume */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-neutral-400 flex items-center gap-1">
-                    <Film className="w-3 h-3 text-amber-400" />
-                    Оригинал (видео):
-                  </span>
-                  <button
-                    onClick={() => setIsVideoMuted(!isVideoMuted)}
-                    className="text-neutral-400 hover:text-neutral-200"
-                    title={isVideoMuted ? "Включить звук видео" : "Заглушить видео"}
-                  >
-                    {isVideoMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-amber-400" />}
-                  </button>
-                </div>
-                <input 
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  disabled={!playWithVideo || isVideoMuted}
-                  value={isVideoMuted ? 0 : videoVolume}
-                  onChange={(e) => setVideoVolume(parseFloat(e.target.value))}
-                  className="w-full accent-amber-500"
-                />
+            {/* Master Volume Control */}
+            <div className="pt-2 border-t border-neutral-800 space-y-1.5">
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-neutral-400 flex items-center gap-1.5">
+                  <Music className="w-3.5 h-3.5 text-purple-400" />
+                  Громкость воспроизведения плеера:
+                </span>
+                <button
+                  onClick={() => setIsTrackMuted(!isTrackMuted)}
+                  className="text-neutral-400 hover:text-neutral-200 flex items-center gap-1 text-[11px]"
+                  title={isTrackMuted ? "Включить звук" : "Заглушить звук"}
+                >
+                  {isTrackMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-purple-400" />}
+                  <span>{isTrackMuted ? 'Выкл' : `${Math.round(trackVolume * 100)}%`}</span>
+                </button>
               </div>
-
-              {/* Selected Track Audio Volume */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-neutral-400 flex items-center gap-1">
-                    <Music className="w-3 h-3 text-purple-400" />
-                    Файл модуля:
-                  </span>
-                  <button
-                    onClick={() => setIsTrackMuted(!isTrackMuted)}
-                    className="text-neutral-400 hover:text-neutral-200"
-                    title={isTrackMuted ? "Включить звук дорожки" : "Заглушить дорожку"}
-                  >
-                    {isTrackMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-purple-400" />}
-                  </button>
-                </div>
-                <input 
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  disabled={isTrackMuted}
-                  value={isTrackMuted ? 0 : trackVolume}
-                  onChange={(e) => setTrackVolume(parseFloat(e.target.value))}
-                  className="w-full accent-purple-500"
-                />
-              </div>
+              <input 
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                disabled={isTrackMuted}
+                value={isTrackMuted ? 0 : trackVolume}
+                onChange={(e) => setTrackVolume(parseFloat(e.target.value))}
+                className="w-full accent-purple-500 cursor-pointer"
+              />
             </div>
           </div>
 

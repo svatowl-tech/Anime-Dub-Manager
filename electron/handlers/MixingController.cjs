@@ -53,6 +53,14 @@ function registerMixingHandlers(getData, mainWindow) {
     return await MixingPipelineService.savePipelineConfig({ episode, targetDir, baseDir, pipeline });
   }));
 
+  ipcMain.handle('mixing-save-timing-metadata', wrapIpcHandler(async (event, { episode, targetDir, timingMetadata }) => {
+    if (!episode || !timingMetadata) throw new Error('Параметры серии и данных тайминга обязательны');
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    console.log(`[MixingController] save-timing-metadata: сохранение карты громкостей фраз тайминга`);
+    return await MixingPipelineService.saveTimingMetadata({ episode, targetDir, baseDir, timingMetadata });
+  }));
+
   ipcMain.handle('mixing-import-sound-engineer-files', wrapIpcHandler(async (event, params) => {
     const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming } = params;
     if (!episode) throw new Error('Параметр серии обязателен');

@@ -79,6 +79,7 @@ export interface PhraseBlock {
   text: string;
   subIndex?: number;
   offsetSec: number; // Manual user shift offset (+ / -)
+  volumePercent?: number; // Volume % modifier: 100% normal, 70% background, 50% whisper
   isFix?: boolean;
   fixSourceFile?: string;
   hasCollision?: boolean;
@@ -465,6 +466,42 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
+  // Helper to set role volume and apply it to all phrases of that track
+  const handleSetRoleVolume = (trackId: string, volMultiplier: number) => {
+    setVolumes(prev => ({ ...prev, [trackId]: volMultiplier }));
+    const volPct = Math.round(volMultiplier * 100);
+
+    setPhraseBlocks(prev => {
+      const trBlocks = prev[trackId] || [];
+      const updated = trBlocks.map(b => ({
+        ...b,
+        volumePercent: volPct
+      }));
+      return { ...prev, [trackId]: updated };
+    });
+
+    toast.info(`Громкость роли изменена: ${volPct}% (сохранено для сведения)`, { duration: 2500 });
+  };
+
+  // Helper to set volume for an individual phrase
+  const handleSetPhraseVolume = (trackId: string, phraseId: string, volPct: number) => {
+    setPhraseBlocks(prev => {
+      const trBlocks = prev[trackId] || [];
+      const updated = trBlocks.map(b => {
+        if (b.id === phraseId) {
+          return {
+            ...b,
+            volumePercent: volPct
+          };
+        }
+        return b;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+
+    toast.info(`Громкость фразы: ${volPct}%`, { duration: 2000 });
+  };
+
   // ---------------------------------------------------------------------------
   // ACTION 5: Экспорт в Сведение видео (Export to Mixing)
   // ---------------------------------------------------------------------------
@@ -473,9 +510,52 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
     try {
       setIsExportingToMixing(true);
-      setStatusMessage('Сборка оттаймленных и проверенных вручную дорожек для сведения...');
+      setStatusMessage('Сохранение карты громкостей фраз (timing_metadata.json) и скомпонованных дорожек...');
 
-      // Save/Export sound engineer files via IPC
+      // 1. Build timing metadata & phrase volume map JSON
+      const timingMetadata = {
+        version: '1.0',
+        updatedAt: new Date().toISOString(),
+        episodeNumber: currentEpisode?.number || 1,
+        defaultVolumePercent: 100,
+        rolesVolumeMap: tracks.reduce((acc, tr) => {
+          const roleName = tr.character || tr.characterName || tr.participant || 'Персонаж';
+          const dubberNick = tr.participant || tr.dubberName || 'Даббер';
+          const volPct = Math.round((volumes[tr.id] ?? 1.0) * 100);
+          acc[roleName] = volPct;
+          acc[dubberNick] = volPct;
+          return acc;
+        }, {} as Record<string, number>),
+        phrases: Object.keys(phraseBlocks).flatMap(trId => {
+          const tr = tracks.find(t => t.id === trId);
+          const blocks = phraseBlocks[trId] || [];
+          return blocks.map(b => {
+            const volPct = b.volumePercent ?? Math.round((volumes[trId] ?? 1.0) * 100);
+            return {
+              id: b.id,
+              dubberNick: b.dubberName,
+              characterName: b.characterName,
+              startSec: Number((b.startSec + b.offsetSec).toFixed(2)),
+              endSec: Number((b.endSec + b.offsetSec).toFixed(2)),
+              text: b.text,
+              volumePercent: volPct,
+              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2))
+            };
+          });
+        })
+      };
+
+      // 2. Save timing_metadata.json directly into mixing directory via IPC
+      try {
+        await ipcSafe.invoke('mixing-save-timing-metadata', {
+          episode: currentEpisode,
+          timingMetadata
+        });
+      } catch (metaErr) {
+        console.warn('Warning saving timing metadata via IPC:', metaErr);
+      }
+
+      // 3. Export sound engineer files
       await ipcSafe.invoke('export-sound-engineer-files', {
         episode: currentEpisode,
         skipConversion: false,
@@ -484,7 +564,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         autoTiming: false // Disable auto-timing since we already manually timed here!
       });
 
-      toast.success('Оттаймленные дорожки успешно переданы в «Сведение видео»!');
+      toast.success('Оттаймленные дорожки и карта громкостей (timing_metadata.json) переданы в «Сведение видео»!');
 
       if (onNavigate) {
         onNavigate('mixing');
@@ -803,17 +883,49 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                       </button>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-neutral-500">Уровень:</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="1.5"
-                        step="0.05"
-                        value={volumes[track.id] ?? 1.0}
-                        onChange={(e) => setVolumes(prev => ({ ...prev, [track.id]: Number(e.target.value) }))}
-                        className="w-full accent-indigo-500 h-1 bg-neutral-800 rounded"
-                      />
+                    {/* Role Volume Presets for Mixing */}
+                    <div className="space-y-1 pt-1 border-t border-neutral-800/50">
+                      <div className="flex items-center justify-between text-[10px] text-neutral-400">
+                        <span>Громкость роли (для сведения):</span>
+                        <span className="font-mono text-amber-300 font-bold">
+                          {Math.round((volumes[track.id] ?? 1.0) * 100)}%
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleSetRoleVolume(track.id, 1.0)}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                            (volumes[track.id] ?? 1.0) === 1.0
+                              ? 'bg-indigo-600 text-white border-indigo-500'
+                              : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
+                          }`}
+                          title="100% — Норма (Первый план)"
+                        >
+                          📢 100%
+                        </button>
+                        <button
+                          onClick={() => handleSetRoleVolume(track.id, 0.7)}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                            (volumes[track.id] ?? 1.0) === 0.7
+                              ? 'bg-amber-600 text-white border-amber-500'
+                              : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
+                          }`}
+                          title="70% — Задний план (Приглушенный голос)"
+                        >
+                          🔉 70% (Фон)
+                        </button>
+                        <button
+                          onClick={() => handleSetRoleVolume(track.id, 0.5)}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                            (volumes[track.id] ?? 1.0) === 0.5
+                              ? 'bg-purple-600 text-white border-purple-500'
+                              : 'bg-neutral-800 text-neutral-400 hover:text-neutral-200 border-neutral-700'
+                          }`}
+                          title="50% — Шепот / Толпа"
+                        >
+                          🔇 50%
+                        </button>
+                      </div>
                     </div>
                   </div>
                 );
@@ -916,33 +1028,66 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                                 {block.hasCollision && <span className="px-1 bg-red-500 text-white rounded font-black">⚠️</span>}
                                 <span>{formatSeconds(effectiveStart)}</span>
                               </div>
-                              {block.offsetSec !== 0 && (
-                                <span className="text-[9px] font-mono text-amber-300">
-                                  {block.offsetSec > 0 ? `+${block.offsetSec}s` : `${block.offsetSec}s`}
-                                </span>
-                              )}
+                              <div className="flex items-center gap-1 shrink-0">
+                                {block.volumePercent && block.volumePercent !== 100 && (
+                                  <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-800/80 font-bold" title={`Задана приглушенная громкость фразы: ${block.volumePercent}%`}>
+                                    🔉 {block.volumePercent}%
+                                  </span>
+                                )}
+                                {block.offsetSec !== 0 && (
+                                  <span className="text-[9px] font-mono text-amber-300">
+                                    {block.offsetSec > 0 ? `+${block.offsetSec}s` : `${block.offsetSec}s`}
+                                  </span>
+                                )}
+                              </div>
                             </div>
 
                             <div className="text-[10px] font-medium truncate leading-tight my-0.5">
                               {block.text || 'Речевая фраза'}
                             </div>
 
-                            {/* Nudge adjustment buttons on hover/select */}
+                            {/* Nudge & Volume adjustment buttons on hover/select */}
                             <div className="flex items-center justify-between gap-1 opacity-0 group-hover:opacity-100 transition">
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, -0.05); }}
-                                className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[9px] rounded border border-neutral-700 text-neutral-300"
-                                title="-50ms влево"
-                              >
-                                -50ms
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, 0.05); }}
-                                className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[9px] rounded border border-neutral-700 text-neutral-300"
-                                title="+50ms вправо"
-                              >
-                                +50ms
-                              </button>
+                              <div className="flex items-center gap-0.5">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleSetPhraseVolume(track.id, block.id, 100); }}
+                                  className={`px-1 text-[8px] rounded border ${block.volumePercent === 100 || !block.volumePercent ? 'bg-indigo-600 text-white border-indigo-400' : 'bg-neutral-900 text-neutral-400 border-neutral-700'}`}
+                                  title="Громкость фразы 100%"
+                                >
+                                  100%
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleSetPhraseVolume(track.id, block.id, 70); }}
+                                  className={`px-1 text-[8px] rounded border ${block.volumePercent === 70 ? 'bg-amber-600 text-white border-amber-400' : 'bg-neutral-900 text-neutral-400 border-neutral-700'}`}
+                                  title="Громкость фразы 70% (Фон)"
+                                >
+                                  70%
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleSetPhraseVolume(track.id, block.id, 50); }}
+                                  className={`px-1 text-[8px] rounded border ${block.volumePercent === 50 ? 'bg-purple-600 text-white border-purple-400' : 'bg-neutral-900 text-neutral-400 border-neutral-700'}`}
+                                  title="Громкость фразы 50% (Шепот)"
+                                >
+                                  50%
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-0.5">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, -0.05); }}
+                                  className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[9px] rounded border border-neutral-700 text-neutral-300"
+                                  title="-50ms влево"
+                                >
+                                  -50ms
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, 0.05); }}
+                                  className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[9px] rounded border border-neutral-700 text-neutral-300"
+                                  title="+50ms вправо"
+                                >
+                                  +50ms
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );

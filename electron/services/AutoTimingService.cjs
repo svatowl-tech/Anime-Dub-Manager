@@ -1036,8 +1036,11 @@ class AutoTimingService {
           else if (s > phraseSamples - curFade) fade = (phraseSamples - s) / curFade;
         }
 
-        const leftSample = Math.round(srcBuf.readInt16LE(srcOffset) * fade);
-        const rightSample = Math.round(srcBuf.readInt16LE(srcOffset + 2) * fade);
+        const volPct = Math.max(10, Math.min(150, p.volumePercent ?? 100));
+        const volScale = volPct / 100.0;
+
+        const leftSample = Math.round(srcBuf.readInt16LE(srcOffset) * fade * volScale);
+        const rightSample = Math.round(srcBuf.readInt16LE(srcOffset + 2) * fade * volScale);
 
         if (isTimelineTrack) {
           // If we muted the area, write the replacement sample cleanly
@@ -1217,6 +1220,49 @@ class AutoTimingService {
     await fs.promises.writeFile(reportPath, reportContent, 'utf-8');
     log.info(`[AutoTiming] Timing & Fix report saved to: ${reportPath}`);
     if (onLog) onLog(`Отчет по таймингу и фиксам сохранен в: ИНФО_О_ФИКСАХ_И_АВТОТАЙМИНГЕ.txt`);
+
+    // Generate and save timing_metadata.json & phrase_volume_map.json into mixing folder
+    try {
+      const timingMetadata = {
+        version: '1.0',
+        updatedAt: new Date().toISOString(),
+        baseVideoName,
+        rolesVolumeMap: tracksToRender.reduce((acc, tr) => {
+          const nick = tr.track?.dubberNick || 'Даббер';
+          const roleName = tr.track?.characterName || nick;
+          const volPct = tr.track?.volumePercent || 100;
+          acc[roleName] = volPct;
+          acc[nick] = volPct;
+          return acc;
+        }, {}),
+        phrases: tracksToRender.flatMap(tr => {
+          const nick = tr.track?.dubberNick || 'Даббер';
+          const roleName = tr.track?.characterName || nick;
+          return (tr.phrases || []).map(p => {
+            const volPct = p.volumePercent || tr.track?.volumePercent || 100;
+            return {
+              id: p.id || `phrase_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              dubberNick: nick,
+              characterName: roleName,
+              startSec: Number((p.targetStartSec || p.sourceStartSec || 0).toFixed(2)),
+              endSec: Number((p.targetEndSec || p.sourceEndSec || 0).toFixed(2)),
+              text: p.subText || '',
+              volumePercent: volPct,
+              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2))
+            };
+          });
+        })
+      };
+
+      const timingJsonPath = path.join(targetDir, 'timing_metadata.json');
+      const volumeJsonPath = path.join(targetDir, 'phrase_volume_map.json');
+      await fs.promises.writeFile(timingJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
+      await fs.promises.writeFile(volumeJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
+      log.info(`[AutoTiming] Saved timing_metadata.json and phrase_volume_map.json to: ${timingJsonPath}`);
+      if (onLog) onLog(`Карта громкостей фраз сохранена в сведение: timing_metadata.json`);
+    } catch (metaErr) {
+      log.warn(`[AutoTiming] Warning saving timing_metadata.json:`, metaErr);
+    }
 
     return {
       renderedTracks,

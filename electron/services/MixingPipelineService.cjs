@@ -1408,6 +1408,11 @@ class MixingPipelineService {
       throw new Error('Нет входных дорожек для пофразовой нормализации.');
     }
 
+    const timingMeta = await this.getTimingMetadata(workingDir);
+    if (timingMeta) {
+      logFn(`[Интеллектуальный тайминг-микс] Найдена карта громкостей фраз (timing_metadata.json). Учитываем настройки фона и роли.`);
+    }
+
     logFn(`Пофразовая автонормализация (Target: ${targetLufs} LUFS, TruePeak: ${truePeak} dB, MaxGain: ${maxGainDb} dB) к ${inputFiles.length} дорожкам...`);
     const results = [];
 
@@ -1417,10 +1422,28 @@ class MixingPipelineService {
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i+1}/${inputFiles.length}] Нормализация фраз для «${nick}»...`);
+      // Check if role or phrases have custom volume multiplier in timingMeta
+      let roleVolPct = 100;
+      if (timingMeta && timingMeta.rolesVolumeMap) {
+        for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
+          if (role.toLowerCase().includes(nick.toLowerCase()) || nick.toLowerCase().includes(role.toLowerCase())) {
+            roleVolPct = Number(vol) || 100;
+            break;
+          }
+        }
+      }
+
+      let trackTargetLufs = targetLufs;
+      if (roleVolPct !== 100) {
+        const offsetDb = 20 * Math.log10(Math.max(10, roleVolPct) / 100);
+        trackTargetLufs = Number((targetLufs + offsetDb).toFixed(1));
+        logFn(`[Интеллектуальная нормализация] Дорожка «${nick}» скорректирована по карте тайминга: ${roleVolPct}% громкости -> целевой уровень ${trackTargetLufs} LUFS (смещение ${offsetDb.toFixed(1)} dB)`);
+      } else {
+        logFn(`[${i+1}/${inputFiles.length}] Нормализация фраз для «${nick}» к ${trackTargetLufs} LUFS...`);
+      }
 
       // Two-pass adaptive loudness filter using loudnorm with speech detection integration
-      const filter = `loudnorm=I=${targetLufs}:TP=${truePeak}:LRA=10:measured_I=-24:measured_TP=-2.0:measured_LRA=9:linear=true`;
+      const filter = `loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=10:measured_I=-24:measured_TP=-2.0:measured_LRA=9:linear=true`;
 
       await new Promise((resolve, reject) => {
         ffmpeg(track.path)
@@ -1866,6 +1889,11 @@ class MixingPipelineService {
       throw new Error('Нет входных дорожек для нормализации.');
     }
 
+    const timingMeta = await this.getTimingMetadata(workingDir);
+    if (timingMeta) {
+      logFn(`[Интеллектуальный сведение] Учитываются целевые уровни из timing_metadata.json`);
+    }
+
     logFn(`Нормализация речевых фраз (Режим: ${mode}, Target: ${targetLufs} LUFS, Peak: ${truePeak} dB) для ${inputFiles.length} дорожек...`);
     const results = [];
 
@@ -1875,13 +1903,30 @@ class MixingPipelineService {
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i+1}/${inputFiles.length}] Нормализация «${nick}»...`);
+      let roleVolPct = 100;
+      if (timingMeta && timingMeta.rolesVolumeMap) {
+        for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
+          if (role.toLowerCase().includes(nick.toLowerCase()) || nick.toLowerCase().includes(role.toLowerCase())) {
+            roleVolPct = Number(vol) || 100;
+            break;
+          }
+        }
+      }
+
+      let trackTargetLufs = targetLufs;
+      if (roleVolPct !== 100) {
+        const offsetDb = 20 * Math.log10(Math.max(10, roleVolPct) / 100);
+        trackTargetLufs = Number((targetLufs + offsetDb).toFixed(1));
+        logFn(`[Интеллектуальная нормализация] Дорожка «${nick}»: установлена целевая громкость ${trackTargetLufs} LUFS (коэффициент тайминга ${roleVolPct}%)`);
+      } else {
+        logFn(`[${i+1}/${inputFiles.length}] Нормализация «${nick}» к ${trackTargetLufs} LUFS...`);
+      }
 
       let filter = '';
       if (mode === 'dynaudnorm') {
         filter = `dynaudnorm=f=150:g=15:p=0.95:m=${maxGainDb}:s=12,alimiter=limit=${truePeak}dB`;
       } else {
-        filter = `loudnorm=I=${targetLufs}:TP=${truePeak}:LRA=${lra}:dual_mono=${dualMono ? 'true' : 'false'}`;
+        filter = `loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=${lra}:dual_mono=${dualMono ? 'true' : 'false'}`;
       }
 
       const cmd = ffmpeg(track.path)
@@ -1917,9 +1962,21 @@ class MixingPipelineService {
    * EXEC: De-Esser (suppresses sibilants)
    */
   async _execDeesser({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
-    const freq = Number(params.frequencyHz ?? 6200);
-    const intensity = Number(params.intensity ?? 3.5);
-    const mode = params.mode === 'wideband' ? 'o' : 's';
+    const rawFreq = Number(params.frequencyHz ?? 6200);
+    const rawIntensity = Number(params.intensity ?? 3.5);
+
+    // FFmpeg's deesser filter expects normalized parameters in range [0.0 - 1.0]:
+    // f (frequency): float [0.0 - 1.0] relative to Nyquist (24000 Hz for 48kHz audio)
+    const normF = Math.max(0.01, Math.min(0.99, rawFreq / 24000.0)).toFixed(4);
+
+    // i (intensity): float [0.0 - 1.0]. UI values range from 0 to 10
+    const normI = Math.max(0.0, Math.min(1.0, rawIntensity > 1.0 ? rawIntensity / 10.0 : rawIntensity)).toFixed(2);
+
+    // m (max deessing): float [0.0 - 1.0], default 0.5
+    const maxDeess = 0.5;
+
+    // s (output mode): 'o' (output processed audio), 'i' (input), 'e' (ess)
+    const outputMode = 'o';
 
     const results = [];
     for (let i = 0; i < inputFiles.length; i++) {
@@ -1928,9 +1985,9 @@ class MixingPipelineService {
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i+1}/${inputFiles.length}] Деэссинг для «${nick}» (${freq} Hz, intensity: ${intensity})...`);
+      logFn(`[${i+1}/${inputFiles.length}] Деэссинг для «${nick}» (${rawFreq} Hz -> normF=${normF}, intensity: ${rawIntensity} -> normI=${normI})...`);
 
-      const filter = `deesser=f=${freq}:i=${intensity}:m=${mode}`;
+      const filter = `deesser=f=${normF}:i=${normI}:m=${maxDeess}:s=${outputMode}`;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -2341,6 +2398,60 @@ class MixingPipelineService {
     logFn(`=======================================================`);
 
     return await this.getStatus({ episode, targetDir: workingDir, baseDir });
+  }
+
+  /**
+   * Saves timing metadata and phrase volume map JSON into the mixing directory
+   */
+  async saveTimingMetadata({ episode, targetDir, baseDir, timingMetadata }) {
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+    await this.ensureDirectory(workingDir);
+
+    const timingFileMain = path.join(workingDir, 'timing_metadata.json');
+    const volumeFileMain = path.join(workingDir, 'phrase_volume_map.json');
+
+    const sourceDir = path.join(workingDir, '00_исходные');
+    await this.ensureDirectory(sourceDir);
+    const timingFileSource = path.join(sourceDir, 'timing_metadata.json');
+    const volumeFileSource = path.join(sourceDir, 'phrase_volume_map.json');
+
+    const jsonStr = JSON.stringify(timingMetadata, null, 2);
+
+    await fs.writeFile(timingFileMain, jsonStr, 'utf8');
+    await fs.writeFile(volumeFileMain, jsonStr, 'utf8');
+    await fs.writeFile(timingFileSource, jsonStr, 'utf8');
+    await fs.writeFile(volumeFileSource, jsonStr, 'utf8');
+
+    log.info(`[Mixing] Timing metadata & phrase volume map saved to: ${timingFileMain}`);
+
+    return {
+      success: true,
+      path: timingFileMain
+    };
+  }
+
+  /**
+   * Helper to load timing metadata & phrase volume map from working directory
+   */
+  async getTimingMetadata(workingDir) {
+    const candidates = [
+      path.join(workingDir, 'timing_metadata.json'),
+      path.join(workingDir, 'phrase_volume_map.json'),
+      path.join(workingDir, '00_исходные', 'timing_metadata.json'),
+      path.join(workingDir, '00_исходные', 'phrase_volume_map.json')
+    ];
+
+    for (const c of candidates) {
+      if (fsSync.existsSync(c)) {
+        try {
+          const raw = fsSync.readFileSync(c, 'utf8');
+          return JSON.parse(raw);
+        } catch (e) {
+          log.warn(`[Mixing] Error reading timing metadata from ${c}:`, e);
+        }
+      }
+    }
+    return null;
   }
 
   async saveFinalVideo({ episode, targetDir, baseDir, destinationPath }) {
