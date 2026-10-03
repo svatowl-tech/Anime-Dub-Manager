@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare } from 'lucide-react';
+import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare, Sliders } from 'lucide-react';
 import { Toaster } from 'sonner';
 import Dashboard from './components/Dashboard';
 import QAPanel from './components/QAPanel';
+import MixingPanel from './components/MixingPanel';
 import ReleasePanel from './components/ReleasePanel';
 import AssEditor from './contexts/AssEditor';
 import DatabasePanel from './components/DatabasePanel';
@@ -21,7 +22,7 @@ import { VideoProvider } from './contexts/VideoContext';
 import { useGlobalKeyboard } from './hooks/useGlobalKeyboard';
  
 function AppContent() {
-  type TabType = 'dashboard' | 'subtitles' | 'qa' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
+  type TabType = 'dashboard' | 'subtitles' | 'qa' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [savedAudioUrl, setSavedAudioUrl] = useState<string | null>(null);
   
@@ -297,6 +298,19 @@ function AppContent() {
           </button>
 
           <button
+            onClick={() => handleNavigate('cover')}
+            title="Генерация обложек для серий"
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
+              activeTab === 'cover' 
+                ? 'bg-pink-600/10 text-pink-400' 
+                : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+            }`}
+          >
+            <ImageIcon className="w-5 h-5" />
+            <span>Обложки серии</span>
+          </button>
+
+          <button
             id="step-qa"
             onClick={() => handleNavigate('qa')}
             title="Проверка качества озвучки и синхронизации"
@@ -311,16 +325,17 @@ function AppContent() {
           </button>
 
           <button
-            onClick={() => handleNavigate('cover')}
-            title="Генерация обложек для серий"
+            id="step-mixing"
+            onClick={() => handleNavigate('mixing')}
+            title="Модульное сведение аудиодорожек и видеоряда серии"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
-              activeTab === 'cover' 
-                ? 'bg-pink-600/10 text-pink-400' 
+              activeTab === 'mixing' 
+                ? 'bg-purple-600/10 text-purple-400' 
                 : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
           >
-            <ImageIcon className="w-5 h-5" />
-            <span>Обложки серии</span>
+            <Sliders className="w-5 h-5" />
+            <span>Сведение видео</span>
           </button>
 
           <button
@@ -404,7 +419,7 @@ function AppContent() {
       </aside>
 
       {/* Main Content */}
-      <main className={`flex-1 bg-neutral-950 flex flex-col ${['subtitles', 'qa', 'telegram'].includes(activeTab) ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <main className={`flex-1 bg-neutral-950 flex flex-col ${['subtitles', 'qa', 'mixing', 'telegram'].includes(activeTab) ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {activeTab === 'dashboard' && (
           <Dashboard 
             onNavigate={handleNavigate} 
@@ -440,6 +455,7 @@ function AppContent() {
         {activeTab === 'stats' && <StatsPanel />}
         {activeTab === 'settings' && <SettingsPanel />}
         {activeTab === 'qa' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="QA Проверка" onApply={setStandaloneEpisode} /> : <QAPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
+        {activeTab === 'mixing' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Сведение видео" onApply={setStandaloneEpisode} /> : <MixingPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {activeTab === 'cover' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Обложки серии" onApply={setStandaloneEpisode} /> : <CoverGenerator currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {!isWeb && <TaskQueuePanel />}
       </main>

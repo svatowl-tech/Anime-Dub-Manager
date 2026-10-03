@@ -83,6 +83,7 @@ const { registerApiHandlers } = require('./handlers/ApiController.cjs');
 const { registerSyncHandlers } = require('./handlers/SyncController.cjs');
 const { registerYoutubeHandlers } = require('./handlers/YoutubeController.cjs');
 const { registerTelegramHandlers, cleanupTelegramHandlers } = require('./handlers/TelegramController.cjs');
+const { registerMixingHandlers } = require('./handlers/MixingController.cjs');
 
 let WhisperLiveKitService = null;
 try {
@@ -438,6 +439,7 @@ app.whenReady().then(async () => {
     registerSyncHandlers(getData, saveData, app.getPath('userData'));
     registerYoutubeHandlers(getData, getMainWindow, taskQueue);
     registerTelegramHandlers(getData, saveData, app.getPath('userData'));
+    registerMixingHandlers(getData, getMainWindow);
     
     registerWhisperHandlers(getData);
     registerLocalTranslateHandlers();

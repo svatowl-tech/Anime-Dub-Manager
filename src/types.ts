@@ -252,3 +252,91 @@ export interface Track {
   selectedFileId?: string;
   comments: Comment[];
 }
+
+export interface MixingFileItem {
+  id?: string;
+  name: string;
+  path: string;
+  size?: number;
+  duration?: number;
+  exists?: boolean;
+  dubberNick?: string;
+  characterName?: string;
+}
+
+export interface MixingModuleState {
+  status: 'idle' | 'processing' | 'completed' | 'error';
+  progress?: number;
+  outputFiles: MixingFileItem[];
+  params?: Record<string, any>;
+  error?: string;
+  updatedAt?: string;
+}
+
+export interface MixingModulePreset {
+  id: string;
+  title: string;
+  description?: string;
+  params: Record<string, any>;
+}
+
+export interface MixingModuleDef {
+  id: string;
+  name?: string;
+  category: 'cleaning' | 'denoise' | 'dereverb' | 'vocal_match' | 'loudness' | 'dynamics' | 'equalization' | 'balance' | 'mastering' | 'export';
+  defaultPrefix: string;
+  title: string;
+  description: string;
+  filename?: string;
+  size_mb?: number;
+  recommended_for?: string;
+  urls?: string[];
+  is_installed?: boolean;
+  installed_bytes?: number | null;
+  local_path?: string | null;
+  format?: string;
+  engineArchitecture?: string;
+  defaultParams: Record<string, any>;
+  presets?: MixingModulePreset[];
+  icon?: string;
+}
+
+export interface PipelineStep {
+  stepId: string;
+  moduleId: string;
+  prefix: string;
+  enabled: boolean;
+  params: Record<string, any>;
+  status: 'idle' | 'processing' | 'completed' | 'error';
+  progress?: number;
+  outputFiles: MixingFileItem[];
+  error?: string;
+  updatedAt?: string;
+}
+
+export interface PipelinePreset {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string;
+  isBuiltIn?: boolean;
+  pipeline: PipelineStep[];
+}
+
+export interface MixingManifest {
+  episodeId: string;
+  projectId?: string;
+  workingDir: string;
+  createdAt: string;
+  isImported: boolean;
+  sourceFiles: {
+    video: MixingFileItem | null;
+    originalAudio: MixingFileItem | null;
+    subtitles: MixingFileItem | null;
+    dubberTracks: MixingFileItem[];
+  };
+  pipeline: PipelineStep[];
+  modulesState: Record<string, MixingModuleState>;
+  finalVideo: MixingFileItem | null;
+}
+
