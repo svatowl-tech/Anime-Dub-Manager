@@ -2215,17 +2215,39 @@ class MixingPipelineService {
 
     logFn(`Вшивание звука «${path.basename(masterAudioPath)}» в видеоряд «${path.basename(videoPath)}» (${videoCodec === 'copy' ? 'быстрое копирование потока' : 'транскодирование'})...`);
 
-    const outputOpts = [
-      '-map 0:v:0',
-      '-map 1:a:0',
-      videoCodec === 'copy' ? '-c:v copy' : '-c:v libx264 -crf 18 -preset fast',
-      audioBitrate === 'flac' ? '-c:a flac' : `-c:a aac -b:a ${audioBitrate}`,
-      '-movflags +faststart'
-    ];
-
     const muxCmd = ffmpeg()
       .input(videoPath)
-      .input(masterAudioPath)
+      .input(masterAudioPath);
+
+    const outputOpts = [
+      '-map 0:v:0',
+      '-map 1:a:0'
+    ];
+
+    if (videoCodec === 'copy') {
+      outputOpts.push('-c:v copy');
+    } else {
+      outputOpts.push(
+        '-c:v libx264',
+        `-crf ${params.crf || 18}`,
+        '-preset fast',
+        '-pix_fmt yuv420p'
+      );
+    }
+
+    if (audioBitrate === 'flac') {
+      outputOpts.push('-c:a flac');
+    } else {
+      outputOpts.push('-c:a aac', `-b:a ${audioBitrate || '320k'}`);
+    }
+
+    if (finalVideoPath.toLowerCase().endsWith('.mp4') && params.fastStart !== false) {
+      outputOpts.push('-movflags +faststart');
+    }
+
+    outputOpts.push('-max_muxing_queue_size 1024');
+
+    muxCmd
       .outputOptions(outputOpts)
       .output(finalVideoPath);
 

@@ -435,11 +435,20 @@ function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, 
       command = command.videoCodec('copy');
     }
 
+    const outputOpts = [
+      '-map 0:v:0',
+      '-map 1:a:0',
+      '-pix_fmt yuv420p',
+      '-c:a aac',
+      '-b:a 320k'
+    ];
+    if (oPath.toLowerCase().endsWith('.mp4')) {
+      outputOpts.push('-movflags +faststart');
+    }
+    outputOpts.push('-max_muxing_queue_size 1024');
+
     command
-      .audioCodec('aac')
-      .outputOptions('-pix_fmt yuv420p')
-      .outputOptions('-map 0:v:0') // Видео из первого входа
-      .outputOptions('-map 1:a:0') // Аудио из второго входа
+      .outputOptions(outputOpts)
       .on('start', (commandLine) => {
         log.info('Muxing started: ' + commandLine);
         currentCommandLine = commandLine;
