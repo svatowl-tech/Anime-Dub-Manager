@@ -1,4 +1,4 @@
-name: Build & Release Desktop App
+name: Build & Release Desktop App & AI Runtime
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
       release_notes:
         description: 'Custom Release Notes'
         required: false
-        default: 'Automated release build.'
+        default: 'Automated release build with full AI environment.'
 
 permissions:
   contents: write
@@ -64,19 +64,91 @@ jobs:
           body: |
             ## 🎙️ Anime Dub Manager ${{ steps.get_version.outputs.tag_name }}
             
-            Автоматическая сборка релиза приложения Anime Dub Manager для Windows, macOS и Linux.
+            Автоматическая сборка релиза приложения Anime Dub Manager и портативной нейросетевой среды `AI_env` для Windows, macOS и Linux.
             
-            ### 📦 Доступные бинарные файлы:
+            ### 📦 Установочные пакеты приложения:
             - **Windows**: Инсталлятор `.exe` (NSIS) и Портативная версия `.exe` (x64)
-            - **macOS**: Образ `.dmg` и `.zip` архив
+            - **macOS**: Образ `.dmg` и `.zip` архив (Universal / Apple Silicon / Intel)
             - **Linux**: Универсальный пакет `.AppImage` и пакет `.deb` (Debian/Ubuntu)
+            
+            ### 🧠 Портативные нейросетевые среды (AI_env):
+            - **Windows (x64)**: `ai_env_windows_x64.zip` (и `ai_env.zip`)
+            - **macOS (Apple Silicon)**: `ai_env_macos_arm64.zip`
+            - **macOS (Intel x64)**: `ai_env_macos_x64.zip`
+            - **Linux (x64)**: `ai_env_linux_x64.zip`
+            
+            *Включает DeepFilterNet3, Demucs v4 (htdemucs/htdemucs_ft), PyTorch и аудио-процессоры.*
             
             ---
             *Собрано автоматически через GitHub Actions CI/CD.*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 2. Build for Windows, macOS, and Linux in parallel
+  # 2. Build AI Environment (AI_env) for Windows, macOS, and Linux
+  build_ai_env:
+    name: Build AI Environment (${{ matrix.platform.name }})
+    needs: prepare_release
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Windows (x64)
+            os: windows-latest
+            tag: windows_x64
+            release_files: |
+              out/ai_env_windows_x64.zip
+              out/ai_env.zip
+            artifact_name: AI_env-Windows-x64
+          - name: macOS (Apple Silicon arm64)
+            os: macos-latest
+            tag: macos_arm64
+            release_files: |
+              out/ai_env_macos_arm64.zip
+            artifact_name: AI_env-macOS-arm64
+          - name: macOS (Intel x64)
+            os: macos-13
+            tag: macos_x64
+            release_files: |
+              out/ai_env_macos_x64.zip
+            artifact_name: AI_env-macOS-x64
+          - name: Linux (x64)
+            os: ubuntu-latest
+            tag: linux_x64
+            release_files: |
+              out/ai_env_linux_x64.zip
+            artifact_name: AI_env-Linux-x64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Build Portable AI Environment
+        run: python scripts/build-ai-env.py --tag ${{ matrix.platform.tag }}
+
+      - name: Upload AI_env to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare_release.outputs.tag_name }}
+          files: ${{ matrix.platform.release_files }}
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload AI_env Artifact to CI Workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform.artifact_name }}
+          path: out/ai_env*.zip
+          if-no-files-found: warn
+
+  # 3. Build Desktop Application Binaries for Windows, macOS, and Linux
   build_binaries:
     name: Build (${{ matrix.platform.name }})
     needs: prepare_release

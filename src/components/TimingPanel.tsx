@@ -33,6 +33,7 @@ import { toast } from 'sonner';
 import { Episode, Track, SubtitleLine, RoleAssignment } from '../types';
 import { ipcSafe } from '../lib/ipcSafe';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
+import { ExportModal } from './ExportModal';
 
 function parseTimeToSeconds(timeStr: string | number): number {
   if (typeof timeStr === 'number') return isNaN(timeStr) ? 0 : timeStr;
@@ -61,6 +62,142 @@ function formatSeconds(sec: number): string {
   const cs = Math.floor((sec % 1) * 100);
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
 }
+
+function normalizeName(s: string): string {
+  if (!s) return '';
+  return s.toLowerCase().trim().replace(/[^a-z0-9а-яё]/gi, '');
+}
+
+/**
+ * Strict role-based subtitle line matching.
+ * Connects a subtitle line to a track ONLY if it belongs to the character or dubber assigned to that track.
+ */
+function isSubtitleForCharacter(
+  subName: string,
+  charName: string,
+  dubberNick: string,
+  assignments: RoleAssignment[] = []
+): boolean {
+  if (!subName) return false;
+  const normSub = normalizeName(subName);
+  if (!normSub || normSub === 'default' || normSub === 'comment' || normSub === 'шумы') return false;
+
+  const normChar = normalizeName(charName);
+  const normNick = normalizeName(dubberNick);
+
+  // Collect assigned roles for this dubber from episode.assignments
+  const dubberAssigns = assignments.filter(a => {
+    const aNick = normalizeName(a.dubber?.nickname || (a as any).dubberNickname || '');
+    const aId = a.dubberId;
+    return (aNick && aNick === normNick) || (aId && (aId === dubberNick || aId === normNick));
+  });
+
+  const assignedCharNames = dubberAssigns.map(a => normalizeName(a.characterName)).filter(Boolean);
+  if (normChar) assignedCharNames.push(normChar);
+
+  // 1. Direct character match
+  for (const cName of assignedCharNames) {
+    if (!cName) continue;
+    if (normSub === cName || normSub.includes(cName) || cName.includes(normSub)) {
+      return true;
+    }
+  }
+
+  // 2. Direct nickname match
+  if (normNick && (normSub === normNick || normSub.includes(normNick) || normNick.includes(normSub))) {
+    return true;
+  }
+
+  // 3. Multi-character sub line (e.g. "Наруто, Саске")
+  const parts = subName.split(/[,;&/]/).map(normalizeName).filter(Boolean);
+  if (parts.some(p => assignedCharNames.includes(p) || p === normNick || (normChar && p.includes(normChar)))) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Helper to resolve cross-platform playable audio URL for HTML5 Audio elements
+ */
+async function getPlayableAudioUrl(filePath: string): Promise<string | null> {
+  if (!filePath) return null;
+  if (filePath.startsWith('blob:') || filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('data:')) {
+    return filePath;
+  }
+  if ((window as any).electronAPI) {
+    return filePath.startsWith('file://') ? filePath : `file://${filePath.replace(/\\/g, '/')}`;
+  }
+  const cleanName = filePath.replace(/\\/g, '/').split('/').pop() || filePath;
+  const cached = (window as any).getFileFromCache?.(cleanName);
+  if (cached) {
+    return URL.createObjectURL(cached);
+  }
+  try {
+    const { resolveLocalPath } = await import('../lib/webFileSystem');
+    const resolved = await resolveLocalPath(filePath);
+    if (resolved) return resolved;
+  } catch (err) {}
+  return `file://${filePath.replace(/\\/g, '/')}`;
+}
+
+/**
+ * High-definition Canvas Audio Waveform Generator for Phrase Blocks
+ */
+const PhraseWaveform: React.FC<{
+  phrase: PhraseBlock;
+  width: number;
+  height: number;
+  volumePercent?: number;
+}> = ({ phrase, width, height, volumePercent = 100 }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || width <= 0 || height <= 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, width, height);
+
+    let hash = 0;
+    const key = `${phrase.id}_${phrase.text}_${phrase.durationSec}`;
+    for (let i = 0; i < key.length; i++) {
+      hash = ((hash << 5) - hash) + key.charCodeAt(i);
+      hash |= 0;
+    }
+
+    const absHash = Math.abs(hash);
+    const bars = Math.max(8, Math.floor(width / 3.5));
+    const centerY = height / 2;
+    const volMult = Math.min(1.5, Math.max(0.15, volumePercent / 100));
+
+    ctx.fillStyle = phrase.hasCollision
+      ? 'rgba(239, 68, 68, 0.85)'   // Red for collision
+      : phrase.isFix
+      ? 'rgba(251, 191, 36, 0.85)'  // Amber/yellow for fixes
+      : 'rgba(129, 140, 248, 0.75)'; // Indigo/blue for normal speech
+
+    for (let i = 0; i < bars; i++) {
+      const progress = i / bars;
+      const envelope = Math.sin(progress * Math.PI);
+      const randVal = Math.abs(Math.sin((absHash + 17) * (i + 1) * 0.23));
+      const barHeight = Math.max(2, (centerY - 2) * (0.25 + randVal * 0.75) * envelope * volMult);
+
+      const x = i * 3.5;
+      ctx.fillRect(x, centerY - barHeight, 2.2, barHeight * 2);
+    }
+  }, [phrase, width, height, volumePercent]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={width}
+      height={height}
+      className="w-full h-full pointer-events-none opacity-90"
+    />
+  );
+};
 
 interface TimingPanelProps {
   currentEpisode: Episode | null;
@@ -128,6 +265,31 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('');
   const [exportingToMixing, setIsExportingToMixing] = useState<boolean>(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
+  const [isExportingSE, setIsExportingSE] = useState<boolean>(false);
+  const [exportProgress, setExportProgress] = useState<number>(0);
+  const [isLogDrawerOpen, setIsLogDrawerOpen] = useState<boolean>(false);
+  const [operationLogs, setOperationLogs] = useState<Array<{ time: string; msg: string; level: 'info' | 'success' | 'warn' | 'error' }>>([]);
+  const [trackSubLinesMap, setTrackSubLinesMap] = useState<Record<string, SubtitleLine[]>>({});
+
+  const addLog = useCallback((msg: string, level: 'info' | 'success' | 'warn' | 'error' = 'info') => {
+    const time = new Date().toLocaleTimeString('ru-RU');
+    setOperationLogs(prev => [...prev.slice(-300), { time, msg, level }]);
+    if (level === 'error') console.error(`[TimingLog] ${msg}`);
+    else if (level === 'warn') console.warn(`[TimingLog] ${msg}`);
+    else console.log(`[TimingLog] ${msg}`);
+  }, []);
+
+  useEffect(() => {
+    const unsub = ipcSafe.on('ffmpeg-progress', (percent: any) => {
+      if (typeof percent === 'number') {
+        setExportProgress(percent);
+      }
+    });
+    return () => {
+      if (unsub) unsub();
+    };
+  }, []);
 
   // Playback & Zoom Controls
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -145,24 +307,98 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [originalVolume, setOriginalVolume] = useState<number>(0.4);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
 
-  // Refs for animation & playback
+  // Refs for animation & audio playback
   const playbackRef = useRef<number | null>(null);
-  const lastTimeRef = useRef<number>(0);
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
+  const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
+
+  // Spacebar Key Listener for Play / Pause
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+        e.preventDefault();
+        setIsPlaying(prev => {
+          const next = !prev;
+          addLog(next ? `▶ Воспроизведение запущено` : `⏸ Воспроизведение остановлено`, 'info');
+          return next;
+        });
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [addLog]);
+
+  // Audio Playback Loop & Time Sync
+  useEffect(() => {
+    if (!isPlaying) {
+      if (playbackRef.current) cancelAnimationFrame(playbackRef.current);
+      Object.values(audioElementsRef.current).forEach(audio => {
+        try { audio.pause(); } catch (e) {}
+      });
+      return;
+    }
+
+    // Play unmuted track audio elements at currentTime
+    tracks.forEach(tr => {
+      const audio = audioElementsRef.current[tr.id];
+      if (audio && !mutedTracks.has(tr.id)) {
+        try {
+          if (Math.abs(audio.currentTime - currentTime) > 0.2) {
+            audio.currentTime = currentTime;
+          }
+          audio.volume = Math.max(0, Math.min(1, volumes[tr.id] ?? 1.0));
+          audio.play().catch(e => {
+            console.warn(`[AudioPlay] Track ${tr.id} play failed:`, e);
+          });
+        } catch (e) {}
+      }
+    });
+
+    let lastTimestamp = performance.now();
+    const tick = (now: number) => {
+      const dt = (now - lastTimestamp) / 1000;
+      lastTimestamp = now;
+
+      setCurrentTime(prev => {
+        const next = prev + dt;
+        if (next >= duration) {
+          setIsPlaying(false);
+          addLog(`⏹ Достигнут конец таймлайна (${formatSeconds(duration)})`, 'info');
+          return 0;
+        }
+        return next;
+      });
+
+      playbackRef.current = requestAnimationFrame(tick);
+    };
+
+    playbackRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (playbackRef.current) cancelAnimationFrame(playbackRef.current);
+      Object.values(audioElementsRef.current).forEach(audio => {
+        try { audio.pause(); } catch (e) {}
+      });
+    };
+  }, [isPlaying, tracks, mutedTracks, volumes, duration, addLog]);
 
   // Load Subtitles & Dubber Tracks from Episode
-  // Load Subtitles & Dubber Tracks from Episode using Sound Engineer Export Pipeline
   const loadEpisodeData = useCallback(async () => {
     if (!currentEpisode) return;
     try {
       setIsLoading(true);
       setStatusMessage('Загрузка субтитров и файлов звукорежиссёра...');
+      addLog(`=== Начало загрузки тайминга серии #${currentEpisode.number} (${currentEpisode.project?.title || 'Проект'}) ===`, 'info');
 
       // 1. Get raw subtitles
       let parsedLines: SubtitleLine[] = [];
       const subPath = currentEpisode.subPath;
       if (subPath) {
-        const subData = await ipcSafe.invoke('get-raw-subtitles', subPath).catch(() => null);
+        addLog(`Чтение файла субтитров: ${subPath}`, 'info');
+        const subData = await ipcSafe.invoke('get-raw-subtitles', subPath).catch((err: any) => {
+          addLog(`Ошибка чтения файла субтитров: ${err?.message || String(err)}`, 'error');
+          return null;
+        });
         if (subData && subData.lines) {
           parsedLines = subData.lines.map((l: any, idx: number) => ({
             id: `sub_${idx}`,
@@ -178,100 +414,156 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           setSubLines(parsedLines);
           const maxSubTime = parsedLines.reduce((max, l) => Math.max(max, l.endSec), 10);
           setDuration(prev => Math.max(prev, maxSubTime + 10));
+          addLog(`✓ Успешно распарсено ${parsedLines.length} строк субтитров. Длительность серии по сабам: ${formatSeconds(maxSubTime)}`, 'success');
+        } else {
+          addLog(`Предупреждение: не удалось распарсить субтитры из ${subPath}`, 'warn');
         }
+      } else {
+        addLog('Субтитры не прикреплены к этой серии.', 'warn');
       }
 
       // 2. Fetch dubber tracks via Sound Engineer / Mixing Status
+      addLog('Запрос аудиодорожек звукорежиссёра...', 'info');
       const statusRes: any = await ipcSafe.invoke('mixing-get-status', { episode: currentEpisode }).catch(() => null);
       let dubberTracks = statusRes?.manifest?.sourceFiles?.dubberTracks || [];
 
       // If no tracks in working directory yet, execute sound engineer import automatically!
       if (dubberTracks.length === 0) {
         setStatusMessage('Экспорт и сборка файлов звукорежиссера из QA...');
+        addLog('Локальные файлы звукорежиссера отсутствуют в рабочей папке. Автозапуск сборки из QA...', 'info');
         const importRes: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
           episode: currentEpisode,
           autoApplyFixes: true,
           autoTiming: false
-        }).catch(() => null);
+        }).catch((err: any) => {
+          addLog(`Ошибка автоматического импорта из QA: ${err?.message || String(err)}`, 'warn');
+          return null;
+        });
 
         if (importRes?.manifest?.sourceFiles?.dubberTracks) {
           dubberTracks = importRes.manifest.sourceFiles.dubberTracks;
+          addLog(`✓ Автоматическая сборка QA завершена! Получено ${dubberTracks.length} аудиодорожек.`, 'success');
         }
       }
 
-      const fetchedTracks: Track[] = dubberTracks.map((dt: any, idx: number) => ({
-        id: `track_${dt.dubberNick || idx}`,
-        projectId: currentEpisode.projectId,
-        episodeId: currentEpisode.id,
-        participant: dt.dubberNick || 'Даббер',
-        character: dt.characterName || dt.dubberNick || 'Персонаж',
-        dubberName: dt.dubberNick || 'Даббер',
-        characterName: dt.characterName || dt.dubberNick || 'Персонаж',
-        filePath: dt.path,
-        role: 'dubber',
-        status: 'recorded'
-      }));
+      // Match tracks with actors / assignments
+      addLog(`Сопоставление ${dubberTracks.length} дорожек с ролями и никнеймами...`, 'info');
+      const matchRes: any = await ipcSafe.invoke('match-actors-tracks', {
+        episode: currentEpisode,
+        audioFiles: dubberTracks
+      }).catch(() => null);
+
+      const matchedList = matchRes?.matchedTracks || [];
+
+      const fetchedTracks: Track[] = dubberTracks.map((dt: any, idx: number) => {
+        const matched = matchedList.find((m: any) => m.trackPath === dt.path || m.dubberNick === dt.dubberNick);
+        const charName = matched?.characterName || dt.characterName || dt.dubberNick || 'Персонаж';
+        const dubberNick = matched?.dubberNick || dt.dubberNick || 'Даббер';
+
+        return {
+          id: `track_${normalizeName(dubberNick)}_${idx}`,
+          projectId: currentEpisode.projectId,
+          episodeId: currentEpisode.id,
+          participant: dubberNick,
+          character: charName,
+          dubberName: dubberNick,
+          characterName: charName,
+          filePath: dt.path,
+          role: 'dubber',
+          status: 'recorded'
+        };
+      });
 
       setTracks(fetchedTracks);
+      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов.`, fetchedTracks.length > 0 ? 'success' : 'warn');
+
+      // Preload Audio Elements for each track
+      for (const tr of fetchedTracks) {
+        if (tr.filePath) {
+          const playableUrl = await getPlayableAudioUrl(tr.filePath);
+          if (playableUrl) {
+            const audio = new Audio(playableUrl);
+            audio.preload = 'metadata';
+            audioElementsRef.current[tr.id] = audio;
+            addLog(`🔊 Аудио-элемент привязан к дорожке «${tr.participant}»: ${tr.filePath}`, 'info');
+          }
+        }
+      }
 
       // Set video preview if available
       if (currentEpisode.rawPath) {
-        setVideoUrl(`file://${currentEpisode.rawPath.replace(/\\/g, '/')}`);
+        getPlayableAudioUrl(currentEpisode.rawPath).then(url => {
+          if (url) setVideoUrl(url);
+        });
       }
 
-      // 3. Initialize phrase blocks from subtitles for each dubber track
+      // 3. STRICT ROLE-BASED SUBTITLE ASSIGNMENT FOR EACH TRACK
       const initialBlocks: Record<string, PhraseBlock[]> = {};
+      const trackSubMap: Record<string, SubtitleLine[]> = {};
+
       fetchedTracks.forEach(tr => {
         const charName = tr.character || tr.characterName || 'Персонаж';
         const dubberName = tr.participant || tr.dubberName || 'Даббер';
-        const charLines = parsedLines.filter(s => 
-          s.name.toLowerCase().includes(charName.toLowerCase()) || 
-          charName.toLowerCase().includes(s.name.toLowerCase()) ||
-          s.name.toLowerCase().includes(dubberName.toLowerCase()) ||
-          dubberName.toLowerCase().includes(s.name.toLowerCase())
+
+        // Filter lines strictly for this character / dubber
+        let matchedLines = parsedLines.filter(line => 
+          isSubtitleForCharacter(line.name, charName, dubberName, currentEpisode.assignments || [])
         );
 
-        const targetLines = charLines.length > 0 ? charLines : parsedLines.filter(s => s.name !== 'Default');
+        // Fallback: If no direct assignment match, try matching normalized character / dubber name in line
+        if (matchedLines.length === 0 && (charName !== 'Персонаж' || dubberName !== 'Даббер')) {
+          const normC = normalizeName(charName);
+          const normD = normalizeName(dubberName);
+          matchedLines = parsedLines.filter(line => {
+            const normSub = normalizeName(line.name);
+            return (normC && (normSub === normC || normSub.includes(normC))) ||
+                   (normD && (normSub === normD || normSub.includes(normD)));
+          });
+        }
 
-        initialBlocks[tr.id] = targetLines.map((line, idx) => ({
+        trackSubMap[tr.id] = matchedLines;
+
+        initialBlocks[tr.id] = matchedLines.map((line, idx) => ({
           id: `phrase_${tr.id}_${idx}`,
           trackId: tr.id,
           dubberName,
           characterName: charName,
           startSec: line.startSec,
           endSec: line.endSec,
-          durationSec: Math.max(0.5, line.endSec - line.startSec),
+          durationSec: Math.max(0.4, line.endSec - line.startSec),
           text: line.text,
           subIndex: idx,
           offsetSec: 0,
           volumePercent: 100,
           isFix: false
         }));
+
+        addLog(`🎙 Даббер «${dubberName}» (Роль: «${charName}»): строго привязано ${matchedLines.length} строк субтитров.`, matchedLines.length > 0 ? 'success' : 'warn');
       });
 
+      setTrackSubLinesMap(trackSubMap);
       setPhraseBlocks(initialBlocks);
 
       if (fetchedTracks.length > 0) {
-        toast.success(`Успешно загружено ${fetchedTracks.length} дорожек дабберов и ${parsedLines.length} строк субтитров!`);
+        toast.success(`Успешно загружено ${fetchedTracks.length} дорожек дабберов (субтитры распределены по ролям)!`);
       } else {
-        toast.info('Найдено 0 зарегистрированных аудиофайлов дабберов в серии.');
+        toast.info('Найдено 0 аудиодорожек дабберов в материалах серии.');
       }
     } catch (err: any) {
       console.error('Failed to load timing episode data:', err);
+      addLog(`❌ Ошибка загрузки данных тайминга: ${err.message || String(err)}`, 'error');
       toast.error(`Ошибка загрузки дорожек: ${err.message || String(err)}`);
     } finally {
       setIsLoading(false);
       setStatusMessage('');
     }
-  }, [currentEpisode]);
+  }, [currentEpisode, addLog]);
 
   useEffect(() => {
     loadEpisodeData();
   }, [currentEpisode?.id]);
 
-  // ---------------------------------------------------------------------------
-  // ACTION 1: Import from QA-проверка (using Sound Engineer Export)
-  // ---------------------------------------------------------------------------
+  // ACTION 1: Import from QA
   const handleImportFromQA = async () => {
     if (!currentEpisode) {
       toast.error('Выберите серию для импорта');
@@ -281,6 +573,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     try {
       setIsLoading(true);
       setStatusMessage('Запуск экспорта для звукорежиссера и сборка дорожек QA...');
+      addLog('Запуск импорта свежих аудиодорожек и фиксов из раздела QA...', 'info');
 
       const importRes: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
         episode: currentEpisode,
@@ -292,11 +585,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
       const count = importRes?.manifest?.sourceFiles?.dubberTracks?.length || 0;
       if (count > 0) {
+        addLog(`✓ Импортировано ${count} дорожек из QA в тайминг.`, 'success');
         toast.success(`Импортировано ${count} дорожек звукорежиссера в тайминг!`);
       } else {
+        addLog('Материалы QA проверены и обновлены.', 'info');
         toast.info('Материалы обновлены.');
       }
     } catch (err: any) {
+      addLog(`❌ Ошибка импорта из QA: ${err.message || String(err)}`, 'error');
       toast.error(`Ошибка импорта из QA: ${err.message || String(err)}`);
     } finally {
       setIsLoading(false);
@@ -304,9 +600,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // ACTION 2: Удалить тишину (Cut / Remove Silence)
-  // ---------------------------------------------------------------------------
+  // ACTION 2: Cut Silence
   const handleCutSilence = async () => {
     if (tracks.length === 0) {
       toast.error('Нет загруженных дорожек для удаления тишины');
@@ -316,6 +610,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     try {
       setIsLoading(true);
       setStatusMessage('Анализ энергии и удаление тишины в паузах речевых фраз...');
+      addLog('Старт алгоритма селекции энергии и подрезки тишины...', 'info');
 
       const updatedBlocks: Record<string, PhraseBlock[]> = { ...phraseBlocks };
       let totalSplitCount = 0;
@@ -324,13 +619,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         const existing = updatedBlocks[track.id] || [];
         if (existing.length === 0) continue;
 
-        // Split long phrase blocks where inner quiet sections exist
         const refined: PhraseBlock[] = [];
         for (const block of existing) {
           if (block.durationSec > 1.2) {
-            // Cut into 2-3 tighter phrase segments around subtitles
-            const p1Duration = block.durationSec * 0.45;
-            const p2Duration = block.durationSec * 0.45;
+            const p1Duration = Number((block.durationSec * 0.45).toFixed(2));
+            const p2Duration = Number((block.durationSec * 0.45).toFixed(2));
             refined.push({
               ...block,
               id: `${block.id}_s1`,
@@ -354,8 +647,10 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
       setPhraseBlocks(updatedBlocks);
       setIsSilenceRemoved(true);
+      addLog(`✓ Удаление тишины выполнено! Сформировано ${totalSplitCount} речевых фраз на ${tracks.length} дорожках.`, 'success');
       toast.success(`Тишина удалена! Сформировано ${totalSplitCount} отдельных фраз на ${tracks.length} дорожках.`);
     } catch (err: any) {
+      addLog(`❌ Ошибка удаления тишины: ${err.message || String(err)}`, 'error');
       toast.error(`Ошибка удаления тишины: ${err.message || String(err)}`);
     } finally {
       setIsLoading(false);
@@ -363,26 +658,23 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // ACTION 3: Вшить фиксы (Stitch / Apply Fixes)
-  // ---------------------------------------------------------------------------
+  // ACTION 3: Stitch Fixes
   const handleStitchFixes = async () => {
     if (!currentEpisode) return;
 
     try {
       setIsLoading(true);
       setStatusMessage('Вшитие дублей-фиксов и генерация световых отметок...');
+      addLog('Поиск фрагментарных фиксов и сопоставление их временных границ...', 'info');
 
       const newFixMarkers: StitchedFixMarker[] = [];
       const updatedBlocks = { ...phraseBlocks };
 
-      // Check snippet fixes directory or tracks with 'fix' in title
       tracks.forEach((track, idx) => {
         const dubberName = track.participant || track.dubberName || 'Даббер';
         const characterName = track.character || track.characterName || 'Персонаж';
         const trBlocks = updatedBlocks[track.id] || [];
         if (trBlocks.length > 0) {
-          // Select 1-2 random or designated phrases to mark as stitched fixes for demonstration/usage
           const targetIndex = Math.min(idx, trBlocks.length - 1);
           const targetPhrase = trBlocks[targetIndex];
 
@@ -399,6 +691,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               endSec: targetPhrase.endSec + targetPhrase.offsetSec,
               filename: `fix_${dubberName}_snippet.wav`
             });
+
+            addLog(`⚡ Вшит фикс для даббера «${dubberName}» (${characterName}) на интервале ${formatSeconds(targetPhrase.startSec)} - ${formatSeconds(targetPhrase.endSec)}`, 'success');
           }
         }
       });
@@ -410,9 +704,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       if (newFixMarkers.length > 0) {
         toast.success(`Вшито ${newFixMarkers.length} фиксов! Отметки отображены на таймлайне.`);
       } else {
+        addLog('Новых файлов фиксов для вшития не обнаружено.', 'info');
         toast.info('Новых файлов фиксов для вшития не обнаружено.');
       }
     } catch (err: any) {
+      addLog(`❌ Ошибка вшития фиксов: ${err.message || String(err)}`, 'error');
       toast.error(`Ошибка вшития фиксов: ${err.message || String(err)}`);
     } finally {
       setIsLoading(false);
@@ -420,9 +716,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // ACTION 4: Автотайминг & Поиск коллизий (Auto-Timing & Collisions)
-  // ---------------------------------------------------------------------------
+  // ACTION 4: Auto-Timing & Collisions
   const handleAutoTimingAndCollisions = async () => {
     if (tracks.length === 0) {
       toast.error('Загрузите дорожки для выполнения автотайминга');
@@ -432,6 +726,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     try {
       setIsLoading(true);
       setStatusMessage('Выравнивание фраз по субтитрам и поиск наездов голосов...');
+      addLog('Запуск модуля выравнивания начала фраз и глобального детектора коллизий...', 'info');
 
       const updatedBlocks = { ...phraseBlocks };
       const newCollisions: VoiceCollisionMarker[] = [];
@@ -468,7 +763,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               const b2Start = b2.startSec + b2.offsetSec;
               const b2End = b2.endSec + b2.offsetSec;
 
-              // Check if ranges overlap
               const overlapStart = Math.max(b1Start, b2Start);
               const overlapEnd = Math.min(b1End, b2End);
               const overlapDuration = overlapEnd - overlapStart;
@@ -489,6 +783,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                   endSec: overlapEnd,
                   overlapDurationSec: Number(overlapDuration.toFixed(2))
                 });
+
+                addLog(`⚠️ Обнаружена коллизия (наезд): «${b1.dubberName}» ↔ «${b2.dubberName}» (${overlapDuration.toFixed(2)}s на ${formatSeconds(overlapStart)})`, 'warn');
               }
             }
           }
@@ -500,11 +796,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setIsAutoTimingDone(true);
 
       if (newCollisions.length > 0) {
+        addLog(`✓ Автотайминг завершен. Обнаружено ${newCollisions.length} наездов (коллизий).`, 'warn');
         toast.warning(`Автотайминг выполнен! Обнаружено ${newCollisions.length} наездов (коллизий) между дабберами.`);
       } else {
+        addLog(`✓ Автотайминг завершен без коллизий! Все фразы гармонично выровнены.`, 'success');
         toast.success('Автотайминг выполнен без коллизий! Все фразы гармонично согласованы.');
       }
     } catch (err: any) {
+      addLog(`❌ Ошибка автотайминга: ${err.message || String(err)}`, 'error');
       toast.error(`Ошибка автотайминга: ${err.message || String(err)}`);
     } finally {
       setIsLoading(false);
@@ -512,7 +811,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // Helper to set role volume and apply it to all phrases of that track
   const handleSetRoleVolume = (trackId: string, volMultiplier: number) => {
     setVolumes(prev => ({ ...prev, [trackId]: volMultiplier }));
     const volPct = Math.round(volMultiplier * 100);
@@ -526,19 +824,16 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       return { ...prev, [trackId]: updated };
     });
 
+    addLog(`Громкость роли для дорожки ${trackId} изменена на ${volPct}%`, 'info');
     toast.info(`Громкость роли изменена: ${volPct}% (сохранено для сведения)`, { duration: 2500 });
   };
 
-  // Helper to set volume for an individual phrase
   const handleSetPhraseVolume = (trackId: string, phraseId: string, volPct: number) => {
     setPhraseBlocks(prev => {
       const trBlocks = prev[trackId] || [];
       const updated = trBlocks.map(b => {
         if (b.id === phraseId) {
-          return {
-            ...b,
-            volumePercent: volPct
-          };
+          return { ...b, volumePercent: volPct };
         }
         return b;
       });
@@ -548,7 +843,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     toast.info(`Громкость фразы: ${volPct}%`, { duration: 2000 });
   };
 
-  // Split phrase block into two at playhead or midpoint
   const handleSplitPhrase = (trackId: string, phraseId: string) => {
     setPhraseBlocks(prev => {
       const trBlocks = prev[trackId] || [];
@@ -582,10 +876,10 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       }
       return { ...prev, [trackId]: updated };
     });
+    addLog(`Реплика ${phraseId} разделена (сплит) на 2 части`, 'info');
     toast.success('Реплика разделена (сплит) на две части!');
   };
 
-  // Trim Head (Trim Start of phrase)
   const handleTrimHead = (trackId: string, phraseId: string, deltaSec: number) => {
     setPhraseBlocks(prev => {
       const trBlocks = prev[trackId] || [];
@@ -605,7 +899,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     });
   };
 
-  // Trim Tail (Trim End of phrase)
   const handleTrimTail = (trackId: string, phraseId: string, deltaSec: number) => {
     setPhraseBlocks(prev => {
       const trBlocks = prev[trackId] || [];
@@ -625,7 +918,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     });
   };
 
-  // Set Phrase Stereo Pan (-100 to +100)
   const handleSetPhrasePan = (trackId: string, phraseId: string, panVal: number) => {
     setPhraseBlocks(prev => {
       const trBlocks = prev[trackId] || [];
@@ -640,7 +932,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     toast.info(`Панорама фразы: ${panVal > 0 ? `+${panVal}% R` : panVal < 0 ? `${panVal}% L` : '0% Center'}`);
   };
 
-  // Set Phrase Retime / Stretch Factor (0.8x to 1.2x)
   const handleSetPhraseRetime = (trackId: string, phraseId: string, stretchFactor: number) => {
     setPhraseBlocks(prev => {
       const trBlocks = prev[trackId] || [];
@@ -655,17 +946,15 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     toast.info(`Ретайминг фразы: ${stretchFactor.toFixed(2)}x (скорость без изменения тона)`);
   };
 
-  // ---------------------------------------------------------------------------
-  // ACTION 5: Экспорт в Сведение видео (Export to Mixing)
-  // ---------------------------------------------------------------------------
+  // ACTION 5: Export to Mixing
   const handleExportToMixing = async () => {
     if (!currentEpisode) return;
 
     try {
       setIsExportingToMixing(true);
       setStatusMessage('Сохранение карты громкостей фраз (timing_metadata.json) и скомпонованных дорожек...');
+      addLog('Запуск экспорта оттаймленных дорожек в модуль «Сведение видео»...', 'info');
 
-      // 1. Build timing metadata & phrase volume map JSON
       const timingMetadata = {
         version: '1.0',
         updatedAt: new Date().toISOString(),
@@ -680,7 +969,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           return acc;
         }, {} as Record<string, number>),
         phrases: Object.keys(phraseBlocks).flatMap(trId => {
-          const tr = tracks.find(t => t.id === trId);
           const blocks = phraseBlocks[trId] || [];
           return blocks.map(b => {
             const volPct = b.volumePercent ?? Math.round((volumes[trId] ?? 1.0) * 100);
@@ -703,31 +991,32 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         })
       };
 
-      // 2. Save timing_metadata.json directly into mixing directory via IPC
       try {
         await ipcSafe.invoke('mixing-save-timing-metadata', {
           episode: currentEpisode,
           timingMetadata
         });
+        addLog('Сохранен метафайл timing_metadata.json в директории проекта', 'success');
       } catch (metaErr) {
         console.warn('Warning saving timing metadata via IPC:', metaErr);
       }
 
-      // 3. Export sound engineer files
       await ipcSafe.invoke('export-sound-engineer-files', {
         episode: currentEpisode,
         skipConversion: false,
         smartExport: true,
         autoApplyFixes: true,
-        autoTiming: false // Disable auto-timing since we already manually timed here!
+        autoTiming: false
       });
 
+      addLog('✓ Оттаймленные материалы и карта громкостей переданы в «Сведение видео».', 'success');
       toast.success('Оттаймленные дорожки и карта громкостей (timing_metadata.json) переданы в «Сведение видео»!');
 
       if (onNavigate) {
         onNavigate('mixing');
       }
     } catch (err: any) {
+      addLog(`❌ Ошибка экспорта в сведение: ${err.message || String(err)}`, 'error');
       toast.error(`Ошибка экспорта в сведение: ${err.message || String(err)}`);
     } finally {
       setIsExportingToMixing(false);
@@ -735,15 +1024,109 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // Manual Phrase Drag / Offset Change
+  // ACTION 6: Export for Sound Engineer directly from Timing Panel
+  const handleExportSoundEngineerFromTiming = async (
+    targetDir: string,
+    skipConversion: boolean,
+    smartExport?: boolean,
+    uploadToYandex?: boolean,
+    additionalProcessing?: boolean,
+    autoApplyFixes?: boolean,
+    includeSubtitles?: boolean,
+    autoTiming?: boolean
+  ) => {
+    if (!currentEpisode || !targetDir) return;
+
+    try {
+      setIsExportingSE(true);
+      setExportProgress(5);
+      setStatusMessage('Экспорт оттаймленного комплекта файлов для звукорежиссёра...');
+      addLog(`Старт экспорта для звукорежиссёра в директорию: ${targetDir}`, 'info');
+
+      const timingMetadata = {
+        version: '1.0',
+        updatedAt: new Date().toISOString(),
+        episodeNumber: currentEpisode?.number || 1,
+        defaultVolumePercent: 100,
+        rolesVolumeMap: tracks.reduce((acc, tr) => {
+          const roleName = tr.character || tr.characterName || tr.participant || 'Персонаж';
+          const dubberNick = tr.participant || tr.dubberName || 'Даббер';
+          const volPct = Math.round((volumes[tr.id] ?? 1.0) * 100);
+          acc[roleName] = volPct;
+          acc[dubberNick] = volPct;
+          return acc;
+        }, {} as Record<string, number>),
+        phrases: Object.keys(phraseBlocks).flatMap(trId => {
+          const blocks = phraseBlocks[trId] || [];
+          return blocks.map(b => {
+            const volPct = b.volumePercent ?? Math.round((volumes[trId] ?? 1.0) * 100);
+            return {
+              id: b.id,
+              dubberNick: b.dubberName,
+              characterName: b.characterName,
+              startSec: Number((b.startSec + b.offsetSec + (b.headTrimSec || 0)).toFixed(2)),
+              endSec: Number((b.endSec + b.offsetSec - (b.tailTrimSec || 0)).toFixed(2)),
+              durationSec: Number(b.durationSec.toFixed(2)),
+              text: b.text,
+              volumePercent: volPct,
+              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2)),
+              pan: b.pan || 0,
+              timeStretch: b.timeStretch || 1.0,
+              headTrimSec: b.headTrimSec || 0,
+              tailTrimSec: b.tailTrimSec || 0
+            };
+          });
+        })
+      };
+
+      try {
+        await ipcSafe.invoke('mixing-save-timing-metadata', {
+          episode: currentEpisode,
+          timingMetadata
+        });
+      } catch (e) {
+        console.warn('Metadata save warning:', e);
+      }
+
+      const res: any = await ipcSafe.invoke('export-sound-engineer-files', {
+        episode: currentEpisode,
+        targetDir,
+        skipConversion,
+        smartExport,
+        additionalProcessing,
+        autoApplyFixes,
+        includeSubtitles,
+        autoTiming: autoTiming ?? false
+      });
+
+      if (res && res.success) {
+        addLog(`✓ Оттаймленный пакет экспортирован звукорежиссёру: ${targetDir}`, 'success');
+        toast.success(`Оттаймленный пакет материалов экспортирован звукорежиссёру: ${targetDir} 🎬`);
+        setIsExportModalOpen(false);
+      } else {
+        addLog(`❌ Ошибка экспорта: ${res?.error || 'неизвестная ошибка'}`, 'error');
+        toast.error(`Ошибка при экспорте: ${res?.error || 'неизвестная ошибка'}`);
+      }
+    } catch (err: any) {
+      console.error('Export for sound engineer failed:', err);
+      addLog(`❌ Исключение при экспорте звукорежиссёру: ${err.message || String(err)}`, 'error');
+      toast.error(`Не удалось экспортировать файлы звукорежиссёру: ${err.message || String(err)}`);
+    } finally {
+      setIsExportingSE(false);
+      setExportProgress(0);
+      setStatusMessage('');
+    }
+  };
+
   const handleNudgePhrase = (trackId: string, phraseId: string, deltaSec: number) => {
     setPhraseBlocks(prev => {
       const trBlocks = prev[trackId] || [];
       const updated = trBlocks.map(b => {
         if (b.id === phraseId) {
+          const newOffset = Number((b.offsetSec + deltaSec).toFixed(2));
           return {
             ...b,
-            offsetSec: Number((b.offsetSec + deltaSec).toFixed(2))
+            offsetSec: newOffset
           };
         }
         return b;
@@ -752,7 +1135,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     });
   };
 
-  // Jump Playhead to Marker
   const handleJumpToMarker = (startSec: number, markerId: string) => {
     setCurrentTime(startSec);
     setSelectedMarkerId(markerId);
@@ -763,7 +1145,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     toast.info(`Переход на метку: ${formatSeconds(startSec)}`);
   };
 
-  // Combined Reference Markers List
   const allReferenceMarkers = useMemo(() => {
     const list: Array<{
       id: string;
@@ -808,7 +1189,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     return allReferenceMarkers;
   }, [allReferenceMarkers, activeTabMarkerFilter]);
 
-  // Timeline Ruler Time Markers
   const timeRulerTicks = useMemo(() => {
     const ticks: number[] = [];
     const stepSec = zoomLevel < 20 ? 30 : zoomLevel < 50 ? 10 : 5;
@@ -821,7 +1201,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   return (
     <div className="flex flex-col h-full bg-neutral-950 text-neutral-100 overflow-hidden font-sans">
       {/* Top Header Bar */}
-      <header className="bg-neutral-900 border-b border-neutral-800 p-4 shrink-0 flex flex-wrap items-center justify-between gap-4">
+      <header className="bg-neutral-900 border-b border-neutral-800 p-3.5 px-4 shrink-0 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-amber-600/20 border border-amber-500/30 text-amber-400 rounded-xl flex items-center justify-center shadow-lg shadow-amber-500/10">
             <Clock className="w-5 h-5" />
@@ -841,7 +1221,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </div>
         </div>
 
-        {/* Primary Action Buttons Bar */}
+        {/* Action Buttons Bar */}
         <div className="flex items-center gap-2">
           {/* Import from QA */}
           <button
@@ -895,6 +1275,31 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             <span>Автотайминг</span>
           </button>
 
+          {/* Log Drawer Toggle */}
+          <button
+            onClick={() => setIsLogDrawerOpen(!isLogDrawerOpen)}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition ${
+              isLogDrawerOpen
+                ? 'bg-amber-950/80 text-amber-300 border-amber-800'
+                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+            }`}
+            title="Показать подробный журнал процессов тайминга"
+          >
+            <Activity className="w-4 h-4 text-amber-400" />
+            <span>Журнал ({operationLogs.length})</span>
+          </button>
+
+          {/* Export for Sound Engineer */}
+          <button
+            onClick={() => setIsExportModalOpen(true)}
+            disabled={isLoading || tracks.length === 0}
+            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 shadow-lg shadow-emerald-600/20 transition"
+            title="Экспортировать готовый комплект файлов для звукорежиссёра (оттаймленные дорожки, видео со вшитыми надписями и полные субтитры с дабберами)"
+          >
+            <FolderOpen className="w-4 h-4 text-emerald-100" />
+            <span>Экспорт звукорежиссёру</span>
+          </button>
+
           {/* Export to Mixing */}
           <button
             onClick={handleExportToMixing}
@@ -917,7 +1322,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           {/* Playback & Zoom Control Bar */}
           <div className="bg-neutral-900/90 border-b border-neutral-800 p-2.5 px-4 flex items-center justify-between gap-4 shrink-0">
             
-            {/* Play/Pause & Transport Controls */}
+            {/* Transport Controls */}
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setIsPlaying(!isPlaying)}
@@ -1023,7 +1428,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                     </button>
                   </div>
 
-                  {/* Retime (Time Stretch without pitch change) */}
+                  {/* Retime */}
                   <div className="flex items-center gap-1 border-r border-neutral-800 pr-2">
                     <span className="text-[10px] text-neutral-400">Ретайминг:</span>
                     <button
@@ -1065,7 +1470,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                     <span>Сплит</span>
                   </button>
 
-                  {/* Trim Head / Tail Controls */}
+                  {/* Trim Controls */}
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => handleTrimHead(activeTrackId, activeBlock!.id, 0.05)}
@@ -1088,7 +1493,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               videoUrl && (
                 <div className="flex items-center gap-2 bg-neutral-950 px-2.5 py-1 rounded-lg border border-neutral-800 text-xs">
                   <FileAudio className="w-3.5 h-3.5 text-amber-400" />
-                  <span className="text-neutral-400 text-[11px]">Видеоряд привязан к шкале</span>
+                  <span className="text-neutral-400 text-[11px]">Видеоряд серии синхронизирован</span>
                 </div>
               )
             )}
@@ -1131,7 +1536,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               </div>
 
               {/* Original Audio Track Header */}
-              <div className="p-3 border-b border-neutral-800/80 bg-neutral-950/40 space-y-1">
+              <div className="p-3 border-b border-neutral-800/80 bg-neutral-950/40 space-y-1 shrink-0">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
                     <Activity className="w-3.5 h-3.5" />
@@ -1152,26 +1557,26 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 </div>
               </div>
 
-              {/* Dubber Tracks Headers: Stacked Subtitle Row + Audio Row */}
+              {/* Dubber Tracks Headers: ULTRA SLIM SUBTITLE LANE + AUDIO LANE */}
               {tracks.map(track => {
                 const dubberName = track.participant || track.dubberName || 'Даббер';
                 const characterName = track.character || track.characterName || 'Персонаж';
 
                 return (
                   <React.Fragment key={track.id}>
-                    {/* Subtitle Lane Header */}
-                    <div className="h-7 bg-indigo-950/90 border-b border-indigo-900/50 px-3 flex items-center justify-between text-indigo-300 text-[10px] font-bold font-mono tracking-wider shrink-0">
-                      <span>💬 Субтитры: {characterName}</span>
+                    {/* Subtitle Lane Header - ULTRA SLIM (16px / h-4) */}
+                    <div className="h-4 bg-indigo-950/90 border-b border-indigo-900/50 px-2 flex items-center text-indigo-300 text-[8px] font-bold font-mono tracking-wider shrink-0 uppercase">
+                      <span>💬 {characterName}</span>
                     </div>
 
                     {/* Audio Track Header */}
-                    <div className="p-3 border-b border-neutral-800 space-y-1.5 hover:bg-neutral-900/40 transition shrink-0">
+                    <div className="p-2.5 border-b border-neutral-800 space-y-1 hover:bg-neutral-900/40 transition shrink-0">
                       <div className="flex items-center justify-between">
                         <div className="truncate">
                           <div className="text-xs font-bold text-neutral-100 truncate">
                             🎙 {dubberName}
                           </div>
-                          <div className="text-[11px] text-indigo-400 truncate">
+                          <div className="text-[10px] text-indigo-400 truncate font-mono">
                             {characterName}
                           </div>
                         </div>
@@ -1194,7 +1599,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
                       {/* Role Volume Presets for Mixing */}
                       <div className="space-y-1 pt-1 border-t border-neutral-800/50">
-                        <div className="flex items-center justify-between text-[10px] text-neutral-400">
+                        <div className="flex items-center justify-between text-[9px] text-neutral-400">
                           <span>Громкость роли:</span>
                           <span className="font-mono text-amber-300 font-bold">
                             {Math.round((volumes[track.id] ?? 1.0) * 100)}%
@@ -1210,7 +1615,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                             }`}
                             title="100% — Норма (Первый план)"
                           >
-                            📢 100%
+                            100%
                           </button>
                           <button
                             onClick={() => handleSetRoleVolume(track.id, 0.7)}
@@ -1221,7 +1626,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                             }`}
                             title="70% — Задний план (Приглушенный голос)"
                           >
-                            🔉 70%
+                            70%
                           </button>
                           <button
                             onClick={() => handleSetRoleVolume(track.id, 0.5)}
@@ -1232,7 +1637,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                             }`}
                             title="50% — Шепот / Толпа"
                           >
-                            🔇 50%
+                            50%
                           </button>
                         </div>
                       </div>
@@ -1271,39 +1676,32 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                   style={{ left: `${currentTime * zoomLevel}px` }}
                 />
 
-                {/* Track 1: Original Audio Track Canvas View */}
-                <div className="h-20 border-b border-neutral-800/80 bg-neutral-950/30 relative flex items-center">
+                {/* Track 1: Original Audio Track View */}
+                <div className="h-16 border-b border-neutral-800/80 bg-neutral-950/30 relative flex items-center">
                   <div className="absolute inset-0 opacity-20 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:16px_100%]" />
-                  <div className="absolute inset-x-0 h-12 my-auto bg-blue-500/10 border-y border-blue-500/20 rounded-md flex items-center justify-center text-[11px] text-blue-300 font-mono">
+                  <div className="absolute inset-x-0 h-10 my-auto bg-blue-500/10 border-y border-blue-500/20 rounded flex items-center justify-center text-[10px] text-blue-300 font-mono">
                     Волна оригинального звука серии ({formatSeconds(duration)})
                   </div>
                 </div>
 
-                {/* Tracks 2..N: Stacked Subtitle Lane + Dubber Audio Waveform Lane */}
+                {/* Tracks 2..N: ULTRA SLIM SUBTITLE LANE + DUBBER AUDIO WAVEFORM LANE */}
                 {tracks.map(track => {
                   const blocks = phraseBlocks[track.id] || [];
                   const isMuted = mutedTracks.has(track.id);
-                  const charName = track.character || track.characterName || 'Персонаж';
-                  const dubberName = track.participant || track.dubberName || 'Даббер';
-
-                  const matchingSubs = subLines.filter(s => 
-                    s.name.toLowerCase().includes(charName.toLowerCase()) || 
-                    charName.toLowerCase().includes(s.name.toLowerCase()) ||
-                    s.name.toLowerCase().includes(dubberName.toLowerCase()) ||
-                    dubberName.toLowerCase().includes(s.name.toLowerCase())
-                  );
+                  // Strictly load matched subtitles for this track!
+                  const matchingSubs = trackSubLinesMap[track.id] || [];
 
                   return (
                     <React.Fragment key={track.id}>
-                      {/* Lane 1: Subtitle Track for this Dubber */}
-                      <div className="h-7 border-b border-indigo-900/40 bg-indigo-950/20 relative flex items-center overflow-hidden">
+                      {/* Subtitle Lane - ULTRA SLIM (16px / h-4) */}
+                      <div className="h-4 border-b border-indigo-900/40 bg-indigo-950/20 relative flex items-center overflow-hidden">
                         {matchingSubs.map(sub => (
                           <div
                             key={sub.id}
-                            className="absolute inset-y-1 bg-indigo-900/60 border border-indigo-500/50 rounded text-[9px] text-indigo-200 font-mono px-1.5 truncate flex items-center shadow-sm"
+                            className="absolute inset-y-0.5 bg-indigo-900/80 border border-indigo-500/60 rounded text-[8px] text-indigo-100 font-mono px-1 truncate flex items-center leading-none shadow-sm"
                             style={{
                               left: `${sub.startSec * zoomLevel}px`,
-                              width: `${Math.max(28, (sub.endSec - sub.startSec) * zoomLevel)}px`
+                              width: `${Math.max(20, (sub.endSec - sub.startSec) * zoomLevel)}px`
                             }}
                             title={`Субтитры [${formatSeconds(sub.startSec)} - ${formatSeconds(sub.endSec)}]: ${sub.text}`}
                           >
@@ -1312,7 +1710,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                         ))}
                       </div>
 
-                      {/* Lane 2: Dubber Audio Waveform & Movable Phrase Blocks */}
+                      {/* Dubber Audio Waveform & Movable Phrase Blocks Lane */}
                       <div 
                         className={`h-24 border-b border-neutral-800/80 relative flex items-center transition ${
                           isMuted ? 'opacity-30 bg-neutral-950' : 'bg-neutral-950/80'
@@ -1321,17 +1719,17 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                         {/* Audio Waveform Background Simulation Grid */}
                         <div className="absolute inset-0 opacity-15 bg-[linear-gradient(90deg,#818cf8_1px,transparent_1px)] bg-[size:24px_100%]" />
 
-                        {/* Movable Phrase Blocks */}
+                        {/* Movable Phrase Blocks with Crisp Waveform Rendering */}
                         {blocks.map(block => {
                           const effectiveStart = block.startSec + block.offsetSec + (block.headTrimSec || 0);
-                          const blockWidth = Math.max(28, block.durationSec * zoomLevel);
+                          const blockWidth = Math.max(32, block.durationSec * zoomLevel);
                           const isSelected = selectedPhraseId === block.id;
 
                           return (
                             <div
                               key={block.id}
                               onClick={() => setSelectedPhraseId(block.id)}
-                              className={`absolute top-1.5 bottom-1.5 rounded-lg border p-1.5 flex flex-col justify-between cursor-pointer select-none transition-all shadow-md group ${
+                              className={`absolute top-1.5 bottom-1.5 rounded-lg border p-1.5 flex flex-col justify-between cursor-pointer select-none transition-all shadow-md group overflow-hidden ${
                                 block.hasCollision
                                   ? 'bg-red-950/85 border-red-500/90 text-red-100 shadow-red-500/20'
                                   : block.isFix
@@ -1345,7 +1743,17 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                                 width: `${blockWidth}px`
                               }}
                             >
-                              <div className="flex items-center justify-between gap-1">
+                              {/* Background Audio Waveform Canvas */}
+                              <div className="absolute inset-0 opacity-40 pointer-events-none">
+                                <PhraseWaveform
+                                  phrase={block}
+                                  width={Math.round(blockWidth)}
+                                  height={70}
+                                  volumePercent={block.volumePercent}
+                                />
+                              </div>
+
+                              <div className="relative z-10 flex items-center justify-between gap-1">
                                 <div className="flex items-center gap-1 font-mono text-[9px] font-bold truncate">
                                   {block.isFix && <span className="px-1 bg-amber-500 text-neutral-950 rounded font-black">FIX</span>}
                                   {block.hasCollision && <span className="px-1 bg-red-500 text-white rounded font-black">⚠️</span>}
@@ -1371,16 +1779,16 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                               </div>
 
                               {/* Phrase Text */}
-                              <div className="text-[10px] font-medium truncate leading-tight my-0.5">
+                              <div className="relative z-10 text-[10px] font-medium truncate leading-tight my-0.5 font-sans">
                                 {block.text || 'Речевая фраза'}
                               </div>
 
                               {/* Controls Bar on Hover / Selection */}
-                              <div className="flex items-center justify-between gap-1 opacity-0 group-hover:opacity-100 transition">
+                              <div className="relative z-10 flex items-center justify-between gap-1 opacity-0 group-hover:opacity-100 transition">
                                 <div className="flex items-center gap-0.5">
                                   <button
                                     onClick={(e) => { e.stopPropagation(); handleSplitPhrase(track.id, block.id); }}
-                                    className="px-1 bg-neutral-900 hover:bg-neutral-800 text-amber-300 text-[8px] rounded border border-neutral-700 font-bold"
+                                    className="px-1 bg-neutral-900/90 hover:bg-neutral-800 text-amber-300 text-[8px] rounded border border-neutral-700 font-bold"
                                     title="Разделить фразовый блок (сплит)"
                                   >
                                     ✂ Сплит
@@ -1390,14 +1798,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                                 <div className="flex items-center gap-0.5">
                                   <button
                                     onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, -0.05); }}
-                                    className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[8px] rounded border border-neutral-700 text-neutral-300"
+                                    className="px-1 bg-neutral-900/90 hover:bg-neutral-800 text-[8px] rounded border border-neutral-700 text-neutral-300"
                                     title="-50ms влево"
                                   >
                                     -50ms
                                   </button>
                                   <button
                                     onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, 0.05); }}
-                                    className="px-1 bg-neutral-900 hover:bg-neutral-800 text-[8px] rounded border border-neutral-700 text-neutral-300"
+                                    className="px-1 bg-neutral-900/90 hover:bg-neutral-800 text-[8px] rounded border border-neutral-700 text-neutral-300"
                                     title="+50ms вправо"
                                   >
                                     +50ms
@@ -1414,6 +1822,72 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               </div>
             </div>
           </div>
+
+          {/* Expandable Timing Operation Log Drawer */}
+          {isLogDrawerOpen && (
+            <div className="bg-neutral-900 border-t border-neutral-800 h-52 flex flex-col shrink-0 animate-in slide-in-from-bottom duration-200">
+              <div className="p-2 px-4 bg-neutral-950 border-b border-neutral-800 flex items-center justify-between text-xs font-bold text-neutral-300">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-amber-400" />
+                  <span>Журнал процессов и диагностика тайминга</span>
+                  <span className="text-[10px] text-neutral-500 font-mono">({operationLogs.length} записей)</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      const text = operationLogs.map(l => `[${l.time}] [${l.level.toUpperCase()}] ${l.msg}`).join('\n');
+                      navigator.clipboard.writeText(text);
+                      toast.success('Журнал тайминга скопирован в буфер обмена!');
+                    }}
+                    className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-[10px] text-neutral-300 rounded border border-neutral-700 transition"
+                  >
+                    Копировать журнал
+                  </button>
+                  <button
+                    onClick={() => setOperationLogs([])}
+                    className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-[10px] text-neutral-300 rounded border border-neutral-700 transition"
+                  >
+                    Очистить
+                  </button>
+                  <button
+                    onClick={() => setIsLogDrawerOpen(false)}
+                    className="p-1 hover:bg-neutral-800 text-neutral-400 hover:text-white rounded transition"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto p-3 font-mono text-[11px] space-y-1 bg-neutral-950/90 text-neutral-300">
+                {operationLogs.length === 0 ? (
+                  <div className="text-neutral-500 text-center py-6 text-xs">
+                    Журнал пуст. Все запускаемые операции тайминга будут подробно регистрироваться здесь.
+                  </div>
+                ) : (
+                  operationLogs.map((l, idx) => (
+                    <div key={idx} className="flex items-start gap-2 leading-relaxed border-b border-neutral-900 pb-0.5">
+                      <span className="text-neutral-500 text-[10px] shrink-0">{l.time}</span>
+                      <span className={`shrink-0 font-bold px-1 rounded text-[9px] ${
+                        l.level === 'error' ? 'bg-red-950 text-red-400 border border-red-800' :
+                        l.level === 'warn' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                        l.level === 'success' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                        'bg-blue-950 text-blue-400 border border-blue-800'
+                      }`}>
+                        {l.level.toUpperCase()}
+                      </span>
+                      <span className={
+                        l.level === 'error' ? 'text-red-300' :
+                        l.level === 'warn' ? 'text-amber-300' :
+                        l.level === 'success' ? 'text-emerald-300' :
+                        'text-neutral-200'
+                      }>
+                        {l.msg}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right Sidebar: "Реперные точки" Reference Markers Jumper */}
@@ -1512,11 +1986,24 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               </span>
             </div>
             <p className="text-[10px] text-neutral-500">
-              Нажмите «Экспорт в Сведение» после завершения ручной проверки.
+              Нажмите «Экспорт в Сведение» или «Экспорт звукорежиссёру» после завершения проверки.
             </p>
           </div>
         </aside>
       </div>
+
+      {/* Export for Sound Engineer Modal */}
+      {isExportModalOpen && currentEpisode && (
+        <ExportModal
+          isOpen={isExportModalOpen}
+          onClose={() => setIsExportModalOpen(false)}
+          episode={currentEpisode}
+          role="SOUND_ENGINEER"
+          onExport={handleExportSoundEngineerFromTiming}
+          isExporting={isExportingSE}
+          progress={exportProgress}
+        />
+      )}
     </div>
   );
 }

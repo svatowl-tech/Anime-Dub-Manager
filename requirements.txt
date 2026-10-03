@@ -1,0 +1,13 @@
+# Neural Audio Processing Requirements for Anime Dub Manager
+# DeepFilterNet3 (Speech Denoising & Dereverberation) + Demucs v4 (Vocal & Music Stem Separation)
+
+torch>=2.1.0,<=2.3.1
+torchaudio>=2.1.0,<=2.3.1
+deepfilternet>=0.5.6
+demucs>=4.0.1
+soundfile>=0.12.1
+numpy>=1.24.0,<2.0.0
+scipy>=1.10.0
+librosa>=0.10.0
+tqdm>=4.65.0
+packaging>=23.0

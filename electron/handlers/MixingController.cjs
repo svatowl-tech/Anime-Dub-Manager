@@ -3,6 +3,7 @@ const path = require('path');
 const log = require('electron-log');
 const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
 const MixingPipelineService = require('../services/MixingPipelineService.cjs');
+const AudioNeuralService = require('../services/AudioNeuralService.cjs');
 
 function registerMixingHandlers(getData, mainWindow) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow);
@@ -252,6 +253,57 @@ function registerMixingHandlers(getData, mainWindow) {
 
     return await MixingPipelineService.downloadUvrModel({
       modelId,
+      onProgress,
+      onLog
+    });
+  }));
+  // Neural AI Processor Handlers (DeepFilterNet3 & Demucs v4)
+  ipcMain.handle('neural-check-environment', wrapIpcHandler(async () => {
+    return await AudioNeuralService.checkEnvironment();
+  }));
+
+  ipcMain.handle('neural-process-denoise', wrapIpcHandler(async (event, params) => {
+    const { inputPath, outputPath, attenuationLimitDb, sensitivity, wetDryBlend } = params;
+    const onProgress = (p) => sendProgress('mixing-progress', p);
+    const onLog = createLogSender('deepfilternet_denoise');
+    return await AudioNeuralService.denoiseAudio({
+      inputPath,
+      outputPath,
+      attenuationLimitDb,
+      sensitivity,
+      wetDryBlend,
+      onProgress,
+      onLog
+    });
+  }));
+
+  ipcMain.handle('neural-process-dereverb', wrapIpcHandler(async (event, params) => {
+    const { inputPath, outputPath, reverbReduction, sensitivity, wetDryBlend } = params;
+    const onProgress = (p) => sendProgress('mixing-progress', p);
+    const onLog = createLogSender('deepfilternet_dereverb');
+    return await AudioNeuralService.dereverbAudio({
+      inputPath,
+      outputPath,
+      reverbReduction,
+      sensitivity,
+      wetDryBlend,
+      onProgress,
+      onLog
+    });
+  }));
+
+  ipcMain.handle('neural-process-separation', wrapIpcHandler(async (event, params) => {
+    const { inputPath, outputDir, modelName, shifts, overlap, stems, prefix } = params;
+    const onProgress = (p) => sendProgress('mixing-progress', p);
+    const onLog = createLogSender('demucs_separation');
+    return await AudioNeuralService.separateStems({
+      inputPath,
+      outputDir,
+      modelName,
+      shifts,
+      overlap,
+      stems,
+      prefix,
       onProgress,
       onLog
     });

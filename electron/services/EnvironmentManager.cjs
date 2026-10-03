@@ -6,7 +6,7 @@ const log = require('electron-log');
 
 class EnvironmentManager {
   /**
-   * Запускает процесс скачивания и установки портативной среды (Python + WhisperX).
+   * Запускает процесс скачивания и установки портативной среды (Python + DeepFilterNet3 + Demucs v4 + WhisperX).
    * 
    * @param {string} url URL-адрес для скачивания архива
    * @param {Object} window Объект окна Electron (BrowserWindow), содержащий webContents
@@ -24,13 +24,13 @@ class EnvironmentManager {
     }
 
     // Получаем защищенную директорию пользователя и определяем целевую папку
-    const userDataPath = app.getPath('userData');
+    const userDataPath = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
     const targetDir = path.join(userDataPath, 'ai_env');
     const zipPath = path.join(userDataPath, 'ai_env_temp.zip');
 
     try {
       // Отправляем начальный статус
-      this._sendProgress(window, { status: 'downloading', percent: 0, message: 'Инициализация загрузки...' });
+      this._sendProgress(window, { status: 'downloading', percent: 0, message: 'Инициализация загрузки AI среды...' });
 
       // Очищаем предыдущие неудачные попытки скачивания (если файл остался)
       if (fs.existsSync(zipPath)) {
@@ -47,6 +47,9 @@ class EnvironmentManager {
         method: 'GET',
         url: url,
         responseType: 'stream',
+        headers: {
+          'User-Agent': 'AnimeDubManager-Desktop'
+        }
       });
 
       // Пытаемся получить общий размер файла из заголовков ответа для расчета процентов
@@ -62,12 +65,12 @@ class EnvironmentManager {
           downloadedLength += chunk.length;
 
           // Рассчитываем процент, если общий размер известен
-          if (totalLength) {
-            const percent = Math.round((downloadedLength / totalLength) * 100);
+          if (totalLength && totalLength > 0) {
+            const percent = Math.min(100, Math.round((downloadedLength / totalLength) * 100));
             this._sendProgress(window, { 
               status: 'downloading', 
               percent, 
-              message: `Скачивание: ${percent}%` 
+              message: `Скачивание нейросетевой среды: ${percent}%` 
             });
           } else {
             // Если сервер не отдал content-length, просто показываем объем скачанного
@@ -89,28 +92,32 @@ class EnvironmentManager {
       });
 
       log.info(`[EnvironmentManager] Скачивание завершено. Начинаем распаковку в ${targetDir}`);
-      this._sendProgress(window, { status: 'extracting', percent: 0, message: 'Распаковка архива...' });
+      this._sendProgress(window, { status: 'extracting', percent: 0, message: 'Распаковка и настройка нейросетевой среды...' });
 
       // Распаковываем архив
       try {
         await extract(zipPath, { dir: targetDir });
       } catch (extractError) {
         log.error('[EnvironmentManager] Ошибка при распаковке:', extractError);
-        // В случае ошибки распаковки удаляем битую целевую папку, чтобы не оставлять сломанную среду
         if (fs.existsSync(targetDir)) {
           await fsPromises.rm(targetDir, { recursive: true, force: true });
         }
         throw new Error(`Ошибка распаковки: ${extractError.message}`);
       }
 
-      log.info(`[EnvironmentManager] Среда успешно установлена в ${targetDir}`);
-      this._sendProgress(window, { status: 'ready', percent: 100, message: 'Среда готова к использованию' });
+      // Настройка прав исполнения на Unix (Linux / macOS)
+      if (process.platform !== 'win32') {
+        this._fixPosixPermissions(targetDir);
+      }
+
+      log.info(`[EnvironmentManager] Среда AI_env успешно установлена в ${targetDir}`);
+      this._sendProgress(window, { status: 'ready', percent: 100, message: 'Среда AI_env готова к работе' });
 
     } catch (error) {
       log.error('[EnvironmentManager] Ошибка загрузки/установки среды:', error);
       this._sendProgress(window, { status: 'error', percent: 0, message: error.message || 'Неизвестная ошибка' });
 
-      // Очистка частично скачанного архива при сбое (обрыв сети и т.п.)
+      // Очистка частично скачанного архива при сбое
       if (fs.existsSync(zipPath)) {
          try {
            await fsPromises.rm(zipPath, { force: true });
@@ -119,7 +126,6 @@ class EnvironmentManager {
          }
       }
     } finally {
-      // В штатном режиме также удаляем временный архив, если распаковка прошла успешно
       if (fs.existsSync(zipPath)) {
         try {
           await fsPromises.rm(zipPath, { force: true });
@@ -130,15 +136,100 @@ class EnvironmentManager {
     }
   }
 
-  async isEnvironmentReady() {
-    const userDataPath = app.getPath('userData');
-    const targetDir = path.join(userDataPath, 'ai_env');
+  /**
+   * Назначает флаг исполняемости для Python-бинарников на POSIX системах.
+   */
+  _fixPosixPermissions(dir) {
     try {
-      const stats = await fsPromises.stat(targetDir);
-      return stats.isDirectory();
-    } catch (e) {
-      return false;
+      const files = fs.readdirSync(dir, { withFileTypes: true });
+      for (const file of files) {
+        const fullPath = path.join(dir, file.name);
+        if (file.isDirectory()) {
+          this._fixPosixPermissions(fullPath);
+        } else if (
+          file.name === 'python' || 
+          file.name === 'python3' || 
+          file.name.startsWith('python3.') || 
+          fullPath.includes('/bin/')
+        ) {
+          try {
+            fs.chmodSync(fullPath, 0o755);
+          } catch (e) {}
+        }
+      }
+    } catch (err) {
+      log.warn('[EnvironmentManager] Предупреждение при назначении прав POSIX:', err);
     }
+  }
+
+  /**
+   * Возвращает валидный путь к исполняемому файлу Python (из ai_env, whisperlivekit, venv или системы).
+   */
+  getPythonPath() {
+    const isWin = process.platform === 'win32';
+    const candidatePaths = [];
+
+    if (typeof app !== 'undefined' && app.getPath) {
+      try {
+        const userData = app.getPath('userData');
+        if (isWin) {
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'Scripts', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'Scripts', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'Scripts', 'python.exe'));
+        } else {
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'bin', 'python3'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'bin', 'python'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'python'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'bin', 'python3'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'bin', 'python'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python'));
+          candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'bin', 'python3'));
+          candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'bin', 'python'));
+        }
+      } catch (e) {}
+    }
+
+    // Check application folder and cwd
+    const cwd = process.cwd();
+    if (isWin) {
+      candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'Scripts', 'python.exe'));
+      candidatePaths.push(path.join(cwd, 'ai_env', 'python.exe'));
+      candidatePaths.push(path.join(cwd, 'venv', 'Scripts', 'python.exe'));
+      candidatePaths.push(path.join(cwd, '.venv', 'Scripts', 'python.exe'));
+    } else {
+      candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'bin', 'python3'));
+      candidatePaths.push(path.join(cwd, 'ai_env', 'bin', 'python3'));
+      candidatePaths.push(path.join(cwd, 'ai_env', 'python'));
+      candidatePaths.push(path.join(cwd, 'venv', 'bin', 'python'));
+      candidatePaths.push(path.join(cwd, '.venv', 'bin', 'python'));
+    }
+
+    for (const cand of candidatePaths) {
+      if (cand && fs.existsSync(cand)) {
+        return cand;
+      }
+    }
+
+    // Fallback to system Python
+    return isWin ? 'python' : 'python3';
+  }
+
+  async isEnvironmentReady() {
+    const pythonPath = this.getPythonPath();
+    if (pythonPath === 'python' || pythonPath === 'python3') {
+      const userDataPath = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
+      const targetDir = path.join(userDataPath, 'ai_env');
+      try {
+        const stats = await fsPromises.stat(targetDir);
+        return stats.isDirectory();
+      } catch (e) {
+        return false;
+      }
+    }
+    return fs.existsSync(pythonPath);
   }
 
   /**

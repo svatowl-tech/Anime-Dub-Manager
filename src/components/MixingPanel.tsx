@@ -79,6 +79,51 @@ interface MixingPanelProps {
   onRefresh?: () => void;
 }
 
+const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = {
+  sensitivity: { min: 0.1, max: 10.0, step: 0.1 },
+  wetDryBlend: { min: 10, max: 100, step: 1 },
+  attenuationLimitDb: { min: -100, max: 0, step: 1 },
+  reverbReduction: { min: 0.0, max: 1.0, step: 0.05 },
+  shifts: { min: 1, max: 5, step: 1 },
+  overlap: { min: 0.1, max: 0.5, step: 0.05 },
+  segment: { min: 5, max: 60, step: 5 },
+  noiseReductionDb: { min: 1, max: 45, step: 1 },
+  noiseFloorDb: { min: -85, max: -20, step: 1 },
+  stationarityWeight: { min: 0.1, max: 1.0, step: 0.01 },
+  frequencySmoothingHz: { min: 20, max: 500, step: 10 },
+  deechoReductionDb: { min: 1, max: 45, step: 1 },
+  earlyReflectionsDecay: { min: 0.1, max: 1.0, step: 0.01 },
+  reverbTailSuppress: { min: 0.1, max: 1.0, step: 0.01 },
+  airBandBoostDb: { min: 0, max: 15, step: 0.5 },
+  harmonicSaturation: { min: 0.1, max: 1.0, step: 0.05 },
+  formantClarity: { min: 0.1, max: 1.0, step: 0.05 },
+  thresholdDb: { min: -60, max: 0, step: 1 },
+  rangeDb: { min: -40, max: 0, step: 1 },
+  attackMs: { min: 1, max: 500, step: 1 },
+  releaseMs: { min: 10, max: 2000, step: 10 },
+  holdMs: { min: 0, max: 1000, step: 10 },
+  targetLufs: { min: -30, max: -5, step: 0.5 },
+  truePeak: { min: -10, max: 0, step: 0.1 },
+  maxGainDb: { min: 0, max: 30, step: 0.5 },
+  marginDb: { min: -10, max: 15, step: 0.1 },
+  postProcessThreshold: { min: 0.0, max: 1.0, step: 0.05 },
+  instrumentalBlend: { min: 0, max: 100, step: 1 },
+  intensity: { min: 0.0, max: 10.0, step: 0.1 },
+  ratio: { min: 1, max: 20, step: 0.1 },
+  kneeDb: { min: 0, max: 20, step: 0.5 },
+  makeupDb: { min: 0, max: 20, step: 0.5 },
+  peakLimitDb: { min: -12, max: 0, step: 0.5 },
+  duckingAmountDb: { min: 0, max: 40, step: 1 },
+  minGapSec: { min: 0.01, max: 2.0, step: 0.01 },
+  leadInSec: { min: 0.0, max: 1.0, step: 0.01 },
+  silenceThresholdDb: { min: -80, max: -20, step: 1 },
+  minSilenceDuration: { min: 0.05, max: 2.0, step: 0.05 },
+  fadeDurationMs: { min: 0, max: 100, step: 1 },
+  safetyPaddingMs: { min: 0, max: 500, step: 5 },
+  minSpeechDb: { min: -80, max: -20, step: 1 },
+  fadeEdgeMs: { min: 0, max: 100, step: 1 }
+};
+
 export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelProps) {
   const [manifest, setManifest] = useState<MixingManifest | null>(null);
   const [moduleDatabase, setModuleDatabase] = useState<MixingModuleDef[]>([]);
@@ -1080,6 +1125,18 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   };
 
   const PARAM_LABELS: Record<string, { label: string; unit?: string }> = {
+    sensitivity: { label: 'Чувствительность (Sensitivity)', unit: 'x' },
+    wetDryBlend: { label: 'Смешивание Dry/Wet (Blend)', unit: '%' },
+    attenuationLimitDb: { label: 'Предел шумоподавления (Attenuation Limit)', unit: 'dB' },
+    reverbReduction: { label: 'Степень дериверберации (Reverb Reduction)', unit: 'x' },
+    shifts: { label: 'Качество смещений (Demucs Shifts)', unit: 'x' },
+    overlap: { label: 'Перекрытие фреймов (Overlap)', unit: 'x' },
+    segment: { label: 'Длина сегмента (Segment Length)', unit: 'с' },
+    stems: { label: 'Выбор стемов для экспорта' },
+    noiseTraining: { label: 'Активное обучение шуму (Noise Training)' },
+    marginDb: { label: 'Запас усиления вокала (Vocal Margin)', unit: 'dB' },
+    postProcessThreshold: { label: 'Порог шумового гейта (Gate Threshold)', unit: 'x' },
+    instrumentalBlend: { label: 'Смешивание M&E фонограммы (BGM Blend)', unit: '%' },
     noiseReductionDb: { label: 'Подавление шума (Noise Reduction)', unit: 'dB' },
     noiseFloorDb: { label: 'Порог фонового шума (Noise Floor)', unit: 'dB' },
     stationarityWeight: { label: 'Вес стационарности (Stationarity)', unit: 'x' },
@@ -1799,15 +1856,76 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                               );
                             }
 
+                            if (paramKey === 'stems') {
+                              return (
+                                <div key={paramKey} className="col-span-2">
+                                  <label className="text-[11px] text-neutral-400 block mb-1">
+                                    Выбор изолируемых стемов (Demucs v4):
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
+                                  >
+                                    <option value="both">Вокал + Инструментал (Vocals + M&E)</option>
+                                    <option value="vocals_only">Только вокал (Vocals Only)</option>
+                                    <option value="instrumental_only">Только фонограмма (M&E Only)</option>
+                                    <option value="all">Все 4 стема (Вокал, Барабаны, Бас, Прочее)</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
                             // Numeric Sliders with precise value
                             const metaParam = PARAM_LABELS[paramKey];
+                            const spec = PARAM_SPECS[paramKey];
+                            if (spec) {
+                              return (
+                                <div key={paramKey} className="col-span-2 space-y-1 bg-neutral-900/40 p-2 rounded border border-neutral-800/40">
+                                  <div className="flex items-center justify-between text-[11px]">
+                                    <span className="text-neutral-300 font-medium truncate" title={metaParam?.label || paramKey}>
+                                      {metaParam?.label || paramKey}:
+                                    </span>
+                                    <span className="text-purple-300 font-mono font-bold shrink-0">
+                                      {val} {metaParam?.unit ? ` ${metaParam.unit}` : ''}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <input 
+                                      type="range"
+                                      min={spec.min}
+                                      max={spec.max}
+                                      step={spec.step}
+                                      value={val}
+                                      onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, parseFloat(e.target.value))}
+                                      className="flex-1 h-1 bg-neutral-800 rounded appearance-none cursor-pointer accent-purple-500"
+                                    />
+                                    <input
+                                      type="number"
+                                      min={spec.min}
+                                      max={spec.max}
+                                      step={spec.step}
+                                      value={val}
+                                      onChange={(e) => {
+                                        const parsed = parseFloat(e.target.value);
+                                        if (!isNaN(parsed)) {
+                                          handleUpdateStepParams(step.stepId, paramKey, parsed);
+                                        }
+                                      }}
+                                      className="w-16 px-1 py-0.5 bg-neutral-950 border border-neutral-800 rounded text-[11px] text-center font-mono text-purple-200"
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            }
+
                             return (
                               <div key={paramKey} className="space-y-1">
                                 <div className="flex items-center justify-between text-[11px]">
-                                  <span className="text-neutral-400">
+                                  <span className="text-neutral-400 truncate" title={metaParam?.label || paramKey}>
                                     {metaParam?.label || paramKey}:
                                   </span>
-                                  <span className="text-purple-300 font-mono font-medium">
+                                  <span className="text-purple-300 font-mono font-medium shrink-0">
                                     {val} {metaParam?.unit ? ` ${metaParam.unit}` : ''}
                                   </span>
                                 </div>

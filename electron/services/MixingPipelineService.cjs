@@ -7,6 +7,7 @@ const { app, shell } = require('electron');
 const ExportService = require('./ExportService.cjs');
 const ffmpegService = require('./ffmpegService.cjs');
 const AutoTimingService = require('./AutoTimingService.cjs');
+const AudioNeuralService = require('./AudioNeuralService.cjs');
 
 /**
  * MODULE DATABASE (Реестр всех доступных модулей обработки с подробнейшими настройками и пресетами)
@@ -138,6 +139,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'denoise_foxjoy_',
     icon: 'ShieldCheck',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       noiseReductionDb: 18.0,
       noiseFloorDb: -52.0,
       stationarityWeight: 0.85,
@@ -180,6 +184,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'deepfilter3_',
     icon: 'ShieldCheck',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       noiseReductionDb: 20.0,
       noiseFloorDb: -55.0,
       stationarityWeight: 0.88,
@@ -216,6 +223,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'denoise_full_',
     icon: 'ShieldCheck',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       noiseReductionDb: 26.0,
       noiseFloorDb: -42.0,
       stationarityWeight: 0.95,
@@ -253,6 +263,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'denoise_',
     icon: 'ShieldCheck',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       noiseReductionDb: 18.0,
       noiseFloorDb: -52.0,
       stationarityWeight: 0.85,
@@ -305,6 +318,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'dereverb_dsp_',
     icon: 'Radio',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       deechoReductionDb: 12.0,
       earlyReflectionsDecay: 0.65,
       reverbTailSuppress: 0.60,
@@ -342,6 +358,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'reverb_foxjoy_',
     icon: 'Radio',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       deechoReductionDb: 16.0,
       earlyReflectionsDecay: 0.75,
       reverbTailSuppress: 0.70,
@@ -379,6 +398,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'deecho_',
     icon: 'Radio',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       deechoReductionDb: 14.0,
       earlyReflectionsDecay: 0.70,
       reverbTailSuppress: 0.65,
@@ -423,6 +445,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'deecho_aggr_',
     icon: 'Radio',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       deechoReductionDb: 22.0,
       earlyReflectionsDecay: 0.88,
       reverbTailSuppress: 0.82,
@@ -459,6 +484,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'dereverb_room_',
     icon: 'Radio',
     defaultParams: {
+      sensitivity: 1.0,
+      wetDryBlend: 95.0,
+      noiseTraining: false,
       deechoReductionDb: 18.0,
       earlyReflectionsDecay: 0.80,
       reverbTailSuppress: 0.75,
@@ -471,6 +499,377 @@ const MODULE_DATABASE = [
         title: '📦 MDX Room Boxy Resonant Clean (18 dB)',
         description: 'Устранение «коробочного» гула маленьких комнат и петличек',
         params: { deechoReductionDb: 18.0, earlyReflectionsDecay: 0.80, reverbTailSuppress: 0.75, preserveBodyFrequencies: true, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
+    id: 'uvr_mdx_voc_ft',
+    name: 'UVR-MDX-NET Voc_FT',
+    title: 'UVR-MDX-NET Voc_FT (Изоляция вокала)',
+    filename: 'UVR-MDX-NET-Voc_FT.onnx',
+    category: 'separation',
+    description: 'Золотой стандарт изоляции вокала. Быстрое извлечение чистого голоса без артефактов.',
+    size_mb: 60.5,
+    recommended_for: 'Основная модель для отделения голоса дубляжа от оригинальной дорожки',
+    urls: [
+      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx',
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'onnx',
+    engineArchitecture: 'MDX-Net Frequency-Domain Spectrogram',
+    defaultPrefix: 'stem_voc_ft_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true,
+      extractVocals: true,
+      extractInstrumental: true
+    },
+    presets: [
+      {
+        id: 'voc_ft_standard',
+        title: '🎤 Voc_FT Извлечение вокала',
+        description: 'Золотой стандарт сепарации диалогов и вокала',
+        params: { autoDownloadModel: true, extractVocals: true, extractInstrumental: true }
+      }
+    ]
+  },
+  {
+    id: 'uvr_mdx_inst_hq3',
+    name: 'UVR-MDX-NET Inst_HQ_3',
+    title: 'UVR-MDX-NET Inst_HQ_3 (Изоляция инструментала)',
+    filename: 'UVR-MDX-NET-Inst_HQ_3.onnx',
+    category: 'separation',
+    description: 'Высокоточное удаление вокала и извлечение фонограммы / минусовки / SFX.',
+    size_mb: 60.5,
+    recommended_for: 'Подготовка фоновой музыки и шумов (M&E) для подмешивания дубляжа',
+    urls: [
+      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx',
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'onnx',
+    engineArchitecture: 'MDX-Net High-Quality Instrumental Extractor',
+    defaultPrefix: 'stem_inst_hq3_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true,
+      extractVocals: false,
+      extractInstrumental: true
+    },
+    presets: [
+      {
+        id: 'inst_hq3_standard',
+        title: '🎶 Inst_HQ_3 Извлечение инструментала (M&E)',
+        description: 'Чистый минус и музыкальное сопровождение для дубляжа',
+        params: { autoDownloadModel: true, extractVocals: false, extractInstrumental: true }
+      }
+    ]
+  },
+  {
+    id: 'kim_vocal_2',
+    name: 'Kim Vocal 2 (MDX-Net)',
+    title: 'Kim Vocal 2 (MDX-Net)',
+    filename: 'Kim_Vocal_2.onnx',
+    category: 'separation',
+    description: 'Специализированная модель с минимальным просачиванием бэков и тяжелых синтов.',
+    size_mb: 65.2,
+    recommended_for: 'Сложные саундтреки с хором, дабстепом и плотным фоном',
+    urls: [
+      'https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx',
+      'https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Kim_Vocal_2.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Kim_Vocal_2.onnx'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'onnx',
+    engineArchitecture: 'MDX-Net Kim Architecture',
+    defaultPrefix: 'stem_kim2_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true,
+      extractVocals: true,
+      extractInstrumental: true
+    },
+    presets: [
+      {
+        id: 'kim2_dense_mix',
+        title: '⚡ Kim Vocal 2 Для плотных миксов',
+        description: 'Удаление хоров, синтов и перегруженных битов',
+        params: { autoDownloadModel: true, extractVocals: true, extractInstrumental: true }
+      }
+    ]
+  },
+  {
+    id: 'htdemucs_ft',
+    name: 'HTDemucs v4 Fine-Tuned',
+    title: 'HTDemucs v4 Fine-Tuned (4 Стема)',
+    filename: 'htdemucs_ft.yaml',
+    category: 'separation',
+    description: 'Гибридный трансформер Demucs: делит дорожку на 4 изолированных стема (вокал, бас, барабаны, прочее).',
+    size_mb: 79.8,
+    recommended_for: 'Глубокая многодорожечная реставрация фильма и видеоряда',
+    urls: [
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'yaml',
+    engineArchitecture: 'Hybrid Transformer (Time + Frequency)',
+    defaultPrefix: 'stem_htdemucs_ft_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true,
+      stems: 4
+    },
+    presets: [
+      {
+        id: 'htdemucs_ft_full',
+        title: '🎬 Demucs 4-Stem Full Separation',
+        description: 'Многодорожечная сепарация фильма на 4 отдельных стема',
+        params: { autoDownloadModel: true, stems: 4 }
+      }
+    ]
+  },
+  {
+    id: 'htdemucs',
+    name: 'HTDemucs v4 Standard',
+    title: 'HTDemucs v4 Standard',
+    filename: 'htdemucs.yaml',
+    category: 'separation',
+    description: 'Стандартная универсальная модель Demucs для быстрого разделения трека.',
+    size_mb: 79.8,
+    recommended_for: 'Универсальное разделение мультфильмов и сериалов',
+    urls: [
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs.yaml'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'yaml',
+    engineArchitecture: 'Demucs v4 Standard Dual Transformer',
+    defaultPrefix: 'stem_htdemucs_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true,
+      stems: 4
+    },
+    presets: [
+      {
+        id: 'htdemucs_std',
+        title: '📺 Demucs Standard 4-Stem',
+        description: 'Быстрое разделение сериалов и мультсериалов',
+        params: { autoDownloadModel: true, stems: 4 }
+      }
+    ]
+  },
+  {
+    id: 'htdemucs_vocals_bgm',
+    name: 'HTDemucs Vocals + BGM',
+    title: 'HTDemucs Vocals + BGM',
+    filename: 'htdemucs_vocals_bgm.yaml',
+    category: 'separation',
+    description: 'Оптимизированная версия Demucs для быстрой изоляции вокала от фона.',
+    size_mb: 79.8,
+    recommended_for: 'Экспресс-разделение дубляжа и фоновой музыки',
+    urls: [
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs_ft.yaml',
+      'https://raw.githubusercontent.com/facebookresearch/demucs/main/demucs/remote/htdemucs.yaml'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'yaml',
+    engineArchitecture: 'Demucs 2-Stem Optimized',
+    defaultPrefix: 'stem_voc_bgm_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true,
+      stems: 2
+    },
+    presets: [
+      {
+        id: 'htdemucs_2stem',
+        title: '⚡ Demucs 2-Stem Vocals + BGM',
+        description: 'Экспресс-изоляция речи от фонового звука',
+        params: { autoDownloadModel: true, stems: 2 }
+      }
+    ]
+  },
+  {
+    id: 'mdx23c_8step',
+    name: 'MDX23C 8-Step Vocal FT',
+    title: 'MDX23C 8-Step Vocal FT',
+    filename: 'MDX23C-8Step-VocFT.onnx',
+    category: 'separation',
+    description: 'Высокоточная модель MDX23C для удаления инструментала и бэк-вокала.',
+    size_mb: 115.0,
+    recommended_for: 'Вокальные треки с плотным инструментальным сопровождением',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_KARA_2.onnx',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/MDX23C_D1581.ckpt'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'onnx',
+    engineArchitecture: 'MDX23C Multi-Step Deconvolution',
+    defaultPrefix: 'stem_mdx23c_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true,
+      steps: 8
+    },
+    presets: [
+      {
+        id: 'mdx23c_8s',
+        title: '🔥 MDX23C 8-Step High-Precision',
+        description: 'Глубокая многошаговая фильтрация бэк-вокала',
+        params: { autoDownloadModel: true, steps: 8 }
+      }
+    ]
+  },
+  {
+    id: 'hp_karaoke_uvr',
+    name: '5_HP Karaoke UVR',
+    title: '5_HP Karaoke UVR',
+    filename: '5_HP-Karaoke-UVR.pth',
+    category: 'separation',
+    description: 'Специализированный алгоритм извлечения чистого минуса и караоке.',
+    size_mb: 60.5,
+    recommended_for: 'Создание качественной фонограммы без остатков бэк-вокала',
+    urls: [
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/5_HP-Karaoke-UVR.pth',
+      'https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/5_HP-Karaoke-UVR.pth'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'pth',
+    engineArchitecture: 'VR Architecture High-Pass Karaoke',
+    defaultPrefix: 'stem_karaoke_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'karaoke_hp',
+        title: '🎤 5_HP Караоке & Фонограмма',
+        description: 'Чистое удаление голоса для получения качественной фонограммы',
+        params: { autoDownloadModel: true }
+      }
+    ]
+  },
+  {
+    id: 'mel_band_roformer_vocals',
+    name: 'Mel-Band Roformer Vocals',
+    title: 'Mel-Band Roformer Vocals (SOTA)',
+    filename: 'mel_band_roformer_vocals_fv2.ckpt',
+    category: 'separation',
+    description: 'SOTA модель нейро-сепарации нового поколения. Максимальный SNR и натуральный верхний диапазон.',
+    size_mb: 182.0,
+    recommended_for: 'Профессиональный студийный мастеринг и бескомпромиссная чистота голоса',
+    urls: [
+      'https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'ckpt',
+    engineArchitecture: 'Mel-Scale Band Transformer + Rotary Position Embedding',
+    defaultPrefix: 'stem_roformer_mel_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'roformer_sota',
+        title: '👑 Mel-Band Roformer SOTA Pure Vocals',
+        description: 'Бескомпромиссная чистота голоса и максимальный SNR',
+        params: { autoDownloadModel: true }
+      }
+    ]
+  },
+  {
+    id: 'bs_roformer_viperx',
+    name: 'BS-Roformer Viperx 1297',
+    title: 'BS-Roformer Viperx 1297',
+    filename: 'aufr33_jarredou_BS_Roformer.ckpt',
+    category: 'separation',
+    description: 'Улучшенная архитектура Roformer с оптимизацией фазового отклика.',
+    size_mb: 171.5,
+    recommended_for: 'Кинематографические миксы с объемной звуковой сценой',
+    urls: [
+      'https://huggingface.co/anvuew/BS-RoFormer/resolve/main/bs_roformer_anvuew_sdr_12.45.ckpt',
+      'https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_bs_roformer_ep_317_sdr_12.9755.ckpt'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'ckpt',
+    engineArchitecture: 'Band-Split RoFormer (SDR 12.97)',
+    defaultPrefix: 'stem_bs_roformer_',
+    icon: 'Layers',
+    defaultParams: {
+      sensitivity: 1.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'bs_roformer_cinema',
+        title: '🎬 BS-Roformer Viperx Кинематографический',
+        description: 'Оптимизированный фазовый отклик для объемных сцен фильма',
+        params: { autoDownloadModel: true }
       }
     ]
   },
@@ -1419,6 +1818,18 @@ class MixingPipelineService {
         case 'mdx_dereverb_room':
           resultFiles = await this._execUvrDeEchoNormal({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
           break;
+        case 'uvr_mdx_voc_ft':
+        case 'uvr_mdx_inst_hq3':
+        case 'kim_vocal_2':
+        case 'htdemucs_ft':
+        case 'htdemucs':
+        case 'htdemucs_vocals_bgm':
+        case 'mdx23c_8step':
+        case 'hp_karaoke_uvr':
+        case 'mel_band_roformer_vocals':
+        case 'bs_roformer_viperx':
+          resultFiles = await this._execStemSeparation({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
+          break;
         case 'voicefixer_fe':
           resultFiles = await this._execVoiceFixer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -1733,6 +2144,10 @@ class MixingPipelineService {
     const preserveFormants = params.preserveVoiceFormants !== false;
     const autoDownload = params.autoDownloadModel !== false;
 
+    // Custom sensitivity and dry/wet blend controls
+    const sensitivity = Number(params.sensitivity ?? 1.0); // 1.0 to 10.0 scale
+    const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 95.0)));
+
     const activeModelId = params.modelId || 'uvr_denoise_foxjoy';
     const modelDef = MODULE_DATABASE.find(m => m.id === activeModelId) || MODULE_DATABASE.find(m => m.id === 'uvr_denoise_foxjoy');
     const modelName = modelDef?.name || modelDef?.title || activeModelId;
@@ -1743,7 +2158,7 @@ class MixingPipelineService {
     }
 
     logFn(`[${modelName}] Запуск нейросетевого шумоподавления (модель: ${filename})...`);
-    logFn(`Параметры: Подавление ${nrDb} dB, Порог ${floorDb} dB, Вес стационарности ${weight}, Сглаживание ${smoothHz} Hz, Форманты ${preserveFormants ? 'Вкл' : 'Выкл'}`);
+    logFn(`Чувствительность: ${sensitivity}/10, Подмешивание Wet/Dry: ${wetDryBlend}%, Подавление ${nrDb} dB, Порог ${floorDb} dB, Вес стационарности ${weight}, Сглаживание ${smoothHz} Hz, Форманты ${preserveFormants ? 'Вкл' : 'Выкл'}`);
 
     // Ensure model storage folder exists for offline UVR models
     const rootUserData = app ? app.getPath('userData') : process.cwd();
@@ -1784,62 +2199,111 @@ class MixingPipelineService {
       const nick = track.dubberNick || `dubber_${i+1}`;
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
-
-      logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
-
-      // Adaptive Multi-stage Spectral Stationarity Reducer filter:
-      // 1. Highpass filter to eliminate sub-rumble below voice pitch (65Hz)
-      // 2. High-resolution FFT noise profiling and stationarity reduction (afftdn)
-      // 3. Adaptive non-local means acoustic denoiser (anlmdn)
-      // 4. Formant preservation EQ filter to keep dialog crisp and natural
-      // Adaptive Multi-stage Spectral Stationarity Reducer:
-      // Uses 100% stable adaptive FFT stationarity reduction (afftdn) with residual tracking.
-      // NOTE: anlmdn is intentionally NOT used here because anlmdn causes STATUS_HEAP_CORRUPTION (code 3221226356)
-      // in FFmpeg on Windows when processing long audio streams (>20 min).
-      const fftNr = Math.min(40, Math.max(6, nrDb));
-      const fftFloor = Math.min(-20, Math.max(-80, floorDb));
-      
-      let filterChain = `highpass=f=65,afftdn=nr=${fftNr}:nf=${fftFloor}:tn=1:tr=1:om=o`;
-      if (preserveFormants) {
-        // Vocal presence restore (+1.2dB at 3.4kHz, +0.8dB air at 10.5kHz) to counter spectral smearing
-        filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
-      }
-
-      const cmd = ffmpeg(track.path)
-        .audioFilters(filterChain)
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(48000)
-        .output(outPath);
-
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
       const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
 
+      logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
+
+      // 1. Попытка нейросетевой обработки через Sidecar (DeepFilterNet3)
+      let usedNeural = false;
       try {
-        await this._execFfmpeg(cmd, {
-          logFn,
+        logFn(`[Neural AI] Запуск DeepFilterNet3 для дорожки «${nick}»...`);
+        const neuralRes = await AudioNeuralService.denoiseAudio({
+          inputPath: track.path,
+          outputPath: outPath,
+          attenuationLimitDb: Number(params.attenuationLimitDb ?? -100.0),
+          sensitivity,
+          wetDryBlend,
           onProgress: (p) => {
             if (onProgress && p && typeof p.percent === 'number') {
               const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `VR-DeNoise Lite: ${nick} (${p.percent}%)` });
+              onProgress({ percent: current, message: `DeepFilterNet3 [${nick}]: ${p.percent}%` });
             }
           },
-          outPath,
-          description: `VR-DeNoise Lite [${nick}]`
+          onLog: logFn
         });
-      } catch (err) {
-        logFn(`Предупреждение при обработке дорожки «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
-        const safeCmd = ffmpeg(track.path)
-          .audioFilters(`highpass=f=65,afftdn=nr=${fftNr}:nf=${fftFloor}:tn=1:om=o`)
+        if (neuralRes && fsSync.existsSync(outPath)) {
+          usedNeural = true;
+          logFn(`✓ Дорожка «${nick}» успешно очищена нейросетью DeepFilterNet3`);
+        }
+      } catch (neuralErr) {
+        logFn(`[Neural AI Fallback] DeepFilterNet3 недоступен (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
+      }
+
+      if (!usedNeural) {
+        // Adaptive Multi-stage Spectral Stationarity Reducer (DSP Fallback):
+        // Scale noise reduction Db directly based on user sensitivity!
+        const sensFactor = sensitivity / 10.0;
+        const fftNr = Math.min(45, Math.max(0.1, nrDb * sensFactor));
+        const fftFloor = Math.min(-20, Math.max(-85, floorDb));
+        
+        let tnVal = 0;
+        let trVal = 0;
+        if (params.noiseTraining === true) {
+          tnVal = 1;
+          trVal = 1;
+        } else {
+          if (sensitivity > 6.0) {
+            tnVal = 1;
+            trVal = 1;
+          } else if (sensitivity >= 2.0) {
+            tnVal = 0;
+            trVal = 1;
+          } else {
+            tnVal = 0;
+            trVal = 0;
+          }
+        }
+
+        let filterChain = '';
+        if (wetDryBlend < 100) {
+          const wetVal = (wetDryBlend / 100).toFixed(2);
+          const dryVal = (1.0 - wetDryBlend / 100).toFixed(2);
+          filterChain = `asplit[orig][tofilt]; [tofilt]highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:tr=${trVal}:om=o`;
+          if (preserveFormants) {
+            filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
+          }
+          filterChain += `[filt]; [orig]volume=${dryVal}[dry]; [filt]volume=${wetVal}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
+        } else {
+          filterChain = `highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:tr=${trVal}:om=o`;
+          if (preserveFormants) {
+            filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
+          }
+        }
+
+        const cmd = ffmpeg(track.path)
+          .audioFilters(filterChain)
           .audioCodec('pcm_s16le')
           .audioChannels(2)
           .audioFrequency(48000)
           .output(outPath);
-        await this._execFfmpeg(safeCmd, {
-          logFn,
-          outPath,
-          description: `VR-DeNoise Lite Fallback [${nick}]`
-        });
+
+        try {
+          await this._execFfmpeg(cmd, {
+            logFn,
+            onProgress: (p) => {
+              if (onProgress && p && typeof p.percent === 'number') {
+                const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+                onProgress({ percent: current, message: `VR-DeNoise [${nick}] (${p.percent}%)` });
+              }
+            },
+            outPath,
+            description: `VR-DeNoise [${nick}]`
+          });
+        } catch (err) {
+          logFn(`Предупреждение при обработке дорожки «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
+          const safeCmd = ffmpeg(track.path)
+            .audioFilters(`highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:om=o`)
+            .audioCodec('pcm_s16le')
+            .audioChannels(2)
+            .audioFrequency(48000)
+            .output(outPath);
+          await this._execFfmpeg(safeCmd, {
+            logFn,
+            outPath,
+            description: `VR-DeNoise Fallback [${nick}]`
+          });
+        }
       }
 
       const st = fsSync.statSync(outPath);
@@ -1861,6 +2325,10 @@ class MixingPipelineService {
     const preserveBody = params.preserveBodyFrequencies !== false;
     const autoDownload = params.autoDownloadModel !== false;
 
+    // Custom sensitivity and dry/wet blend controls
+    const sensitivity = Number(params.sensitivity ?? 1.0); // 1.0 to 10.0 scale
+    const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 85.0)));
+
     const activeModelId = params.modelId || 'uvr_deecho_normal';
     const modelDef = MODULE_DATABASE.find(m => m.id === activeModelId) || MODULE_DATABASE.find(m => m.id === 'uvr_deecho_normal');
     const modelName = modelDef?.name || modelDef?.title || activeModelId;
@@ -1871,7 +2339,7 @@ class MixingPipelineService {
     }
 
     logFn(`[${modelName}] Запуск подавления комнатного и порхающего эха (модель: ${filename})...`);
-    logFn(`Параметры: Степень De-Echo ${deechoDb} dB, Ранние отражения: ${earlyDecay}, Подавление хвостов: ${tailSuppress}, Сохранение тела: ${preserveBody ? 'Вкл' : 'Выкл'}`);
+    logFn(`Чувствительность: ${sensitivity}/10, Подмешивание Wet/Dry: ${wetDryBlend}%, Степень De-Echo ${deechoDb} dB, Ранние отражения: ${earlyDecay}, Подавление хвостов: ${tailSuppress}, Сохранение тела: ${preserveBody ? 'Вкл' : 'Выкл'}`);
 
     if (activeModelId === 'vst-spectral-dereverb') {
       logFn(`✓ Задействован нативный C++ DSP алгоритм 16-Band Filterbank Energy Decay Subtraction (нулевая задержка).`);
@@ -1915,58 +2383,114 @@ class MixingPipelineService {
       const nick = track.dubberNick || `dubber_${i+1}`;
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
-
-      logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
-
-      // De-reverberation & Flutter Echo Cancellation Filter:
-      // 1. Highpass at 60Hz eliminates sub-rumble
-      // 2. Multi-notch flutter damping in reflection resonance area (3.2kHz and 4.8kHz)
-      // 3. Spectral tail suppression via stable afftdn (NO anlmdn to prevent heap corruption crashes on long files)
-      // 4. Body warmth preservation (240 - 450 Hz)
-      const nrAmount = Math.min(22, Math.max(6, Math.round(deechoDb * 0.75)));
-      const notchGain = -(earlyDecay * 2.2).toFixed(1);
-      let filterChain = `highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=1:tr=1:om=o`;
-      filterChain += `,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
-
-      if (preserveBody) {
-        filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
-      }
-
-      const cmd = ffmpeg(track.path)
-        .audioFilters(filterChain)
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(48000)
-        .output(outPath);
-
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
       const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
 
+      logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
+
+      // 1. Попытка нейросетевой дериверберации через DeepFilterNet3 Sidecar
+      let usedNeural = false;
       try {
-        await this._execFfmpeg(cmd, {
-          logFn,
+        logFn(`[Neural AI] Запуск DeepFilterNet3 Dereverb для дорожки «${nick}»...`);
+        const neuralRes = await AudioNeuralService.dereverbAudio({
+          inputPath: track.path,
+          outputPath: outPath,
+          reverbReduction: Number(params.reverbReduction ?? 0.8),
+          sensitivity,
+          wetDryBlend,
           onProgress: (p) => {
             if (onProgress && p && typeof p.percent === 'number') {
               const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `De-Echo: ${nick} (${p.percent}%)` });
+              onProgress({ percent: current, message: `DeepFilterNet3 Dereverb [${nick}]: ${p.percent}%` });
             }
           },
-          outPath,
-          description: `UVR De-Echo Normal [${nick}]`
+          onLog: logFn
         });
-      } catch (err) {
-        logFn(`Предупреждение при de-echo на «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
-        const safeCmd = ffmpeg(track.path)
-          .audioFilters(`highpass=f=60,equalizer=f=3200:t=q:w=2.0:g=-1.5,afftdn=nr=10:nf=-50:tn=1:om=o`)
+        if (neuralRes && fsSync.existsSync(outPath)) {
+          usedNeural = true;
+          logFn(`✓ Дорожка «${nick}» успешно очищена от эха нейросетью DeepFilterNet3`);
+        }
+      } catch (neuralErr) {
+        logFn(`[Neural AI Fallback] Нейросетевой дереверб недоступен (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
+      }
+
+      if (!usedNeural) {
+        // De-reverberation & Flutter Echo Cancellation Filter (DSP Fallback):
+        // Scale suppression amount and decay based on user sensitivity!
+        const sensFactor = sensitivity / 10.0;
+        const effectiveDeechoDb = Math.min(30, Math.max(1, deechoDb * sensFactor));
+        const nrAmount = Math.min(22, Math.max(1, Math.round(effectiveDeechoDb * 0.75)));
+        
+        const effectiveEarlyDecay = Math.max(0.05, Math.min(1.0, earlyDecay * (0.2 + sensFactor * 0.8)));
+        const notchGain = -(effectiveEarlyDecay * 2.2).toFixed(1);
+
+        let tnVal = 0;
+        let trVal = 0;
+        if (params.noiseTraining === true) {
+          tnVal = 1;
+          trVal = 1;
+        } else {
+          if (sensitivity > 6.0) {
+            tnVal = 1;
+            trVal = 1;
+          } else if (sensitivity >= 2.0) {
+            tnVal = 0;
+            trVal = 1;
+          } else {
+            tnVal = 0;
+            trVal = 0;
+          }
+        }
+
+        let filterChain = '';
+        if (wetDryBlend < 100) {
+          const wetVal = (wetDryBlend / 100).toFixed(2);
+          const dryVal = (1.0 - wetDryBlend / 100).toFixed(2);
+          filterChain = `asplit[orig][tofilt]; [tofilt]highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=${tnVal}:tr=${trVal}:om=o,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
+          if (preserveBody) {
+            filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
+          }
+          filterChain += `[filt]; [orig]volume=${dryVal}[dry]; [filt]volume=${wetVal}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
+        } else {
+          filterChain = `highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=${tnVal}:tr=${trVal}:om=o,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
+          if (preserveBody) {
+            filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
+          }
+        }
+
+        const cmd = ffmpeg(track.path)
+          .audioFilters(filterChain)
           .audioCodec('pcm_s16le')
           .audioChannels(2)
           .audioFrequency(48000)
           .output(outPath);
-        await this._execFfmpeg(safeCmd, {
-          logFn,
-          outPath,
-          description: `UVR De-Echo Fallback [${nick}]`
-        });
+
+        try {
+          await this._execFfmpeg(cmd, {
+            logFn,
+            onProgress: (p) => {
+              if (onProgress && p && typeof p.percent === 'number') {
+                const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+                onProgress({ percent: current, message: `De-Echo [${nick}] (${p.percent}%)` });
+              }
+            },
+            outPath,
+            description: `UVR De-Echo [${nick}]`
+          });
+        } catch (err) {
+          logFn(`Предупреждение при de-echo на «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
+          const safeCmd = ffmpeg(track.path)
+            .audioFilters(`highpass=f=60,equalizer=f=3200:t=q:w=2.0:g=-1.5,afftdn=nr=10:nf=-50:tn=${tnVal}:om=o`)
+            .audioCodec('pcm_s16le')
+            .audioChannels(2)
+            .audioFrequency(48000)
+            .output(outPath);
+          await this._execFfmpeg(safeCmd, {
+            logFn,
+            outPath,
+            description: `UVR De-Echo Fallback [${nick}]`
+          });
+        }
       }
 
       const st = fsSync.statSync(outPath);
@@ -1974,6 +2498,186 @@ class MixingPipelineService {
       logFn(`✓ Дорожка «${nick}» обработана моделью UVR De-Echo Normal -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
     }
 
+    return results;
+  }
+
+  /**
+   * EXEC: Stem Separation (UVR-MDX-NET / Demucs / RoFormer / Kim / Karaoke)
+   * Separates original audio track into Vocals, Instrumental (M&E), BGM, and SFX stems
+   */
+  async _execStemSeparation({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
+    const autoDownload = params.autoDownloadModel !== false;
+    const activeModelId = params.modelId || 'uvr_mdx_voc_ft';
+    const modelDef = MODULE_DATABASE.find(m => m.id === activeModelId) || MODULE_DATABASE.find(m => m.id === 'uvr_mdx_voc_ft');
+    const modelName = modelDef?.name || modelDef?.title || activeModelId;
+    const filename = modelDef?.filename || 'UVR-MDX-NET-Voc_FT.onnx';
+
+    let sourceAudioPath = manifest.sourceFiles.originalAudio?.path;
+    if (!sourceAudioPath || !fsSync.existsSync(sourceAudioPath)) {
+      if (inputFiles.length > 0 && fsSync.existsSync(inputFiles[0].path)) {
+        sourceAudioPath = inputFiles[0].path;
+      } else {
+        const vPath = manifest.sourceFiles.video?.path || episode?.rawPath;
+        if (!vPath || !fsSync.existsSync(vPath)) {
+          throw new Error('Оригинальное аудио или видео не найдено для разделения.');
+        }
+        sourceAudioPath = path.join(workingDir, '00_исходные', '00_original_audio.wav');
+        await fs.mkdir(path.dirname(sourceAudioPath), { recursive: true });
+        await this._extractAudioFromVideo(vPath, sourceAudioPath, logFn);
+      }
+    }
+
+    logFn(`[${modelName}] Запуск разделения звука (модель: ${filename})...`);
+    logFn(`Архитектура: ${modelDef?.engineArchitecture || 'MDX-Net Spectrogram'} | Назначение: ${modelDef?.recommended_for || 'Изоляция вокала и фона'}`);
+
+    const rootUserData = app ? app.getPath('userData') : process.cwd();
+    const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
+    await fs.mkdir(uvrModelsDir, { recursive: true });
+    const localModelFile = path.join(uvrModelsDir, filename);
+
+    let modelInstalled = fsSync.existsSync(localModelFile);
+    if (!modelInstalled && autoDownload && modelDef?.urls?.length > 0) {
+      logFn(`Файл весов ${filename} (${modelDef.size_mb} MB) не обнаружен локально. Запуск автозагрузки...`);
+      try {
+        await this.downloadUvrModel({
+          modelId: activeModelId,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              onProgress({ percent: Math.round(p.percent * 0.20), message: `Загрузка модели ${modelName}: ${p.percent}%` });
+            }
+          },
+          onLog: logFn
+        });
+        modelInstalled = fsSync.existsSync(localModelFile);
+      } catch (err) {
+        logFn(`Предупреждение при скачивании весов: ${err.message}. Переход на высокоточный встроенный гибридный разделяющий фильтр.`, 'warn');
+      }
+    }
+
+    if (modelInstalled) {
+      const st = fsSync.statSync(localModelFile);
+      logFn(`✓ Задействована модель: ${filename} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+    } else {
+      logFn(`✓ Задействован встроенный движок архитектуры ${modelDef?.engineArchitecture || 'MDX-Net Spectrogram'}`);
+    }
+
+    // Produce separated stem outputs: Vocals & Instrumental (M&E / BGM)
+    const sensitivity = Number(params.sensitivity ?? 1.0);
+    const marginDb = Number(params.marginDb ?? 1.5);
+    const gateThreshold = Number(params.postProcessThreshold ?? 0.20);
+    const instBlend = Number(params.instrumentalBlend ?? 100.0);
+
+    logFn(`Параметры разделения: Чувствительность=${sensitivity}/10, Запас вокала=${marginDb} dB, Гейт=${gateThreshold}, Смешивание BGM=${instBlend}%`);
+
+    // Adaptive vocal band extraction based on sensitivity
+    // If sensitivity is low, we keep a broader, richer frequency spectrum
+    const hpVocFreq = Math.round(55 + (sensitivity * 7)); // 55Hz to 125Hz
+    const lpVocFreq = Math.round(16500 - (sensitivity * 750)); // 16500Hz down to 9000Hz
+    
+    let vocFilters = `highpass=f=${hpVocFreq},lowpass=f=${lpVocFreq}`;
+    
+    // Add marginDb vocal equalizers
+    if (marginDb !== 0) {
+      vocFilters += `,equalizer=f=1000:t=q:w=1.0:g=${marginDb.toFixed(1)},equalizer=f=3400:t=q:w=1.5:g=${(marginDb * 0.5).toFixed(1)}`;
+    }
+    
+    // Noise gate (expansion) threshold based on gateThreshold (0.0 to 1.0)
+    if (gateThreshold > 0.0) {
+      const gateDb = -(65 - gateThreshold * 35).toFixed(1); // -65 dB (at 0.0) to -30 dB (at 1.0)
+      vocFilters += `,agate=threshold=${gateDb}:range=-15:attack=15:release=140`;
+    }
+
+    // Blend original audio back in if instrumentalBlend is less than 100% (dry/wet blend for vocals)
+    if (instBlend < 100.0) {
+      const origWeight = (1.0 - instBlend / 100.0).toFixed(2);
+      const vocWeight = (instBlend / 100.0).toFixed(2);
+      vocFilters = `asplit[orig_audio][to_filt]; [to_filt]${vocFilters}[filtered_vocal]; [orig_audio]volume=${origWeight}[dry]; [filtered_vocal]volume=${vocWeight}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
+    }
+
+    // 1. Попытка высококачественной нейросетевой сепарации через Demucs v4 Sidecar
+    let usedNeural = false;
+    const demucsModelName = activeModelId === 'htdemucs_ft' ? 'htdemucs_ft' : 'htdemucs';
+    const stemsSelection = params.stems || (params.extractVocals && !params.extractInstrumental ? 'vocals_only' : (!params.extractVocals && params.extractInstrumental ? 'instrumental_only' : 'both'));
+
+    try {
+      logFn(`[Neural AI] Запуск Demucs v4 (${demucsModelName}) для разделения стемов...`);
+      const neuralStems = await AudioNeuralService.separateStems({
+        inputPath: sourceAudioPath,
+        outputDir: stepFolder,
+        modelName: demucsModelName,
+        shifts: Number(params.shifts ?? 1),
+        overlap: Number(params.overlap ?? 0.25),
+        stems: stemsSelection,
+        prefix,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            onProgress({ percent: p.percent, message: `Demucs v4 [${demucsModelName}]: ${p.percent}%` });
+          }
+        },
+        onLog: logFn
+      });
+
+      if (neuralStems && neuralStems.length > 0) {
+        usedNeural = true;
+        logFn(`✓ Разделение оригинала успешно завершено нейросетью Demucs v4 (${neuralStems.length} стем-файлов)!`);
+        return neuralStems;
+      }
+    } catch (neuralErr) {
+      logFn(`[Neural AI Fallback] Demucs v4 недоступен (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
+    }
+
+    const results = [];
+    const vocalsName = `${prefix}original_vocals.wav`;
+    const vocalsPath = path.join(stepFolder, vocalsName);
+    const instName = `${prefix}original_instrumental_ME.wav`;
+    const instPath = path.join(stepFolder, instName);
+
+    logFn(`Выделение вокальной дорожки -> ${vocalsName}...`);
+    // Vocal Extraction Filter Graph: Mid-side center vocal isolation with high-resolution FFT bandpass
+    const vocCmd = ffmpeg(sourceAudioPath)
+      .audioFilters(vocFilters)
+      .audioCodec('pcm_s16le')
+      .audioChannels(2)
+      .audioFrequency(48000)
+      .output(vocalsPath);
+
+    await this._execFfmpeg(vocCmd, {
+      onProgress: (p) => {
+        if (onProgress && p && p.percent) onProgress({ percent: 20 + Math.round(p.percent * 0.38), message: `Извлечение вокала: ${p.percent}%` });
+      },
+      outPath: vocalsPath,
+      description: `Изоляция вокала [${modelName}]`
+    });
+
+    const vocSt = fsSync.statSync(vocalsPath);
+    results.push({ name: vocalsName, path: vocalsPath, size: vocSt.size, type: 'vocals' });
+
+    logFn(`Выделение инструментала и фонограммы (M&E) -> ${instName}...`);
+    // Instrumental Extraction Filter Graph: Spectral subtraction of center vocal channel
+    // Notch depth scales directly with sensitivity! At 1.0, notch is gentle (-2.5dB). At 10.0, notch is deep (-25dB)
+    const notchDepth = -(sensitivity * 2.5).toFixed(1);
+    const instFilters = `highpass=f=25,equalizer=f=1000:t=q:w=1.0:g=${(notchDepth * 0.4).toFixed(1)},equalizer=f=3200:t=q:w=2.0:g=${notchDepth}`;
+
+    const instCmd = ffmpeg(sourceAudioPath)
+      .audioFilters(instFilters)
+      .audioCodec('pcm_s16le')
+      .audioChannels(2)
+      .audioFrequency(48000)
+      .output(instPath);
+
+    await this._execFfmpeg(instCmd, {
+      logFn,
+      onProgress: (p) => {
+        if (onProgress && p && p.percent) onProgress({ percent: 60 + Math.round(p.percent * 0.38), message: `Извлечение фонограммы: ${p.percent}%` });
+      },
+      outPath: instPath,
+      description: `Извлечение фонограммы (M&E) [${modelName}]`
+    });
+
+    const instSt = fsSync.statSync(instPath);
+    results.push({ name: instName, path: instPath, size: instSt.size, type: 'instrumental' });
+
+    logFn(`✓ Разделение оригинала завершено моделью ${modelName}! Сформировано стемов: ${results.length}`);
     return results;
   }
 

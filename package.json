@@ -13,6 +13,7 @@
     "download:ffmpeg": "node scripts/download-ffmpeg.js",
     "electron:build": "node scripts/generate-icons.cjs && node scripts/generate-metadata.js && node scripts/prepare-sidecars.js && vite build && electron-builder",
     "build:electron": "npm run electron:build",
+    "build:ai-env": "python scripts/build-ai-env.py",
     "build:mac-arm": "bash build-mac-arm.sh",
     "prebuild": "echo 'ONNX check skipped during build'",
     "build": "node scripts/generate-icons.cjs && node scripts/generate-metadata.js && vite build",
