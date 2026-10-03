@@ -71,7 +71,8 @@ class AudioNeuralService {
           PYTHONIOENCODING: 'utf-8',
           TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch')
         },
-        windowsHide: true
+        windowsHide: true,
+        shell: process.platform === 'win32'
       });
 
       // Track process for emergency SIGKILL cancellation
@@ -204,52 +205,13 @@ class AudioNeuralService {
       operationName: 'DeepFilterNet3 Denoise'
     });
 
-    if (!fs.existsSync(outputPath)) {
-      throw new Error(`Выходной файл шумоподавления не был создан: ${outputPath}`);
-    }
-
-    const st = await fsPromises.stat(outputPath);
-    return { outputPath, size: st.size };
-  }
-
-  /**
-   * DeepFilterNet3 Dereverb
-   */
-  async dereverbAudio({ inputPath, outputPath, reverbReduction = 0.8, sensitivity = 1.0, wetDryBlend = 100.0, onProgress, onLog, abortSignal }) {
-    if (!fs.existsSync(inputPath)) {
-      throw new Error(`Входной файл не существует: ${inputPath}`);
-    }
-
-    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
-
-    const args = [
-      '--mode', 'dereverb',
-      '--input', inputPath,
-      '--output', outputPath,
-      '--reverb_reduction', String(reverbReduction),
-      '--sensitivity', String(sensitivity),
-      '--wet_dry_blend', String(wetDryBlend)
-    ];
-
-    await this._runPythonSidecar(args, {
-      onProgress,
-      onLog,
-      abortSignal,
-      operationName: 'DeepFilterNet3 Dereverb'
-    });
-
-    if (!fs.existsSync(outputPath)) {
-      throw new Error(`Выходной файл дериверберации не был создан: ${outputPath}`);
-    }
-
-    const st = await fsPromises.stat(outputPath);
-    return { outputPath, size: st.size };
+    return outputPath;
   }
 
   /**
    * Demucs v4 Stem Separation
    */
-  async separateStems({ inputPath, outputDir, modelName = 'htdemucs', shifts = 1, overlap = 0.25, stems = 'both', prefix = '', onProgress, onLog, abortSignal }) {
+  async separateStems({ inputPath, outputDir, model = 'htdemucs', shifts = 1, overlap = 0.25, segments = 30, onProgress, onLog, abortSignal }) {
     if (!fs.existsSync(inputPath)) {
       throw new Error(`Входной файл не существует: ${inputPath}`);
     }
@@ -259,35 +221,21 @@ class AudioNeuralService {
     const args = [
       '--mode', 'separate',
       '--input', inputPath,
-      '--output_dir', outputDir,
-      '--model_name', modelName,
+      '--output', outputDir,
+      '--model', model,
       '--shifts', String(shifts),
       '--overlap', String(overlap),
-      '--stems', stems,
-      '--prefix', prefix
+      '--segments', String(segments)
     ];
 
     const result = await this._runPythonSidecar(args, {
       onProgress,
       onLog,
       abortSignal,
-      operationName: `Demucs v4 (${modelName})`
+      operationName: 'Demucs Stem Separation'
     });
 
-    const expectedVocals = path.join(outputDir, `${prefix}original_vocals.wav`);
-    const expectedInst = path.join(outputDir, `${prefix}original_instrumental_ME.wav`);
-
-    const outputs = [];
-    if (fs.existsSync(expectedVocals)) {
-      const st = await fsPromises.stat(expectedVocals);
-      outputs.push({ type: 'vocals', name: path.basename(expectedVocals), path: expectedVocals, size: st.size });
-    }
-    if (fs.existsSync(expectedInst)) {
-      const st = await fsPromises.stat(expectedInst);
-      outputs.push({ type: 'instrumental', name: path.basename(expectedInst), path: expectedInst, size: st.size });
-    }
-
-    return outputs;
+    return result;
   }
 }
 

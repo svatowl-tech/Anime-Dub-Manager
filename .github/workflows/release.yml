@@ -22,6 +22,8 @@ permissions:
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   YOUTUBE_DL_SKIP_DOWNLOAD: "true"
+  PYTHONIOENCODING: "utf-8"
+  PYTHONUTF8: "1"
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
@@ -131,6 +133,9 @@ jobs:
 
       - name: Build Portable AI Environment
         run: python scripts/build-ai-env.py --tag ${{ matrix.platform.tag }}
+        env:
+          PYTHONIOENCODING: "utf-8"
+          PYTHONUTF8: "1"
 
       - name: Upload AI_env to GitHub Release
         uses: softprops/action-gh-release@v2

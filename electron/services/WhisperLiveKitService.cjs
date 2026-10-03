@@ -135,7 +135,8 @@ class WhisperLiveKitService {
     // Запуск сервера в фоновом режиме
     const child = spawn(pythonPath, args, { 
       env,
-      detached: false
+      detached: false,
+      shell: process.platform === 'win32'
     });
 
     trackProcess(child);
