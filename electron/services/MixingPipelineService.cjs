@@ -1512,36 +1512,55 @@ class MixingPipelineService {
       // 2. High-resolution FFT noise profiling and stationarity reduction (afftdn)
       // 3. Adaptive non-local means acoustic denoiser (anlmdn)
       // 4. Formant preservation EQ filter to keep dialog crisp and natural
+      // Adaptive Multi-stage Spectral Stationarity Reducer:
+      // Uses 100% stable adaptive FFT stationarity reduction (afftdn) with residual tracking.
+      // NOTE: anlmdn is intentionally NOT used here because anlmdn causes STATUS_HEAP_CORRUPTION (code 3221226356)
+      // in FFmpeg on Windows when processing long audio streams (>20 min).
       const fftNr = Math.min(40, Math.max(6, nrDb));
       const fftFloor = Math.min(-20, Math.max(-80, floorDb));
       
-      let filterChain = `highpass=f=65,afftdn=nr=${fftNr}:nf=${fftFloor}:tn=1:om=o`;
-      if (weight > 0.70) {
-        filterChain += `,anlmdn=s=${Math.round(weight * 5)}:p=0.002:r=0.004`;
-      }
+      let filterChain = `highpass=f=65,afftdn=nr=${fftNr}:nf=${fftFloor}:tn=1:tr=1:om=o`;
       if (preserveFormants) {
-        // Vocal presence restore (+1.2dB at 3.4kHz, +0.8dB air at 10kHz) to counter spectral smearing
+        // Vocal presence restore (+1.2dB at 3.4kHz, +0.8dB air at 10.5kHz) to counter spectral smearing
         filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
       }
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(track.path)
-          .audioFilters(filterChain)
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterChain)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      try {
+        await this._execFfmpeg(cmd, {
+          logFn,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `VR-DeNoise Lite: ${nick} (${p.percent}%)` });
+            }
+          },
+          outPath,
+          description: `VR-DeNoise Lite [${nick}]`
+        });
+      } catch (err) {
+        logFn(`Предупреждение при обработке дорожки «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
+        const safeCmd = ffmpeg(track.path)
+          .audioFilters(`highpass=f=65,afftdn=nr=${fftNr}:nf=${fftFloor}:tn=1:om=o`)
           .audioCodec('pcm_s16le')
           .audioChannels(2)
           .audioFrequency(48000)
-          .output(outPath)
-          .on('progress', (p) => {
-            if (onProgress && p && p.percent) {
-              const startPct = 15;
-              const overall = startPct + Math.round(((i + p.percent / 100) / inputFiles.length) * (100 - startPct));
-              onProgress({ percent: overall, message: `VR-DeNoise Lite: ${nick}` });
-            }
-          })
-          .on('end', () => resolve())
-          .on('error', (e) => reject(e))
-          .run();
-      });
+          .output(outPath);
+        await this._execFfmpeg(safeCmd, {
+          logFn,
+          outPath,
+          description: `VR-DeNoise Lite Fallback [${nick}]`
+        });
+      }
 
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
@@ -1611,39 +1630,55 @@ class MixingPipelineService {
       logFn(`[${i+1}/${inputFiles.length}] Применение модели UVR De-Echo Normal к дорожке «${nick}»...`);
 
       // De-reverberation & Flutter Echo Cancellation Filter:
-      // 1. Attenuate high-frequency flutter reflections (comb-filtering flutter damping)
-      // 2. Multi-tap reflection suppressor (anlmdn with acoustic temporal weighting)
-      // 3. Body warmth preservation: EQ keeping 180-500 Hz intact without thinning low/mid frequencies
-      const flutterDamp = Math.min(6, Math.max(1, Math.round(deechoDb / 3)));
-      let filterChain = `anlmdn=s=${flutterDamp}:p=0.003:r=0.005`;
+      // 1. Highpass at 60Hz eliminates sub-rumble
+      // 2. Multi-notch flutter damping in reflection resonance area (3.2kHz and 4.8kHz)
+      // 3. Spectral tail suppression via stable afftdn (NO anlmdn to prevent heap corruption crashes on long files)
+      // 4. Body warmth preservation (240 - 450 Hz)
+      const nrAmount = Math.min(22, Math.max(6, Math.round(deechoDb * 0.75)));
+      const notchGain = -(earlyDecay * 2.2).toFixed(1);
+      let filterChain = `highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=1:tr=1:om=o`;
+      filterChain += `,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
 
       if (preserveBody) {
-        // Protect body frequencies (180 - 450 Hz) from being thinned out
         filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
       }
 
-      // Smooth room flutter shelf above 2.8kHz to tame ringing walls
-      const highCutGain = -(earlyDecay * 1.8).toFixed(1);
-      filterChain += `,equalizer=f=3200:t=h:g=${highCutGain}`;
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterChain)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(track.path)
-          .audioFilters(filterChain)
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      try {
+        await this._execFfmpeg(cmd, {
+          logFn,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `De-Echo: ${nick} (${p.percent}%)` });
+            }
+          },
+          outPath,
+          description: `UVR De-Echo Normal [${nick}]`
+        });
+      } catch (err) {
+        logFn(`Предупреждение при de-echo на «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
+        const safeCmd = ffmpeg(track.path)
+          .audioFilters(`highpass=f=60,equalizer=f=3200:t=q:w=2.0:g=-1.5,afftdn=nr=10:nf=-50:tn=1:om=o`)
           .audioCodec('pcm_s16le')
           .audioChannels(2)
           .audioFrequency(48000)
-          .output(outPath)
-          .on('progress', (p) => {
-            if (onProgress && p && p.percent) {
-              const startPct = 15;
-              const overall = startPct + Math.round(((i + p.percent / 100) / inputFiles.length) * (100 - startPct));
-              onProgress({ percent: overall, message: `De-Echo: ${nick}` });
-            }
-          })
-          .on('end', () => resolve())
-          .on('error', (e) => reject(e))
-          .run();
-      });
+          .output(outPath);
+        await this._execFfmpeg(safeCmd, {
+          logFn,
+          outPath,
+          description: `UVR De-Echo Fallback [${nick}]`
+        });
+      }
 
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
@@ -1713,13 +1748,7 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Применение модели VoiceFixer к дорожке «${nick}»...`);
 
-      // Multi-stage VoiceFixer Harmonic Reconstruction:
-      // 1. High-frequency Air-Band harmonic restoration (high-shelf at 13.5kHz with silk slope)
-      // 2. Formant presence & clarity (parametric peak around 3.4kHz with Q=1.2)
-      // 3. Warm even-order tube harmonic saturation
-      // 4. Sub-bass preservation keeping vocal fundamental frequencies clean (>70Hz)
       let filterChain = '';
-      
       if (subBassProtect) {
         filterChain += `highpass=f=70,`;
       }
@@ -1737,23 +1766,26 @@ class MixingPipelineService {
         filterChain += `,aexciter=level_in=1:level_out=1:amount=${(sat * 2).toFixed(1)}:drive=${drive}:freq=7500`;
       }
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(track.path)
-          .audioFilters(filterChain)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath)
-          .on('progress', (p) => {
-            if (onProgress && p && p.percent) {
-              const startPct = 15;
-              const overall = startPct + Math.round(((i + p.percent / 100) / inputFiles.length) * (100 - startPct));
-              onProgress({ percent: overall, message: `VoiceFixer: ${nick}` });
-            }
-          })
-          .on('end', () => resolve())
-          .on('error', (e) => reject(e))
-          .run();
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterChain)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `VoiceFixer: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `VoiceFixer [${nick}]`
       });
 
       const st = fsSync.statSync(outPath);
@@ -1790,21 +1822,26 @@ class MixingPipelineService {
 
       const filter = `agate=threshold=${thresholdDb}dB:range=${rangeDb}dB:attack=${attackMs}:release=${releaseMs}`;
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(track.path)
-          .audioFilters(filter)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath)
-          .on('progress', (p) => {
-            if (onProgress && p && p.percent) {
-              onProgress({ percent: Math.round(((i + p.percent / 100) / inputFiles.length) * 100), message: `Гейт: ${nick}` });
-            }
-          })
-          .on('end', () => resolve())
-          .on('error', (e) => reject(e))
-          .run();
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Гейт: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `Silence Gate [${nick}]`
       });
 
       const st = fsSync.statSync(outPath);
@@ -1847,21 +1884,26 @@ class MixingPipelineService {
         filter = `loudnorm=I=${targetLufs}:TP=${truePeak}:LRA=${lra}:dual_mono=${dualMono ? 'true' : 'false'}`;
       }
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(track.path)
-          .audioFilters(filter)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath)
-          .on('progress', (p) => {
-            if (onProgress && p && p.percent) {
-              onProgress({ percent: Math.round(((i + p.percent / 100) / inputFiles.length) * 100), message: `Нормализация: ${nick}` });
-            }
-          })
-          .on('end', () => resolve())
-          .on('error', (e) => reject(e))
-          .run();
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Нормализация: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `Phrase Norm [${nick}]`
       });
 
       const st = fsSync.statSync(outPath);
@@ -1890,16 +1932,26 @@ class MixingPipelineService {
 
       const filter = `deesser=f=${freq}:i=${intensity}:m=${mode}`;
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(track.path)
-          .audioFilters(filter)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath)
-          .on('end', () => resolve())
-          .on('error', (e) => reject(e))
-          .run();
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Деэссинг: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `De-Esser [${nick}]`
       });
 
       const st = fsSync.statSync(outPath);
@@ -1931,16 +1983,26 @@ class MixingPipelineService {
 
       const filter = `highpass=f=${lowCut},equalizer=f=250:t=q:w=1.2:g=${bodyGain},equalizer=f=500:t=q:w=1.4:g=${boxCutGain},equalizer=f=${presHz}:t=q:w=1.5:g=${presGain},equalizer=f=11000:t=h:g=${airGain}`;
 
-      await new Promise((resolve, reject) => {
-        ffmpeg(track.path)
-          .audioFilters(filter)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath)
-          .on('end', () => resolve())
-          .on('error', (e) => reject(e))
-          .run();
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Вокальный EQ: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `Vocal EQ [${nick}]`
       });
 
       const st = fsSync.statSync(outPath);
