@@ -16,6 +16,7 @@ interface TrackSidebarProps {
   onGenerateFixesMessage?: () => void;
   onGenerateReminderMessage?: () => void;
   onExportSoundEngineer?: () => void;
+  onOpenTimingPanel?: () => void;
   onGenerateSoundEngineerReport?: () => void;
   onBakeSubtitles?: () => void;
   isBaking?: boolean;
@@ -42,6 +43,7 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
   onGenerateFixesMessage,
   onGenerateReminderMessage,
   onExportSoundEngineer,
+  onOpenTimingPanel,
   onGenerateSoundEngineerReport,
   onBakeSubtitles,
   isBaking,
@@ -287,6 +289,14 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
         >
           <Headphones className="w-3.5 h-3.5 text-indigo-400" />
           Отчет для звукаря
+        </button>
+        <button 
+          onClick={onOpenTimingPanel}
+          className="w-full py-2 bg-gradient-to-r from-amber-600/30 to-amber-500/20 hover:from-amber-600/50 hover:to-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
+          title="Открыть интерактивную студию точного многодорожечного тайминга"
+        >
+          <Clock className="w-3.5 h-3.5 text-amber-400" />
+          Перейти в Тайминг видео
         </button>
         <button 
           onClick={onExportSoundEngineer}

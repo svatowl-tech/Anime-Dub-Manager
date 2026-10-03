@@ -23,9 +23,10 @@ import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
 interface QAPanelProps {
   currentEpisode: Episode | null;
   onRefresh: () => void;
+  onNavigate?: (tab: 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive') => void;
 }
 
-export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
+export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPanelProps) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [mutedTracks, setMutedTracks] = useState<Set<string>>(new Set());
   const [soloTrack, setSoloTrack] = useState<string | null>(null);
@@ -2057,6 +2058,7 @@ export default function QAPanel({ currentEpisode, onRefresh }: QAPanelProps) {
           onGenerateFixesMessage={handleGenerateFixesMessage}
           onGenerateReminderMessage={handleGenerateReminderMessage}
           onExportSoundEngineer={() => setIsExportModalOpen(true)}
+          onOpenTimingPanel={() => onNavigate?.('timing')}
           onGenerateSoundEngineerReport={handleGenerateSoundEngineerReport}
           onBakeSubtitles={handleBakeSubtitles}
           isBaking={isBaking}

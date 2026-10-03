@@ -46,7 +46,8 @@ import {
   XCircle,
   FileDown,
   RotateCcw,
-  Folder
+  Folder,
+  Activity
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { 
@@ -89,7 +90,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [isImporting, setIsImporting] = useState<boolean>(false);
   const [importProgress, setImportProgress] = useState<number>(0);
   const [importStatusMessage, setImportStatusMessage] = useState<string>('');
-  const [importAutoTiming, setImportAutoTiming] = useState<boolean>(true);
+  const [importSource, setImportSource] = useState<'qa' | 'timing'>('timing');
+  const [importAutoTiming, setImportAutoTiming] = useState<boolean>(false);
   const [importAutoFixes, setImportAutoFixes] = useState<boolean>(true);
   const [importSubtitles, setImportSubtitles] = useState<boolean>(true);
   const [customTargetDir, setCustomTargetDir] = useState<string>('');
@@ -2172,6 +2174,45 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             </div>
 
             <div className="space-y-3 text-xs">
+              {/* Source Selector */}
+              <div>
+                <label className="text-neutral-300 font-medium block mb-1">
+                  Источник материалов для сведения:
+                </label>
+                <div className="grid grid-cols-2 gap-2 p-1 bg-neutral-950 rounded-xl border border-neutral-800">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImportSource('timing');
+                      setImportAutoTiming(false);
+                    }}
+                    className={`py-2 px-3 rounded-lg font-medium flex items-center justify-center gap-2 transition ${
+                      importSource === 'timing' 
+                        ? 'bg-amber-600/20 text-amber-300 border border-amber-500/40' 
+                        : 'text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    <Clock className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Из Тайминга видео</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setImportSource('qa');
+                      setImportAutoTiming(true);
+                    }}
+                    className={`py-2 px-3 rounded-lg font-medium flex items-center justify-center gap-2 transition ${
+                      importSource === 'qa' 
+                        ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40' 
+                        : 'text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    <Activity className="w-3.5 h-3.5 text-blue-400" />
+                    <span>Из QA-проверки</span>
+                  </button>
+                </div>
+              </div>
+
               <div>
                 <label className="text-neutral-300 font-medium block mb-1">
                   Целевая папка сведения:
@@ -2217,10 +2258,15 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                     onChange={(e) => setImportAutoTiming(e.target.checked)}
                     className="rounded accent-blue-500"
                   />
-                  <span>Автотайминг речевых фраз по субтитрам и разведение коллизий</span>
+                  <span>Включить автоматический автотайминг поверх импорта</span>
                 </label>
+                <p className="text-[10px] text-neutral-500 ml-5 -mt-1">
+                  {importSource === 'timing' 
+                    ? 'При импорте из Тайминга рекомендуется оставить выключенным, чтобы сохранить ручные правки.' 
+                    : 'Автоматически подогнать фразы к таймингам субтитров ASS.'}
+                </p>
 
-                <label className="flex items-center gap-2 cursor-pointer">
+                <label className="flex items-center gap-2 cursor-pointer pt-1">
                   <input 
                     type="checkbox"
                     checked={importAutoFixes}

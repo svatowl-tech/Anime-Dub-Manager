@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare, Sliders } from 'lucide-react';
+import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare, Sliders, Clock } from 'lucide-react';
 import { Toaster } from 'sonner';
 import Dashboard from './components/Dashboard';
 import QAPanel from './components/QAPanel';
+import TimingPanel from './components/TimingPanel';
 import MixingPanel from './components/MixingPanel';
 import ReleasePanel from './components/ReleasePanel';
 import AssEditor from './contexts/AssEditor';
@@ -22,7 +23,7 @@ import { VideoProvider } from './contexts/VideoContext';
 import { useGlobalKeyboard } from './hooks/useGlobalKeyboard';
  
 function AppContent() {
-  type TabType = 'dashboard' | 'subtitles' | 'qa' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
+  type TabType = 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [savedAudioUrl, setSavedAudioUrl] = useState<string | null>(null);
   
@@ -325,6 +326,20 @@ function AppContent() {
           </button>
 
           <button
+            id="step-timing"
+            onClick={() => handleNavigate('timing')}
+            title="Точный многодорожечный тайминг голосов, зачистка тишины и устранение коллизий"
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
+              activeTab === 'timing' 
+                ? 'bg-amber-600/10 text-amber-400' 
+                : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+            }`}
+          >
+            <Clock className="w-5 h-5 text-amber-400" />
+            <span>Тайминг видео</span>
+          </button>
+
+          <button
             id="step-mixing"
             onClick={() => handleNavigate('mixing')}
             title="Модульное сведение аудиодорожек и видеоряда серии"
@@ -454,7 +469,8 @@ function AppContent() {
         {activeTab === 'database' && <DatabasePanel />}
         {activeTab === 'stats' && <StatsPanel />}
         {activeTab === 'settings' && <SettingsPanel />}
-        {activeTab === 'qa' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="QA Проверка" onApply={setStandaloneEpisode} /> : <QAPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
+        {activeTab === 'qa' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="QA Проверка" onApply={setStandaloneEpisode} /> : <QAPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} onNavigate={handleNavigate} />)}
+        {activeTab === 'timing' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Тайминг видео" onApply={setStandaloneEpisode} /> : <TimingPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} onNavigate={handleNavigate} />)}
         {activeTab === 'mixing' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Сведение видео" onApply={setStandaloneEpisode} /> : <MixingPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {activeTab === 'cover' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Обложки серии" onApply={setStandaloneEpisode} /> : <CoverGenerator currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {!isWeb && <TaskQueuePanel />}

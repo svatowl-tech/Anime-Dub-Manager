@@ -247,6 +247,8 @@ export interface Track {
   id: string;
   participant: string;
   character: string;
+  dubberName?: string;
+  characterName?: string;
   status: 'pending' | 'approved' | 'rejected' | 'fixes_needed';
   files: { id: string; path: string; createdAt: string; type?: 'DUBBER_FILE' | 'FIXES' | 'SOUND_ENGINEER_FILE' }[];
   selectedFileId?: string;
