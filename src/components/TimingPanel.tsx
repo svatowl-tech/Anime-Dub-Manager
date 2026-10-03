@@ -30,6 +30,8 @@ import {
   FileAudio
 } from 'lucide-react';
 import { toast } from 'sonner';
+import WaveSurfer from 'wavesurfer.js';
+import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import { Episode, Track, SubtitleLine, RoleAssignment } from '../types';
 import { ipcSafe } from '../lib/ipcSafe';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
@@ -134,89 +136,76 @@ async function getPlayableAudioUrl(filePath: string): Promise<string | null> {
 }
 
 /**
- * High-definition Real Audio Waveform Canvas Generator using Web Audio API AudioBuffer
+ * Real WaveSurfer.js Audio Waveform Track Component for Timing Panel
  */
-const PhraseWaveform: React.FC<{
-  phrase: PhraseBlock;
-  width: number;
-  height: number;
-  volumePercent?: number;
-  audioBuffer?: AudioBuffer | null;
-}> = ({ phrase, width, height, volumePercent = 100, audioBuffer }) => {
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+const WaveSurferTrack: React.FC<{
+  track: Track;
+  zoomLevel: number;
+  volume: number;
+  isMuted: boolean;
+  onReady?: (duration: number) => void;
+}> = ({ track, zoomLevel, volume, isMuted, onReady }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const wsRef = useRef<WaveSurfer | null>(null);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || width <= 0 || height <= 0) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!containerRef.current || !track.filePath) return;
 
-    ctx.clearRect(0, 0, width, height);
+    let isMounted = true;
+    (async () => {
+      const audioUrl = await getPlayableAudioUrl(track.filePath);
+      if (!audioUrl || !isMounted || !containerRef.current) return;
 
-    const centerY = height / 2;
-    const volMult = Math.min(1.5, Math.max(0.15, volumePercent / 100));
+      try {
+        const ws = WaveSurfer.create({
+          container: containerRef.current,
+          waveColor: '#818cf8',
+          progressColor: '#4f46e5',
+          cursorColor: 'transparent',
+          barWidth: 2,
+          barGap: 3,
+          height: 80,
+          normalize: true,
+          minPxPerSec: zoomLevel,
+          interact: false
+        });
 
-    ctx.fillStyle = phrase.hasCollision
-      ? 'rgba(239, 68, 68, 0.85)'   // Red for collision
-      : phrase.isFix
-      ? 'rgba(251, 191, 36, 0.85)'  // Amber/yellow for fixes
-      : 'rgba(129, 140, 248, 0.75)'; // Indigo/blue for normal speech
+        wsRef.current = ws;
 
-    if (audioBuffer) {
-      const sampleRate = audioBuffer.sampleRate;
-      const channelData = audioBuffer.getChannelData(0);
-      const effectiveStart = Math.max(0, phrase.startSec + phrase.offsetSec);
-      const effectiveEnd = Math.max(effectiveStart + 0.1, phrase.endSec + phrase.offsetSec);
-      const startSample = Math.floor(effectiveStart * sampleRate);
-      const endSample = Math.floor(Math.min(audioBuffer.duration, effectiveEnd) * sampleRate);
-      const totalSamples = Math.max(1, endSample - startSample);
-      const bars = Math.max(8, Math.floor(width / 3.5));
-      const samplesPerBar = Math.floor(totalSamples / bars);
+        ws.on('error', (err: any) => {
+          if (err?.name === 'AbortError' || err?.message?.includes('aborted')) return;
+        });
 
-      for (let i = 0; i < bars; i++) {
-        let sum = 0;
-        const barStart = startSample + i * samplesPerBar;
-        const barEnd = Math.min(endSample, barStart + samplesPerBar);
-        const count = Math.max(1, barEnd - barStart);
-
-        for (let s = barStart; s < barEnd; s++) {
-          sum += Math.abs(channelData[s] || 0);
+        await ws.load(audioUrl);
+        if (isMounted) {
+          ws.setVolume(isMuted ? 0 : volume);
+          if (onReady) onReady(ws.getDuration());
         }
-        const avg = sum / count;
-        const barHeight = Math.max(2, centerY * Math.min(1.0, avg * 4.5) * volMult);
+      } catch (err) {
+        console.warn(`[WaveSurferTrack] Load error for track ${track.id}:`, err);
+      }
+    })();
 
-        const x = i * 3.5;
-        ctx.fillRect(x, centerY - barHeight, 2.2, barHeight * 2);
+    return () => {
+      isMounted = false;
+      if (wsRef.current) {
+        try {
+          wsRef.current.destroy();
+        } catch (e) {}
       }
-    } else {
-      let hash = 0;
-      const key = `${phrase.id}_${phrase.text}_${phrase.durationSec}`;
-      for (let i = 0; i < key.length; i++) {
-        hash = ((hash << 5) - hash) + key.charCodeAt(i);
-        hash |= 0;
-      }
-      const absHash = Math.abs(hash);
-      const bars = Math.max(8, Math.floor(width / 3.5));
-      for (let i = 0; i < bars; i++) {
-        const progress = i / bars;
-        const envelope = Math.sin(progress * Math.PI);
-        const randVal = Math.abs(Math.sin((absHash + 17) * (i + 1) * 0.23));
-        const barHeight = Math.max(2, (centerY - 2) * (0.25 + randVal * 0.75) * envelope * volMult);
+    };
+  }, [track.filePath]);
 
-        const x = i * 3.5;
-        ctx.fillRect(x, centerY - barHeight, 2.2, barHeight * 2);
-      }
+  useEffect(() => {
+    if (wsRef.current) {
+      try {
+        wsRef.current.zoom(zoomLevel);
+        wsRef.current.setVolume(isMuted ? 0 : volume);
+      } catch (e) {}
     }
-  }, [phrase, width, height, volumePercent, audioBuffer]);
+  }, [zoomLevel, volume, isMuted]);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      width={width}
-      height={height}
-      className="w-full h-full pointer-events-none opacity-90"
-    />
-  );
+  return <div ref={containerRef} className="w-full h-full absolute inset-0 pointer-events-none opacity-85" />;
 };
 
 interface TimingPanelProps {
@@ -333,7 +322,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const playbackRef = useRef<number | null>(null);
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
-  const audioBuffersRef = useRef<Record<string, AudioBuffer>>({});
 
   // Mouse Dragging Effect for Phrases
   useEffect(() => {
@@ -529,10 +517,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       });
 
       setTracks(fetchedTracks);
-      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов.`, fetchedTracks.length > 0 ? 'success' : 'warn');
+      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов с WaveSurfer.`, fetchedTracks.length > 0 ? 'success' : 'warn');
 
-      // Preload Audio Elements & Decode Real Audio Buffers for Waveform Rendering
-      const sharedAudioCtx = getSharedAudioContext();
+      // Preload Audio Elements for Playback
       for (const tr of fetchedTracks) {
         if (tr.filePath) {
           const playableUrl = await getPlayableAudioUrl(tr.filePath);
@@ -540,16 +527,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             const audio = new Audio(playableUrl);
             audio.preload = 'metadata';
             audioElementsRef.current[tr.id] = audio;
-
-            try {
-              const resp = await fetch(playableUrl);
-              const arrayBuf = await resp.arrayBuffer();
-              const decodedBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
-              audioBuffersRef.current[tr.id] = decodedBuf;
-              addLog(`📈 Реальная вейфформа декодирована для дорожки «${tr.participant}» (${decodedBuf.duration.toFixed(1)}s)`, 'success');
-            } catch (decodeErr) {
-              console.warn(`[AudioDecode] Не удалось декодировать аудио для ${tr.id}:`, decodeErr);
-            }
           }
         }
       }
@@ -603,7 +580,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setPhraseBlocks(initialBlocks);
 
       if (fetchedTracks.length > 0) {
-        toast.success(`Загружено ${fetchedTracks.length} дорожек с реальными вейфформами!`);
+        toast.success(`Загружено ${fetchedTracks.length} дорожек с реальными WaveSurfer вейфформами!`);
       }
     } catch (err: any) {
       addLog(`❌ Ошибка загрузки данных тайминга: ${err.message || String(err)}`, 'error');
@@ -931,7 +908,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               </span>
             </div>
             <p className="text-xs text-neutral-400 mt-0.5">
-              Многодорожечный тайминг с реальными вейфформами, перетаскиванием фраз мышкой и точной поканальной настройкой громкости
+              Многодорожечный тайминг с реальными WaveSurfer вейфформами, перетаскиванием фраз мышкой и точной поканальной настройкой громкости
             </p>
           </div>
         </div>
@@ -1007,7 +984,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         {/* Track Sidebar Headers */}
         <div className="w-64 bg-neutral-900/60 border-r border-neutral-800 shrink-0 flex flex-col overflow-y-auto">
           <div className="h-9 bg-neutral-900 border-b border-neutral-800 px-3 flex items-center text-[11px] font-bold text-neutral-400 uppercase tracking-wider shrink-0">
-            Дорожки (Реальный звук)
+            Дорожки (WaveSurfer.js)
           </div>
 
           <div className="p-3 border-b border-neutral-800/80 bg-neutral-950/40 space-y-1 shrink-0">
@@ -1108,7 +1085,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           })}
         </div>
 
-        {/* Timeline Waveforms Scroll View Area with click-to-seek */}
+        {/* Timeline Waveforms Scroll View Area with WaveSurfer.js */}
         <div 
           ref={timelineContainerRef}
           onClick={handleTimelineClick}
@@ -1141,11 +1118,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             <div className="h-16 border-b border-neutral-800/80 bg-neutral-950/30 relative flex items-center">
               <div className="absolute inset-0 opacity-20 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:16px_100%]" />
               <div className="absolute inset-x-0 h-10 my-auto bg-blue-500/10 border-y border-blue-500/20 rounded flex items-center justify-center text-[10px] text-blue-300 font-mono">
-                Оригинальный звук серии с реальной вейфформой ({formatSeconds(duration)})
+                Оригинальный звук серии ({formatSeconds(duration)})
               </div>
             </div>
 
-            {/* Tracks 2..N: Subtitle Lane + Dubber Audio Waveform Lane with Mouse Dragging & Real Waveforms */}
+            {/* Tracks 2..N: Subtitle Lane + WaveSurfer Waveform Lane with Mouse Dragging */}
             {tracks.map(track => {
               const blocks = phraseBlocks[track.id] || [];
               const isMuted = mutedTracks.has(track.id);
@@ -1170,13 +1147,22 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                     ))}
                   </div>
 
-                  {/* Dubber Audio Waveform Lane with Real PCM Waveforms & Mouse Dragging */}
+                  {/* Dubber WaveSurfer Audio Waveform Lane & Movable Phrase Blocks */}
                   <div 
                     className={`h-24 border-b border-neutral-800/80 relative flex items-center transition ${
                       isMuted ? 'opacity-30 bg-neutral-950' : 'bg-neutral-950/80'
                     }`}
                   >
-                    <div className="absolute inset-0 opacity-15 bg-[linear-gradient(90deg,#818cf8_1px,transparent_1px)] bg-[size:24px_100%]" />
+                    {/* REAL WAVESURFER.JS AUDIO WAVEFORM */}
+                    <WaveSurferTrack
+                      track={track}
+                      zoomLevel={zoomLevel}
+                      volume={volumes[track.id] ?? 1.0}
+                      isMuted={isMuted}
+                      onReady={(dur) => {
+                        if (dur > duration) setDuration(dur);
+                      }}
+                    />
 
                     {blocks.map(block => {
                       const effectiveStart = block.startSec + (block.offsetSec || 0) + (block.headTrimSec || 0);
@@ -1188,14 +1174,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                           key={block.id}
                           onClick={() => setSelectedPhraseId(block.id)}
                           onMouseDown={(e) => handlePhraseMouseDown(e, track.id, block)}
-                          className={`absolute top-1.5 bottom-1.5 rounded-lg border p-1.5 flex flex-col justify-between cursor-grab active:cursor-grabbing select-none transition-all shadow-md group overflow-hidden ${
+                          className={`absolute top-1.5 bottom-1.5 rounded-lg border p-1.5 flex flex-col justify-between cursor-grab active:cursor-grabbing select-none transition-all shadow-md group overflow-hidden z-20 ${
                             block.hasCollision
-                              ? 'bg-red-950/85 border-red-500/90 text-red-100 shadow-red-500/20'
+                              ? 'bg-red-950/90 border-red-500 text-red-100 shadow-red-500/30'
                               : block.isFix
-                              ? 'bg-amber-950/85 border-amber-500/90 text-amber-100 shadow-amber-500/20'
+                              ? 'bg-amber-950/90 border-amber-500 text-amber-100 shadow-amber-500/30'
                               : isSelected
-                              ? 'bg-indigo-600/40 border-indigo-300 text-white ring-2 ring-indigo-400 shadow-lg'
-                              : 'bg-indigo-950/80 border-indigo-600/60 text-indigo-100 hover:border-indigo-400'
+                              ? 'bg-indigo-600/60 border-indigo-300 text-white ring-2 ring-indigo-400 shadow-xl'
+                              : 'bg-indigo-950/90 border-indigo-600 text-indigo-100 hover:border-indigo-400'
                           }`}
                           style={{
                             left: `${effectiveStart * zoomLevel}px`,
@@ -1203,17 +1189,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                           }}
                           title="Зажмите и перетащите мышкой для сдвига тайминга"
                         >
-                          {/* REAL AUDIO WAVEFORM CANVAS */}
-                          <div className="absolute inset-0 opacity-50 pointer-events-none">
-                            <PhraseWaveform
-                              phrase={block}
-                              width={Math.round(blockWidth)}
-                              height={70}
-                              volumePercent={block.volumePercent}
-                              audioBuffer={audioBuffersRef.current[track.id]}
-                            />
-                          </div>
-
                           <div className="relative z-10 flex items-center justify-between gap-1">
                             <div className="flex items-center gap-1 font-mono text-[9px] font-bold truncate">
                               {block.isFix && <span className="px-1 bg-amber-500 text-neutral-950 rounded font-black">FIX</span>}
@@ -1221,7 +1196,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                             </div>
                             <div className="flex items-center gap-1 shrink-0 text-[8px] font-mono">
                               {block.volumePercent && block.volumePercent !== 100 && (
-                                <span className="px-1 bg-amber-950 text-amber-300 border border-amber-800/80 rounded font-bold">
+                                <span className="px-1 bg-amber-950 text-amber-300 border border-amber-800 rounded font-bold">
                                   🔉 {block.volumePercent}%
                                 </span>
                               )}

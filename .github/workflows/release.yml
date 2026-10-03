@@ -22,8 +22,6 @@ permissions:
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: "true"
   YOUTUBE_DL_SKIP_DOWNLOAD: "true"
-  PYTHONIOENCODING: "utf-8"
-  PYTHONUTF8: "1"
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
@@ -129,7 +127,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
 
       - name: Build Portable AI Environment
         run: python scripts/build-ai-env.py --tag ${{ matrix.platform.tag }}
