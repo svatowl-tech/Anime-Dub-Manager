@@ -14,10 +14,34 @@ function registerMixingHandlers(getData, mainWindow) {
     }
   };
 
+  const createLogSender = (defaultStepId = null) => {
+    return (msg, level = 'info', meta = null) => {
+      const timestamp = new Date().toISOString();
+      const payload = {
+        stepId: defaultStepId,
+        message: typeof msg === 'string' ? msg : JSON.stringify(msg),
+        level: level || 'info',
+        meta: meta || null,
+        timestamp
+      };
+      sendProgress('mixing-log', payload);
+      // Also log to Node.js backend console
+      const prefix = defaultStepId ? `[MixingController:${defaultStepId}]` : '[MixingController]';
+      if (level === 'error') {
+        console.error(`${prefix} ❌ ${payload.message}`, meta || '');
+      } else if (level === 'warn') {
+        console.warn(`${prefix} ⚠️ ${payload.message}`, meta || '');
+      } else {
+        console.log(`${prefix} ${payload.message}`, meta || '');
+      }
+    };
+  };
+
   ipcMain.handle('mixing-get-status', wrapIpcHandler(async (event, { episode, targetDir }) => {
     if (!episode) throw new Error('Параметр серии обязателен');
     const config = await getData('config.json');
     const baseDir = config.baseDir || app.getPath('userData');
+    console.log(`[MixingController] get-status: episode=${episode?.number || 'unknown'}, targetDir=${targetDir || 'default'}`);
     return await MixingPipelineService.getStatus({ episode, targetDir, baseDir });
   }));
 
@@ -25,6 +49,7 @@ function registerMixingHandlers(getData, mainWindow) {
     if (!episode || !pipeline) throw new Error('Параметры серии и конвейера обязательны');
     const config = await getData('config.json');
     const baseDir = config.baseDir || app.getPath('userData');
+    console.log(`[MixingController] save-pipeline-config: ${pipeline.length} шагов`);
     return await MixingPipelineService.savePipelineConfig({ episode, targetDir, baseDir, pipeline });
   }));
 
@@ -41,9 +66,9 @@ function registerMixingHandlers(getData, mainWindow) {
       sendProgress('mixing-progress', p);
     };
 
-    const onLog = (msg, level) => {
-      sendProgress('mixing-log', { message: msg, level });
-    };
+    const onLog = createLogSender('import');
+
+    onLog(`Инициализация импорта файлов звукорежиссера для серии #${episode.number || 1}...`, 'info', { params });
 
     return await MixingPipelineService.importSoundEngineerFiles({
       episode,
@@ -72,8 +97,8 @@ function registerMixingHandlers(getData, mainWindow) {
       sendProgress('mixing-progress', { stepId, ...p });
     };
 
-    const onLog = (msg, level) => {
-      sendProgress('mixing-log', { stepId, message: msg, level });
+    const onLog = (msg, level = 'info', meta = null) => {
+      createLogSender(stepId)(msg, level, meta);
     };
 
     return await MixingPipelineService.runStep({
@@ -95,9 +120,7 @@ function registerMixingHandlers(getData, mainWindow) {
       sendProgress('mixing-progress', p);
     };
 
-    const onLog = (msg, level) => {
-      sendProgress('mixing-log', { message: msg, level });
-    };
+    const onLog = createLogSender('pipeline');
 
     return await MixingPipelineService.runAllSteps({
       episode,
@@ -185,18 +208,27 @@ function registerMixingHandlers(getData, mainWindow) {
     if (!episode) throw new Error('Параметр серии обязателен');
     const config = await getData('config.json');
     const baseDir = config.baseDir || app.getPath('userData');
+    const onLog = createLogSender('external_import');
+    const onProgress = (p) => {
+      sendProgress('mixing-progress', p);
+    };
+    onLog(`Импорт внешних файлов в сведение: video=${videoPath || 'нет'}, sub=${subPath || 'нет'}, audio=${audioPaths?.length || 0} шт.`, 'info');
     return await MixingPipelineService.importExternalFiles({
       episode,
       targetDir,
       baseDir,
       videoPath,
       subPath,
-      audioPaths
+      audioPaths,
+      onProgress,
+      onLog
     });
   }));
 
   // UVR Models Management
   ipcMain.handle('mixing-check-uvr-model', wrapIpcHandler(async (event, { modelId } = {}) => {
+    const onLog = createLogSender('model_check');
+    onLog(`Проверка статуса модели: ${modelId || 'uvr_denoise_lite'}`, 'debug');
     return await MixingPipelineService.checkUvrModelStatus({ modelId });
   }));
 
@@ -204,9 +236,7 @@ function registerMixingHandlers(getData, mainWindow) {
     const onProgress = (p) => {
       sendProgress('mixing-progress', p);
     };
-    const onLog = (msg, level) => {
-      sendProgress('mixing-log', { message: msg, level });
-    };
+    const onLog = createLogSender(modelId || 'uvr_model');
 
     return await MixingPipelineService.downloadUvrModel({
       modelId,

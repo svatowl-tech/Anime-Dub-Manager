@@ -32,12 +32,20 @@ import {
   Check, 
   Info,
   Maximize2,
+  Minimize2,
   Bookmark,
   Upload,
   Copy,
   FolderPlus,
   FilePlus,
-  Compass
+  Compass,
+  Terminal,
+  Search,
+  AlertTriangle,
+  AlertCircle,
+  XCircle,
+  FileDown,
+  RotateCcw
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { 
@@ -52,6 +60,17 @@ import {
 import { ipcSafe } from '../lib/ipcSafe';
 import { resolveLocalPath } from '../lib/webFileSystem';
 import { sanitizeFolderName } from '../lib/pathUtils';
+
+export interface MixingLogEntry {
+  id: string;
+  timestamp: string; // HH:mm:ss.ms
+  fullTime: string;  // ISO
+  level: 'info' | 'warn' | 'error' | 'debug' | 'success';
+  tag: string;
+  message: string;
+  stepId?: string;
+  meta?: any;
+}
 
 interface MixingPanelProps {
   currentEpisode?: Episode | null;
@@ -101,6 +120,95 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [isDownloadingUvrModel, setIsDownloadingUvrModel] = useState<boolean>(false);
   const [uvrDownloadPercent, setUvrDownloadPercent] = useState<number>(0);
 
+  // Process Logging & Live Terminal Console (Полное логирование сведения)
+  const [logs, setLogs] = useState<MixingLogEntry[]>([]);
+  const [isConsoleOpen, setIsConsoleOpen] = useState<boolean>(true); // Открыта по умолчанию для максимальной прозрачности
+  const [isConsoleExpanded, setIsConsoleExpanded] = useState<boolean>(false);
+  const [consoleFilter, setConsoleFilter] = useState<'all' | 'error' | 'warn' | 'info' | 'debug'>('all');
+  const [consoleSearch, setConsoleSearch] = useState<string>('');
+  const [autoScroll, setAutoScroll] = useState<boolean>(true);
+  const consoleBottomRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Universal Frontend Logger:
+   * 1. Direct colorized printing to browser/DevTools console with CSS styling
+   * 2. Live streaming buffer to UI Terminal Console with auto-scroll and inspection
+   */
+  const mixLog = useCallback((
+    level: 'info' | 'warn' | 'error' | 'debug' | 'success',
+    tag: string,
+    message: string,
+    meta?: any,
+    stepId?: string
+  ) => {
+    const d = new Date();
+    const timestamp = d.toLocaleTimeString('ru-RU', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    const fullTime = d.toISOString();
+
+    // DevTools Console Formatting
+    const tagStyle = 'color: #c084fc; font-weight: 700; background: rgba(168, 85, 247, 0.15); padding: 1px 6px; border-radius: 4px;';
+    const timeStyle = 'color: #94a3b8; font-weight: 500; font-family: monospace;';
+    const levelStyles: Record<string, string> = {
+      info: 'color: #38bdf8; font-weight: 600;',
+      success: 'color: #4ade80; font-weight: 700;',
+      warn: 'color: #facc15; font-weight: 700;',
+      error: 'color: #f87171; font-weight: 800;',
+      debug: 'color: #a1a1aa; font-style: italic;',
+    };
+
+    const consoleMethod = level === 'error' ? console.error : level === 'warn' ? console.warn : level === 'debug' ? console.debug : console.log;
+
+    if (meta !== undefined && meta !== null) {
+      consoleMethod(
+        `%c[Сведение видео]%c %c[${tag}]%c %c${timestamp}%c ${message}`,
+        'color: #a855f7; font-weight: bold;',
+        '',
+        tagStyle,
+        '',
+        timeStyle,
+        levelStyles[level] || '',
+        meta
+      );
+    } else {
+      consoleMethod(
+        `%c[Сведение видео]%c %c[${tag}]%c %c${timestamp}%c ${message}`,
+        'color: #a855f7; font-weight: bold;',
+        '',
+        tagStyle,
+        '',
+        timeStyle,
+        levelStyles[level] || ''
+      );
+    }
+
+    // UI Console State
+    setLogs(prev => {
+      const entry: MixingLogEntry = {
+        id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        timestamp,
+        fullTime,
+        level,
+        tag,
+        message,
+        stepId,
+        meta
+      };
+      const updated = [...prev, entry];
+      return updated.length > 800 ? updated.slice(updated.length - 800) : updated;
+    });
+
+    if (level === 'error') {
+      setIsConsoleOpen(true);
+    }
+  }, []);
+
+  // Auto-scroll terminal console
+  useEffect(() => {
+    if (autoScroll && isConsoleOpen && consoleBottomRef.current) {
+      consoleBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs, autoScroll, isConsoleOpen]);
+
   // Player state
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const trackAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -129,6 +237,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     if (!currentEpisode) return;
     try {
       setIsLoading(true);
+      mixLog('debug', 'Статус', `Запрос состояния сведения серии #${currentEpisode.number || 1}...`);
       const res: any = await ipcSafe.invoke('mixing-get-status', {
         episode: currentEpisode,
         targetDir: customTargetDir || undefined
@@ -139,27 +248,45 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         if (res.moduleDatabase) {
           setModuleDatabase(res.moduleDatabase);
         }
+        mixLog('info', 'Статус', `Состояние загружено: «${res.workingDir || ''}». Модулей: ${res.manifest.pipeline?.length || 0}. Исходных дорожек: ${res.manifest.sourceFiles?.dubberTracks?.length || 0}`, {
+          manifest: res.manifest,
+          workingDir: res.workingDir
+        });
       }
     } catch (e: any) {
-      console.error('Failed to load mixing status:', e);
+      mixLog('error', 'Статус', `Ошибка загрузки статуса сведения: ${e.message || String(e)}`, { error: e, stack: e.stack });
       toast.error(`Ошибка загрузки статуса сведения: ${e.message || String(e)}`);
     } finally {
       setIsLoading(false);
     }
-  }, [currentEpisode, customTargetDir]);
+  }, [currentEpisode, customTargetDir, mixLog]);
 
   useEffect(() => {
     loadStatus();
   }, [loadStatus]);
+
+  // Log episode selection changes
+  useEffect(() => {
+    if (currentEpisode) {
+      mixLog('info', 'Серия', `Инициализация серии #${currentEpisode.number || 1} [${currentEpisode.project?.title || 'Проект'}]`, {
+        episodeId: currentEpisode.id,
+        rawPath: currentEpisode.rawPath,
+        subPath: currentEpisode.subPath,
+        assignments: currentEpisode.assignments?.length || 0
+      });
+    }
+  }, [currentEpisode, mixLog]);
 
   // Set default target directory
   useEffect(() => {
     if (currentEpisode && !customTargetDir) {
       const pTitle = sanitizeFolderName(currentEpisode.project?.title || 'Project');
       const epNum = currentEpisode.number !== undefined ? currentEpisode.number : 1;
-      setCustomTargetDir(`Сведение/${pTitle}_Серия_${epNum}`);
+      const target = `Сведение/${pTitle}_Серия_${epNum}`;
+      setCustomTargetDir(target);
+      mixLog('debug', 'Папка', `Установлена рабочая директория по умолчанию: ${target}`);
     }
-  }, [currentEpisode]);
+  }, [currentEpisode, customTargetDir, mixLog]);
 
   // Resolve video URL for HTML5 video element
   useEffect(() => {
@@ -176,11 +303,18 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         if (!src.startsWith('http') && !src.startsWith('file://') && !src.startsWith('blob:')) {
           src = `file://${src}`;
         }
-        if (active) setVideoSrc(src);
+        if (active) {
+          setVideoSrc(src);
+          const fileName = vPath.split(/[/\\]/).pop() || src;
+          mixLog('debug', 'Видео', `Видеопоток подключен: ${fileName}`);
+        }
       } else {
         try {
           const resolved = await resolveLocalPath(vPath);
-          if (active) setVideoSrc(resolved);
+          if (active) {
+            setVideoSrc(resolved);
+            mixLog('debug', 'Видео', `Локальный видеопоток разрешен: ${vPath}`);
+          }
         } catch (e) {
           if (active) setVideoSrc(vPath);
         }
@@ -189,7 +323,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
     resolveVideo();
     return () => { active = false; };
-  }, [manifest?.finalVideo?.path, manifest?.sourceFiles?.video?.path, currentEpisode?.rawPath]);
+  }, [manifest?.finalVideo?.path, manifest?.sourceFiles?.video?.path, currentEpisode?.rawPath, mixLog]);
 
   // Listen to IPC progress and log events
   useEffect(() => {
@@ -205,14 +339,24 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         }
         if (data.message) {
           setImportStatusMessage(data.message);
+          mixLog('debug', 'Прогресс', `[${data.percent !== undefined ? data.percent + '%' : '...'}] ${data.message}`, data);
         }
+      }
+    });
+
+    const unsubLog = ipcSafe.on('mixing-log', (data: any) => {
+      if (data && data.message) {
+        const level = data.level === 'warn' ? 'warn' : data.level === 'error' ? 'error' : data.level === 'debug' ? 'debug' : 'info';
+        const tag = data.stepId ? `Шаг:${data.stepId}` : 'Сервер';
+        mixLog(level, tag, data.message, data.meta, data.stepId);
       }
     });
 
     return () => {
       if (unsubProgress) unsubProgress();
+      if (unsubLog) unsubLog();
     };
-  }, []);
+  }, [mixLog]);
 
   // Update volume & muting on audio/video elements
   useEffect(() => {
@@ -495,6 +639,12 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
     try {
       setIsSubmittingExternal(true);
+      mixLog('info', 'ВнешнийИмпорт', `Импорт сторонних материалов: video=${extVideoPath || 'нет'}, sub=${extSubPath || 'нет'}, audio=${extAudioPaths.length} шт.`, {
+        video: extVideoPath,
+        subtitles: extSubPath,
+        audioCount: extAudioPaths.length,
+        audioPaths: extAudioPaths
+      });
       toast.info('Импорт внешних файлов в сведение серии...');
 
       const res: any = await ipcSafe.invoke('mixing-import-external-files', {
@@ -508,6 +658,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       if (res && res.manifest) {
         setManifest(res.manifest);
         setWorkingDir(res.workingDir || '');
+        mixLog('success', 'ВнешнийИмпорт', `Внешние материалы успешно импортированы в сведение!`);
         toast.success('Внешние материалы успешно импортированы в сведение! 🎬');
         setIsExternalImportModalOpen(false);
         setExtVideoPath('');
@@ -516,6 +667,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         await loadStatus();
       }
     } catch (e: any) {
+      mixLog('error', 'ВнешнийИмпорт', `Ошибка импорта внешних файлов: ${e.message || String(e)}`, { error: e, stack: e.stack });
       console.error('Import external files error:', e);
       toast.error(`Ошибка импорта внешних файлов: ${e.message || String(e)}`);
     } finally {
@@ -538,6 +690,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       outputFiles: []
     };
     const newPipeline = [...manifest.pipeline, newStep];
+    mixLog('info', 'Конвейер', `Добавлен модуль «${modDef.title}» (префикс: ${newPrefix}) в позицию #${newIndex + 1}`);
     savePipeline(newPipeline);
     setIsAddModuleModalOpen(false);
     toast.success(`Модуль «${modDef.title}» добавлен в конвейер!`);
@@ -546,9 +699,16 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   // Execute single step
   const handleRunStep = async (stepId: string) => {
     if (!currentEpisode) return;
+    const targetStep = manifest?.pipeline?.find(s => s.stepId === stepId);
+    const stepMeta = targetStep ? getModuleMeta(targetStep.moduleId) : undefined;
+    const stepTitle = stepMeta?.title || targetStep?.moduleId || stepId;
     try {
       setActiveProcessingStepId(stepId);
       setStepProgress(prev => ({ ...prev, [stepId]: 5 }));
+      mixLog('info', 'Шаг', `🚀 Запуск шага конвейера: «${stepTitle}» (ID: ${stepId})`, {
+        params: targetStep?.params,
+        prefix: targetStep?.prefix
+      });
 
       const res: any = await ipcSafe.invoke('mixing-run-step', {
         episode: currentEpisode,
@@ -557,10 +717,19 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       });
 
       if (res && res.success) {
+        mixLog('success', 'Шаг', `✅ Шаг «${stepTitle}» успешно выполнен за ${res.durationSec || '?'}s! Сформировано файлов: ${res.outputFiles?.length || 0}`, {
+          outputFiles: res.outputFiles
+        });
         toast.success(`Шаг успешно выполнен! Файлы сохранены на диск. 🚀`);
         await loadStatus();
       }
     } catch (e: any) {
+      mixLog('error', 'Шаг', `❌ Сбой выполнения шага «${stepTitle}»: ${e.message || String(e)}`, {
+        error: e,
+        stack: e.stack,
+        stepId,
+        params: targetStep?.params
+      });
       console.error(`Run step error:`, e);
       toast.error(`Ошибка выполнения шага: ${e.message || String(e)}`);
     } finally {
@@ -572,8 +741,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   // Execute all enabled steps
   const handleRunAllSteps = async () => {
     if (!currentEpisode) return;
+    const enabledCount = manifest?.pipeline?.filter(s => s.enabled)?.length || 0;
     try {
       setActiveProcessingStepId('all');
+      mixLog('info', 'Конвейер', `🎬 Запуск полной цепочки сведения (${enabledCount} активных модулей)...`);
       toast.info('Запуск конвейера сведения по цепочке модулей...');
 
       const res: any = await ipcSafe.invoke('mixing-run-all-steps', {
@@ -582,10 +753,15 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       });
 
       if (res && res.success) {
+        mixLog('success', 'Конвейер', `🎉 Все активные модули сведения успешно выполнены!`, res);
         toast.success('Все активные модули сведения успешно выполнены! 🎉');
         await loadStatus();
       }
     } catch (e: any) {
+      mixLog('error', 'Конвейер', `❌ Критический сбой при выполнении конвейера сведения: ${e.message || String(e)}`, {
+        error: e,
+        stack: e.stack
+      });
       console.error('Run all steps error:', e);
       toast.error(`Ошибка при сведении: ${e.message || String(e)}`);
     } finally {
@@ -604,6 +780,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       setIsImporting(true);
       setImportProgress(5);
       setImportStatusMessage('Подготовка экспорта звукорежиссеру...');
+      mixLog('info', 'Импорт', `Запуск экспорта/импорта файлов звукорежиссера (тайминг: ${importAutoTiming}, фиксы: ${importAutoFixes}, субтитры: ${importSubtitles})...`);
 
       const res: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
         episode: currentEpisode,
@@ -619,10 +796,12 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       if (res && res.manifest) {
         setManifest(res.manifest);
         setWorkingDir(res.workingDir || '');
+        mixLog('success', 'Импорт', `Файлы звукорежиссера успешно импортированы в сведение!`);
         toast.success('Файлы звукорежиссера успешно импортированы в сведение серии! 🎉');
         setIsImportModalOpen(false);
       }
     } catch (e: any) {
+      mixLog('error', 'Импорт', `Ошибка импорта файлов звукорежиссера: ${e.message || String(e)}`, { error: e, stack: e.stack });
       console.error('Import sound engineer error:', e);
       toast.error(`Ошибка импорта файлов звукорежиссера: ${e.message || String(e)}`);
     } finally {
@@ -636,16 +815,22 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const handleSaveFinalVideo = async () => {
     if (!currentEpisode) return;
     try {
+      mixLog('info', 'ЭкспортВидео', `Запрос сохранения сведенного видео серии...`);
       const res: any = await ipcSafe.invoke('mixing-save-final-video', {
         episode: currentEpisode,
         targetDir: workingDir || customTargetDir
       });
 
-      if (res && res.canceled) return;
+      if (res && res.canceled) {
+        mixLog('debug', 'ЭкспортВидео', `Сохранение видео отменено пользователем`);
+        return;
+      }
       if (res && res.success) {
+        mixLog('success', 'ЭкспортВидео', `Готовое видео сохранено: ${res.savedPath}`);
         toast.success(`Готовое видео серии сохранено: ${res.savedPath} 🎬`);
       }
     } catch (e: any) {
+      mixLog('error', 'ЭкспортВидео', `Ошибка сохранения видео: ${e.message || String(e)}`, { error: e, stack: e.stack });
       toast.error(`Ошибка сохранения видео: ${e.message || String(e)}`);
     }
   };
@@ -653,8 +838,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   // Open folder in explorer
   const handleOpenFolder = async () => {
     try {
+      mixLog('debug', 'Папка', `Открытие рабочей папки: ${workingDir}`);
       await ipcSafe.invoke('mixing-open-folder', { folderPath: workingDir });
     } catch (e: any) {
+      mixLog('error', 'Папка', `Не удалось открыть папку: ${e.message || String(e)}`);
       toast.error(`Не удалось открыть папку: ${e.message || String(e)}`);
     }
   };
@@ -668,6 +855,11 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     try {
       setIsDownloadingUvrModel(true);
       setUvrDownloadPercent(5);
+      mixLog('info', 'Модель', `Запуск загрузки/инициализации нейромодели «${modelName}» (${sizeMb} МБ)...`, {
+        modelId: targetModelId,
+        urls: targetDef?.urls,
+        filename: targetDef?.filename
+      });
       toast.info(`Запуск загрузки модели ${modelName} (${sizeMb} МБ)...`);
 
       const res: any = await ipcSafe.invoke('mixing-download-uvr-model', {
@@ -675,17 +867,53 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       });
 
       if (res && res.success) {
+        mixLog('success', 'Модель', `Модель ${targetDef?.filename || modelName} успешно активирована!`, res);
         toast.success(`Модель ${targetDef?.filename || modelName} успешно активирована и готова к работе! 🛡`);
         await loadStatus();
       } else {
+        mixLog('error', 'Модель', `Не удалось активировать модель ${modelName}: ${res?.error || 'неизвестная ошибка'}`);
         toast.error(`Не удалось активировать модель ${modelName}`);
       }
     } catch (e: any) {
+      mixLog('error', 'Модель', `Ошибка загрузки модели ${modelName}: ${e.message || String(e)}`, { error: e, stack: e.stack });
       toast.error(`Ошибка загрузки модели: ${e.message || String(e)}`);
     } finally {
       setIsDownloadingUvrModel(false);
       setUvrDownloadPercent(0);
     }
+  };
+
+  // Copy all console logs to clipboard
+  const handleCopyLogs = () => {
+    const text = logs
+      .map(l => `[${l.timestamp}] [${l.level.toUpperCase()}] [${l.tag}] ${l.message}${l.meta ? '\n  ' + JSON.stringify(l.meta) : ''}`)
+      .join('\n');
+    navigator.clipboard.writeText(text);
+    toast.success(`Скопировано ${logs.length} строк логов в буфер обмена 📋`);
+    mixLog('debug', 'Консоль', `Все логи (${logs.length} записей) скопированы в буфер обмена`);
+  };
+
+  // Download logs to text file
+  const handleDownloadLogs = () => {
+    const header = `=== Лог процесса сведения видео ===\nСерия: #${currentEpisode?.number || 1} [${currentEpisode?.project?.title || 'Проект'}]\nДата выгрузки: ${new Date().toLocaleString('ru-RU')}\nВсего записей: ${logs.length}\n=====================================\n\n`;
+    const text = header + logs
+      .map(l => `[${l.fullTime}] [${l.level.toUpperCase()}] [${l.tag}] ${l.message}${l.meta ? '\n' + JSON.stringify(l.meta, null, 2) : ''}`)
+      .join('\n\n');
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `mixing_process_${currentEpisode?.number || 1}_${Date.now()}.log`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success('Лог-файл процесса сохранен на диск! 💾');
+    mixLog('info', 'Консоль', `Лог-файл сохранен (записей: ${logs.length})`);
+  };
+
+  // Clear console logs
+  const handleClearLogs = () => {
+    setLogs([]);
+    mixLog('info', 'Консоль', 'Консоль процесса очищена');
   };
 
   const PARAM_LABELS: Record<string, { label: string; unit?: string }> = {
@@ -875,6 +1103,26 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
               <FolderOpen className="w-4 h-4" />
             </button>
           )}
+
+          <button
+            onClick={() => setIsConsoleOpen(prev => !prev)}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition border ${
+              isConsoleOpen 
+                ? 'bg-purple-950/60 text-purple-300 border-purple-500/50 shadow-sm' 
+                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
+            }`}
+            title="Открыть / закрыть интерактивную консоль логирования сведения"
+          >
+            <Terminal className="w-4 h-4 text-purple-400" />
+            <span>Консоль</span>
+            {logs.some(l => l.level === 'error') ? (
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+            ) : (
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-neutral-900 text-neutral-400 font-mono">
+                {logs.length}
+              </span>
+            )}
+          </button>
 
           <button
             onClick={loadStatus}
@@ -1645,6 +1893,264 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             </div>
           )}
         </div>
+      </div>
+
+      {/* Dockable Live Process Console & Terminal (Интерактивная консоль логирования сведения) */}
+      <div className={`border-t border-neutral-800 bg-[#0b0c10] flex flex-col transition-all duration-200 z-20 ${
+        isConsoleOpen ? (isConsoleExpanded ? 'h-96' : 'h-64') : 'h-9'
+      }`}>
+        {/* Console Header Bar */}
+        <div className="bg-neutral-900/90 border-b border-neutral-800 px-4 py-1.5 flex items-center justify-between flex-shrink-0 select-none">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setIsConsoleOpen(prev => !prev)}
+              className="flex items-center gap-2 text-xs font-semibold text-neutral-200 hover:text-white transition"
+              title={isConsoleOpen ? 'Свернуть консоль' : 'Развернуть консоль'}
+            >
+              <div className="p-1 bg-purple-950/80 text-purple-400 rounded border border-purple-500/30">
+                <Terminal className="w-3.5 h-3.5" />
+              </div>
+              <span className="flex items-center gap-1.5 font-mono text-[11px] text-purple-300">
+                &gt;_ Консоль процесса сведения
+              </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-400 font-mono">
+                {logs.length}
+              </span>
+            </button>
+
+            {logs.filter(l => l.level === 'error').length > 0 && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-red-950/80 text-red-400 border border-red-800/80 flex items-center gap-1 font-mono animate-pulse">
+                <AlertCircle className="w-3 h-3" />
+                {logs.filter(l => l.level === 'error').length} ошибок
+              </span>
+            )}
+
+            {logs.filter(l => l.level === 'warn').length > 0 && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-950/80 text-amber-300 border border-amber-800/60 flex items-center gap-1 font-mono">
+                <AlertTriangle className="w-3 h-3" />
+                {logs.filter(l => l.level === 'warn').length} пред.
+              </span>
+            )}
+
+            {/* Preview of latest log when collapsed */}
+            {!isConsoleOpen && logs.length > 0 && (
+              <div className="text-[11px] font-mono text-neutral-400 truncate max-w-xl pl-2 border-l border-neutral-800">
+                <span className="text-neutral-500 mr-1.5">[{logs[logs.length - 1].timestamp}]</span>
+                <span className={
+                  logs[logs.length - 1].level === 'error' ? 'text-red-400 font-bold' :
+                  logs[logs.length - 1].level === 'warn' ? 'text-amber-400 font-semibold' :
+                  logs[logs.length - 1].level === 'success' ? 'text-emerald-400' : 'text-neutral-300'
+                }>
+                  {logs[logs.length - 1].message}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* Right Toolbar Controls */}
+          <div className="flex items-center gap-2">
+            {isConsoleOpen && (
+              <>
+                {/* Level Filters */}
+                <div className="flex items-center gap-1 bg-neutral-950 p-0.5 rounded border border-neutral-800 text-[10px] font-mono">
+                  {(['all', 'error', 'warn', 'info', 'debug'] as const).map(f => {
+                    const count = f === 'all' ? logs.length :
+                      f === 'error' ? logs.filter(l => l.level === 'error').length :
+                      f === 'warn' ? logs.filter(l => l.level === 'warn').length :
+                      f === 'info' ? logs.filter(l => l.level === 'info' || l.level === 'success').length :
+                      logs.filter(l => l.level === 'debug').length;
+                    return (
+                      <button
+                        key={f}
+                        onClick={() => setConsoleFilter(f)}
+                        className={`px-2 py-0.5 rounded transition ${
+                          consoleFilter === f 
+                            ? 'bg-purple-900/60 text-purple-200 font-semibold' 
+                            : 'text-neutral-400 hover:text-neutral-200'
+                        }`}
+                      >
+                        {f === 'all' ? `Все (${count})` :
+                         f === 'error' ? `Ошибки (${count})` :
+                         f === 'warn' ? `Внимание (${count})` :
+                         f === 'info' ? `Инфо (${count})` : `Отладка (${count})`}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Search in logs */}
+                <div className="relative flex items-center">
+                  <Search className="w-3 h-3 absolute left-2 text-neutral-500" />
+                  <input
+                    type="text"
+                    value={consoleSearch}
+                    onChange={(e) => setConsoleSearch(e.target.value)}
+                    placeholder="Поиск в логах..."
+                    className="pl-6 pr-2 py-0.5 bg-neutral-950 border border-neutral-800 rounded text-[11px] font-mono text-neutral-200 placeholder-neutral-500 w-32 focus:w-44 transition-all focus:outline-none focus:border-purple-500"
+                  />
+                  {consoleSearch && (
+                    <button
+                      onClick={() => setConsoleSearch('')}
+                      className="absolute right-1 text-neutral-500 hover:text-neutral-300 text-[10px]"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+
+                {/* Copy logs */}
+                <button
+                  onClick={handleCopyLogs}
+                  className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-[11px] flex items-center gap-1 font-mono transition"
+                  title="Скопировать все логи в буфер обмена"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span className="hidden sm:inline">Копия</span>
+                </button>
+
+                {/* Download log file */}
+                <button
+                  onClick={handleDownloadLogs}
+                  className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-[11px] flex items-center gap-1 font-mono transition"
+                  title="Скачать полный лог процесса (.log файл)"
+                >
+                  <FileDown className="w-3 h-3" />
+                  <span className="hidden sm:inline">Лог-файл</span>
+                </button>
+
+                {/* Clear logs */}
+                <button
+                  onClick={handleClearLogs}
+                  className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-[11px] flex items-center gap-1 font-mono transition"
+                  title="Очистить терминал"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span className="hidden sm:inline">Очистить</span>
+                </button>
+
+                {/* Auto-scroll toggle */}
+                <button
+                  onClick={() => setAutoScroll(prev => !prev)}
+                  className={`px-2 py-1 rounded text-[11px] flex items-center gap-1 font-mono transition border ${
+                    autoScroll 
+                      ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/50' 
+                      : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                  }`}
+                  title={autoScroll ? 'Автопрокрутка включена' : 'Автопрокрутка выключена'}
+                >
+                  <ArrowDown className={`w-3 h-3 ${autoScroll ? 'animate-bounce' : ''}`} />
+                  <span className="hidden sm:inline">Автоскролл</span>
+                </button>
+
+                {/* Height toggle */}
+                <button
+                  onClick={() => setIsConsoleExpanded(prev => !prev)}
+                  className="p-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-xs transition"
+                  title={isConsoleExpanded ? 'Уменьшить высоту' : 'Увеличить высоту'}
+                >
+                  {isConsoleExpanded ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
+                </button>
+              </>
+            )}
+
+            {/* Collapse / Expand Toggle */}
+            <button
+              onClick={() => setIsConsoleOpen(prev => !prev)}
+              className="p-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded transition"
+              title={isConsoleOpen ? 'Свернуть' : 'Развернуть'}
+            >
+              {isConsoleOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+            </button>
+          </div>
+        </div>
+
+        {/* Console Terminal Log Stream */}
+        {isConsoleOpen && (
+          <div className="flex-1 bg-[#090a0f] p-3 overflow-y-auto font-mono text-[11px] leading-relaxed select-text space-y-1">
+            {logs.length === 0 ? (
+              <div className="text-neutral-500 italic py-6 text-center text-xs">
+                Логов пока нет. Запустите импорт, модуль конвейера или воспроизведение серии для вывода процесса.
+              </div>
+            ) : (
+              logs
+                .filter(l => {
+                  if (consoleFilter === 'error' && l.level !== 'error') return false;
+                  if (consoleFilter === 'warn' && l.level !== 'warn') return false;
+                  if (consoleFilter === 'info' && (l.level !== 'info' && l.level !== 'success')) return false;
+                  if (consoleFilter === 'debug' && l.level !== 'debug') return false;
+                  if (consoleSearch.trim()) {
+                    const q = consoleSearch.toLowerCase();
+                    const matchMsg = l.message.toLowerCase().includes(q);
+                    const matchTag = l.tag.toLowerCase().includes(q);
+                    const matchStep = l.stepId ? l.stepId.toLowerCase().includes(q) : false;
+                    return matchMsg || matchTag || matchStep;
+                  }
+                  return true;
+                })
+                .map((logItem) => {
+                  const isErr = logItem.level === 'error';
+                  const isWarn = logItem.level === 'warn';
+                  const isSuccess = logItem.level === 'success';
+                  const isDebug = logItem.level === 'debug';
+
+                  return (
+                    <div
+                      key={logItem.id}
+                      className={`flex flex-col py-0.5 px-1.5 rounded transition ${
+                        isErr ? 'bg-red-950/30 border-l-2 border-red-500 text-red-200' :
+                        isWarn ? 'bg-amber-950/20 border-l-2 border-amber-500 text-amber-200' :
+                        isSuccess ? 'bg-emerald-950/20 border-l-2 border-emerald-500 text-emerald-200' :
+                        'hover:bg-neutral-900/40 text-neutral-300'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2">
+                        {/* Timestamp */}
+                        <span className="text-neutral-500 select-none shrink-0 font-mono text-[10px] mt-0.5">
+                          {logItem.timestamp}
+                        </span>
+
+                        {/* Level badge */}
+                        <span className={`px-1.5 py-0.2 rounded font-bold text-[9px] uppercase tracking-wider shrink-0 select-none mt-0.5 ${
+                          isErr ? 'bg-red-900/60 text-red-300 border border-red-700/60' :
+                          isWarn ? 'bg-amber-900/60 text-amber-300 border border-amber-700/60' :
+                          isSuccess ? 'bg-emerald-900/60 text-emerald-300 border border-emerald-700/60' :
+                          isDebug ? 'bg-neutral-800 text-neutral-400' :
+                          'bg-sky-950/80 text-sky-300 border border-sky-800/60'
+                        }`}>
+                          {logItem.level}
+                        </span>
+
+                        {/* Tag */}
+                        <span className="px-1.5 py-0.2 rounded bg-purple-950/40 text-purple-300 border border-purple-800/30 font-semibold text-[10px] shrink-0 select-none mt-0.5">
+                          {logItem.tag}
+                        </span>
+
+                        {/* Message */}
+                        <span className="flex-1 break-words select-text">
+                          {logItem.message}
+                        </span>
+                      </div>
+
+                      {/* Optional Expandable Meta or Stack Trace */}
+                      {logItem.meta && (
+                        <div className="ml-16 mt-1 text-[10px] text-neutral-400">
+                          <details className="cursor-pointer">
+                            <summary className="text-neutral-500 hover:text-neutral-300 select-none">
+                              ▸ Детали объекта (JSON / Stack Trace)
+                            </summary>
+                            <pre className="mt-1 p-2 bg-neutral-950/90 rounded border border-neutral-800/80 overflow-x-auto text-neutral-300 font-mono text-[10px] max-h-40">
+                              {typeof logItem.meta === 'string' ? logItem.meta : JSON.stringify(logItem.meta, null, 2)}
+                            </pre>
+                          </details>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+            )}
+            <div ref={consoleBottomRef} />
+          </div>
+        )}
       </div>
 
       {/* Modal: Import Sound Engineer Files */}

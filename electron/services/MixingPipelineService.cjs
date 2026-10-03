@@ -977,17 +977,65 @@ class MixingPipelineService {
     return await this.getStatus({ episode, targetDir: workingDir, baseDir });
   }
 
-  _extractAudioFromVideo(videoPath, outAudioPath) {
+  /**
+   * Universal FFmpeg executor with deep command/stderr/progress logging
+   */
+  _execFfmpeg(command, { logFn, onProgress, outPath, description = 'FFmpeg' } = {}) {
     return new Promise((resolve, reject) => {
-      ffmpeg(videoPath)
-        .noVideo()
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(48000)
-        .output(outAudioPath)
-        .on('end', () => resolve(outAudioPath))
-        .on('error', (err) => reject(err))
+      const lastStderr = [];
+      let commandLineStr = '';
+
+      command
+        .on('start', (cmdLine) => {
+          commandLineStr = cmdLine;
+          console.log(`[Mixing:FFmpeg] 🚀 ${description} -> START:\n  ${cmdLine}`);
+          if (logFn) logFn(`[FFmpeg] ${description}: ${cmdLine}`, 'debug');
+        })
+        .on('stderr', (stderrLine) => {
+          lastStderr.push(stderrLine);
+          if (lastStderr.length > 30) lastStderr.shift();
+          if (stderrLine.includes('Error') || stderrLine.includes('failed') || stderrLine.includes('Invalid') || stderrLine.includes('fatal')) {
+            console.warn(`[Mixing:FFmpeg:Stderr] ⚠️ ${stderrLine}`);
+          }
+        })
+        .on('progress', (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            onProgress(p);
+          }
+        })
+        .on('end', () => {
+          let sizeStr = '';
+          if (outPath && fsSync.existsSync(outPath)) {
+            const st = fsSync.statSync(outPath);
+            sizeStr = `(${(st.size / 1024 / 1024).toFixed(2)} MB)`;
+          }
+          console.log(`[Mixing:FFmpeg] ✅ ${description} успешно завершено ${sizeStr}`);
+          if (logFn) logFn(`[FFmpeg] Успешно: ${description} ${sizeStr}`, 'debug');
+          resolve(outPath);
+        })
+        .on('error', (err, stdout, stderr) => {
+          const detailStderr = (stderr || lastStderr.join('\n')).slice(-700);
+          const fullErrMsg = `[FFmpeg Ошибка] ${description}: ${err.message}${detailStderr ? `\nДетали stderr:\n${detailStderr}` : ''}`;
+          console.error(`[Mixing:FFmpeg:Fatal] ❌ ${fullErrMsg}\nКоманда: ${commandLineStr}`);
+          if (logFn) logFn(fullErrMsg, 'error', { commandLine: commandLineStr, stderr: detailStderr });
+          reject(new Error(fullErrMsg));
+        })
         .run();
+    });
+  }
+
+  _extractAudioFromVideo(videoPath, outAudioPath, logFn) {
+    const cmd = ffmpeg(videoPath)
+      .noVideo()
+      .audioCodec('pcm_s16le')
+      .audioChannels(2)
+      .audioFrequency(48000)
+      .output(outAudioPath);
+
+    return this._execFfmpeg(cmd, {
+      logFn,
+      outPath: outAudioPath,
+      description: `Извлечение оригинального аудио из ${path.basename(videoPath)}`
     });
   }
 
@@ -1002,11 +1050,22 @@ class MixingPipelineService {
     }
 
     const step = manifest.pipeline[stepIndex];
-    const logFn = (msg, level = 'info') => {
-      log.info(`[Mixing ${step.moduleId}] ${msg}`);
-      if (onLog) onLog(msg, level);
+    const logFn = (msg, level = 'info', meta = null) => {
+      const tag = `[Mixing:${step.moduleId}]`;
+      if (level === 'error') {
+        console.error(`${tag} ❌ ${msg}`, meta || '');
+        log.error(`${tag} ${msg}`);
+      } else if (level === 'warn') {
+        console.warn(`${tag} ⚠️ ${msg}`, meta || '');
+        log.warn(`${tag} ${msg}`);
+      } else {
+        console.log(`${tag} ${msg}`, meta || '');
+        log.info(`${tag} ${msg}`);
+      }
+      if (onLog) onLog(msg, level, { stepId: step.stepId, moduleId: step.moduleId, meta });
     };
 
+    const startTime = Date.now();
     step.status = 'processing';
     await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
@@ -1015,6 +1074,15 @@ class MixingPipelineService {
       await fs.mkdir(stepFolder, { recursive: true });
 
       const inputFiles = this._resolveInputsForStep(manifest, stepIndex);
+
+      logFn(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      logFn(`▶ [ШАГ ${stepIndex + 1}/${manifest.pipeline.length}] Запуск: «${step.title || step.moduleId}» (ID: ${step.moduleId})`);
+      logFn(`  Папка этапа: ${stepFolder}`);
+      logFn(`  Количество входных дорожек: ${inputFiles.length}`);
+      inputFiles.forEach((f, idx) => {
+        logFn(`    • [${idx + 1}/${inputFiles.length}] ${f.name} (путь: ${f.path})`, 'debug');
+      });
+      logFn(`  Параметры модуля: ${JSON.stringify(step.params || {})}`, 'debug', { params: step.params });
 
       let resultFiles = [];
       switch (step.moduleId) {
@@ -1064,6 +1132,7 @@ class MixingPipelineService {
           throw new Error(`Неизвестный тип модуля: ${step.moduleId}`);
       }
 
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(2);
       step.status = 'completed';
       step.outputFiles = resultFiles;
       step.error = null;
@@ -1074,18 +1143,34 @@ class MixingPipelineService {
       }
 
       await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-      logFn(`Шаг «${step.moduleId}» успешно выполнен и сохранен на диск!`);
+      logFn(`✔ Шаг «${step.moduleId}» успешно выполнен за ${elapsedSec}s! Создано файлов: ${resultFiles.length}`, 'info', {
+        stepId: step.stepId,
+        durationSec: elapsedSec,
+        outputFiles: resultFiles
+      });
+      resultFiles.forEach((f, idx) => {
+        logFn(`    ✓ [${idx + 1}/${resultFiles.length}] ${f.name} (${(f.size / (1024 * 1024)).toFixed(2)} MB)`, 'debug');
+      });
+      logFn(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
       return {
         success: true,
         stepId: step.stepId,
-        outputFiles: resultFiles
+        outputFiles: resultFiles,
+        durationSec: elapsedSec
       };
     } catch (err) {
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(2);
       step.status = 'error';
       step.error = err.message || String(err);
       await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-      logFn(`Ошибка шага ${step.moduleId}: ${err.message}`, 'error');
+      console.error(`[Mixing:Step:Error] 💥 Аварийная остановка шага ${step.moduleId} (${stepId}) за ${elapsedSec}s:`, err);
+      logFn(`💥 КРИТИЧЕСКАЯ ОШИБКА шага «${step.moduleId}» за ${elapsedSec}s: ${err.message}`, 'error', {
+        stack: err.stack,
+        stepId: step.stepId,
+        moduleId: step.moduleId,
+        params: step.params
+      });
       throw err;
     }
   }
@@ -1820,32 +1905,34 @@ class MixingPipelineService {
 
     logFn(`Склеивание ${inputFiles.length} дорожек в мастер-файл «${outName}» (Ratio ${ratio}:1, Knee ${kneeDb}dB)...`);
 
-    await new Promise((resolve, reject) => {
-      let command = ffmpeg();
-      inputFiles.forEach(t => { command = command.input(t.path); });
+    let command = ffmpeg();
+    inputFiles.forEach(t => { command = command.input(t.path); });
 
-      const n = inputFiles.length;
-      let filter = '';
-      if (n > 1) {
-        filter = `amix=inputs=${n}:dropout_transition=0:normalize=0,`;
-      }
-      filter += `acompressor=threshold=${thresholdDb}dB:ratio=${ratio}:attack=${attackMs}:release=${releaseMs}:knee=${kneeDb}dB:makeup=${makeupDb}dB,alimiter=limit=${peakLimitDb}dB`;
+    const n = inputFiles.length;
+    let filter = '';
+    if (n > 1) {
+      filter = `amix=inputs=${n}:dropout_transition=0:normalize=0,`;
+    }
+    filter += `acompressor=threshold=${thresholdDb}dB:ratio=${ratio}:attack=${attackMs}:release=${releaseMs}:knee=${kneeDb}dB:makeup=${makeupDb}dB,alimiter=limit=${peakLimitDb}dB`;
 
-      command
-        .complexFilter([filter])
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(48000)
-        .output(outPath)
-        .on('progress', (p) => {
-          if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Склейка голосов...' });
-        })
-        .on('end', () => resolve())
-        .on('error', (e) => reject(e))
-        .run();
+    command
+      .complexFilter([filter])
+      .audioCodec('pcm_s16le')
+      .audioChannels(2)
+      .audioFrequency(48000)
+      .output(outPath);
+
+    await this._execFfmpeg(command, {
+      logFn,
+      onProgress: (p) => {
+        if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Склейка голосов...' });
+      },
+      outPath,
+      description: `Склейка и компрессия ${n} дорожек`
     });
 
     const st = fsSync.statSync(outPath);
+    logFn(`Голосовой мастер-файл успешно склеен: ${outName} (${(st.size / (1024*1024)).toFixed(2)} MB)`);
     return [{ name: outName, path: outPath, size: st.size }];
   }
 
@@ -1866,7 +1953,7 @@ class MixingPipelineService {
       }
       origAudioPath = path.join(workingDir, '00_исходные', '00_original_audio.wav');
       await fs.mkdir(path.dirname(origAudioPath), { recursive: true });
-      await this._extractAudioFromVideo(vPath, origAudioPath);
+      await this._extractAudioFromVideo(vPath, origAudioPath, logFn);
     }
 
     let voicePath = inputFiles.find(f => f.name.includes('voices_master'))?.path;
@@ -1882,25 +1969,26 @@ class MixingPipelineService {
 
     const filter = `[0:a]volume=0.95[orig];[orig][1:a]sidechaincompress=threshold=${threshold}:ratio=4:attack=${attackMs}:release=${releaseMs}:makeup=1[ducked]`;
 
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(origAudioPath)
-        .input(voicePath)
-        .complexFilter(filter, ['ducked'])
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(48000)
-        .output(outPath)
-        .on('progress', (p) => {
-          if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Сайдчейн-даккинг...' });
-        })
-        .on('end', () => resolve())
-        .on('error', (e) => reject(e))
-        .run();
+    const duckCmd = ffmpeg()
+      .input(origAudioPath)
+      .input(voicePath)
+      .complexFilter(filter, ['ducked'])
+      .audioCodec('pcm_s16le')
+      .audioChannels(2)
+      .audioFrequency(48000)
+      .output(outPath);
+
+    await this._execFfmpeg(duckCmd, {
+      logFn,
+      onProgress: (p) => {
+        if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Сайдчейн-даккинг...' });
+      },
+      outPath,
+      description: 'Сайдчейн-даккинг оригинального звука под голос'
     });
 
     const st = fsSync.statSync(outPath);
-    logFn(`Даккинг завершен. Обработанный фоновый звук сохранен: ${outName}`);
+    logFn(`Даккинг завершен. Обработанный фоновый звук сохранен: ${outName} (${(st.size / (1024*1024)).toFixed(2)} MB)`);
     return [{ name: outName, path: outPath, size: st.size }];
   }
 
@@ -1945,25 +2033,26 @@ class MixingPipelineService {
 
     const filter = `[0:a]volume=${bgVolume},extrastereo=m=${stereoWidth}[bg];[1:a]volume=${voiceVolume}[voc];[bg][voc]amix=inputs=2:dropout_transition=0:normalize=0,alimiter=limit=${ceilingDb}dB:attack=5:release=${limiterReleaseMs}[mixout]`;
 
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(duckedAudioPath)
-        .input(voicePath)
-        .complexFilter(filter, ['mixout'])
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(48000)
-        .output(outPath)
-        .on('progress', (p) => {
-          if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Сведение мастер-аудио...' });
-        })
-        .on('end', () => resolve())
-        .on('error', (e) => reject(e))
-        .run();
+    const masterCmd = ffmpeg()
+      .input(duckedAudioPath)
+      .input(voicePath)
+      .complexFilter(filter, ['mixout'])
+      .audioCodec('pcm_s16le')
+      .audioChannels(2)
+      .audioFrequency(48000)
+      .output(outPath);
+
+    await this._execFfmpeg(masterCmd, {
+      logFn,
+      onProgress: (p) => {
+        if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Сведение мастер-аудио...' });
+      },
+      outPath,
+      description: 'Финальный мастер-микс аудиодорожек'
     });
 
     const st = fsSync.statSync(outPath);
-    logFn(`Финальный мастер-аудиофайл готов: ${outName}`);
+    logFn(`Финальный мастер-аудиофайл готов: ${outName} (${(st.size / (1024*1024)).toFixed(2)} MB)`);
     return [{ name: outName, path: outPath, size: st.size }];
   }
 
@@ -2006,18 +2095,19 @@ class MixingPipelineService {
       '-movflags +faststart'
     ];
 
-    await new Promise((resolve, reject) => {
-      ffmpeg()
-        .input(videoPath)
-        .input(masterAudioPath)
-        .outputOptions(outputOpts)
-        .output(finalVideoPath)
-        .on('progress', (p) => {
-          if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Сборка видео...' });
-        })
-        .on('end', () => resolve())
-        .on('error', (e) => reject(e))
-        .run();
+    const muxCmd = ffmpeg()
+      .input(videoPath)
+      .input(masterAudioPath)
+      .outputOptions(outputOpts)
+      .output(finalVideoPath);
+
+    await this._execFfmpeg(muxCmd, {
+      logFn,
+      onProgress: (p) => {
+        if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent), message: 'Сборка видео...' });
+      },
+      outPath: finalVideoPath,
+      description: `Сведение видео ${finalVideoName}`
     });
 
     const st = fsSync.statSync(finalVideoPath);
@@ -2030,7 +2120,7 @@ class MixingPipelineService {
       }
     } catch (e) {}
 
-    logFn(`Готовая сведенная серия создана: ${finalVideoName}`);
+    logFn(`Готовая сведенная серия создана: ${finalVideoName} (${(st.size / (1024*1024)).toFixed(2)} MB)`);
     return [finalVideoObj];
   }
 
@@ -2044,18 +2134,38 @@ class MixingPipelineService {
       throw new Error('Все шаги конвейера отключены. Включите хотя бы один модуль.');
     }
 
-    const logFn = (msg, level = 'info') => {
-      log.info(`[Mixing Pipeline] ${msg}`);
-      if (onLog) onLog(msg, level);
+    const logFn = (msg, level = 'info', meta = null) => {
+      const tag = '[Mixing:Pipeline]';
+      if (level === 'error') {
+        console.error(`${tag} ❌ ${msg}`, meta || '');
+        log.error(`${tag} ${msg}`);
+      } else if (level === 'warn') {
+        console.warn(`${tag} ⚠️ ${msg}`, meta || '');
+        log.warn(`${tag} ${msg}`);
+      } else {
+        console.log(`${tag} ${msg}`, meta || '');
+        log.info(`${tag} ${msg}`);
+      }
+      if (onLog) onLog(msg, level, { meta });
     };
 
-    logFn(`Запуск конвейера сведения (${enabledSteps.length} активных модулей)...`);
+    const startTime = Date.now();
+    logFn(`=======================================================`);
+    logFn(`🎬 НАЧАЛО ПОЛНОГО КОНВЕЙЕРА СВЕДЕНИЯ ВИДЕО`);
+    logFn(`  Серия: ${episode?.project?.title || 'Проект'} — Эпизод #${episode?.number || 1}`);
+    logFn(`  Рабочая директория: ${workingDir}`);
+    logFn(`  Всего активных модулей: ${enabledSteps.length}`);
+    enabledSteps.forEach((s, idx) => {
+      logFn(`    [${idx + 1}/${enabledSteps.length}] ${s.moduleId} (${s.title || ''})`);
+    });
+    logFn(`=======================================================`);
 
     for (let i = 0; i < enabledSteps.length; i++) {
       const step = enabledSteps[i];
       const stepPctStart = Math.round((i / enabledSteps.length) * 100);
       const stepPctEnd = Math.round(((i + 1) / enabledSteps.length) * 100);
 
+      logFn(`--- Запуск этапа ${i + 1}/${enabledSteps.length}: ${step.moduleId} ---`);
       if (onProgress) {
         onProgress({ percent: stepPctStart, message: `Шаг ${i+1}/${enabledSteps.length}: ${step.moduleId}...` });
       }
@@ -2075,8 +2185,10 @@ class MixingPipelineService {
       });
     }
 
+    const totalSec = ((Date.now() - startTime) / 1000).toFixed(2);
     if (onProgress) onProgress({ percent: 100, message: 'Все модули конвейера успешно выполнены!' });
-    logFn('Полный конвейер сведения успешно завершен!');
+    logFn(`🎉 Полный конвейер сведения успешно завершен за ${totalSec}s!`);
+    logFn(`=======================================================`);
 
     return await this.getStatus({ episode, targetDir: workingDir, baseDir });
   }
@@ -2562,7 +2674,9 @@ class MixingPipelineService {
     baseDir,
     videoPath,
     subPath,
-    audioPaths = []
+    audioPaths = [],
+    onProgress,
+    onLog
   }) {
     const workingDir = targetDir || this.getDefaultTargetDir(episode, baseDir);
     await fs.mkdir(workingDir, { recursive: true });
@@ -2570,22 +2684,42 @@ class MixingPipelineService {
     const rawDir = path.join(workingDir, '00_исходные');
     await fs.mkdir(rawDir, { recursive: true });
 
-    log.info(`[Mixing] Importing external standalone files into ${workingDir}...`);
+    const logFn = (msg, level = 'info', meta = null) => {
+      const tag = '[Mixing:ExternalImport]';
+      if (level === 'error') {
+        console.error(`${tag} ❌ ${msg}`, meta || '');
+        log.error(`${tag} ${msg}`);
+      } else if (level === 'warn') {
+        console.warn(`${tag} ⚠️ ${msg}`, meta || '');
+        log.warn(`${tag} ${msg}`);
+      } else {
+        console.log(`${tag} ${msg}`, meta || '');
+        log.info(`${tag} ${msg}`);
+      }
+      if (onLog) onLog(msg, level, { meta });
+      if (onProgress) onProgress({ message: msg, percent: undefined });
+    };
+
+    logFn(`Импорт внешних автономных файлов в папку: ${workingDir}`);
 
     // 1. Video
     if (videoPath && fsSync.existsSync(videoPath)) {
       const vName = path.basename(videoPath);
       const targetVideo = path.join(workingDir, vName);
+      logFn(`Копирование внешнего видео: ${vName}...`);
       if (path.resolve(videoPath) !== path.resolve(targetVideo)) {
         await fs.copyFile(videoPath, targetVideo);
       }
+      logFn(`Видео скопировано -> ${targetVideo}`);
 
       // Extract original audio track from imported video
       const origAudioOut = path.join(rawDir, '00_original_audio.wav');
+      logFn('Извлечение оригинального аудио из видеоряда...');
       try {
-        await this._extractAudioFromVideo(targetVideo, origAudioOut);
+        await this._extractAudioFromVideo(targetVideo, origAudioOut, logFn);
+        logFn('Оригинальное аудио успешно сохранено в исходные');
       } catch (e) {
-        log.warn('[Mixing] Could not extract original audio:', e.message);
+        logFn(`Внимание: не удалось извлечь оригинальное аудио: ${e.message}`, 'warn');
       }
     }
 
@@ -2593,23 +2727,27 @@ class MixingPipelineService {
     if (subPath && fsSync.existsSync(subPath)) {
       const sName = path.basename(subPath);
       const targetSub = path.join(workingDir, sName);
+      logFn(`Копирование субтитров: ${sName}...`);
       if (path.resolve(subPath) !== path.resolve(targetSub)) {
         await fs.copyFile(subPath, targetSub);
       }
+      logFn(`Субтитры скопированы -> ${targetSub}`);
     }
 
     // 3. Audio tracks
-    for (const aPath of audioPaths) {
+    for (let i = 0; i < audioPaths.length; i++) {
+      const aPath = audioPaths[i];
       if (aPath && fsSync.existsSync(aPath)) {
         const aName = path.basename(aPath);
         const targetAudio = path.join(rawDir, aName);
+        logFn(`[${i + 1}/${audioPaths.length}] Копирование аудиодорожки: ${aName}...`);
         if (path.resolve(aPath) !== path.resolve(targetAudio)) {
           await fs.copyFile(aPath, targetAudio);
         }
       }
     }
 
-    log.info(`[Mixing] External files imported successfully into ${workingDir}`);
+    logFn(`Все внешние материалы успешно импортированы в ${workingDir}`);
     return await this.getStatus({ episode, targetDir: workingDir, baseDir });
   }
 }
