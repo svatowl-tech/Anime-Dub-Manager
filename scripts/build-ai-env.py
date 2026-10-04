@@ -149,8 +149,18 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         raise FileNotFoundError(f"Virtual environment python executable not found at: {venv_python}")
 
     # 3. Upgrade pip, wheel, setuptools
-    print("\n[STEP 2] Upgrading pip, setuptools, wheel...")
-    run_cmd([str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel", "--no-cache-dir"])
+    # Note: DeepFilterNet 0.5.6 strictly requires `packaging>=23.0,<24.0`.
+    # Recent wheel (>=0.45) and setuptools (>=70) pull in packaging>=24.0, which causes ResolutionImpossible.
+    # We constrain setuptools and wheel to maintain full compatibility with DeepFilterNet.
+    print("\n[STEP 2] Upgrading pip, setuptools, wheel (DeepFilterNet compatible)...")
+    run_cmd([
+        str(venv_python), "-m", "pip", "install", "--upgrade",
+        "pip<25.0",
+        "setuptools<70.0.0",
+        "wheel<0.45.0",
+        "packaging>=23.0,<24.0",
+        "--no-cache-dir"
+    ])
 
     # 4. Install optimized PyTorch & dependencies
     print("\n[STEP 3] Installing PyTorch, DeepFilterNet3, Demucs v4 & audio packages...")
@@ -176,7 +186,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "scipy>=1.10.0",
         "librosa>=0.10.0",
         "tqdm>=4.65.0",
-        "packaging>=24.0",
+        "packaging>=23.0,<24.0",
         "einops>=0.7.0",
         "rotary-embedding-torch>=0.5.0",
         "requests>=2.31.0",
