@@ -538,6 +538,19 @@ class ExportService {
               await logStep(`[Экспорт] Дорожка фикса «${nick}» экспортирована: ${path.basename(fixOut)}`, 'info', dubberPercent);
             }
           }
+
+          // Export any additional original tracks/takes/layers from this dubber so nothing is lost
+          if (original && original.length > 1) {
+            const extraOriginals = original.filter(o => !latestOriginal || o.id !== latestOriginal.id);
+            for (let exIdx = 0; exIdx < extraOriginals.length; exIdx++) {
+              const extraFile = extraOriginals[exIdx];
+              const ext = path.extname(extraFile.path) || '.wav';
+              const extraName = getExportName(extraFile, false).replace(ext, `_дорожка${exIdx + 2}${ext}`);
+              const extraPath = path.join(targetDir, extraName);
+              await fs.copyFile(extraFile.path, extraPath);
+              await logStep(`[Экспорт] Дополнительная дорожка даббера «${nick}» (слой ${exIdx + 2}): ${extraName}`, 'info', dubberPercent);
+            }
+          }
         }
       }
 

@@ -1959,7 +1959,10 @@ class MixingPipelineService {
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
       const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const sameNickCount = inputFiles.filter(f => (f.dubberNick || `dubber`) === nick).length;
+      const nickOccurrences = inputFiles.slice(0, i + 1).filter(f => (f.dubberNick || `dubber`) === nick).length;
+      const trackSuffix = sameNickCount > 1 ? `_дорожка${nickOccurrences}` : '';
+      const outName = `${prefix}${nick}${trackSuffix}.wav`;
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] Рендеринг оттаймленной дорожки для «${nick}»...`);
@@ -2030,7 +2033,10 @@ class MixingPipelineService {
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
       const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const sameNickCount = inputFiles.filter(f => (f.dubberNick || `dubber`) === nick).length;
+      const nickOccurrences = inputFiles.slice(0, i + 1).filter(f => (f.dubberNick || `dubber`) === nick).length;
+      const trackSuffix = sameNickCount > 1 ? `_дорожка${nickOccurrences}` : '';
+      const outName = `${prefix}${nick}${trackSuffix}.wav`;
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] Вшитие фиксов в дорожку «${nick}»...`);
@@ -3549,10 +3555,13 @@ class MixingPipelineService {
     const sizeMb = modelDef?.size_mb || 40.0;
     const approxBytes = Math.round(sizeMb * 1024 * 1024);
 
-    // If an existing file on disk is smaller than 1MB, it is likely a corrupted previous placeholder
+    const isConfig = /\.(yaml|yml|json)$/i.test(filename);
+    const minValidExisting = isConfig ? 50 : 1024 * 1024;
+
+    // If an existing file on disk is smaller than threshold, it is likely a corrupted previous placeholder
     if (fsSync.existsSync(localModelFile)) {
       const existingSize = fsSync.statSync(localModelFile).size;
-      if (existingSize < 1024 * 1024) {
+      if (existingSize < minValidExisting) {
         log.warn(`[Mixing] Deleting corrupted previous placeholder file (${existingSize} bytes): ${localModelFile}`);
         try { fsSync.unlinkSync(localModelFile); } catch (e) {}
       } else {
@@ -3614,7 +3623,8 @@ class MixingPipelineService {
             res.on('end', () => {
               fileStream.end(async () => {
                 try {
-                  if (fsSync.existsSync(tempFile) && fsSync.statSync(tempFile).size > 1024 * 100) {
+                  const minTempValid = isConfig ? 50 : 1024 * 100;
+                  if (fsSync.existsSync(tempFile) && fsSync.statSync(tempFile).size > minTempValid) {
                     await fs.rename(tempFile, localModelFile);
                     const metaInfo = {
                       id: modelDef.id,
@@ -3682,7 +3692,8 @@ class MixingPipelineService {
         operationName: `Download Model ${filename}`
       });
 
-      if (fsSync.existsSync(localModelFile) && fsSync.statSync(localModelFile).size > 1024 * 512) {
+      const minPyValid = isConfig ? 50 : 1024 * 512;
+      if (fsSync.existsSync(localModelFile) && fsSync.statSync(localModelFile).size > minPyValid) {
         const sz = fsSync.statSync(localModelFile).size;
         const metaInfo = {
           id: modelDef.id,

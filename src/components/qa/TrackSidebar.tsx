@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, CheckCircle, Check, MessageSquare, Clock, Mic, Trash2, Sliders, Scissors, AlertTriangle, Headphones } from 'lucide-react';
+import { Activity, CheckCircle, Check, MessageSquare, Clock, Mic, Trash2, Sliders, Scissors, AlertTriangle, Headphones, Layers } from 'lucide-react';
 import { STATUS_MAP } from '../../constants';
 import { Track } from '../../types';
 import { NormalizationMetrics } from '../../lib/qa/audioNormalizer';
@@ -29,6 +29,8 @@ interface TrackSidebarProps {
   isAnalyzingGaps?: boolean;
   detectedGapsCount?: number;
   gapsByTrack?: Record<string, number>;
+  isSplitMultiTracks?: boolean;
+  onToggleSplitMultiTracks?: () => void;
 }
 
 export const TrackSidebar: React.FC<TrackSidebarProps> = ({
@@ -55,7 +57,9 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
   onOpenGapDetection,
   isAnalyzingGaps = false,
   detectedGapsCount = 0,
-  gapsByTrack = {}
+  gapsByTrack = {},
+  isSplitMultiTracks = true,
+  onToggleSplitMultiTracks
 }) => {
   return (
     <div className="w-80 border-r border-neutral-800 flex flex-col">
@@ -90,6 +94,27 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
             title={isAutoNormalize ? "Авто-нормализация громкости включена для QA превью (оригиналы на диске и в экспорте неизменны)" : "Нормализация отключена (воспроизведение в оригинальной громкости)"}
           >
             {isAutoNormalize ? 'Вкл' : 'Выкл'}
+          </button>
+        </div>
+      )}
+
+      {/* Split Multi-tracks / Versions Toggle */}
+      {onToggleSplitMultiTracks && (
+        <div className="px-3 py-1.5 bg-neutral-900/60 border-b border-neutral-800 flex items-center justify-between text-[11px]">
+          <div className="flex items-center gap-1.5 text-neutral-300">
+            <Layers className="w-3.5 h-3.5 text-purple-400" />
+            <span>Версии / слои:</span>
+          </div>
+          <button
+            onClick={onToggleSplitMultiTracks}
+            className={`px-2 py-0.5 rounded text-[10px] font-bold border transition ${
+              isSplitMultiTracks 
+                ? 'bg-purple-950/80 text-purple-300 border-purple-800/80 shadow-sm' 
+                : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+            }`}
+            title={isSplitMultiTracks ? "Все версии и дубли импортируются как параллельные дорожки (для перекрытий)" : "Версии сгруппированы в выпадающий список"}
+          >
+            {isSplitMultiTracks ? 'Раздельно (2+ дор.)' : 'В списке'}
           </button>
         </div>
       )}

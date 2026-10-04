@@ -27,13 +27,15 @@ import {
   Activity,
   Check,
   X,
-  FileAudio
+  FileAudio,
+  Settings
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Episode, Track, SubtitleLine, RoleAssignment } from '../types';
 import { ipcSafe } from '../lib/ipcSafe';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import { ExportModal } from './ExportModal';
+import { TimingSettingsModal, TimingSettings, DEFAULT_TIMING_SETTINGS } from './TimingSettingsModal';
 
 function parseTimeToSeconds(timeStr: string | number): number {
   if (typeof timeStr === 'number') return isNaN(timeStr) ? 0 : timeStr;
@@ -133,30 +135,133 @@ async function getPlayableAudioUrl(filePath: string): Promise<string | null> {
   return `file://${filePath.replace(/\\/g, '/')}`;
 }
 
+export interface NoiseCalibration {
+  noiseFloorDb: number;
+  speechFloorDb: number;
+  speechPeakDb: number;
+  calculatedThresholdDb: number;
+  thresholdAmp: number;
+  dynamicRangeDb: number;
+  snrDb: number;
+}
+
+/**
+ * Statistical Noise Floor & Speech Energy Analyzer.
+ * Accurately analyzes the track before silence cutting to detect true ambient room noise,
+ * speech dynamics, and safe threshold preventing clipping of quiet words or breaths.
+ */
+export function analyzeTrackAudioNoiseFloor(
+  audioBuffer: AudioBuffer,
+  manualThresholdDb?: number
+): NoiseCalibration {
+  const channelData = audioBuffer.getChannelData(0);
+  const sampleRate = audioBuffer.sampleRate;
+  const totalSamples = channelData.length;
+  
+  const windowSize = Math.max(128, Math.floor(sampleRate * 0.02)); // 20ms windows
+  const totalWindows = Math.floor(totalSamples / windowSize);
+  
+  // Sample up to 12000 windows across the file for fast, ultra-accurate distribution
+  const step = Math.max(1, Math.floor(totalWindows / 12000));
+  const rmsDbValues: number[] = [];
+
+  for (let w = 0; w < totalWindows; w += step) {
+    const offset = w * windowSize;
+    let sumSquares = 0;
+    for (let j = 0; j < windowSize; j++) {
+      const s = channelData[offset + j];
+      sumSquares += s * s;
+    }
+    const rms = Math.sqrt(sumSquares / windowSize);
+    const db = rms > 1e-5 ? 20 * Math.log10(rms) : -96;
+    rmsDbValues.push(db);
+  }
+
+  if (rmsDbValues.length === 0) {
+    return {
+      noiseFloorDb: -60,
+      speechFloorDb: -24,
+      speechPeakDb: -6,
+      calculatedThresholdDb: manualThresholdDb ?? -45,
+      thresholdAmp: Math.pow(10, (manualThresholdDb ?? -45) / 20),
+      dynamicRangeDb: 36,
+      snrDb: 36
+    };
+  }
+
+  rmsDbValues.sort((a, b) => a - b);
+  const n = rmsDbValues.length;
+
+  const noiseFloorDb = rmsDbValues[Math.floor(n * 0.15)]; // Room noise floor
+  const speechFloorDb = rmsDbValues[Math.floor(n * 0.75)]; // Speech median
+  const speechPeakDb = rmsDbValues[Math.floor(n * 0.98)];  // Speech peaks
+
+  let calculatedThresholdDb: number;
+  if (manualThresholdDb !== undefined && manualThresholdDb !== null && !isNaN(manualThresholdDb)) {
+    calculatedThresholdDb = manualThresholdDb;
+  } else {
+    const snr = speechFloorDb - noiseFloorDb;
+    if (snr > 14) {
+      const margin = Math.min(8.0, Math.max(3.5, snr * 0.20));
+      calculatedThresholdDb = Math.min(-34, noiseFloorDb + margin);
+    } else {
+      calculatedThresholdDb = Math.min(-32, noiseFloorDb + 2.5);
+    }
+    calculatedThresholdDb = Math.max(-65, Math.min(-30, calculatedThresholdDb));
+  }
+
+  const thresholdAmp = Math.pow(10, calculatedThresholdDb / 20);
+  const dynamicRangeDb = Number((speechPeakDb - noiseFloorDb).toFixed(1));
+  const snrDb = Number((speechFloorDb - noiseFloorDb).toFixed(1));
+
+  return {
+    noiseFloorDb: Number(noiseFloorDb.toFixed(1)),
+    speechFloorDb: Number(speechFloorDb.toFixed(1)),
+    speechPeakDb: Number(speechPeakDb.toFixed(1)),
+    calculatedThresholdDb: Number(calculatedThresholdDb.toFixed(1)),
+    thresholdAmp,
+    dynamicRangeDb,
+    snrDb
+  };
+}
+
 /**
  * Speech interval detection algorithm on decoded AudioBuffer.
- * Identifies speech phrases and silences, cutting away background noise and long pauses.
+ * Identifies speech phrases and silences with noise calibration, intra-word pause smoothing,
+ * and adaptive lead-in / lead-out padding so quiet consonants and breath tails are NEVER cut.
  */
 function detectSpeechIntervals(
   audioBuffer: AudioBuffer,
-  minSilenceDurationSec: number = 0.35,
-  paddingSec: number = 0.12
+  options: {
+    minSilenceDurationSec?: number;
+    leadInPaddingSec?: number;
+    leadOutPaddingSec?: number;
+    minSpeechDurationSec?: number;
+    mergeCloseGapsSec?: number;
+    manualThresholdDb?: number;
+    onCalibration?: (calib: NoiseCalibration) => void;
+  } = {}
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
+  const {
+    minSilenceDurationSec = 0.30,
+    leadInPaddingSec = 0.15,
+    leadOutPaddingSec = 0.22,
+    minSpeechDurationSec = 0.20,
+    mergeCloseGapsSec = 0.35,
+    manualThresholdDb,
+    onCalibration
+  } = options;
+
+  const calib = analyzeTrackAudioNoiseFloor(audioBuffer, manualThresholdDb);
+  if (onCalibration) onCalibration(calib);
+
   const channelData = audioBuffer.getChannelData(0);
   const sampleRate = audioBuffer.sampleRate;
   const totalSamples = channelData.length;
   const duration = audioBuffer.duration;
-  
-  // Find peak amplitude across the track to set dynamic threshold
-  let maxAmp = 0;
-  const stepCheck = Math.max(1, Math.floor(sampleRate * 0.1));
-  for (let i = 0; i < totalSamples; i += stepCheck) {
-    const a = Math.abs(channelData[i]);
-    if (a > maxAmp) maxAmp = a;
-  }
-  const thresholdAmp = Math.max(0.004, maxAmp * 0.08); // 8% of peak
+  const thresholdAmp = calib.thresholdAmp;
 
-  const chunkSize = Math.floor(sampleRate * 0.025); // 25ms windows
+  const chunkSize = Math.max(128, Math.floor(sampleRate * 0.02)); // 20ms chunks
   const totalChunks = Math.floor(totalSamples / chunkSize);
   const isSpeechChunk = new Uint8Array(totalChunks);
 
@@ -173,8 +278,8 @@ function detectSpeechIntervals(
     }
   }
 
-  // Smooth short pauses inside words (< minSilenceDurationSec)
-  const minSilenceChunks = Math.floor(minSilenceDurationSec / 0.025);
+  // Smooth short micro-pauses inside words (e.g. stop consonants like p, t, k < mergeCloseGapsSec)
+  const minSilenceChunks = Math.floor(mergeCloseGapsSec / 0.02);
   let gapCount = 0;
   for (let i = 0; i < totalChunks; i++) {
     if (isSpeechChunk[i] === 0) {
@@ -189,7 +294,7 @@ function detectSpeechIntervals(
     }
   }
 
-  const intervals: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
+  const rawIntervals: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
   let inSpeech = false;
   let intervalStartSec = 0;
 
@@ -197,12 +302,12 @@ function detectSpeechIntervals(
     const chunkTime = (i * chunkSize) / sampleRate;
     if (isSpeechChunk[i] === 1 && !inSpeech) {
       inSpeech = true;
-      intervalStartSec = Math.max(0, chunkTime - paddingSec);
+      intervalStartSec = Math.max(0, chunkTime - leadInPaddingSec);
     } else if (isSpeechChunk[i] === 0 && inSpeech) {
       inSpeech = false;
-      const intervalEndSec = Math.min(duration, chunkTime + paddingSec);
-      if (intervalEndSec - intervalStartSec >= 0.25) {
-        intervals.push({
+      const intervalEndSec = Math.min(duration, chunkTime + leadOutPaddingSec);
+      if (intervalEndSec - intervalStartSec >= minSpeechDurationSec) {
+        rawIntervals.push({
           startSec: Number(intervalStartSec.toFixed(2)),
           endSec: Number(intervalEndSec.toFixed(2)),
           durationSec: Number((intervalEndSec - intervalStartSec).toFixed(2))
@@ -213,8 +318,8 @@ function detectSpeechIntervals(
 
   if (inSpeech) {
     const intervalEndSec = duration;
-    if (intervalEndSec - intervalStartSec >= 0.25) {
-      intervals.push({
+    if (intervalEndSec - intervalStartSec >= minSpeechDurationSec) {
+      rawIntervals.push({
         startSec: Number(intervalStartSec.toFixed(2)),
         endSec: Number(intervalEndSec.toFixed(2)),
         durationSec: Number((intervalEndSec - intervalStartSec).toFixed(2))
@@ -222,7 +327,24 @@ function detectSpeechIntervals(
     }
   }
 
-  return intervals;
+  // Merge intervals if silence between them is less than minSilenceDurationSec
+  const finalIntervals: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
+  for (const interval of rawIntervals) {
+    if (finalIntervals.length === 0) {
+      finalIntervals.push({ ...interval });
+    } else {
+      const last = finalIntervals[finalIntervals.length - 1];
+      const gap = interval.startSec - last.endSec;
+      if (gap < minSilenceDurationSec) {
+        last.endSec = Math.max(last.endSec, interval.endSec);
+        last.durationSec = Number((last.endSec - last.startSec).toFixed(2));
+      } else {
+        finalIntervals.push({ ...interval });
+      }
+    }
+  }
+
+  return finalIntervals;
 }
 
 /**
@@ -306,6 +428,9 @@ export interface AudioClip {
   isFix?: boolean;          // Flag for spliced fix takes
   hasCollision?: boolean;   // Collision with another actor
   offsetSec: number;        // Manual mouse drag offset
+  rawSourceStartSec?: number; // Detected start before any manual trim/expansion
+  rawSourceEndSec?: number;   // Detected end before any manual trim/expansion
+  isSelfOverlap?: boolean;    // Intentional parallel layer between 2 tracks of same dubber
 }
 
 export interface StitchedFixMarker {
@@ -358,8 +483,37 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [operationLogs, setOperationLogs] = useState<Array<{ time: string; msg: string; level: 'info' | 'success' | 'warn' | 'error' }>>([]);
   const [trackSubLinesMap, setTrackSubLinesMap] = useState<Record<string, SubtitleLine[]>>({});
 
-  // Mouse Dragging State for Clips
-  const [draggingClip, setDraggingClip] = useState<{ trackId: string; clipId: string; startMouseX: number; initialClipStartSec: number } | null>(null);
+  // Timing & Silence Settings Modal
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState<boolean>(false);
+  const [timingSettings, setTimingSettings] = useState<TimingSettings>(() => {
+    try {
+      const saved = localStorage.getItem('timing_settings');
+      if (saved) return { ...DEFAULT_TIMING_SETTINGS, ...JSON.parse(saved) };
+    } catch (e) {}
+    return DEFAULT_TIMING_SETTINGS;
+  });
+  const [calibrationsByTrack, setCalibrationsByTrack] = useState<Record<string, NoiseCalibration>>({});
+
+  const handleSaveSettings = (newSettings: TimingSettings) => {
+    setTimingSettings(newSettings);
+    try {
+      localStorage.setItem('timing_settings', JSON.stringify(newSettings));
+    } catch (e) {}
+    toast.success('Настройки тайминга и удаления тишины сохранены!');
+  };
+
+  // Mouse Dragging & Resizing State for Clips (DAW-style trim and expand)
+  const [draggingClip, setDraggingClip] = useState<{
+    type: 'move' | 'resize-start' | 'resize-end';
+    trackId: string;
+    clipId: string;
+    startMouseX: number;
+    initialClipStartSec: number;
+    initialDurationSec: number;
+    initialSourceStartSec: number;
+    initialSourceEndSec: number;
+  } | null>(null);
+
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
   const addLog = useCallback((msg: string, level: 'info' | 'success' | 'warn' | 'error' = 'info') => {
@@ -399,27 +553,89 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
   const audioBuffersRef = useRef<Record<string, AudioBuffer>>({});
 
-  // Mouse Dragging Effect for Real Audio Clips
+  // Mouse Dragging & Resizing (DAW Trim/Expand into Silence)
   useEffect(() => {
     if (!draggingClip) return;
     const handleMouseMove = (e: MouseEvent) => {
       const deltaX = e.clientX - draggingClip.startMouseX;
       const deltaSec = deltaX / zoomLevel;
-      setAudioClips(prev => {
-        const trClips = prev[draggingClip.trackId] || [];
-        const updated = trClips.map(clip => {
-          if (clip.id === draggingClip.clipId) {
-            const newStart = Math.max(0, Number((draggingClip.initialClipStartSec + deltaSec).toFixed(2)));
-            return { ...clip, clipStartSec: newStart, offsetSec: 0 };
-          }
-          return clip;
+
+      if (draggingClip.type === 'move') {
+        setAudioClips(prev => {
+          const trClips = prev[draggingClip.trackId] || [];
+          const updated = trClips.map(clip => {
+            if (clip.id === draggingClip.clipId) {
+              const newStart = Math.max(0, Number((draggingClip.initialClipStartSec + deltaSec).toFixed(2)));
+              return { ...clip, clipStartSec: newStart, offsetSec: 0 };
+            }
+            return clip;
+          });
+          return { ...prev, [draggingClip.trackId]: updated };
         });
-        return { ...prev, [draggingClip.trackId]: updated };
-      });
+      } else if (draggingClip.type === 'resize-start') {
+        // Dragging left (deltaSec < 0) -> expands earlier into source audio from silence!
+        // Dragging right (deltaSec > 0) -> trims start inwards!
+        const maxBackwardsExpandSec = draggingClip.initialSourceStartSec;
+        const clampedDelta = Math.max(-maxBackwardsExpandSec, deltaSec);
+        const maxTrimInwards = draggingClip.initialDurationSec - 0.10;
+        const finalDelta = Math.min(maxTrimInwards, clampedDelta);
+
+        const newClipStart = Math.max(0, Number((draggingClip.initialClipStartSec + finalDelta).toFixed(2)));
+        const newSourceStart = Math.max(0, Number((draggingClip.initialSourceStartSec + finalDelta).toFixed(2)));
+        const newDuration = Math.max(0.10, Number((draggingClip.initialDurationSec - finalDelta).toFixed(2)));
+
+        setAudioClips(prev => {
+          const trClips = prev[draggingClip.trackId] || [];
+          const updated = trClips.map(clip => {
+            if (clip.id === draggingClip.clipId) {
+              return {
+                ...clip,
+                clipStartSec: newClipStart,
+                sourceStartSec: newSourceStart,
+                durationSec: newDuration,
+                sourceEndSec: Number((newSourceStart + newDuration).toFixed(2)),
+                offsetSec: 0
+              };
+            }
+            return clip;
+          });
+          return { ...prev, [draggingClip.trackId]: updated };
+        });
+      } else if (draggingClip.type === 'resize-end') {
+        // Dragging right (deltaSec > 0) -> expands tail forwards into un-cut audio!
+        // Dragging left (deltaSec < 0) -> trims tail inwards!
+        const trackBuffer = audioBuffersRef.current[draggingClip.trackId];
+        const maxSourceDuration = trackBuffer ? trackBuffer.duration : 3600;
+        const maxForwardsExpandSec = Math.max(0, maxSourceDuration - draggingClip.initialSourceEndSec);
+
+        const clampedDelta = Math.min(maxForwardsExpandSec, deltaSec);
+        const maxTrimBackwards = -(draggingClip.initialDurationSec - 0.10);
+        const finalDelta = Math.max(maxTrimBackwards, clampedDelta);
+
+        const newDuration = Math.max(0.10, Number((draggingClip.initialDurationSec + finalDelta).toFixed(2)));
+        const newSourceEnd = Math.min(maxSourceDuration, Number((draggingClip.initialSourceEndSec + finalDelta).toFixed(2)));
+
+        setAudioClips(prev => {
+          const trClips = prev[draggingClip.trackId] || [];
+          const updated = trClips.map(clip => {
+            if (clip.id === draggingClip.clipId) {
+              return {
+                ...clip,
+                durationSec: newDuration,
+                sourceEndSec: newSourceEnd
+              };
+            }
+            return clip;
+          });
+          return { ...prev, [draggingClip.trackId]: updated };
+        });
+      }
     };
+
     const handleMouseUp = () => {
       setDraggingClip(null);
     };
+
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
     return () => {
@@ -432,11 +648,89 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     e.stopPropagation();
     setSelectedClipId(clip.id);
     setDraggingClip({
+      type: 'move',
       trackId,
       clipId: clip.id,
       startMouseX: e.clientX,
-      initialClipStartSec: clip.clipStartSec + (clip.offsetSec || 0)
+      initialClipStartSec: clip.clipStartSec + (clip.offsetSec || 0),
+      initialDurationSec: clip.durationSec,
+      initialSourceStartSec: clip.sourceStartSec,
+      initialSourceEndSec: clip.sourceEndSec
     });
+  };
+
+  const handleResizeMouseDown = (e: React.MouseEvent, trackId: string, clip: AudioClip, edge: 'start' | 'end') => {
+    e.stopPropagation();
+    setSelectedClipId(clip.id);
+    setDraggingClip({
+      type: edge === 'start' ? 'resize-start' : 'resize-end',
+      trackId,
+      clipId: clip.id,
+      startMouseX: e.clientX,
+      initialClipStartSec: clip.clipStartSec + (clip.offsetSec || 0),
+      initialDurationSec: clip.durationSec,
+      initialSourceStartSec: clip.sourceStartSec,
+      initialSourceEndSec: clip.sourceEndSec
+    });
+  };
+
+  const handleExpandClip = (trackId: string, clipId: string, side: 'start' | 'end', deltaSec: number) => {
+    setAudioClips(prev => {
+      const trClips = prev[trackId] || [];
+      const trackBuffer = audioBuffersRef.current[trackId];
+      const maxSourceDuration = trackBuffer ? trackBuffer.duration : 3600;
+
+      const updated = trClips.map(clip => {
+        if (clip.id === clipId) {
+          if (side === 'start') {
+            const actualDelta = Math.min(clip.sourceStartSec, deltaSec);
+            const newClipStart = Math.max(0, Number((clip.clipStartSec - actualDelta).toFixed(2)));
+            const newSourceStart = Math.max(0, Number((clip.sourceStartSec - actualDelta).toFixed(2)));
+            const newDuration = Number((clip.durationSec + actualDelta).toFixed(2));
+            return {
+              ...clip,
+              clipStartSec: newClipStart,
+              sourceStartSec: newSourceStart,
+              durationSec: newDuration,
+              sourceEndSec: Number((newSourceStart + newDuration).toFixed(2))
+            };
+          } else {
+            const availableEnd = Math.max(0, maxSourceDuration - clip.sourceEndSec);
+            const actualDelta = Math.min(availableEnd, deltaSec);
+            const newDuration = Number((clip.durationSec + actualDelta).toFixed(2));
+            const newSourceEnd = Number((clip.sourceEndSec + actualDelta).toFixed(2));
+            return {
+              ...clip,
+              durationSec: newDuration,
+              sourceEndSec: newSourceEnd
+            };
+          }
+        }
+        return clip;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+    toast.success(`Клип расширен на +${deltaSec}с (${side === 'start' ? 'начало' : 'хвост'})`);
+  };
+
+  const handleResetClipToOriginal = (trackId: string, clipId: string) => {
+    setAudioClips(prev => {
+      const trClips = prev[trackId] || [];
+      const updated = trClips.map(clip => {
+        if (clip.id === clipId && clip.rawSourceStartSec !== undefined && clip.rawSourceEndSec !== undefined) {
+          const origDur = Math.max(0.1, clip.rawSourceEndSec - clip.rawSourceStartSec);
+          return {
+            ...clip,
+            sourceStartSec: clip.rawSourceStartSec,
+            sourceEndSec: clip.rawSourceEndSec,
+            durationSec: origDur
+          };
+        }
+        return clip;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+    toast.info('Границы клипа сброшены к начальной детекции');
   };
 
   const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -568,6 +862,28 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         }
       }
 
+      // Ensure ALL uploaded files from the dubbers in currentEpisode.uploads are imported (multi-tracks, versions, fixes)
+      const existingPaths = new Set(dubberTracks.map((dt: any) => dt.path));
+      for (const u of (currentEpisode.uploads || [])) {
+        if ((u.type === 'DUBBER_FILE' || u.type === 'FIXES') && u.path && !existingPaths.has(u.path)) {
+          const assign = currentEpisode.assignments?.find(a => 
+            a.id === u.assignmentId || 
+            a.dubberId === u.uploadedById || 
+            a.substituteId === u.uploadedById
+          );
+          const dubberNick = assign?.substitute?.nickname || assign?.dubber?.nickname || u.uploadedBy?.nickname || 'Даббер';
+          const charName = assign?.characterName || 'Персонаж';
+          dubberTracks.push({
+            path: u.path,
+            dubberNick,
+            characterName: charName,
+            type: u.type,
+            name: u.path.split(/[/\\]/).pop() || 'track.wav'
+          });
+          existingPaths.add(u.path);
+        }
+      }
+
       const matchRes: any = await ipcSafe.invoke('match-actors-tracks', {
         episode: currentEpisode,
         audioFiles: dubberTracks
@@ -575,18 +891,34 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
       const matchedList = matchRes?.matchedTracks || [];
 
+      // Count tracks per dubber to label parallel tracks/takes/layers
+      const nickCounter: Record<string, number> = {};
+      const nickTotals: Record<string, number> = {};
+      dubberTracks.forEach((dt: any) => {
+        const n = dt.dubberNick || 'Даббер';
+        nickTotals[n] = (nickTotals[n] || 0) + 1;
+      });
+
       const fetchedTracks: Track[] = dubberTracks.map((dt: any, idx: number) => {
-        const matched = matchedList.find((m: any) => m.trackPath === dt.path || m.dubberNick === dt.dubberNick);
+        const matched = matchedList.find((m: any) => m.trackPath === dt.path);
         const charName = matched?.characterName || dt.characterName || dt.dubberNick || 'Персонаж';
-        const dubberNick = matched?.dubberNick || dt.dubberNick || 'Даббер';
+        const rawDubberNick = matched?.dubberNick || dt.dubberNick || 'Даббер';
+        
+        const count = (nickCounter[rawDubberNick] || 0) + 1;
+        nickCounter[rawDubberNick] = count;
+        const total = nickTotals[rawDubberNick] || 1;
+
+        const isFixFile = (dt.type === 'FIXES') || (dt.path || '').toLowerCase().includes('fix') || (dt.path || '').toLowerCase().includes('фикс');
+        const trackLabel = isFixFile ? `Фикс` : `Дорожка ${count}`;
+        const displayName = total > 1 ? `${rawDubberNick} [${trackLabel}]` : rawDubberNick;
 
         return {
-          id: `track_${normalizeName(dubberNick)}_${idx}`,
+          id: `track_${normalizeName(rawDubberNick)}_${count}_${idx}`,
           projectId: currentEpisode.projectId,
           episodeId: currentEpisode.id,
-          participant: dubberNick,
+          participant: displayName,
           character: charName,
-          dubberName: dubberNick,
+          dubberName: displayName,
           characterName: charName,
           filePath: dt.path,
           role: 'dubber',
@@ -595,7 +927,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       });
 
       setTracks(fetchedTracks);
-      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов.`, fetchedTracks.length > 0 ? 'success' : 'warn');
+      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов (включая параллельные слои и версии).`, fetchedTracks.length > 0 ? 'success' : 'warn');
 
       // 3. Decode Real AudioBuffers for Every Track
       const sharedAudioCtx = getSharedAudioContext();
@@ -714,7 +1046,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // PIPELINE STEP 3: "Удалить тишину" — Real VAD Silence Cutting & DAW Clip Slicing
+  // PIPELINE STEP 3: "Удалить тишину" — Real VAD Silence Cutting with Noise Floor Auto-Calibration
   const handleCutSilence = async () => {
     if (tracks.length === 0) {
       toast.error('Нет загруженных дорожек');
@@ -722,11 +1054,12 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
     try {
       setIsLoading(true);
-      setStatusMessage('Нарезка аудио-вейвформ по паузам и удаление тишины...');
-      addLog('Запуск анализа энергии аудиосигнала и нарезки на речевые фразы...', 'info');
+      setStatusMessage('Авто-калибровка шума и удаление тишины...');
+      addLog('Запуск анализа энергии аудиосигнала и авто-калибровки шума/тишины перед нарезкой...', 'info');
 
       const updatedClips: Record<string, AudioClip[]> = {};
       let totalClips = 0;
+      const newCalibrations: Record<string, NoiseCalibration> = {};
 
       for (const track of tracks) {
         const audioBuf = audioBuffersRef.current[track.id];
@@ -735,9 +1068,21 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         const trSubs = trackSubLinesMap[track.id] || [];
 
         if (audioBuf) {
-          // Detect speech intervals in audio signal
-          const intervals = detectSpeechIntervals(audioBuf);
-          addLog(`🎙 Дорожка «${dubberName}»: обнаружено ${intervals.length} речевых фраз. Тишина между ними вырезана.`, 'info');
+          // Detect speech intervals with automatic noise floor calibration and safety margins
+          const intervals = detectSpeechIntervals(audioBuf, {
+            minSilenceDurationSec: timingSettings.minSilenceDurationSec,
+            leadInPaddingSec: timingSettings.leadInPaddingSec,
+            leadOutPaddingSec: timingSettings.leadOutPaddingSec,
+            minSpeechDurationSec: timingSettings.minSpeechDurationSec,
+            mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
+            manualThresholdDb: timingSettings.autoAnalyzeNoiseFloor ? undefined : timingSettings.silenceThresholdDb,
+            onCalibration: (calib) => {
+              newCalibrations[track.id] = calib;
+              addLog(`📊 Авто-калибровка «${dubberName}»: Шум: ${calib.noiseFloorDb} dB, Речь: ${calib.speechFloorDb} dB, Порог: ${calib.calculatedThresholdDb} dB (Запас: ${Math.round(timingSettings.leadInPaddingSec * 1000)}/${Math.round(timingSettings.leadOutPaddingSec * 1000)} мс)`, 'info');
+            }
+          });
+
+          addLog(`🎙 Дорожка «${dubberName}»: обнаружено ${intervals.length} полезных речевых фраз. Тишина между ними удалена.`, 'info');
 
           updatedClips[track.id] = intervals.map((iv, idx) => {
             // Find matching subtitle text
@@ -756,6 +1101,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               durationSec: iv.durationSec,
               sourceStartSec: iv.startSec,
               sourceEndSec: iv.endSec,
+              rawSourceStartSec: iv.startSec,
+              rawSourceEndSec: iv.endSec,
               text: matchingSub?.text || `Фраза ${idx + 1}`,
               volumePercent: 100,
               isFix: false,
@@ -776,6 +1123,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               durationSec: Math.max(0.4, sub.endSec - sub.startSec),
               sourceStartSec: sub.startSec,
               sourceEndSec: sub.endSec,
+              rawSourceStartSec: sub.startSec,
+              rawSourceEndSec: sub.endSec,
               text: sub.text,
               volumePercent: 100,
               isFix: false,
@@ -786,10 +1135,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         }
       }
 
+      setCalibrationsByTrack(newCalibrations);
       setAudioClips(updatedClips);
       setIsSilenceRemoved(true);
-      addLog(`✓ Удаление тишины завершено! Сформировано ${totalClips} отдельных речевых клипов. Тишина между фразами удалена (пустое пространство).`, 'success');
-      toast.success(`Тишина удалена! Вейвформы нарезаны на ${totalClips} отдельных речевых фраз.`);
+      addLog(`✓ Удаление тишины с авто-калибровкой завершено! Сформировано ${totalClips} отдельных речевых клипов. Все границы можно свободно расширять за края.`, 'success');
+      toast.success(`Тишина удалена! Вейвформы нарезаны на ${totalClips} фраз с защитой от съедания согласных и хвостов.`);
     } catch (err: any) {
       addLog(`❌ Ошибка удаления тишины: ${err.message}`, 'error');
       toast.error(`Ошибка: ${err.message}`);
@@ -980,21 +1330,32 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               const overlapEnd = Math.min(c1End, c2End);
               const overlapDur = overlapEnd - overlapStart;
 
-              if (overlapDur > 0.15) {
-                c1.hasCollision = true;
-                c2.hasCollision = true;
-                newCollisions.push({
-                  id: `col_${c1.id}_${c2.id}`,
-                  track1Id: trackIds[i],
-                  track2Id: trackIds[j],
-                  dubber1Name: c1.dubberName,
-                  dubber2Name: c2.dubberName,
-                  character1Name: c1.characterName,
-                  character2Name: c2.characterName,
-                  startSec: overlapStart,
-                  endSec: overlapEnd,
-                  overlapDurationSec: Number(overlapDur.toFixed(2))
-                });
+              if (overlapDur > 0.12) {
+                const normD1 = normalizeName(c1.dubberName).split(' ')[0];
+                const normD2 = normalizeName(c2.dubberName).split(' ')[0];
+                const isSameDubber = normD1 && normD1 === normD2;
+
+                if (isSameDubber) {
+                  // Parallel track/layer from the same dubber: keep as intentional overlap!
+                  c1.isSelfOverlap = true;
+                  c2.isSelfOverlap = true;
+                  addLog(`🎙 Параллельный слой одного даббера «${c1.dubberName}» и «${c2.dubberName}» (${overlapDur.toFixed(2)}с): перекрытие сохранено`, 'info');
+                } else {
+                  c1.hasCollision = true;
+                  c2.hasCollision = true;
+                  newCollisions.push({
+                    id: `col_${c1.id}_${c2.id}`,
+                    track1Id: trackIds[i],
+                    track2Id: trackIds[j],
+                    dubber1Name: c1.dubberName,
+                    dubber2Name: c2.dubberName,
+                    character1Name: c1.characterName,
+                    character2Name: c2.characterName,
+                    startSec: overlapStart,
+                    endSec: overlapEnd,
+                    overlapDurationSec: Number(overlapDur.toFixed(2))
+                  });
+                }
               }
             }
           }
@@ -1242,6 +1603,15 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         {/* Action Buttons Bar matching user's exact pipeline */}
         <div className="flex items-center gap-2">
           <button
+            onClick={() => setIsSettingsModalOpen(true)}
+            className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded-xl text-xs font-semibold flex items-center gap-1.5 border border-amber-600/40 shadow-sm transition"
+            title="Настройки параметров удаления тишины, авто-калибровки, вшития фиксов и автотайминга"
+          >
+            <Settings className="w-4 h-4 text-amber-400" />
+            <span>Параметры</span>
+          </button>
+
+          <button
             onClick={handleImportFromQA}
             disabled={isLoading}
             className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl text-xs font-semibold flex items-center gap-2 border border-neutral-700 transition"
@@ -1314,6 +1684,29 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </button>
         </div>
       </header>
+
+      {/* Dynamic Calibration Info Banner */}
+      {Object.keys(calibrationsByTrack).length > 0 && (
+        <div className="bg-amber-950/30 border-b border-amber-900/40 px-4 py-1.5 flex items-center justify-between text-[11px] text-amber-200 shrink-0">
+          <div className="flex items-center gap-2 overflow-x-auto py-0.5">
+            <span className="font-bold text-amber-400 flex items-center gap-1 shrink-0">
+              <Sliders className="w-3.5 h-3.5" /> Авто-калибровка шума активна:
+            </span>
+            {Object.entries(calibrationsByTrack).map(([trId, calib]) => {
+              const trk = tracks.find(t => t.id === trId);
+              const name = trk?.participant || 'Трек';
+              return (
+                <span key={trId} className="bg-neutral-900/90 border border-amber-800/40 rounded px-2 py-0.5 font-mono text-[10px] text-neutral-300 shrink-0">
+                  <strong className="text-amber-300">{name}</strong>: шум {calib.noiseFloorDb} dB | речь {calib.speechFloorDb} dB | порог {calib.calculatedThresholdDb} dB
+                </span>
+              );
+            })}
+          </div>
+          <span className="text-[10px] text-neutral-400 shrink-0 ml-3 hidden md:inline">
+            💡 Границы клипов можно свободно вытягивать из тишины мышкой за края
+          </span>
+        </div>
+      )}
 
       {/* Main Multitrack Workspace */}
       <div className="flex-1 flex overflow-hidden">
@@ -1508,9 +1901,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                           key={clip.id}
                           onClick={(e) => { e.stopPropagation(); setSelectedClipId(clip.id); }}
                           onMouseDown={(e) => handleClipMouseDown(e, track.id, clip)}
-                          className={`absolute top-1 bottom-1 rounded-md border flex flex-col justify-between overflow-hidden shadow-lg transition-all cursor-grab active:cursor-grabbing ${
+                          className={`absolute top-1 bottom-1 rounded-md border flex flex-col justify-between overflow-hidden shadow-lg transition-all cursor-grab active:cursor-grabbing select-none ${
                             clip.hasCollision
                               ? 'bg-red-950/90 border-red-500 shadow-red-500/20'
+                              : clip.isSelfOverlap
+                              ? 'bg-purple-950/90 border-purple-400 shadow-purple-500/20'
                               : clip.isFix
                               ? 'bg-amber-950/90 border-amber-400 shadow-amber-500/20'
                               : isSelected
@@ -1521,21 +1916,44 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                             left: `${clipLeftPx}px`,
                             width: `${clipWidthPx}px`
                           }}
-                          title="Зажмите и перетащите мышкой для сдвига клипа по таймлайну"
+                          title="Зажмите тело клипа для перемещения, или потяните за левый/правый край для раскрытия звука из тишины"
                         >
+                          {/* Left Edge Resize Handle (Reveals audio from silence or trims start) */}
+                          <div
+                            onMouseDown={(e) => handleResizeMouseDown(e, track.id, clip, 'start')}
+                            className="absolute top-0 bottom-0 left-0 w-2.5 z-30 cursor-ew-resize group/edge flex items-center justify-center hover:bg-amber-400/40 transition-colors"
+                            title="Потяните влево для раскрытия начала фразы из тишины, или вправо для подрезки"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="w-0.5 h-6 rounded-full bg-neutral-400/50 group-hover/edge:bg-amber-300 group-hover/edge:w-1 transition-all" />
+                          </div>
+
+                          {/* Right Edge Resize Handle (Reveals audio from silence or trims tail) */}
+                          <div
+                            onMouseDown={(e) => handleResizeMouseDown(e, track.id, clip, 'end')}
+                            className="absolute top-0 bottom-0 right-0 w-2.5 z-30 cursor-ew-resize group/edge flex items-center justify-center hover:bg-amber-400/40 transition-colors"
+                            title="Потяните вправо для раскрытия хвоста фразы (вздоха/затухания) из тишины, или влево для подрезки"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="w-0.5 h-6 rounded-full bg-neutral-400/50 group-hover/edge:bg-amber-300 group-hover/edge:w-1 transition-all" />
+                          </div>
+
                           {/* Clip Top Header Badge */}
-                          <div className={`px-1.5 py-0.5 text-[9px] font-mono flex items-center justify-between border-b ${
+                          <div className={`px-2 py-0.5 text-[9px] font-mono flex items-center justify-between border-b ${
                             clip.isFix 
                               ? 'bg-amber-900/60 border-amber-500/40 text-amber-200' 
                               : clip.hasCollision
                               ? 'bg-red-900/60 border-red-500/40 text-red-200'
+                              : clip.isSelfOverlap
+                              ? 'bg-purple-900/60 border-purple-500/40 text-purple-200'
                               : 'bg-indigo-950/80 border-indigo-800/50 text-indigo-200'
                           }`}>
                             <div className="flex items-center gap-1 truncate font-bold">
                               {clip.isFix && <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black">ФИКС</span>}
                               {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">КОЛЛИЗИЯ</span>}
+                              {clip.isSelfOverlap && <span className="bg-purple-500 text-white px-1 rounded text-[8px] font-black">СЛОЙ</span>}
                               <span>{formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))}</span>
-                              <span className="text-neutral-400 font-sans truncate max-w-[130px] font-medium opacity-90">
+                              <span className="text-neutral-400 font-sans truncate max-w-[110px] font-medium opacity-90">
                                 {clip.text}
                               </span>
                             </div>
@@ -1552,31 +1970,47 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                               sourceEndSec={clip.sourceEndSec}
                               width={Math.round(clipWidthPx)}
                               height={68}
-                              color={clip.hasCollision ? '#ef4444' : clip.isFix ? '#fbbf24' : '#818cf8'}
+                              color={clip.hasCollision ? '#ef4444' : clip.isSelfOverlap ? '#c084fc' : clip.isFix ? '#fbbf24' : '#818cf8'}
                               volumePercent={clip.volumePercent}
                             />
                           </div>
 
-                          {/* Clip Bottom Action Tools (Split & Nudge) */}
-                          <div className="px-1 py-0.5 bg-black/40 flex items-center justify-between opacity-0 hover:opacity-100 transition text-[8px]">
-                            <button
-                              onClick={(e) => { e.stopPropagation(); handleSplitClip(track.id, clip.id); }}
-                              className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 font-bold"
-                              title="Разрезать аудио-клип на 2 части в точке курсора"
-                            >
-                              ✂ Сплит
-                            </button>
+                          {/* Clip Bottom Action Tools (Split, Expand & Nudge) */}
+                          <div className="px-1 py-0.5 bg-black/50 flex items-center justify-between opacity-0 hover:opacity-100 transition text-[8px] z-20">
+                            <div className="flex items-center gap-0.5">
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleSplitClip(track.id, clip.id); }}
+                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 font-bold"
+                                title="Разрезать клип на 2 части"
+                              >
+                                ✂
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleExpandClip(track.id, clip.id, 'start', 0.25); }}
+                                className="px-1 py-0.5 bg-amber-950/70 hover:bg-amber-800 text-amber-300 rounded border border-amber-700/60 font-mono"
+                                title="Раскрыть начало на +0.25с из тишины"
+                              >
+                                ◀+0.25с
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleExpandClip(track.id, clip.id, 'end', 0.25); }}
+                                className="px-1 py-0.5 bg-amber-950/70 hover:bg-amber-800 text-amber-300 rounded border border-amber-700/60 font-mono"
+                                title="Раскрыть хвост на +0.25с из тишины"
+                              >
+                                +0.25с▶
+                              </button>
+                            </div>
                             <div className="flex items-center gap-0.5">
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, -0.05); }}
-                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700"
+                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 font-mono"
                                 title="-50 мс"
                               >
                                 -50ms
                               </button>
                               <button
                                 onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, 0.05); }}
-                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700"
+                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 font-mono"
                                 title="+50 мс"
                               >
                                 +50ms
@@ -1617,14 +2051,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </div>
         </div>
 
-        {/* Selected Clip Volume Inspector */}
+        {/* Selected Clip Volume & Expansion Inspector */}
         {activeSelectedClip && (
           <div className="flex items-center gap-3 bg-neutral-950 px-3 py-1.5 rounded-xl border border-indigo-800 text-xs shadow-lg">
-            <span className="font-bold text-indigo-300 max-w-[180px] truncate">
+            <span className="font-bold text-indigo-300 max-w-[150px] truncate" title={activeSelectedClip.clip.text}>
               {activeSelectedClip.clip.characterName}: {activeSelectedClip.clip.text}
             </span>
-            <div className="flex items-center gap-2 border-l border-neutral-800 pl-3">
-              <span className="text-[10px] text-neutral-400">Громкость фразы:</span>
+            <div className="flex items-center gap-2 border-l border-neutral-800 pl-2.5">
+              <span className="text-[10px] text-neutral-400">Громкость:</span>
               <input
                 type="range"
                 min="0"
@@ -1632,11 +2066,44 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 step="5"
                 value={activeSelectedClip.clip.volumePercent ?? 100}
                 onChange={(e) => handleSetClipVolume(activeSelectedClip.trackId, activeSelectedClip.clip.id, Number(e.target.value))}
-                className="w-24 accent-indigo-500 h-1.5 bg-neutral-800 rounded cursor-pointer"
+                className="w-20 accent-indigo-500 h-1.5 bg-neutral-800 rounded cursor-pointer"
               />
-              <span className="font-mono text-xs text-amber-300 font-bold w-10 text-right">
+              <span className="font-mono text-xs text-amber-300 font-bold w-9 text-right">
                 {activeSelectedClip.clip.volumePercent ?? 100}%
               </span>
+            </div>
+
+            {/* Quick manual expansion buttons: reveal cut audio from silence */}
+            <div className="flex items-center gap-1 border-l border-neutral-800 pl-2.5">
+              <span className="text-[10px] text-neutral-400 mr-0.5">Границы:</span>
+              <button
+                onClick={() => handleExpandClip(activeSelectedClip.trackId, activeSelectedClip.clip.id, 'start', 0.5)}
+                className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded text-[10px] border border-neutral-700 transition"
+                title="Раскрыть начало фразы на +0.5 сек из тишины"
+              >
+                ◀ +0.5с
+              </button>
+              <button
+                onClick={() => handleExpandClip(activeSelectedClip.trackId, activeSelectedClip.clip.id, 'end', 0.5)}
+                className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded text-[10px] border border-neutral-700 transition"
+                title="Раскрыть хвост фразы на +0.5 сек из тишины"
+              >
+                +0.5с ▶
+              </button>
+              <button
+                onClick={() => handleExpandClip(activeSelectedClip.trackId, activeSelectedClip.clip.id, 'end', 1.0)}
+                className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded text-[10px] border border-neutral-700 transition"
+                title="Раскрыть хвост фразы на +1.0 сек из тишины"
+              >
+                +1.0с ▶
+              </button>
+              <button
+                onClick={() => handleResetClipToOriginal(activeSelectedClip.trackId, activeSelectedClip.clip.id)}
+                className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-400 hover:text-white rounded text-[10px] border border-neutral-700 transition"
+                title="Сбросить границы клипа к исходной детекции"
+              >
+                Сброс
+              </button>
             </div>
           </div>
         )}
@@ -1709,6 +2176,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         onExport={handleExportSoundEngineerFromTiming}
         isExporting={isExportingSE}
         progress={exportProgress}
+      />
+
+      {/* Timing and Silence Settings Modal */}
+      <TimingSettingsModal
+        isOpen={isSettingsModalOpen}
+        onClose={() => setIsSettingsModalOpen(false)}
+        settings={timingSettings}
+        onSave={handleSaveSettings}
       />
     </div>
   );

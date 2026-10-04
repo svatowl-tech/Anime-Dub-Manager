@@ -81,7 +81,26 @@ export const useTracks = (currentEpisode: Episode | null) => {
        }
     });
 
-    const mappedTracks = Object.values(dubberTracks);
+    const splitMultiTracks = localStorage.getItem('qa_split_multi_tracks') !== 'false';
+    const mappedTracks: Track[] = [];
+
+    Object.values(dubberTracks).forEach(track => {
+      if (splitMultiTracks && track.files.length > 1) {
+        track.files.forEach((file, fIdx) => {
+          const isFix = file.type === 'FIXES';
+          const fileLabel = isFix ? 'Фикс' : `Дорожка ${fIdx + 1}`;
+          mappedTracks.push({
+            ...track,
+            id: `${track.id}__layer_${fIdx + 1}`,
+            participant: `${track.participant} [${fileLabel}]`,
+            files: [file],
+            selectedFileId: file.id
+          });
+        });
+      } else {
+        mappedTracks.push(track);
+      }
+    });
     
     const originalTrack: Track = {
       id: 'original',

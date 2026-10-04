@@ -95,6 +95,19 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     });
   }, []);
 
+  const [isSplitMultiTracks, setIsSplitMultiTracks] = useState<boolean>(() => {
+    return localStorage.getItem('qa_split_multi_tracks') !== 'false';
+  });
+
+  const toggleSplitMultiTracks = useCallback(() => {
+    setIsSplitMultiTracks(prev => {
+      const next = !prev;
+      localStorage.setItem('qa_split_multi_tracks', String(next));
+      toast.info(next ? 'Импорт всех версий как отдельных параллельных дорожек включен' : 'Группировка версий в выпадающий список включена');
+      return next;
+    });
+  }, []);
+
   // Restore persisted QA results for current episode so work is never lost on closing modal
   useEffect(() => {
     if (!currentEpisode?.id) {
@@ -685,7 +698,27 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       }
     });
     
-    const mappedTracks = Object.values(dubberTracks);
+    const splitMultiTracks = localStorage.getItem('qa_split_multi_tracks') !== 'false';
+    const mappedTracks: Track[] = [];
+
+    Object.values(dubberTracks).forEach(track => {
+      if (splitMultiTracks && track.files.length > 1) {
+        // If dubber has multiple files (e.g. 2 original takes/layers with overlap, or versions)
+        track.files.forEach((file, fIdx) => {
+          const isFix = file.type === 'FIXES';
+          const fileLabel = isFix ? 'Фикс' : `Дорожка ${fIdx + 1}`;
+          mappedTracks.push({
+            ...track,
+            id: `${track.id}__layer_${fIdx + 1}`,
+            participant: `${track.participant} [${fileLabel}]`,
+            files: [file],
+            selectedFileId: file.id
+          });
+        });
+      } else {
+        mappedTracks.push(track);
+      }
+    });
     
     // Add original track
     const originalTrack: Track = {
@@ -702,7 +735,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     if (mappedTracks.length > 0 && !selectedTrackId) {
       setSelectedTrackId(mappedTracks[0].id);
     }
-  }, [currentEpisode]);
+  }, [currentEpisode, isSplitMultiTracks]);
 
   // Load subtitles for auto-detection
   useEffect(() => {
@@ -872,10 +905,11 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
 
     // Use selected track if available, otherwise try to auto-detect
     let targetTrackId = selectedTrackId === 'all' ? null : selectedTrackId;
+    const baseDubberId = targetTrackId ? targetTrackId.split('__')[0] : null;
     
     // If we have a detected character, we can use it to find the specific assignment
     // but we should stay on the selected track if it's one of the dubber's roles
-    const dubberAssignments = targetTrackId ? (currentEpisode.assignments?.filter(a => (a.substituteId || a.dubberId) === targetTrackId) || []) : [];
+    const dubberAssignments = baseDubberId ? (currentEpisode.assignments?.filter(a => (a.substituteId || a.dubberId) === baseDubberId) || []) : [];
     const matchingAssignment = dubberAssignments.find(
       a => currentCharacter && a.characterName.toLowerCase() === currentCharacter.toLowerCase()
     );
@@ -925,7 +959,8 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       // Determine which assignment to attach the comment to
       // If the dubber has multiple roles, we try to match the current character,
       // otherwise we use the first assignment of that dubber.
-      const targetDubberAssignments = currentEpisode.assignments?.filter(a => (a.substituteId || a.dubberId) === targetTrackId) || [];
+      const resolvedDubberId = targetTrackId.split('__')[0];
+      const targetDubberAssignments = currentEpisode.assignments?.filter(a => (a.substituteId || a.dubberId) === resolvedDubberId) || [];
       const bestAssignmentMatch = targetDubberAssignments.find(
         a => currentCharacter && a.characterName.toLowerCase() === currentCharacter.toLowerCase()
       ) || targetDubberAssignments[0];
@@ -1902,7 +1937,8 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     if (!file || !currentEpisode) return;
 
     // Find one of the assignments for this dubber to link the upload to
-    const assignment = currentEpisode.assignments?.find(a => (a.substituteId || a.dubberId) === trackId);
+    const baseDubberId = trackId.split('__')[0];
+    const assignment = currentEpisode.assignments?.find(a => (a.substituteId || a.dubberId) === baseDubberId);
     if (!assignment) return;
 
     const projectTitle = sanitizeFolderName(currentEpisode.project?.title || 'Project');
@@ -1936,7 +1972,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         episodeId: currentEpisode.id,
         type,
         path: res.path,
-        uploadedById: trackId,
+        uploadedById: baseDubberId,
         assignmentId: assignment.id,
         createdAt: new Date().toISOString()
       };
@@ -1944,7 +1980,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       const updatedUploads = [...(currentEpisode.uploads || []), newUpload];
       
       const updatedAssignments = currentEpisode.assignments?.map(a => 
-        (a.substituteId || a.dubberId) === trackId ? { ...a, status: 'RECORDED' } : a
+        (a.substituteId || a.dubberId) === baseDubberId ? { ...a, status: 'RECORDED' } : a
       ) || [];
 
       // Check if all assignments are recorded or approved
@@ -1991,9 +2027,10 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           const updatedUploads = uploads.filter(u => u.id !== fileId);
           
           // Check if this dubber has any files left
+          const baseDubberId = trackId.split('__')[0];
           const dubberFilesRemaining = updatedUploads.some(u => 
-            u.uploadedById === trackId || 
-            (u.assignmentId && currentEpisode.assignments?.find(a => a.id === u.assignmentId && (a.substituteId || a.dubberId) === trackId))
+            u.uploadedById === baseDubberId || 
+            (u.assignmentId && currentEpisode.assignments?.find(a => a.id === u.assignmentId && (a.substituteId || a.dubberId) === baseDubberId))
           );
           
           let updatedAssignments = currentEpisode.assignments;
@@ -2001,7 +2038,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           
           if (!dubberFilesRemaining && currentEpisode.assignments) {
             updatedAssignments = currentEpisode.assignments.map(a => 
-              (a.substituteId || a.dubberId) === trackId ? { ...a, status: 'PENDING' } : a
+              (a.substituteId || a.dubberId) === baseDubberId ? { ...a, status: 'PENDING' } : a
             );
             
             // If the episode was in QA but we now have pending assignments, move back to RECORDING
@@ -2071,6 +2108,8 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           isAnalyzingGaps={isAnalyzingGaps}
           detectedGapsCount={detectedGaps.length}
           gapsByTrack={gapsByTrack}
+          isSplitMultiTracks={isSplitMultiTracks}
+          onToggleSplitMultiTracks={toggleSplitMultiTracks}
         />
 
       {/* Main Content - Player & Comments */}

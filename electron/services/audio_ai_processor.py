@@ -27,6 +27,43 @@ import math
 import warnings
 import urllib.request
 import urllib.parse
+
+# Auto-detect and dynamically link AI_env site-packages if running with system or external Python
+def _bootstrap_site_packages():
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        cur_dir,
+        os.path.dirname(cur_dir),
+        os.path.dirname(os.path.dirname(cur_dir)),
+        os.getcwd()
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(os.path.join(appdata, "anime-dub-manager"))
+    user_home = os.path.expanduser("~")
+    candidates.append(os.path.join(user_home, ".anime-dub-manager"))
+    candidates.append(user_home)
+
+    sub_dirs = [
+        os.path.join("ai_env", "python_env", "Lib", "site-packages"),
+        os.path.join("ai_env", "python_env", "lib", f"python3.{sys.version_info.minor}", "site-packages"),
+        os.path.join("ai_env", "python_env", "lib", "python3.10", "site-packages"),
+        os.path.join("ai_env", "Lib", "site-packages"),
+        os.path.join("ai_env", "lib", f"python3.{sys.version_info.minor}", "site-packages"),
+        os.path.join("ai_env", "lib", "python3.10", "site-packages"),
+        os.path.join("ai_env", "ai_env", "python_env", "Lib", "site-packages"),
+        os.path.join("whisperlivekit", "venv", "Lib", "site-packages"),
+        os.path.join("whisperlivekit", "venv", "lib", f"python3.{sys.version_info.minor}", "site-packages"),
+    ]
+
+    for c in candidates:
+        for s in sub_dirs:
+            p = os.path.join(c, s)
+            if os.path.isdir(p) and p not in sys.path:
+                sys.path.insert(0, p)
+
+_bootstrap_site_packages()
+
 import numpy as np
 
 # Suppress noisy warnings in CLI output

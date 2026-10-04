@@ -380,6 +380,13 @@ class AutoTimingService {
 
     const unassignedActors = Array.from(charactersMap.keys()).filter(c => !usedCharacters.has(c));
 
+    const nickCounts = new Map();
+    for (const mt of matchedTracks) {
+      const c = (nickCounts.get(mt.dubberNick) || 0) + 1;
+      nickCounts.set(mt.dubberNick, c);
+      mt.subTrackIndex = c;
+    }
+
     log.info(`[AutoTiming] Matched ${matchedTracks.length} tracks in total (including fallback tracks). Unassigned actors: ${unassignedActors.length}`);
     return {
       matchedTracks,
@@ -631,6 +638,14 @@ class AutoTimingService {
         if (subOriginallyOverlapped) {
           totalIntentionalOverlapsPreserved++;
           next.intentionalOverlapWith = current.id;
+          continue;
+        }
+
+        // If both phrases belong to the SAME dubber on different tracks (parallel layers, overlapping takes)
+        if (current.dubberNick && current.dubberNick === next.dubberNick && current.trackId !== next.trackId) {
+          totalIntentionalOverlapsPreserved++;
+          next.intentionalOverlapWith = current.id;
+          log.info(`[AutoTiming] Сохранено намеренное перекрытие параллельных дорожек одного даббера «${current.dubberNick}»`);
           continue;
         }
 
@@ -1159,7 +1174,11 @@ class AutoTimingService {
       const { track, phrases } = item;
       const ext = path.extname(track.trackPath) || '.wav';
       const nick = track.dubberNick || 'Даббер';
-      const outFilename = `${baseVideoName}_[${nick}]${ext}`;
+      const sameNickTracks = tracksToRender.filter(t => (t.track.dubberNick || 'Даббер') === nick);
+      const isMultiTrack = sameNickTracks.length > 1;
+      const subIdx = track.subTrackIndex || (sameNickTracks.indexOf(item) + 1);
+      const trackSuffix = isMultiTrack ? `_дорожка${subIdx}` : '';
+      const outFilename = `${baseVideoName}_[${nick}]${trackSuffix}${ext}`;
       const outFilePath = path.join(targetDir, outFilename);
 
       const trackProgressPercent = 70 + Math.round(((tIdx + 1) / tracksToRender.length) * 28);

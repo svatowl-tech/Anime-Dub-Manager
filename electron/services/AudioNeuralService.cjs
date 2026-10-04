@@ -46,19 +46,30 @@ class AudioNeuralService {
     const pythonPath = EnvironmentManager.getPythonPath();
     const scriptPath = this.getSidecarScriptPath();
 
-    if (!fs.existsSync(scriptPath)) {
+    const pythonExists = fs.existsSync(pythonPath);
+    const scriptExists = fs.existsSync(scriptPath);
+
+    if (onLog) {
+      onLog(`[Neural AI Диагностика] Интерпретатор: ${pythonPath} (найден: ${pythonExists ? 'Да' : 'НЕТ'})`, 'info');
+      onLog(`[Neural AI Диагностика] Скрипт процессора: ${scriptPath} (найден: ${scriptExists ? 'Да' : 'НЕТ'})`, 'info');
+    }
+
+    if (!scriptExists) {
       throw new Error(`Скрипт нейросетевого процессора не найден: ${scriptPath}`);
     }
 
-    if (!fs.existsSync(pythonPath)) {
-      throw new Error(`Файл интерпретатора Python не найден по пути: ${pythonPath}`);
+    if (!EnvironmentManager._isPythonExecutableWorking(pythonPath)) {
+      const errDetail = `Python (${pythonPath}) недоступен или поврежден (код ошибки ENOENT/Crash). ` +
+        `Убедитесь, что AI-окружение установлено в настройках или установите Python 3.10+ в систему.`;
+      if (onLog) onLog(`❌ [Neural AI Ошибка] ${errDetail}`, 'error');
+      throw new Error(errDetail);
     }
 
     const fullArgs = [scriptPath, ...args];
     const displayCmd = `"${pythonPath}" "${scriptPath}" ${args.map(a => `"${a}"`).join(' ')}`;
 
     if (onLog) {
-      onLog(`[Neural AI] Запуск ${operationName}: ${displayCmd}`, 'debug');
+      onLog(`[Neural AI] Запуск команды: ${displayCmd}`, 'info');
     }
     log.info(`[AudioNeuralService] Spawning directly: ${displayCmd}`);
 
@@ -79,9 +90,21 @@ class AudioNeuralService {
       const delimiter = path.delimiter || (process.platform === 'win32' ? ';' : ':');
       const updatedPath = `${extraPaths.join(delimiter)}${delimiter}${process.env.PATH || ''}`;
 
+      // Propagate AI_env site-packages to PYTHONPATH
+      const sitePackages = EnvironmentManager.getPythonSitePackagesDirs();
+      const existingPythonPath = process.env.PYTHONPATH || '';
+      const fullPythonPath = sitePackages.length > 0 
+        ? `${sitePackages.join(delimiter)}${delimiter}${existingPythonPath}`
+        : existingPythonPath;
+
+      if (onLog && sitePackages.length > 0) {
+        onLog(`[Neural AI] Подключены библиотеки: ${sitePackages.join('; ')}`, 'debug');
+      }
+
       const env = {
         ...process.env,
         PATH: updatedPath,
+        PYTHONPATH: fullPythonPath,
         PYTHONUNBUFFERED: '1',
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1',
@@ -144,7 +167,7 @@ class AudioNeuralService {
               resultData = JSON.parse(line.replace('ENV_STATUS:', '').trim());
             } catch (e) {}
           } else {
-            if (onLog) onLog(line, 'debug');
+            if (onLog) onLog(line, 'info');
           }
         }
       });
@@ -152,14 +175,16 @@ class AudioNeuralService {
       child.stderr.on('data', (chunk) => {
         const text = chunk.toString('utf8');
         stderrBuffer += text;
-        if (onLog) onLog(`[PyStderr] ${text.trim()}`, 'debug');
+        if (onLog) onLog(`[Python STDERR] ${text.trim()}`, 'warn');
       });
 
       child.on('error', (err) => {
         if (!isSettled) {
           isSettled = true;
           log.error(`[AudioNeuralService] Child process error: ${err.message}`);
-          reject(new Error(`Не удалось запустить Python-окружение (${pythonPath}): ${err.message}`));
+          const msg = `Не удалось запустить Python-окружение (${pythonPath}): ${err.message}. Проверьте наличие Python 3.10+ или переустановите AI_env в настройках.`;
+          if (onLog) onLog(`❌ [Neural AI Ошибка запуска] ${msg}`, 'error');
+          reject(new Error(msg));
         }
       });
 
@@ -171,9 +196,10 @@ class AudioNeuralService {
           log.info(`[AudioNeuralService] ${operationName} finished successfully.`);
           resolve(resultData || { success: true });
         } else {
-          const tailStderr = (stderrBuffer || stdoutBuffer).slice(-800);
+          const tailStderr = (stderrBuffer || stdoutBuffer).slice(-1200);
           const errMessage = `Скрипт ${operationName} завершился с кодом ошибки ${code}.\nДетали:\n${tailStderr}`;
           log.error(`[AudioNeuralService] ${errMessage}`);
+          if (onLog) onLog(`❌ [Neural AI Сбой] ${errMessage}`, 'error');
           reject(new Error(errMessage));
         }
       });

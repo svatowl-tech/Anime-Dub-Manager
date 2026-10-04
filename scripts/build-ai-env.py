@@ -50,9 +50,9 @@ def run_cmd(cmd, cwd=None, env=None):
     if res.returncode != 0:
         raise RuntimeError(f"Command failed with exit code {res.returncode}: {cmd}")
 
-def prune_unneeded_files(target_dir):
+def prune_unneeded_files(target_dir, strip_cuda=True):
     """
-    Strips unnecessary heavy files (tests, static libs, pycache, doc assets)
+    Strips unnecessary heavy files (tests, static libs, pycache, doc assets, CUDA/NVIDIA bloat)
     to keep archive size ultra-light (< 400 MB) and well below GitHub's 2GB limit.
     """
     print("  [CLEANUP] Pruning unneeded files, static libraries, test suites, and caches...")
@@ -60,7 +60,7 @@ def prune_unneeded_files(target_dir):
         '__pycache__', '.pytest_cache', 'tests', 'test', 'testing', 
         'idle_test', 'unit_tests', 'examples', 'sample_data'
     }
-    unneeded_extensions = {'.pyc', '.pyo', '.a', '.pdb', '.lib', '.h', '.c', '.cpp'}
+    unneeded_extensions = {'.pyc', '.pyo', '.a', '.pdb', '.lib', '.h', '.c', '.cpp', '.cu', '.ptx'}
     
     removed_count = 0
     for root, dirs, files in os.walk(target_dir, topdown=False):
@@ -73,7 +73,8 @@ def prune_unneeded_files(target_dir):
                 except Exception:
                     pass
         for name in dirs:
-            if name in unneeded_dir_names:
+            dir_lower = name.lower()
+            if dir_lower in unneeded_dir_names or (strip_cuda and (dir_lower.startswith('nvidia') or dir_lower.startswith('triton') or dir_lower.startswith('cuda'))):
                 try:
                     shutil.rmtree(os.path.join(root, name), ignore_errors=True)
                     removed_count += 1
@@ -154,30 +155,19 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     # 4. Install optimized PyTorch & dependencies
     print("\n[STEP 3] Installing PyTorch, DeepFilterNet3, Demucs v4 & audio packages...")
     
-    # For Windows & Linux, use PyTorch CPU wheels by default for portable distributions to prevent 6GB CUDA bloat
+    # For Windows & Linux, install PyTorch CPU wheels strictly from the CPU index first.
+    # This prevents pip from querying PyPI and pulling 4GB of NVIDIA CUDA 13 / triton packages!
     if use_cpu_wheels and (is_win or is_linux):
-        print("  [OPT] Installing lightweight PyTorch (CPU wheel index) for portable release...")
+        print("  [OPT] Installing CPU PyTorch wheels directly from CPU index (zero CUDA bloat)...")
         run_cmd([
             str(venv_python), "-m", "pip", "install", 
-            "--no-cache-dir", 
-            "torch>=2.1.0,<=2.3.1", 
-            "torchaudio>=2.1.0,<=2.3.1", 
-            "--index-url", "https://download.pytorch.org/whl/cpu"
-        ])
-    else:
-        # macOS uses native PyTorch with built-in Apple Silicon Metal / MPS
-        print("  [OPT] Installing standard PyTorch wheel...")
-        run_cmd([
-            str(venv_python), "-m", "pip", "install", 
-            "--no-cache-dir", 
+            "--no-cache-dir",
+            "--index-url", "https://download.pytorch.org/whl/cpu",
             "torch>=2.1.0,<=2.3.1", 
             "torchaudio>=2.1.0,<=2.3.1"
         ])
 
-    # Install remaining audio ML packages
-    run_cmd([
-        str(venv_python), "-m", "pip", "install", 
-        "--no-cache-dir",
+    other_packages = [
         "deepfilternet>=0.5.6",
         "demucs>=4.0.1",
         "onnxruntime>=1.16.0",
@@ -186,12 +176,38 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "scipy>=1.10.0",
         "librosa>=0.10.0",
         "tqdm>=4.65.0",
-        "packaging>=23.0",
+        "packaging>=24.0",
         "einops>=0.7.0",
         "rotary-embedding-torch>=0.5.0",
         "requests>=2.31.0",
         "huggingface-hub>=0.20.0"
-    ])
+    ]
+    if not (use_cpu_wheels and (is_win or is_linux)):
+        other_packages = ["torch>=2.1.0,<=2.3.1", "torchaudio>=2.1.0,<=2.3.1"] + other_packages
+
+    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir"] + other_packages)
+
+    if is_win:
+        # Copy base python dlls and executables into env_dir so it is fully standalone across machines
+        print("  [PORTABLE] Copying Windows Python base binaries into virtual environment...")
+        base_dir = Path(sys.base_prefix)
+        for fn in ["python.exe", "pythonw.exe", "python3.dll", f"python3{sys.version_info.minor}.dll", "vcruntime140.dll"]:
+            src_f = base_dir / fn
+            if src_f.exists():
+                try:
+                    shutil.copy2(src_f, env_dir / fn)
+                    shutil.copy2(src_f, env_dir / "Scripts" / fn)
+                except Exception:
+                    pass
+        # Set pyvenv.cfg home = .
+        cfg_path = env_dir / "pyvenv.cfg"
+        if cfg_path.exists():
+            try:
+                lines = cfg_path.read_text(encoding="utf-8").splitlines()
+                new_lines = [("home = ." if l.strip().startswith("home =") else l) for l in lines]
+                cfg_path.write_text("\n".join(new_lines), encoding="utf-8")
+            except Exception:
+                pass
 
     # 5. Copy sidecars into environment bundle for self-containment
     print("\n[STEP 4] Bundling audio_ai_processor sidecar and metadata...")
@@ -208,7 +224,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         f.write(f'{{\n  "platform": "{tag}",\n  "python_version": "{platform.python_version()}",\n  "deepfilternet": true,\n  "demucs": true\n}}\n')
 
     # 7. Prune bloat
-    prune_unneeded_files(build_temp_dir)
+    prune_unneeded_files(build_temp_dir, strip_cuda=(use_cpu_wheels and (is_win or is_linux)))
 
     # 8. Package zip archives
     print("\n[STEP 5] Archiving AI_env bundle with maximum compression...")
