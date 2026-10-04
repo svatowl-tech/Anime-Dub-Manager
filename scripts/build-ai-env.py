@@ -52,13 +52,12 @@ def run_cmd(cmd, cwd=None, env=None):
 
 def prune_unneeded_files(target_dir, strip_cuda=True):
     """
-    Strips unnecessary heavy files (tests, static libs, pycache, doc assets, CUDA/NVIDIA bloat)
-    to keep archive size ultra-light (< 400 MB) and well below GitHub's 2GB limit.
+    Strips unnecessary heavy files (pycache, doc assets, CUDA/NVIDIA bloat)
+    while preserving all required module directories (including torch/testing).
     """
-    print("  [CLEANUP] Pruning unneeded files, static libraries, test suites, and caches...")
+    print("  [CLEANUP] Pruning unneeded files, static libraries, and caches...")
     unneeded_dir_names = {
-        '__pycache__', '.pytest_cache', 'tests', 'test', 'testing', 
-        'idle_test', 'unit_tests', 'examples', 'sample_data'
+        '__pycache__', '.pytest_cache', 'idle_test', 'unit_tests', 'examples', 'sample_data'
     }
     unneeded_extensions = {'.pyc', '.pyo', '.a', '.pdb', '.lib', '.h', '.c', '.cpp', '.cu', '.ptx'}
     
@@ -74,6 +73,11 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
                     pass
         for name in dirs:
             dir_lower = name.lower()
+            # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
+            norm_root = root.replace("\\", "/").lower()
+            if dir_lower in ['tests', 'test', 'testing'] and ('torch' in norm_root or 'site-packages' in norm_root):
+                continue
+
             if dir_lower in unneeded_dir_names or (strip_cuda and (dir_lower.startswith('nvidia') or dir_lower.startswith('triton') or dir_lower.startswith('cuda'))):
                 try:
                     shutil.rmtree(os.path.join(root, name), ignore_errors=True)

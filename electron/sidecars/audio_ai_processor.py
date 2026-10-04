@@ -94,6 +94,62 @@ def _bootstrap_site_packages():
 
 _bootstrap_site_packages()
 
+def _bootstrap_torch_shims():
+    """
+    Guarantees PyTorch 2.x submodules (torch._decomp, torch._refs, torch._meta_registrations)
+    can import cleanly without throwing:
+    ImportError: cannot import name 'highest_precision_float' from 'torch.testing._internal.common_dtype'
+    even if torch.testing was stripped, pruned, or incomplete in portable installations.
+    """
+    import types
+    from importlib.machinery import ModuleSpec
+
+    class _TestingDynamicShim(types.ModuleType):
+        def __init__(self, name):
+            super().__init__(name)
+            self.__path__ = []
+
+        def __getattr__(self, name):
+            if name == 'highest_precision_float':
+                def highest_precision_float(*args):
+                    for a in args:
+                        s = str(a).lower()
+                        if 'float64' in s or 'double' in s:
+                            return a
+                    for a in args:
+                        s = str(a).lower()
+                        if 'float32' in s or 'float' in s:
+                            return a
+                    t = sys.modules.get('torch', None)
+                    return getattr(t, 'float32', float)
+                return highest_precision_float
+            if name in ['all_types', 'all_types_and_complex', 'all_types_and_half', 'floating_types', 'floating_and_complex_types', 'complex_types', 'integral_types']:
+                t = sys.modules.get('torch', None)
+                if t:
+                    return (getattr(t, 'float32', float), getattr(t, 'float64', float), getattr(t, 'int32', int), getattr(t, 'int64', int))
+                return ()
+            return lambda *args, **kwargs: None
+
+    class _TorchTestingLoader:
+        def __init__(self, fullname):
+            self.fullname = fullname
+        def create_module(self, spec):
+            return _TestingDynamicShim(self.fullname)
+        def exec_module(self, module):
+            pass
+
+    class _TorchTestingFinder:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == 'torch.testing' or (isinstance(fullname, str) and fullname.startswith('torch.testing.')):
+                return ModuleSpec(fullname, _TorchTestingLoader(fullname), is_package=True)
+            return None
+
+    # Pre-emptively register finder before torch is imported
+    if not any(isinstance(f, _TorchTestingFinder) for f in sys.meta_path):
+        sys.meta_path.insert(0, _TorchTestingFinder())
+
+_bootstrap_torch_shims()
+
 import numpy as np
 
 # Suppress noisy warnings in CLI output
@@ -996,18 +1052,9 @@ def main():
             process_voicefixer(args)
             return
 
-        # 2. ONNX Model Inference (MDX-Net / FoxJoy / Kim / Kara / Inst_HQ / Reverb_HQ)
-        if (has_model_file and model_p.lower().endswith(".onnx")) or (model_id in ["reverb_foxjoy", "uvr_mdx_voc_ft", "uvr_mdx_inst_hq3", "kim_vocal_2", "mdx23c_8step"]):
-            process_mdx_onnx(
-                model_path=model_p,
-                input_path=args.input,
-                output_path=args.output,
-                output_dir=args.output_dir,
-                prefix=args.prefix,
-                mode=args.mode,
-                stems=args.stems,
-                model_id=model_id
-            )
+        # 2. DeepFilterNet 3 (Speech Denoising & Dereverberation)
+        if model_id == "deepfilternet3" or model_id.startswith("deepfilter") or (args.mode in ["denoise", "dereverb"] and (not model_p or "df" in os.path.basename(model_p).lower())):
+            process_deepfilternet(args)
             return
 
         # 3. PyTorch VR Model Inference (.pth / .ckpt)
@@ -1024,12 +1071,26 @@ def main():
             return
 
         # 4. Demucs Separation (htdemucs, htdemucs_ft, htdemucs_vocals_bgm)
-        if args.mode == "separate" or (model_id in ["htdemucs", "htdemucs_ft", "htdemucs_vocals_bgm"]):
+        if (args.mode == "separate" and not (has_model_file and model_p.lower().endswith(".onnx"))) or (model_id in ["htdemucs", "htdemucs_ft", "htdemucs_vocals_bgm"]):
             process_demucs(args)
             return
 
-        # 5. DeepFilterNet Denoise & Dereverb
-        if args.mode in ["denoise", "dereverb"] or model_id == "deepfilternet3":
+        # 5. ONNX Model Inference (MDX-Net / FoxJoy / Kim / Kara / Inst_HQ / Reverb_HQ)
+        if (has_model_file and model_p.lower().endswith(".onnx")) or (model_id in ["reverb_foxjoy", "uvr_mdx_voc_ft", "uvr_mdx_inst_hq3", "kim_vocal_2", "mdx23c_8step"]):
+            process_mdx_onnx(
+                model_path=model_p,
+                input_path=args.input,
+                output_path=args.output,
+                output_dir=args.output_dir,
+                prefix=args.prefix,
+                mode=args.mode,
+                stems=args.stems,
+                model_id=model_id
+            )
+            return
+
+        # 6. Fallback Denoise & Dereverb
+        if args.mode in ["denoise", "dereverb"]:
             process_deepfilternet(args)
             return
 
