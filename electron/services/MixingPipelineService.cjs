@@ -2204,30 +2204,32 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
 
-      // 1. Попытка нейросетевой обработки через Sidecar (DeepFilterNet3)
+      // 1. Попытка нейросетевой обработки через Sidecar (DeepFilterNet3 / VR-DeNoise)
       let usedNeural = false;
       try {
-        logFn(`[Neural AI] Запуск DeepFilterNet3 для дорожки «${nick}»...`);
+        logFn(`[Neural AI] Запуск нейросетевой модели «${modelName}» для дорожки «${nick}»...`);
         const neuralRes = await AudioNeuralService.denoiseAudio({
           inputPath: track.path,
           outputPath: outPath,
+          modelPath: localModelFile,
+          modelId: activeModelId,
           attenuationLimitDb: Number(params.attenuationLimitDb ?? -100.0),
           sensitivity,
           wetDryBlend,
           onProgress: (p) => {
             if (onProgress && p && typeof p.percent === 'number') {
               const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `DeepFilterNet3 [${nick}]: ${p.percent}%` });
+              onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
             }
           },
           onLog: logFn
         });
         if (neuralRes && fsSync.existsSync(outPath)) {
           usedNeural = true;
-          logFn(`✓ Дорожка «${nick}» успешно очищена нейросетью DeepFilterNet3`);
+          logFn(`✓ Дорожка «${nick}» успешно очищена нейросетью «${modelName}»`);
         }
       } catch (neuralErr) {
-        logFn(`[Neural AI Fallback] DeepFilterNet3 недоступен (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
+        logFn(`[Neural AI Fallback] Модель «${modelName}» недоступна (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
       }
 
       if (!usedNeural) {
@@ -2388,30 +2390,32 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
 
-      // 1. Попытка нейросетевой дериверберации через DeepFilterNet3 Sidecar
+      // 1. Попытка нейросетевой дериверберации через Sidecar (DeepFilterNet3 / Reverb HQ FoxJoy / UVR De-Echo)
       let usedNeural = false;
       try {
-        logFn(`[Neural AI] Запуск DeepFilterNet3 Dereverb для дорожки «${nick}»...`);
+        logFn(`[Neural AI] Запуск модели «${modelName}» для дорожки «${nick}»...`);
         const neuralRes = await AudioNeuralService.dereverbAudio({
           inputPath: track.path,
           outputPath: outPath,
-          reverbReduction: Number(params.reverbReduction ?? 0.8),
+          modelPath: localModelFile,
+          modelId: activeModelId,
+          reverbReduction: Number(params.reverbReduction ?? (params.deechoReductionDb ? params.deechoReductionDb / 20.0 : 0.8)),
           sensitivity,
           wetDryBlend,
           onProgress: (p) => {
             if (onProgress && p && typeof p.percent === 'number') {
               const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `DeepFilterNet3 Dereverb [${nick}]: ${p.percent}%` });
+              onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
             }
           },
           onLog: logFn
         });
         if (neuralRes && fsSync.existsSync(outPath)) {
           usedNeural = true;
-          logFn(`✓ Дорожка «${nick}» успешно очищена от эха нейросетью DeepFilterNet3`);
+          logFn(`✓ Дорожка «${nick}» успешно очищена от эха нейросетью «${modelName}»`);
         }
       } catch (neuralErr) {
-        logFn(`[Neural AI Fallback] Нейросетевой дереверб недоступен (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
+        logFn(`[Neural AI Fallback] Модель «${modelName}» недоступна (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
       }
 
       if (!usedNeural) {
@@ -2594,36 +2598,47 @@ class MixingPipelineService {
       vocFilters = `asplit[orig_audio][to_filt]; [to_filt]${vocFilters}[filtered_vocal]; [orig_audio]volume=${origWeight}[dry]; [filtered_vocal]volume=${vocWeight}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
     }
 
-    // 1. Попытка высококачественной нейросетевой сепарации через Demucs v4 Sidecar
+    // 1. Попытка высококачественной нейросетевой сепарации (MDX-Net ONNX / VR PyTorch / Demucs v4 / RoFormer)
     let usedNeural = false;
-    const demucsModelName = activeModelId === 'htdemucs_ft' ? 'htdemucs_ft' : 'htdemucs';
     const stemsSelection = params.stems || (params.extractVocals && !params.extractInstrumental ? 'vocals_only' : (!params.extractVocals && params.extractInstrumental ? 'instrumental_only' : 'both'));
 
     try {
-      logFn(`[Neural AI] Запуск Demucs v4 (${demucsModelName}) для разделения стемов...`);
+      logFn(`[Neural AI] Запуск модели «${modelName}» для разделения стемов...`);
       const neuralStems = await AudioNeuralService.separateStems({
         inputPath: sourceAudioPath,
         outputDir: stepFolder,
-        modelName: demucsModelName,
+        modelName: activeModelId,
+        modelPath: localModelFile,
+        modelId: activeModelId,
         shifts: Number(params.shifts ?? 1),
         overlap: Number(params.overlap ?? 0.25),
         stems: stemsSelection,
         prefix,
         onProgress: (p) => {
           if (onProgress && p && typeof p.percent === 'number') {
-            onProgress({ percent: p.percent, message: `Demucs v4 [${demucsModelName}]: ${p.percent}%` });
+            onProgress({ percent: p.percent, message: `${modelName}: ${p.percent}%` });
           }
         },
         onLog: logFn
       });
 
-      if (neuralStems && neuralStems.length > 0) {
+      if (neuralStems && Array.isArray(neuralStems) && neuralStems.length > 0) {
         usedNeural = true;
-        logFn(`✓ Разделение оригинала успешно завершено нейросетью Demucs v4 (${neuralStems.length} стем-файлов)!`);
-        return neuralStems;
+        const formatted = neuralStems.map(s => {
+          let sz = 0;
+          try { sz = fsSync.statSync(s.path).size; } catch (e) {}
+          return {
+            name: path.basename(s.path),
+            path: s.path,
+            size: sz,
+            type: s.type
+          };
+        });
+        logFn(`✓ Разделение оригинала успешно завершено нейросетью «${modelName}» (${formatted.length} стем-файлов)!`);
+        return formatted;
       }
     } catch (neuralErr) {
-      logFn(`[Neural AI Fallback] Demucs v4 недоступен (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
+      logFn(`[Neural AI Fallback] Модель «${modelName}» недоступна (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
     }
 
     const results = [];
@@ -2741,45 +2756,75 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Применение модели VoiceFixer к дорожке «${nick}»...`);
 
-      let filterChain = '';
-      if (subBassProtect) {
-        filterChain += `highpass=f=70,`;
+      let usedNeural = false;
+      try {
+        logFn(`[Neural AI] Запуск VoiceFixer Harmonic Restorer для дорожки «${nick}»...`);
+        const neuralRes = await AudioNeuralService.voiceFixer({
+          inputPath: track.path,
+          outputPath: outPath,
+          modelPath: localModelFile,
+          airBandBoostDb: airBoost,
+          harmonicSaturation: sat,
+          formantClarity: clarity,
+          warmTubeEmulation: warmTube,
+          subBassProtect,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `VoiceFixer [${nick}]: ${p.percent}%` });
+            }
+          },
+          onLog: logFn
+        });
+        if (neuralRes && fsSync.existsSync(outPath)) {
+          usedNeural = true;
+          logFn(`✓ Дорожка «${nick}» успешно обработана нейросетью VoiceFixer Harmonic Restorer`);
+        }
+      } catch (neuralErr) {
+        logFn(`[Neural AI Fallback] VoiceFixer недоступен (${neuralErr.message}). Переход на встроенный DSP-гармонайзер.`, 'warn');
       }
-      
-      // Air-band restoration (12.5kHz - 16kHz)
-      filterChain += `equalizer=f=13500:t=h:g=${airBoost.toFixed(1)}`;
-      
-      // Formant presence & clarity (3.4kHz)
-      const clarityGain = (clarity * 3.0).toFixed(1);
-      filterChain += `,equalizer=f=3400:t=q:w=1.2:g=${clarityGain}`;
 
-      // Warm analog tube harmonic saturation
-      if (warmTube && sat > 0.15) {
-        const drive = (1.0 + sat * 0.8).toFixed(2);
-        filterChain += `,aexciter=level_in=1:level_out=1:amount=${(sat * 2).toFixed(1)}:drive=${drive}:freq=7500`;
+      if (!usedNeural) {
+        let filterChain = '';
+        if (subBassProtect) {
+          filterChain += `highpass=f=70,`;
+        }
+        
+        // Air-band restoration (12.5kHz - 16kHz)
+        filterChain += `equalizer=f=13500:t=h:g=${airBoost.toFixed(1)}`;
+        
+        // Formant presence & clarity (3.4kHz)
+        const clarityGain = (clarity * 3.0).toFixed(1);
+        filterChain += `,equalizer=f=3400:t=q:w=1.2:g=${clarityGain}`;
+
+        // Warm analog tube harmonic saturation
+        if (warmTube && sat > 0.15) {
+          const drive = (1.0 + sat * 0.8).toFixed(2);
+          filterChain += `,aexciter=level_in=1:level_out=1:amount=${(sat * 2).toFixed(1)}:drive=${drive}:freq=7500`;
+        }
+
+        const cmd = ffmpeg(track.path)
+          .audioFilters(filterChain)
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(outPath);
+
+        const trackStartPct = Math.round((i / inputFiles.length) * 100);
+        const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+        await this._execFfmpeg(cmd, {
+          logFn,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `VoiceFixer: ${nick} (${p.percent}%)` });
+            }
+          },
+          outPath,
+          description: `VoiceFixer [${nick}]`
+        });
       }
-
-      const cmd = ffmpeg(track.path)
-        .audioFilters(filterChain)
-        .audioCodec('pcm_s16le')
-        .audioChannels(2)
-        .audioFrequency(48000)
-        .output(outPath);
-
-      const trackStartPct = Math.round((i / inputFiles.length) * 100);
-      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
-
-      await this._execFfmpeg(cmd, {
-        logFn,
-        onProgress: (p) => {
-          if (onProgress && p && typeof p.percent === 'number') {
-            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-            onProgress({ percent: current, message: `VoiceFixer: ${nick} (${p.percent}%)` });
-          }
-        },
-        outPath,
-        description: `VoiceFixer [${nick}]`
-      });
 
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
@@ -3504,6 +3549,24 @@ class MixingPipelineService {
     const sizeMb = modelDef?.size_mb || 40.0;
     const approxBytes = Math.round(sizeMb * 1024 * 1024);
 
+    // If an existing file on disk is smaller than 1MB, it is likely a corrupted previous placeholder
+    if (fsSync.existsSync(localModelFile)) {
+      const existingSize = fsSync.statSync(localModelFile).size;
+      if (existingSize < 1024 * 1024) {
+        log.warn(`[Mixing] Deleting corrupted previous placeholder file (${existingSize} bytes): ${localModelFile}`);
+        try { fsSync.unlinkSync(localModelFile); } catch (e) {}
+      } else {
+        return {
+          success: true,
+          id: modelDef.id,
+          name: modelDef.name || modelDef.title,
+          filename: modelDef.filename,
+          installed_bytes: existingSize,
+          local_path: localModelFile
+        };
+      }
+    }
+
     if (onLog) onLog(`Запуск загрузки модели ${filename} (${sizeMb} МБ)...`);
 
     const downloadFromUrl = (targetUrl) => {
@@ -3512,18 +3575,25 @@ class MixingPipelineService {
         const http = require('http');
 
         const requestWithRedirect = (curUrl, redirectCount = 0) => {
-          if (redirectCount > 6) {
+          if (redirectCount > 8) {
             return reject(new Error('Слишком много перенаправлений'));
           }
 
           const client = curUrl.startsWith('https') ? https : http;
-          const req = client.get(curUrl, { headers: { 'User-Agent': 'Anixart-Dub-Studio/1.0' } }, (res) => {
+          const req = client.get(curUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+              'Accept': '*/*'
+            }
+          }, (res) => {
             if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
+              res.resume(); // CRITICAL: release socket stream before redirect
               const redirectUrl = new URL(res.headers.location, curUrl).toString();
               return requestWithRedirect(redirectUrl, redirectCount + 1);
             }
 
             if (res.statusCode !== 200) {
+              res.resume();
               return reject(new Error(`HTTP статус: ${res.statusCode}`));
             }
 
@@ -3544,23 +3614,27 @@ class MixingPipelineService {
             res.on('end', () => {
               fileStream.end(async () => {
                 try {
-                  await fs.rename(tempFile, localModelFile);
-                  const metaInfo = {
-                    id: modelDef.id,
-                    name: modelDef.name || modelDef.title,
-                    filename: modelDef.filename,
-                    category: modelDef.category,
-                    description: modelDef.description,
-                    size_mb: modelDef.size_mb,
-                    recommended_for: modelDef.recommended_for,
-                    engineArchitecture: modelDef.engineArchitecture,
-                    installed_bytes: downloadedBytes,
-                    local_path: localModelFile,
-                    format: modelDef.format || 'pth',
-                    installedAt: new Date().toISOString()
-                  };
-                  await fs.writeFile(metaFile, JSON.stringify(metaInfo, null, 2), 'utf8');
-                  resolve(metaInfo);
+                  if (fsSync.existsSync(tempFile) && fsSync.statSync(tempFile).size > 1024 * 100) {
+                    await fs.rename(tempFile, localModelFile);
+                    const metaInfo = {
+                      id: modelDef.id,
+                      name: modelDef.name || modelDef.title,
+                      filename: modelDef.filename,
+                      category: modelDef.category,
+                      description: modelDef.description,
+                      size_mb: modelDef.size_mb,
+                      recommended_for: modelDef.recommended_for,
+                      engineArchitecture: modelDef.engineArchitecture,
+                      installed_bytes: downloadedBytes,
+                      local_path: localModelFile,
+                      format: modelDef.format || 'pth',
+                      installedAt: new Date().toISOString()
+                    };
+                    await fs.writeFile(metaFile, JSON.stringify(metaInfo, null, 2), 'utf8');
+                    resolve(metaInfo);
+                  } else {
+                    reject(new Error('Размер скачанного файла подозрительно мал'));
+                  }
                 } catch (err) {
                   reject(err);
                 }
@@ -3574,7 +3648,7 @@ class MixingPipelineService {
           });
 
           req.on('error', (err) => reject(err));
-          req.setTimeout(25000, () => {
+          req.setTimeout(35000, () => {
             req.destroy();
             reject(new Error('Превышен таймаут загрузки'));
           });
@@ -3595,28 +3669,39 @@ class MixingPipelineService {
       }
     }
 
-    // Fallback: create initialized weights container on disk
-    if (onLog) onLog(`Инициализация локального пакета весов модели ${filename}...`);
-    const placeholderSize = 1024 * 512;
-    await fs.writeFile(localModelFile, Buffer.alloc(placeholderSize));
-    const metaInfo = {
-      id: modelDef.id,
-      name: modelDef.name || modelDef.title,
-      filename: modelDef.filename,
-      category: modelDef.category,
-      description: modelDef.description,
-      size_mb: modelDef.size_mb,
-      recommended_for: modelDef.recommended_for,
-      engineArchitecture: modelDef.engineArchitecture,
-      installed_bytes: placeholderSize,
-      local_path: localModelFile,
-      format: modelDef.format || 'pth',
-      offline_initialized: true,
-      installedAt: new Date().toISOString()
-    };
-    await fs.writeFile(metaFile, JSON.stringify(metaInfo, null, 2), 'utf8');
-    if (onLog) onLog(`✓ Модель ${filename} активирована на диске (${localModelFile})!`);
-    return { success: true, ...metaInfo };
+    // Try secondary Python downloader with direct streaming
+    try {
+      if (onLog) onLog(`Запуск прямого Python-загрузчика для ${filename}...`);
+      await AudioNeuralService._runPythonSidecar([
+        '--mode', 'download_model',
+        '--model_path', localModelFile,
+        '--model_id', modelDef.id
+      ], {
+        onProgress,
+        onLog,
+        operationName: `Download Model ${filename}`
+      });
+
+      if (fsSync.existsSync(localModelFile) && fsSync.statSync(localModelFile).size > 1024 * 512) {
+        const sz = fsSync.statSync(localModelFile).size;
+        const metaInfo = {
+          id: modelDef.id,
+          name: modelDef.name || modelDef.title,
+          filename: modelDef.filename,
+          installed_bytes: sz,
+          local_path: localModelFile,
+          format: modelDef.format || 'pth',
+          installedAt: new Date().toISOString()
+        };
+        await fs.writeFile(metaFile, JSON.stringify(metaInfo, null, 2), 'utf8');
+        if (onLog) onLog(`✓ Модель ${filename} успешно загружена через Python!`);
+        return { success: true, ...metaInfo };
+      }
+    } catch (pyErr) {
+      log.warn(`[Mixing] Python downloader fallback failed: ${pyErr.message}`);
+    }
+
+    throw new Error(`Не удалось скачать веса модели ${filename}. Проверьте доступ в интернет или скопируйте файл вручную в папку: ${uvrModelsDir}`);
   }
 
   /**

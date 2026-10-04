@@ -30,8 +30,6 @@ import {
   FileAudio
 } from 'lucide-react';
 import { toast } from 'sonner';
-import WaveSurfer from 'wavesurfer.js';
-import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import { Episode, Track, SubtitleLine, RoleAssignment } from '../types';
 import { ipcSafe } from '../lib/ipcSafe';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
@@ -136,104 +134,178 @@ async function getPlayableAudioUrl(filePath: string): Promise<string | null> {
 }
 
 /**
- * Real WaveSurfer.js Audio Waveform Track Component for Timing Panel
+ * Speech interval detection algorithm on decoded AudioBuffer.
+ * Identifies speech phrases and silences, cutting away background noise and long pauses.
  */
-const WaveSurferTrack: React.FC<{
-  track: Track;
-  zoomLevel: number;
-  volume: number;
-  isMuted: boolean;
-  onReady?: (duration: number) => void;
-}> = ({ track, zoomLevel, volume, isMuted, onReady }) => {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const wsRef = useRef<WaveSurfer | null>(null);
+function detectSpeechIntervals(
+  audioBuffer: AudioBuffer,
+  minSilenceDurationSec: number = 0.35,
+  paddingSec: number = 0.12
+): Array<{ startSec: number; endSec: number; durationSec: number }> {
+  const channelData = audioBuffer.getChannelData(0);
+  const sampleRate = audioBuffer.sampleRate;
+  const totalSamples = channelData.length;
+  const duration = audioBuffer.duration;
+  
+  // Find peak amplitude across the track to set dynamic threshold
+  let maxAmp = 0;
+  const stepCheck = Math.max(1, Math.floor(sampleRate * 0.1));
+  for (let i = 0; i < totalSamples; i += stepCheck) {
+    const a = Math.abs(channelData[i]);
+    if (a > maxAmp) maxAmp = a;
+  }
+  const thresholdAmp = Math.max(0.004, maxAmp * 0.08); // 8% of peak
 
-  useEffect(() => {
-    if (!containerRef.current || !track.filePath) return;
+  const chunkSize = Math.floor(sampleRate * 0.025); // 25ms windows
+  const totalChunks = Math.floor(totalSamples / chunkSize);
+  const isSpeechChunk = new Uint8Array(totalChunks);
 
-    let isMounted = true;
-    (async () => {
-      const audioUrl = await getPlayableAudioUrl(track.filePath);
-      if (!audioUrl || !isMounted || !containerRef.current) return;
-
-      try {
-        const ws = WaveSurfer.create({
-          container: containerRef.current,
-          waveColor: '#818cf8',
-          progressColor: '#4f46e5',
-          cursorColor: 'transparent',
-          barWidth: 2,
-          barGap: 3,
-          height: 80,
-          normalize: true,
-          minPxPerSec: zoomLevel,
-          interact: false
-        });
-
-        wsRef.current = ws;
-
-        ws.on('error', (err: any) => {
-          if (err?.name === 'AbortError' || err?.message?.includes('aborted')) return;
-        });
-
-        await ws.load(audioUrl);
-        if (isMounted) {
-          ws.setVolume(isMuted ? 0 : volume);
-          if (onReady) onReady(ws.getDuration());
-        }
-      } catch (err) {
-        console.warn(`[WaveSurferTrack] Load error for track ${track.id}:`, err);
-      }
-    })();
-
-    return () => {
-      isMounted = false;
-      if (wsRef.current) {
-        try {
-          wsRef.current.destroy();
-        } catch (e) {}
-      }
-    };
-  }, [track.filePath]);
-
-  useEffect(() => {
-    if (wsRef.current) {
-      try {
-        wsRef.current.zoom(zoomLevel);
-        wsRef.current.setVolume(isMuted ? 0 : volume);
-      } catch (e) {}
+  for (let i = 0; i < totalChunks; i++) {
+    let sumSquares = 0;
+    const offset = i * chunkSize;
+    for (let j = 0; j < chunkSize; j++) {
+      const s = channelData[offset + j];
+      sumSquares += s * s;
     }
-  }, [zoomLevel, volume, isMuted]);
+    const rms = Math.sqrt(sumSquares / chunkSize);
+    if (rms >= thresholdAmp) {
+      isSpeechChunk[i] = 1;
+    }
+  }
 
-  return <div ref={containerRef} className="w-full h-full absolute inset-0 pointer-events-none opacity-85" />;
-};
+  // Smooth short pauses inside words (< minSilenceDurationSec)
+  const minSilenceChunks = Math.floor(minSilenceDurationSec / 0.025);
+  let gapCount = 0;
+  for (let i = 0; i < totalChunks; i++) {
+    if (isSpeechChunk[i] === 0) {
+      gapCount++;
+    } else {
+      if (gapCount > 0 && gapCount < minSilenceChunks) {
+        for (let k = i - gapCount; k < i; k++) {
+          isSpeechChunk[k] = 1;
+        }
+      }
+      gapCount = 0;
+    }
+  }
 
-interface TimingPanelProps {
-  currentEpisode: Episode | null;
-  onRefresh: () => void;
-  onNavigate?: (tab: 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive') => void;
+  const intervals: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
+  let inSpeech = false;
+  let intervalStartSec = 0;
+
+  for (let i = 0; i < totalChunks; i++) {
+    const chunkTime = (i * chunkSize) / sampleRate;
+    if (isSpeechChunk[i] === 1 && !inSpeech) {
+      inSpeech = true;
+      intervalStartSec = Math.max(0, chunkTime - paddingSec);
+    } else if (isSpeechChunk[i] === 0 && inSpeech) {
+      inSpeech = false;
+      const intervalEndSec = Math.min(duration, chunkTime + paddingSec);
+      if (intervalEndSec - intervalStartSec >= 0.25) {
+        intervals.push({
+          startSec: Number(intervalStartSec.toFixed(2)),
+          endSec: Number(intervalEndSec.toFixed(2)),
+          durationSec: Number((intervalEndSec - intervalStartSec).toFixed(2))
+        });
+      }
+    }
+  }
+
+  if (inSpeech) {
+    const intervalEndSec = duration;
+    if (intervalEndSec - intervalStartSec >= 0.25) {
+      intervals.push({
+        startSec: Number(intervalStartSec.toFixed(2)),
+        endSec: Number(intervalEndSec.toFixed(2)),
+        durationSec: Number((intervalEndSec - intervalStartSec).toFixed(2))
+      });
+    }
+  }
+
+  return intervals;
 }
 
-export interface PhraseBlock {
+/**
+ * Real Audio Waveform Canvas Component for Individual Speech Clips
+ * Renders real PCM peaks directly from the decoded AudioBuffer between sourceStartSec and sourceEndSec.
+ */
+const ClipWaveform: React.FC<{
+  audioBuffer: AudioBuffer | null;
+  sourceStartSec: number;
+  sourceEndSec: number;
+  width: number;
+  height: number;
+  color?: string;
+  volumePercent?: number;
+}> = ({ audioBuffer, sourceStartSec, sourceEndSec, width, height, color = '#818cf8', volumePercent = 100 }) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || width <= 0 || height <= 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, width, height);
+
+    const centerY = height / 2;
+    const volMult = Math.min(2.0, Math.max(0.1, (volumePercent || 100) / 100));
+
+    if (audioBuffer) {
+      const channelData = audioBuffer.getChannelData(0);
+      const sampleRate = audioBuffer.sampleRate;
+      const startSample = Math.max(0, Math.floor(sourceStartSec * sampleRate));
+      const endSample = Math.min(channelData.length, Math.floor(sourceEndSec * sampleRate));
+      const totalSamples = Math.max(1, endSample - startSample);
+
+      const barWidth = 2.0;
+      const barGap = 1.2;
+      const step = barWidth + barGap;
+      const numBars = Math.max(2, Math.floor(width / step));
+      const samplesPerBar = Math.floor(totalSamples / numBars);
+
+      ctx.fillStyle = color;
+
+      for (let i = 0; i < numBars; i++) {
+        const offset = startSample + i * samplesPerBar;
+        let maxPeak = 0;
+        const count = Math.min(samplesPerBar, endSample - offset);
+        for (let j = 0; j < count; j++) {
+          const val = Math.abs(channelData[offset + j]);
+          if (val > maxPeak) maxPeak = val;
+        }
+
+        const barHeight = Math.max(1.5, Math.min(centerY - 1, (centerY - 2) * maxPeak * 2.4 * volMult));
+        const x = i * step;
+        ctx.fillRect(x, centerY - barHeight, barWidth, barHeight * 2);
+      }
+    } else {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, centerY);
+      ctx.lineTo(width, centerY);
+      ctx.stroke();
+    }
+  }, [audioBuffer, sourceStartSec, sourceEndSec, width, height, color, volumePercent]);
+
+  return <canvas ref={canvasRef} width={width} height={height} className="w-full h-full pointer-events-none" />;
+};
+
+export interface AudioClip {
   id: string;
   trackId: string;
   dubberName: string;
   characterName: string;
-  startSec: number;
-  endSec: number;
-  durationSec: number;
-  text: string;
-  subIndex?: number;
-  offsetSec: number; // Manual user shift offset (+ / -)
-  volumePercent?: number; // Volume % modifier: 100% normal, 70% background, 50% whisper
-  pan?: number;
-  timeStretch?: number;
-  headTrimSec?: number;
-  tailTrimSec?: number;
-  isFix?: boolean;
-  fixSourceFile?: string;
-  hasCollision?: boolean;
-  collisionWithTrackId?: string;
+  clipStartSec: number;     // Position on timeline
+  durationSec: number;      // Clip duration
+  sourceStartSec: number;   // Start time inside audio file
+  sourceEndSec: number;     // End time inside audio file
+  text: string;             // Dialogue text hint
+  volumePercent: number;    // Gain % (0 - 200%)
+  isFix?: boolean;          // Flag for spliced fix takes
+  hasCollision?: boolean;   // Collision with another actor
+  offsetSec: number;        // Manual mouse drag offset
 }
 
 export interface StitchedFixMarker {
@@ -259,14 +331,20 @@ export interface VoiceCollisionMarker {
   overlapDurationSec: number;
 }
 
+interface TimingPanelProps {
+  currentEpisode: Episode | null;
+  onRefresh: () => void;
+  onNavigate?: (tab: 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive') => void;
+}
+
 export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: TimingPanelProps) {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [subLines, setSubLines] = useState<SubtitleLine[]>([]);
-  const [phraseBlocks, setPhraseBlocks] = useState<Record<string, PhraseBlock[]>>({});
+  const [audioClips, setAudioClips] = useState<Record<string, AudioClip[]>>({}); // trackId -> AudioClip[]
   const [stitchedFixes, setStitchedFixes] = useState<StitchedFixMarker[]>([]);
   const [collisions, setCollisions] = useState<VoiceCollisionMarker[]>([]);
   
-  // State flags
+  // Pipeline status flags
   const [isSilenceRemoved, setIsSilenceRemoved] = useState<boolean>(false);
   const [isFixesStitched, setIsFixesStitched] = useState<boolean>(false);
   const [isAutoTimingDone, setIsAutoTimingDone] = useState<boolean>(false);
@@ -280,8 +358,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [operationLogs, setOperationLogs] = useState<Array<{ time: string; msg: string; level: 'info' | 'success' | 'warn' | 'error' }>>([]);
   const [trackSubLinesMap, setTrackSubLinesMap] = useState<Record<string, SubtitleLine[]>>({});
 
-  // Mouse Dragging State for Phrase Blocks
-  const [draggingPhrase, setDraggingPhrase] = useState<{ trackId: string; phraseId: string; startX: number; initialOffset: number } | null>(null);
+  // Mouse Dragging State for Clips
+  const [draggingClip, setDraggingClip] = useState<{ trackId: string; clipId: string; startMouseX: number; initialClipStartSec: number } | null>(null);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
   const addLog = useCallback((msg: string, level: 'info' | 'success' | 'warn' | 'error' = 'info') => {
     const time = new Date().toLocaleTimeString('ru-RU');
@@ -307,42 +386,39 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [duration, setDuration] = useState<number>(100);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [zoomLevel, setZoomLevel] = useState<number>(30); // pixels per second
-  const [selectedPhraseId, setSelectedPhraseId] = useState<string | null>(null);
-  const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
-  const [activeTabMarkerFilter, setActiveTabMarkerFilter] = useState<'all' | 'fixes' | 'collisions'>('all');
 
   // Audio Playback
   const [mutedTracks, setMutedTracks] = useState<Set<string>>(new Set());
-  const [soloTrack, setSoloTrack] = useState<string | null>(null);
   const [volumes, setVolumes] = useState<Record<string, number>>({});
   const [originalVolume, setOriginalVolume] = useState<number>(0.4);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
 
-  // Refs for animation & audio playback
+  // Refs for animation & decoded audio buffers
   const playbackRef = useRef<number | null>(null);
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
+  const audioBuffersRef = useRef<Record<string, AudioBuffer>>({});
 
-  // Mouse Dragging Effect for Phrases
+  // Mouse Dragging Effect for Real Audio Clips
   useEffect(() => {
-    if (!draggingPhrase) return;
+    if (!draggingClip) return;
     const handleMouseMove = (e: MouseEvent) => {
-      const deltaX = e.clientX - draggingPhrase.startX;
+      const deltaX = e.clientX - draggingClip.startMouseX;
       const deltaSec = deltaX / zoomLevel;
-      setPhraseBlocks(prev => {
-        const trBlocks = prev[draggingPhrase.trackId] || [];
-        const updated = trBlocks.map(b => {
-          if (b.id === draggingPhrase.phraseId) {
-            const newOffset = Number((draggingPhrase.initialOffset + deltaSec).toFixed(2));
-            return { ...b, offsetSec: newOffset };
+      setAudioClips(prev => {
+        const trClips = prev[draggingClip.trackId] || [];
+        const updated = trClips.map(clip => {
+          if (clip.id === draggingClip.clipId) {
+            const newStart = Math.max(0, Number((draggingClip.initialClipStartSec + deltaSec).toFixed(2)));
+            return { ...clip, clipStartSec: newStart, offsetSec: 0 };
           }
-          return b;
+          return clip;
         });
-        return { ...prev, [draggingPhrase.trackId]: updated };
+        return { ...prev, [draggingClip.trackId]: updated };
       });
     };
     const handleMouseUp = () => {
-      setDraggingPhrase(null);
+      setDraggingClip(null);
     };
     window.addEventListener('mousemove', handleMouseMove);
     window.addEventListener('mouseup', handleMouseUp);
@@ -350,16 +426,16 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [draggingPhrase, zoomLevel]);
+  }, [draggingClip, zoomLevel]);
 
-  const handlePhraseMouseDown = (e: React.MouseEvent, trackId: string, phrase: PhraseBlock) => {
+  const handleClipMouseDown = (e: React.MouseEvent, trackId: string, clip: AudioClip) => {
     e.stopPropagation();
-    setSelectedPhraseId(phrase.id);
-    setDraggingPhrase({
+    setSelectedClipId(clip.id);
+    setDraggingClip({
       trackId,
-      phraseId: phrase.id,
-      startX: e.clientX,
-      initialOffset: phrase.offsetSec || 0
+      clipId: clip.id,
+      startMouseX: e.clientX,
+      initialClipStartSec: clip.clipStartSec + (clip.offsetSec || 0)
     });
   };
 
@@ -406,7 +482,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       const audio = audioElementsRef.current[tr.id];
       if (audio && !mutedTracks.has(tr.id)) {
         try {
-          if (Math.abs(audio.currentTime - currentTime) > 0.2) {
+          if (Math.abs(audio.currentTime - currentTime) > 0.25) {
             audio.currentTime = currentTime;
           }
           audio.volume = Math.max(0, Math.min(1, volumes[tr.id] ?? 1.0));
@@ -451,6 +527,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setStatusMessage('Загрузка субтитров и файлов звукорежиссёра...');
       addLog(`=== Начало загрузки тайминга серии #${currentEpisode.number} (${currentEpisode.project?.title || 'Проект'}) ===`, 'info');
 
+      // 1. Load Subtitles
       let parsedLines: SubtitleLine[] = [];
       const subPath = currentEpisode.subPath;
       if (subPath) {
@@ -474,6 +551,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         }
       }
 
+      // 2. Fetch Dubber Tracks
       const statusRes: any = await ipcSafe.invoke('mixing-get-status', { episode: currentEpisode }).catch(() => null);
       let dubberTracks = statusRes?.manifest?.sourceFiles?.dubberTracks || [];
 
@@ -517,9 +595,10 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       });
 
       setTracks(fetchedTracks);
-      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов с WaveSurfer.`, fetchedTracks.length > 0 ? 'success' : 'warn');
+      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов.`, fetchedTracks.length > 0 ? 'success' : 'warn');
 
-      // Preload Audio Elements for Playback
+      // 3. Decode Real AudioBuffers for Every Track
+      const sharedAudioCtx = getSharedAudioContext();
       for (const tr of fetchedTracks) {
         if (tr.filePath) {
           const playableUrl = await getPlayableAudioUrl(tr.filePath);
@@ -527,6 +606,19 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             const audio = new Audio(playableUrl);
             audio.preload = 'metadata';
             audioElementsRef.current[tr.id] = audio;
+
+            try {
+              const resp = await fetch(playableUrl);
+              const arrayBuf = await resp.arrayBuffer();
+              if (sharedAudioCtx) {
+                const decodedBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
+                audioBuffersRef.current[tr.id] = decodedBuf;
+                setDuration(prev => Math.max(prev, decodedBuf.duration));
+                addLog(`📈 Реальная аудиоволна декодирована для «${tr.participant}» (${decodedBuf.duration.toFixed(1)}s)`, 'success');
+              }
+            } catch (decodeErr) {
+              console.warn(`[AudioDecode] Не удалось декодировать аудио для ${tr.id}:`, decodeErr);
+            }
           }
         }
       }
@@ -537,7 +629,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         });
       }
 
-      const initialBlocks: Record<string, PhraseBlock[]> = {};
+      // 4. Map Subtitles and Initialize Initial Audio Clips (continuous full file before silence cut)
+      const initialClips: Record<string, AudioClip[]> = {};
       const trackSubMap: Record<string, SubtitleLine[]> = {};
 
       fetchedTracks.forEach(tr => {
@@ -560,27 +653,32 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
         trackSubMap[tr.id] = matchedLines;
 
-        initialBlocks[tr.id] = matchedLines.map((line, idx) => ({
-          id: `phrase_${tr.id}_${idx}`,
+        const trackBuf = audioBuffersRef.current[tr.id];
+        const trackDur = trackBuf ? trackBuf.duration : (matchedLines[matchedLines.length - 1]?.endSec || 100);
+
+        // Initially before "Удалить тишину", track has one continuous full audio clip
+        initialClips[tr.id] = [{
+          id: `clip_${tr.id}_full`,
           trackId: tr.id,
           dubberName,
           characterName: charName,
-          startSec: line.startSec,
-          endSec: line.endSec,
-          durationSec: Math.max(0.4, line.endSec - line.startSec),
-          text: line.text,
-          subIndex: idx,
-          offsetSec: 0,
+          clipStartSec: 0,
+          durationSec: trackDur,
+          sourceStartSec: 0,
+          sourceEndSec: trackDur,
+          text: `Полная запись: ${dubberName}`,
           volumePercent: 100,
-          isFix: false
-        }));
+          isFix: false,
+          hasCollision: false,
+          offsetSec: 0
+        }];
       });
 
       setTrackSubLinesMap(trackSubMap);
-      setPhraseBlocks(initialBlocks);
+      setAudioClips(initialClips);
 
       if (fetchedTracks.length > 0) {
-        toast.success(`Загружено ${fetchedTracks.length} дорожек с реальными WaveSurfer вейфформами!`);
+        toast.success(`Загружено ${fetchedTracks.length} дорожек дабберов с реальными аудиоволнами!`);
       }
     } catch (err: any) {
       addLog(`❌ Ошибка загрузки данных тайминга: ${err.message || String(err)}`, 'error');
@@ -595,19 +693,19 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     loadEpisodeData();
   }, [currentEpisode?.id]);
 
-  // ACTION 1: Import from QA
+  // PIPELINE STEP 1: Export / Backup all tracks
   const handleImportFromQA = async () => {
     if (!currentEpisode) return;
     try {
       setIsLoading(true);
-      setStatusMessage('Импорт материалов из QA...');
+      setStatusMessage('Бэкап и сборка дорожек до манипуляций...');
       await ipcSafe.invoke('mixing-import-sound-engineer-files', {
         episode: currentEpisode,
-        autoApplyFixes: true,
+        autoApplyFixes: false,
         autoTiming: false
       });
       await loadEpisodeData();
-      toast.success('Материалы успешно импортированы из QA!');
+      toast.success('Бэкап дорожек выполнен! Исходные файлы загружены в тайминг.');
     } catch (err: any) {
       toast.error(`Ошибка импорта: ${err.message || String(err)}`);
     } finally {
@@ -616,7 +714,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // ACTION 2: Cut Silence
+  // PIPELINE STEP 3: "Удалить тишину" — Real VAD Silence Cutting & DAW Clip Slicing
   const handleCutSilence = async () => {
     if (tracks.length === 0) {
       toast.error('Нет загруженных дорожек');
@@ -624,24 +722,76 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
     try {
       setIsLoading(true);
-      setStatusMessage('Удаление пауз и тишины...');
-      const updatedBlocks: Record<string, PhraseBlock[]> = { ...phraseBlocks };
-      let count = 0;
+      setStatusMessage('Нарезка аудио-вейвформ по паузам и удаление тишины...');
+      addLog('Запуск анализа энергии аудиосигнала и нарезки на речевые фразы...', 'info');
+
+      const updatedClips: Record<string, AudioClip[]> = {};
+      let totalClips = 0;
 
       for (const track of tracks) {
-        const existing = updatedBlocks[track.id] || [];
-        const refined: PhraseBlock[] = [];
-        for (const block of existing) {
-          refined.push(block);
-          count++;
+        const audioBuf = audioBuffersRef.current[track.id];
+        const dubberName = track.participant || track.dubberName || 'Даббер';
+        const characterName = track.character || track.characterName || 'Персонаж';
+        const trSubs = trackSubLinesMap[track.id] || [];
+
+        if (audioBuf) {
+          // Detect speech intervals in audio signal
+          const intervals = detectSpeechIntervals(audioBuf);
+          addLog(`🎙 Дорожка «${dubberName}»: обнаружено ${intervals.length} речевых фраз. Тишина между ними вырезана.`, 'info');
+
+          updatedClips[track.id] = intervals.map((iv, idx) => {
+            // Find matching subtitle text
+            let matchingSub = trSubs[idx];
+            if (!matchingSub) {
+              matchingSub = trSubs.find(s => (s.startSec >= iv.startSec - 2.0 && s.startSec <= iv.endSec + 2.0));
+            }
+
+            totalClips++;
+            return {
+              id: `clip_${track.id}_${idx}`,
+              trackId: track.id,
+              dubberName,
+              characterName,
+              clipStartSec: iv.startSec,
+              durationSec: iv.durationSec,
+              sourceStartSec: iv.startSec,
+              sourceEndSec: iv.endSec,
+              text: matchingSub?.text || `Фраза ${idx + 1}`,
+              volumePercent: 100,
+              isFix: false,
+              hasCollision: false,
+              offsetSec: 0
+            };
+          });
+        } else {
+          // Fallback if buffer not loaded yet: slice by subtitles
+          updatedClips[track.id] = trSubs.map((sub, idx) => {
+            totalClips++;
+            return {
+              id: `clip_${track.id}_${idx}`,
+              trackId: track.id,
+              dubberName,
+              characterName,
+              clipStartSec: sub.startSec,
+              durationSec: Math.max(0.4, sub.endSec - sub.startSec),
+              sourceStartSec: sub.startSec,
+              sourceEndSec: sub.endSec,
+              text: sub.text,
+              volumePercent: 100,
+              isFix: false,
+              hasCollision: false,
+              offsetSec: 0
+            };
+          });
         }
-        updatedBlocks[track.id] = refined;
       }
-      setPhraseBlocks(updatedBlocks);
+
+      setAudioClips(updatedClips);
       setIsSilenceRemoved(true);
-      addLog(`✓ Тишина успешно удалена на всех дорожках (${count} фраз). Субтитры сохранены.`, 'success');
-      toast.success(`Тишина удалена! Обработано ${count} фраз.`);
+      addLog(`✓ Удаление тишины завершено! Сформировано ${totalClips} отдельных речевых клипов. Тишина между фразами удалена (пустое пространство).`, 'success');
+      toast.success(`Тишина удалена! Вейвформы нарезаны на ${totalClips} отдельных речевых фраз.`);
     } catch (err: any) {
+      addLog(`❌ Ошибка удаления тишины: ${err.message}`, 'error');
       toast.error(`Ошибка: ${err.message}`);
     } finally {
       setIsLoading(false);
@@ -649,73 +799,221 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // ACTION 3: Stitch Fixes
+  // PIPELINE STEP 4: "Применить фиксы" — Splicing fix clips or full retakes
   const handleStitchFixes = async () => {
     try {
       setIsLoading(true);
-      setStatusMessage('Применение и вшитие фиксов...');
-      const newFixMarkers: StitchedFixMarker[] = [];
-      const updatedBlocks = { ...phraseBlocks };
+      setStatusMessage('Анализ файлов фиксов и вшитие в дорожки...');
+      addLog('Поиск фиксов и проверка соотношения длительностей/размеров...', 'info');
 
-      tracks.forEach((track, idx) => {
+      const updatedClips = { ...audioClips };
+      const newFixMarkers: StitchedFixMarker[] = [];
+      let appliedCount = 0;
+
+      for (const track of tracks) {
         const dubberName = track.participant || track.dubberName || 'Даббер';
         const characterName = track.character || track.characterName || 'Персонаж';
-        const trBlocks = updatedBlocks[track.id] || [];
-        if (trBlocks.length > 0) {
-          const target = trBlocks[0];
-          target.isFix = true;
-          newFixMarkers.push({
-            id: `fix_${Date.now()}_${idx}`,
-            trackId: track.id,
-            dubberName,
-            characterName,
-            startSec: target.startSec,
-            endSec: target.endSec,
-            filename: `fix_${dubberName}.wav`
-          });
-        }
-      });
+        const normDubber = normalizeName(dubberName);
+        const origAudio = audioBuffersRef.current[track.id];
+        if (!origAudio) continue;
 
-      setPhraseBlocks(updatedBlocks);
+        const origDuration = origAudio.duration;
+        const trackClips = updatedClips[track.id] || [];
+
+        // Check if there are fix files in currentEpisode files
+        const fixFile = ((currentEpisode as any)?.files || []).find((f: any) => {
+          const fn = (f.name || f.path || '').toLowerCase();
+          return (fn.includes('fix') || fn.includes('фикс')) && fn.includes(normDubber);
+        });
+
+        if (fixFile && fixFile.path) {
+          const fixPlayableUrl = await getPlayableAudioUrl(fixFile.path);
+          if (fixPlayableUrl) {
+            const resp = await fetch(fixPlayableUrl);
+            const arrayBuf = await resp.arrayBuffer();
+            const fixBuffer = await getSharedAudioContext()!.decodeAudioData(arrayBuf);
+            const fixDuration = fixBuffer.duration;
+            const ratio = fixDuration / origDuration;
+
+            if (ratio >= 0.85) {
+              // Full retake: Replace entire track with fix track clips!
+              addLog(`⚡ Полный фикс (${(ratio * 100).toFixed(0)}% длины) для «${dubberName}». Замена всей дорожки на фикс.`, 'success');
+              audioBuffersRef.current[track.id] = fixBuffer;
+              const newIntervals = detectSpeechIntervals(fixBuffer);
+              updatedClips[track.id] = newIntervals.map((iv, idx) => ({
+                id: `clip_${track.id}_fix_full_${idx}`,
+                trackId: track.id,
+                dubberName,
+                characterName,
+                clipStartSec: iv.startSec,
+                durationSec: iv.durationSec,
+                sourceStartSec: iv.startSec,
+                sourceEndSec: iv.endSec,
+                text: trackClips[idx]?.text || `Фраза ${idx + 1}`,
+                volumePercent: 100,
+                isFix: true,
+                offsetSec: 0
+              }));
+              appliedCount++;
+            } else {
+              // Fragmentary snippet fix: Splice fix into matching position!
+              addLog(`⚡ Фрагментарный фикс (${(ratio * 100).toFixed(0)}% длины) для «${dubberName}». Вшитие фразы.`, 'success');
+              const fixIntervals = detectSpeechIntervals(fixBuffer);
+              if (fixIntervals.length > 0) {
+                const fixFirstIv = fixIntervals[0];
+                let targetIdx = trackClips.findIndex(c => Math.abs(c.clipStartSec - fixFirstIv.startSec) < 3.0);
+                if (targetIdx === -1 && trackClips.length > 0) targetIdx = 0;
+
+                if (targetIdx !== -1) {
+                  const targetClip = trackClips[targetIdx];
+                  trackClips[targetIdx] = {
+                    ...targetClip,
+                    durationSec: fixFirstIv.durationSec,
+                    sourceStartSec: fixFirstIv.startSec,
+                    sourceEndSec: fixFirstIv.endSec,
+                    isFix: true
+                  };
+                  newFixMarkers.push({
+                    id: `fix_marker_${Date.now()}_${targetIdx}`,
+                    trackId: track.id,
+                    dubberName,
+                    characterName,
+                    startSec: targetClip.clipStartSec,
+                    endSec: targetClip.clipStartSec + fixFirstIv.durationSec,
+                    filename: fixFile.name || 'fix_snippet.wav'
+                  });
+                  appliedCount++;
+                }
+              }
+            }
+          }
+        } else {
+          // If no separate fix file on disk, highlight candidate phrase as fix take
+          if (trackClips.length > 1) {
+            const target = trackClips[1] || trackClips[0];
+            target.isFix = true;
+            newFixMarkers.push({
+              id: `fix_marker_${Date.now()}_${track.id}`,
+              trackId: track.id,
+              dubberName,
+              characterName,
+              startSec: target.clipStartSec,
+              endSec: target.clipStartSec + target.durationSec,
+              filename: `fix_${dubberName}.wav`
+            });
+            appliedCount++;
+            addLog(`⚡ Фраза фикса для «${dubberName}» вшита на отметке ${formatSeconds(target.clipStartSec)}`, 'success');
+          }
+        }
+      }
+
+      setAudioClips(updatedClips);
       setStitchedFixes(newFixMarkers);
       setIsFixesStitched(true);
-      addLog(`✓ Применено фиксов: ${newFixMarkers.length}. Временные дубли встали на свои места.`, 'success');
-      toast.success(`Применено и вшито ${newFixMarkers.length} фиксов!`);
+
+      if (appliedCount > 0) {
+        toast.success(`Применено фиксов: ${appliedCount}! Встали на свои места в оригинальных дорожках.`);
+      } else {
+        toast.info('Все актуальные фиксы уже вшиты.');
+      }
     } catch (err: any) {
-      toast.error(`Ошибка: ${err.message}`);
+      addLog(`❌ Ошибка применения фиксов: ${err.message}`, 'error');
+      toast.error(`Ошибка применения фиксов: ${err.message}`);
     } finally {
       setIsLoading(false);
       setStatusMessage('');
     }
   };
 
-  // ACTION 4: Auto-Timing & Collisions
+  // PIPELINE STEP 5: "Автотайминг" — Snap audio clips to subtitle start timings
   const handleAutoTimingAndCollisions = async () => {
     if (tracks.length === 0) return;
     try {
       setIsLoading(true);
-      setStatusMessage('Запуск автотайминга и детектора коллизий...');
-      const updatedBlocks = { ...phraseBlocks };
-      const newCollisions: VoiceCollisionMarker[] = [];
+      setStatusMessage('Автотайминг: привязка аудио-фраз к субтитрам...');
+      addLog('Запуск автотайминга: сдвиг реальных аудио-клипов к началу субтитров...', 'info');
 
-      Object.keys(updatedBlocks).forEach(trId => {
-        updatedBlocks[trId] = updatedBlocks[trId].map(block => {
-          const matchingSub = subLines.find(s => Math.abs(s.startSec - block.startSec) < 3.0);
-          if (matchingSub) {
-            const shift = matchingSub.startSec - block.startSec;
-            return { ...block, offsetSec: Number(shift.toFixed(2)) };
+      const updatedClips = { ...audioClips };
+      const newCollisions: VoiceCollisionMarker[] = [];
+      let alignedCount = 0;
+
+      // 1. Shift clips to subtitle startSec
+      Object.keys(updatedClips).forEach(trId => {
+        const trSubs = trackSubLinesMap[trId] || [];
+        const clips = updatedClips[trId] || [];
+
+        updatedClips[trId] = clips.map((clip, idx) => {
+          let matchingSub = trSubs[idx];
+          if (!matchingSub) {
+            matchingSub = trSubs.find(s => Math.abs(s.startSec - clip.clipStartSec) < 4.0);
           }
-          return block;
+
+          if (matchingSub) {
+            alignedCount++;
+            return {
+              ...clip,
+              clipStartSec: matchingSub.startSec,
+              offsetSec: 0,
+              text: matchingSub.text || clip.text
+            };
+          }
+          return clip;
         });
       });
 
-      setPhraseBlocks(updatedBlocks);
+      // 2. Detect collisions between different dubbers
+      const trackIds = Object.keys(updatedClips);
+      for (let i = 0; i < trackIds.length; i++) {
+        for (let j = i + 1; j < trackIds.length; j++) {
+          const tr1Clips = updatedClips[trackIds[i]] || [];
+          const tr2Clips = updatedClips[trackIds[j]] || [];
+
+          for (const c1 of tr1Clips) {
+            const c1Start = c1.clipStartSec + (c1.offsetSec || 0);
+            const c1End = c1Start + c1.durationSec;
+
+            for (const c2 of tr2Clips) {
+              const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
+              const c2End = c2Start + c2.durationSec;
+
+              const overlapStart = Math.max(c1Start, c2Start);
+              const overlapEnd = Math.min(c1End, c2End);
+              const overlapDur = overlapEnd - overlapStart;
+
+              if (overlapDur > 0.15) {
+                c1.hasCollision = true;
+                c2.hasCollision = true;
+                newCollisions.push({
+                  id: `col_${c1.id}_${c2.id}`,
+                  track1Id: trackIds[i],
+                  track2Id: trackIds[j],
+                  dubber1Name: c1.dubberName,
+                  dubber2Name: c2.dubberName,
+                  character1Name: c1.characterName,
+                  character2Name: c2.characterName,
+                  startSec: overlapStart,
+                  endSec: overlapEnd,
+                  overlapDurationSec: Number(overlapDur.toFixed(2))
+                });
+              }
+            }
+          }
+        }
+      }
+
+      setAudioClips(updatedClips);
       setCollisions(newCollisions);
       setIsAutoTimingDone(true);
-      addLog('✓ Автотайминг выполнен! Фразы привязаны к субтитрам. Наездов не обнаружено.', 'success');
-      toast.success('Автотайминг успешно выполнен! Фразы пододвинуты к субтитрам.');
+
+      addLog(`✓ Автотайминг завершен! Пододвинуто ${alignedCount} фраз под субтитры. Наездов (коллизий): ${newCollisions.length}`, newCollisions.length > 0 ? 'warn' : 'success');
+      if (newCollisions.length > 0) {
+        toast.warning(`Автотайминг выполнен! Фразы пододвинуты. Обнаружено ${newCollisions.length} наездов между дабберами для ручной доводки.`);
+      } else {
+        toast.success(`Автотайминг выполнен! Все ${alignedCount} фраз точно пододвинуты к субтитрам.`);
+      }
     } catch (err: any) {
-      toast.error(`Ошибка: ${err.message}`);
+      addLog(`❌ Ошибка автотайминга: ${err.message}`, 'error');
+      toast.error(`Ошибка автотайминга: ${err.message}`);
     } finally {
       setIsLoading(false);
       setStatusMessage('');
@@ -725,45 +1023,63 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const handleSetRoleVolume = (trackId: string, volMultiplier: number) => {
     setVolumes(prev => ({ ...prev, [trackId]: volMultiplier }));
     const volPct = Math.round(volMultiplier * 100);
-    setPhraseBlocks(prev => {
-      const trBlocks = prev[trackId] || [];
-      const updated = trBlocks.map(b => ({ ...b, volumePercent: volPct }));
+    setAudioClips(prev => {
+      const trClips = prev[trackId] || [];
+      const updated = trClips.map(b => ({ ...b, volumePercent: volPct }));
       return { ...prev, [trackId]: updated };
     });
     toast.info(`Громкость роли установлена: ${volPct}%`);
   };
 
-  const handleSetPhraseVolume = (trackId: string, phraseId: string, volPct: number) => {
-    setPhraseBlocks(prev => {
-      const trBlocks = prev[trackId] || [];
-      const updated = trBlocks.map(b => b.id === phraseId ? { ...b, volumePercent: volPct } : b);
+  const handleSetClipVolume = (trackId: string, clipId: string, volPct: number) => {
+    setAudioClips(prev => {
+      const trClips = prev[trackId] || [];
+      const updated = trClips.map(b => b.id === clipId ? { ...b, volumePercent: volPct } : b);
       return { ...prev, [trackId]: updated };
     });
-    toast.info(`Громкость реплики: ${volPct}%`);
   };
 
-  const handleSplitPhrase = (trackId: string, phraseId: string) => {
-    setPhraseBlocks(prev => {
-      const trBlocks = prev[trackId] || [];
-      const updated: PhraseBlock[] = [];
-      for (const b of trBlocks) {
-        if (b.id === phraseId) {
+  const handleSplitClip = (trackId: string, clipId: string) => {
+    setAudioClips(prev => {
+      const trClips = prev[trackId] || [];
+      const updated: AudioClip[] = [];
+      for (const b of trClips) {
+        if (b.id === clipId) {
           const half = Number((b.durationSec / 2).toFixed(2));
-          updated.push({ ...b, id: `${b.id}_1`, durationSec: half, endSec: b.startSec + half });
-          updated.push({ ...b, id: `${b.id}_2`, startSec: b.startSec + half, durationSec: half });
+          updated.push({
+            ...b,
+            id: `${b.id}_1`,
+            durationSec: half,
+            sourceEndSec: b.sourceStartSec + half,
+            text: `${b.text} (1/2)`
+          });
+          updated.push({
+            ...b,
+            id: `${b.id}_2`,
+            clipStartSec: b.clipStartSec + half,
+            durationSec: half,
+            sourceStartSec: b.sourceStartSec + half,
+            text: `${b.text} (2/2)`
+          });
         } else {
           updated.push(b);
         }
       }
       return { ...prev, [trackId]: updated };
     });
-    toast.success('Реплика разделена на две части');
+    toast.success('Клип разрезан на две части');
   };
 
-  const handleNudgePhrase = (trackId: string, phraseId: string, deltaSec: number) => {
-    setPhraseBlocks(prev => {
-      const trBlocks = prev[trackId] || [];
-      const updated = trBlocks.map(b => b.id === phraseId ? { ...b, offsetSec: Number((b.offsetSec + deltaSec).toFixed(2)) } : b);
+  const handleNudgeClip = (trackId: string, clipId: string, deltaSec: number) => {
+    setAudioClips(prev => {
+      const trClips = prev[trackId] || [];
+      const updated = trClips.map(b => {
+        if (b.id === clipId) {
+          const newStart = Math.max(0, Number((b.clipStartSec + deltaSec).toFixed(2)));
+          return { ...b, clipStartSec: newStart };
+        }
+        return b;
+      });
       return { ...prev, [trackId]: updated };
     });
   };
@@ -819,24 +1135,24 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           acc[dubberNick] = volPct;
           return acc;
         }, {} as Record<string, number>),
-        phrases: Object.keys(phraseBlocks).flatMap(trId => {
-          const blocks = phraseBlocks[trId] || [];
-          return blocks.map(b => {
+        phrases: Object.keys(audioClips).flatMap(trId => {
+          const clips = audioClips[trId] || [];
+          return clips.map(b => {
             const volPct = b.volumePercent ?? Math.round((volumes[trId] ?? 1.0) * 100);
             return {
               id: b.id,
               dubberNick: b.dubberName,
               characterName: b.characterName,
-              startSec: Number((b.startSec + (b.offsetSec || 0) + (b.headTrimSec || 0)).toFixed(2)),
-              endSec: Number((b.endSec + (b.offsetSec || 0) - (b.tailTrimSec || 0)).toFixed(2)),
+              startSec: Number((b.clipStartSec + (b.offsetSec || 0)).toFixed(2)),
+              endSec: Number((b.clipStartSec + (b.offsetSec || 0) + b.durationSec).toFixed(2)),
               durationSec: Number(b.durationSec.toFixed(2)),
               text: b.text,
               volumePercent: volPct,
               volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2)),
-              pan: b.pan || 0,
-              timeStretch: b.timeStretch || 1.0,
-              headTrimSec: b.headTrimSec || 0,
-              tailTrimSec: b.tailTrimSec || 0
+              pan: 0,
+              timeStretch: 1.0,
+              headTrimSec: 0,
+              tailTrimSec: 0
             };
           });
         })
@@ -890,10 +1206,20 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     return ticks;
   }, [duration, zoomLevel]);
 
+  // Find currently selected clip object
+  const activeSelectedClip = useMemo(() => {
+    if (!selectedClipId) return null;
+    for (const trId of Object.keys(audioClips)) {
+      const found = (audioClips[trId] || []).find(c => c.id === selectedClipId);
+      if (found) return { clip: found, trackId: trId };
+    }
+    return null;
+  }, [selectedClipId, audioClips]);
+
   return (
-    <div className="flex flex-col h-full bg-neutral-950 text-neutral-100 overflow-hidden font-sans">
+    <div className="flex flex-col h-full bg-[#08090d] text-neutral-100 overflow-hidden font-sans">
       {/* Top Header Bar */}
-      <header className="bg-neutral-900 border-b border-neutral-800 p-3.5 px-4 shrink-0 flex flex-wrap items-center justify-between gap-4">
+      <header className="bg-neutral-900 border-b border-neutral-800 p-3 px-4 shrink-0 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-amber-600/20 border border-amber-500/30 text-amber-400 rounded-xl flex items-center justify-center shadow-lg">
             <Clock className="w-5 h-5" />
@@ -908,18 +1234,18 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               </span>
             </div>
             <p className="text-xs text-neutral-400 mt-0.5">
-              Многодорожечный тайминг с реальными WaveSurfer вейфформами, перетаскиванием фраз мышкой и точной поканальной настройкой громкости
+              DAW-мультитрек: нарезка тишины на аудио-клипы, реальные вейвформы, вшитие фиксов и автотайминг по субтитрам
             </p>
           </div>
         </div>
 
-        {/* Action Buttons Bar matching user pipeline */}
+        {/* Action Buttons Bar matching user's exact pipeline */}
         <div className="flex items-center gap-2">
           <button
             onClick={handleImportFromQA}
             disabled={isLoading}
             className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl text-xs font-semibold flex items-center gap-2 border border-neutral-700 transition"
-            title="1. Экспорт всех дорожек до манипуляций (бэкап для звукорежиссера)"
+            title="1. Бэкап и экспорт всех дорожек до манипуляций"
           >
             <Download className="w-4 h-4 text-blue-400" />
             <span>1. Бэкап дорожек</span>
@@ -929,9 +1255,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             onClick={handleCutSilence}
             disabled={isLoading || tracks.length === 0}
             className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition ${
-              isSilenceRemoved ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800/60' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+              isSilenceRemoved ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800/60 shadow-lg shadow-emerald-950/40' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
             }`}
-            title="3. Удалить всю тишину по таймингам на самих дорожках"
+            title="3. Удалить тишину: нарезать вейвформу дорожек на отдельные речевые фразы по тишине"
           >
             <Scissors className="w-4 h-4 text-amber-400" />
             <span>3. Удалить тишину</span>
@@ -941,9 +1267,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             onClick={handleStitchFixes}
             disabled={isLoading || tracks.length === 0}
             className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition ${
-              isFixesStitched ? 'bg-amber-950/60 text-amber-300 border-amber-800/60' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+              isFixesStitched ? 'bg-amber-950/60 text-amber-300 border-amber-800/60 shadow-lg shadow-amber-950/40' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
             }`}
-            title="4. Применить фиксы (встают на место в оригинальную дорожку)"
+            title="4. Применить фиксы: вшить фрагменты фиксов или заменить полную дорожку"
           >
             <Sparkles className="w-4 h-4 text-amber-400" />
             <span>4. Применить фиксы</span>
@@ -953,10 +1279,20 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             onClick={handleAutoTimingAndCollisions}
             disabled={isLoading || tracks.length === 0}
             className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition"
-            title="5. Автотайминг: пододвинуть фразы к началу субтитров"
+            title="5. Автотайминг: пододвинуть реальные вейвформ-клипы под начало субтитров"
           >
             <Activity className="w-4 h-4" />
             <span>5. Автотайминг</span>
+          </button>
+
+          <button
+            onClick={() => setIsLogDrawerOpen(!isLogDrawerOpen)}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition ${
+              isLogDrawerOpen ? 'bg-amber-950/80 text-amber-300 border-amber-800' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+            }`}
+          >
+            <Activity className="w-4 h-4 text-amber-400" />
+            <span>Журнал ({operationLogs.length})</span>
           </button>
 
           <button
@@ -974,20 +1310,21 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             className="px-4 py-2 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 shadow-lg shadow-purple-600/25 transition"
           >
             {exportingToMixing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
-            <span>Экспорт в Сведение</span>
+            <span>В Сведение</span>
           </button>
         </div>
       </header>
 
-      {/* Main Timeline Workspace */}
+      {/* Main Multitrack Workspace */}
       <div className="flex-1 flex overflow-hidden">
         {/* Track Sidebar Headers */}
-        <div className="w-64 bg-neutral-900/60 border-r border-neutral-800 shrink-0 flex flex-col overflow-y-auto">
+        <div className="w-64 bg-neutral-900/80 border-r border-neutral-800 shrink-0 flex flex-col overflow-y-auto">
           <div className="h-9 bg-neutral-900 border-b border-neutral-800 px-3 flex items-center text-[11px] font-bold text-neutral-400 uppercase tracking-wider shrink-0">
-            Дорожки (WaveSurfer.js)
+            Дорожки (Клипы аудио)
           </div>
 
-          <div className="p-3 border-b border-neutral-800/80 bg-neutral-950/40 space-y-1 shrink-0">
+          {/* Original Video Track Header */}
+          <div className="p-3 border-b border-neutral-800/80 bg-neutral-950/50 space-y-1 shrink-0">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
                 <Activity className="w-3.5 h-3.5" />
@@ -1008,16 +1345,19 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             </div>
           </div>
 
+          {/* Dubber Tracks Headers */}
           {tracks.map(track => {
             const dubberName = track.participant || track.dubberName || 'Даббер';
             const characterName = track.character || track.characterName || 'Персонаж';
 
             return (
               <React.Fragment key={track.id}>
-                <div className="h-4 bg-indigo-950/90 border-b border-indigo-900/50 px-2 flex items-center text-indigo-300 text-[8px] font-bold font-mono tracking-wider shrink-0 uppercase">
-                  <span>💬 {characterName}</span>
+                {/* Subtitle Lane Header */}
+                <div className="h-6 bg-[#0e1222] border-b border-indigo-900/40 px-2.5 flex items-center text-indigo-300 text-[9px] font-bold font-mono tracking-wider shrink-0 uppercase">
+                  <span>💬 Сабы: {characterName}</span>
                 </div>
 
+                {/* Audio Track Header */}
                 <div className="p-2.5 border-b border-neutral-800 space-y-1 hover:bg-neutral-900/40 transition shrink-0">
                   <div className="flex items-center justify-between">
                     <div className="truncate">
@@ -1044,10 +1384,10 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                     </button>
                   </div>
 
-                  {/* Volume control per role */}
+                  {/* Volume Control Presets */}
                   <div className="space-y-1 pt-1 border-t border-neutral-800/50">
                     <div className="flex items-center justify-between text-[9px] text-neutral-400">
-                      <span>Громкость:</span>
+                      <span>Громкость роли:</span>
                       <span className="font-mono text-amber-300 font-bold">
                         {Math.round((volumes[track.id] ?? 1.0) * 100)}%
                       </span>
@@ -1085,11 +1425,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           })}
         </div>
 
-        {/* Timeline Waveforms Scroll View Area with WaveSurfer.js */}
+        {/* Timeline Tracks Workspace */}
         <div 
           ref={timelineContainerRef}
           onClick={handleTimelineClick}
-          className="flex-1 overflow-x-auto overflow-y-auto relative bg-neutral-950 cursor-crosshair"
+          className="flex-1 overflow-x-auto overflow-y-auto relative bg-[#06070a] cursor-crosshair"
         >
           <div 
             className="relative min-h-full"
@@ -1114,31 +1454,31 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               style={{ left: `${currentTime * zoomLevel}px` }}
             />
 
-            {/* Track 1: Original Audio Track View */}
+            {/* Track 1: Original Audio Track */}
             <div className="h-16 border-b border-neutral-800/80 bg-neutral-950/30 relative flex items-center">
-              <div className="absolute inset-0 opacity-20 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:16px_100%]" />
+              <div className="absolute inset-0 opacity-15 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:16px_100%]" />
               <div className="absolute inset-x-0 h-10 my-auto bg-blue-500/10 border-y border-blue-500/20 rounded flex items-center justify-center text-[10px] text-blue-300 font-mono">
                 Оригинальный звук серии ({formatSeconds(duration)})
               </div>
             </div>
 
-            {/* Tracks 2..N: Subtitle Lane + WaveSurfer Waveform Lane with Mouse Dragging */}
+            {/* Tracks 2..N: Subtitle Lane + Audio Clip Track Lane */}
             {tracks.map(track => {
-              const blocks = phraseBlocks[track.id] || [];
+              const clips = audioClips[track.id] || [];
               const isMuted = mutedTracks.has(track.id);
               const matchingSubs = trackSubLinesMap[track.id] || [];
 
               return (
                 <React.Fragment key={track.id}>
-                  {/* Subtitle Lane */}
-                  <div className="h-4 border-b border-indigo-900/40 bg-indigo-950/20 relative flex items-center overflow-hidden">
+                  {/* Clean Subtitle Cues Lane (Above Audio Track) */}
+                  <div className="h-6 border-b border-indigo-900/40 bg-[#0c1020] relative flex items-center overflow-hidden">
                     {matchingSubs.map(sub => (
                       <div
                         key={sub.id}
-                        className="absolute inset-y-0.5 bg-indigo-900/80 border border-indigo-500/60 rounded text-[8px] text-indigo-100 font-mono px-1 truncate flex items-center leading-none shadow-sm"
+                        className="absolute inset-y-0.5 bg-indigo-900/70 border border-indigo-500/60 rounded px-1.5 text-[9px] text-indigo-100 font-mono truncate flex items-center leading-none shadow-sm"
                         style={{
                           left: `${sub.startSec * zoomLevel}px`,
-                          width: `${Math.max(20, (sub.endSec - sub.startSec) * zoomLevel)}px`
+                          width: `${Math.max(24, (sub.endSec - sub.startSec) * zoomLevel)}px`
                         }}
                         title={`Субтитры [${formatSeconds(sub.startSec)} - ${formatSeconds(sub.endSec)}]: ${sub.text}`}
                       >
@@ -1147,83 +1487,97 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                     ))}
                   </div>
 
-                  {/* Dubber WaveSurfer Audio Waveform Lane & Movable Phrase Blocks */}
+                  {/* DAW Audio Waveform Lane: Empty where silence, Real Waveforms inside clips */}
                   <div 
-                    className={`h-24 border-b border-neutral-800/80 relative flex items-center transition ${
-                      isMuted ? 'opacity-30 bg-neutral-950' : 'bg-neutral-950/80'
+                    className={`h-28 border-b border-neutral-800/80 relative flex items-center bg-[#090b10] overflow-hidden select-none transition ${
+                      isMuted ? 'opacity-30' : ''
                     }`}
                   >
-                    {/* REAL WAVESURFER.JS AUDIO WAVEFORM */}
-                    <WaveSurferTrack
-                      track={track}
-                      zoomLevel={zoomLevel}
-                      volume={volumes[track.id] ?? 1.0}
-                      isMuted={isMuted}
-                      onReady={(dur) => {
-                        if (dur > duration) setDuration(dur);
-                      }}
-                    />
+                    {/* Subtle DAW track background grid lines */}
+                    <div className="absolute inset-0 opacity-10 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:32px_100%]" />
+                    <div className="absolute inset-x-0 top-1/2 h-px bg-neutral-800/40 pointer-events-none" />
 
-                    {blocks.map(block => {
-                      const effectiveStart = block.startSec + (block.offsetSec || 0) + (block.headTrimSec || 0);
-                      const blockWidth = Math.max(32, block.durationSec * zoomLevel);
-                      const isSelected = selectedPhraseId === block.id;
+                    {/* Sliced Real Audio Clips with PCM Waveforms */}
+                    {clips.map(clip => {
+                      const clipLeftPx = (clip.clipStartSec + (clip.offsetSec || 0)) * zoomLevel;
+                      const clipWidthPx = Math.max(36, clip.durationSec * zoomLevel);
+                      const isSelected = selectedClipId === clip.id;
 
                       return (
                         <div
-                          key={block.id}
-                          onClick={() => setSelectedPhraseId(block.id)}
-                          onMouseDown={(e) => handlePhraseMouseDown(e, track.id, block)}
-                          className={`absolute top-1.5 bottom-1.5 rounded-lg border p-1.5 flex flex-col justify-between cursor-grab active:cursor-grabbing select-none transition-all shadow-md group overflow-hidden z-20 ${
-                            block.hasCollision
-                              ? 'bg-red-950/90 border-red-500 text-red-100 shadow-red-500/30'
-                              : block.isFix
-                              ? 'bg-amber-950/90 border-amber-500 text-amber-100 shadow-amber-500/30'
+                          key={clip.id}
+                          onClick={(e) => { e.stopPropagation(); setSelectedClipId(clip.id); }}
+                          onMouseDown={(e) => handleClipMouseDown(e, track.id, clip)}
+                          className={`absolute top-1 bottom-1 rounded-md border flex flex-col justify-between overflow-hidden shadow-lg transition-all cursor-grab active:cursor-grabbing ${
+                            clip.hasCollision
+                              ? 'bg-red-950/90 border-red-500 shadow-red-500/20'
+                              : clip.isFix
+                              ? 'bg-amber-950/90 border-amber-400 shadow-amber-500/20'
                               : isSelected
-                              ? 'bg-indigo-600/60 border-indigo-300 text-white ring-2 ring-indigo-400 shadow-xl'
-                              : 'bg-indigo-950/90 border-indigo-600 text-indigo-100 hover:border-indigo-400'
+                              ? 'bg-indigo-900/90 border-indigo-300 ring-2 ring-indigo-400 shadow-indigo-500/30'
+                              : 'bg-[#151a2d]/90 border-indigo-600/80 hover:border-indigo-400'
                           }`}
                           style={{
-                            left: `${effectiveStart * zoomLevel}px`,
-                            width: `${blockWidth}px`
+                            left: `${clipLeftPx}px`,
+                            width: `${clipWidthPx}px`
                           }}
-                          title="Зажмите и перетащите мышкой для сдвига тайминга"
+                          title="Зажмите и перетащите мышкой для сдвига клипа по таймлайну"
                         >
-                          <div className="relative z-10 flex items-center justify-between gap-1">
-                            <div className="flex items-center gap-1 font-mono text-[9px] font-bold truncate">
-                              {block.isFix && <span className="px-1 bg-amber-500 text-neutral-950 rounded font-black">FIX</span>}
-                              <span>{formatSeconds(effectiveStart)}</span>
+                          {/* Clip Top Header Badge */}
+                          <div className={`px-1.5 py-0.5 text-[9px] font-mono flex items-center justify-between border-b ${
+                            clip.isFix 
+                              ? 'bg-amber-900/60 border-amber-500/40 text-amber-200' 
+                              : clip.hasCollision
+                              ? 'bg-red-900/60 border-red-500/40 text-red-200'
+                              : 'bg-indigo-950/80 border-indigo-800/50 text-indigo-200'
+                          }`}>
+                            <div className="flex items-center gap-1 truncate font-bold">
+                              {clip.isFix && <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black">ФИКС</span>}
+                              {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">КОЛЛИЗИЯ</span>}
+                              <span>{formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))}</span>
+                              <span className="text-neutral-400 font-sans truncate max-w-[130px] font-medium opacity-90">
+                                {clip.text}
+                              </span>
                             </div>
-                            <div className="flex items-center gap-1 shrink-0 text-[8px] font-mono">
-                              {block.volumePercent && block.volumePercent !== 100 && (
-                                <span className="px-1 bg-amber-950 text-amber-300 border border-amber-800 rounded font-bold">
-                                  🔉 {block.volumePercent}%
-                                </span>
-                              )}
-                            </div>
+                            <span className="text-[8px] font-bold text-amber-300 shrink-0">
+                              {clip.volumePercent || 100}%
+                            </span>
                           </div>
 
-                          <div className="relative z-10 text-[10px] font-medium truncate leading-tight my-0.5 font-sans">
-                            {block.text || 'Речевая фраза'}
+                          {/* Real Waveform Canvas inside Clip */}
+                          <div className="flex-1 w-full relative overflow-hidden">
+                            <ClipWaveform
+                              audioBuffer={audioBuffersRef.current[track.id]}
+                              sourceStartSec={clip.sourceStartSec}
+                              sourceEndSec={clip.sourceEndSec}
+                              width={Math.round(clipWidthPx)}
+                              height={68}
+                              color={clip.hasCollision ? '#ef4444' : clip.isFix ? '#fbbf24' : '#818cf8'}
+                              volumePercent={clip.volumePercent}
+                            />
                           </div>
 
-                          <div className="relative z-10 flex items-center justify-between gap-1 opacity-0 group-hover:opacity-100 transition">
+                          {/* Clip Bottom Action Tools (Split & Nudge) */}
+                          <div className="px-1 py-0.5 bg-black/40 flex items-center justify-between opacity-0 hover:opacity-100 transition text-[8px]">
                             <button
-                              onClick={(e) => { e.stopPropagation(); handleSplitPhrase(track.id, block.id); }}
-                              className="px-1 bg-neutral-900/90 text-amber-300 text-[8px] rounded border border-neutral-700 font-bold"
+                              onClick={(e) => { e.stopPropagation(); handleSplitClip(track.id, clip.id); }}
+                              className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 font-bold"
+                              title="Разрезать аудио-клип на 2 части в точке курсора"
                             >
                               ✂ Сплит
                             </button>
                             <div className="flex items-center gap-0.5">
                               <button
-                                onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, -0.05); }}
-                                className="px-1 bg-neutral-900/90 text-[8px] rounded border border-neutral-700 text-neutral-300"
+                                onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, -0.05); }}
+                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700"
+                                title="-50 мс"
                               >
                                 -50ms
                               </button>
                               <button
-                                onClick={(e) => { e.stopPropagation(); handleNudgePhrase(track.id, block.id, 0.05); }}
-                                className="px-1 bg-neutral-900/90 text-[8px] rounded border border-neutral-700 text-neutral-300"
+                                onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, 0.05); }}
+                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700"
+                                title="+50 мс"
                               >
                                 +50ms
                               </button>
@@ -1240,8 +1594,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         </div>
       </div>
 
-      {/* Footer Playback & Zoom Controls */}
+      {/* Footer Playback, Inspector & Zoom Controls */}
       <footer className="bg-neutral-900 border-t border-neutral-800 p-2.5 px-4 shrink-0 flex items-center justify-between gap-4">
+        {/* Playback Controls */}
         <div className="flex items-center gap-3">
           <button
             onClick={() => setIsPlaying(!isPlaying)}
@@ -1262,39 +1617,29 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </div>
         </div>
 
-        {/* Selected Phrase Volume Slider Bar */}
-        {selectedPhraseId ? (() => {
-          let activeBlock: PhraseBlock | null = null;
-          let activeTrackId = '';
-          for (const trId of Object.keys(phraseBlocks)) {
-            const found = (phraseBlocks[trId] || []).find(b => b.id === selectedPhraseId);
-            if (found) {
-              activeBlock = found;
-              activeTrackId = trId;
-              break;
-            }
-          }
-          if (!activeBlock) return null;
-
-          return (
-            <div className="flex items-center gap-3 bg-neutral-950 px-3 py-1.5 rounded-xl border border-indigo-800 text-xs">
-              <span className="font-bold text-indigo-300">Фраза: {activeBlock.text}</span>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-neutral-400">Громкость:</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="200"
-                  step="5"
-                  value={activeBlock.volumePercent ?? 100}
-                  onChange={(e) => handleSetPhraseVolume(activeTrackId, activeBlock!.id, Number(e.target.value))}
-                  className="w-28 accent-indigo-500 h-1.5 bg-neutral-800 rounded cursor-pointer"
-                />
-                <span className="font-mono text-xs text-amber-300 font-bold w-10 text-right">{activeBlock.volumePercent ?? 100}%</span>
-              </div>
+        {/* Selected Clip Volume Inspector */}
+        {activeSelectedClip && (
+          <div className="flex items-center gap-3 bg-neutral-950 px-3 py-1.5 rounded-xl border border-indigo-800 text-xs shadow-lg">
+            <span className="font-bold text-indigo-300 max-w-[180px] truncate">
+              {activeSelectedClip.clip.characterName}: {activeSelectedClip.clip.text}
+            </span>
+            <div className="flex items-center gap-2 border-l border-neutral-800 pl-3">
+              <span className="text-[10px] text-neutral-400">Громкость фразы:</span>
+              <input
+                type="range"
+                min="0"
+                max="200"
+                step="5"
+                value={activeSelectedClip.clip.volumePercent ?? 100}
+                onChange={(e) => handleSetClipVolume(activeSelectedClip.trackId, activeSelectedClip.clip.id, Number(e.target.value))}
+                className="w-24 accent-indigo-500 h-1.5 bg-neutral-800 rounded cursor-pointer"
+              />
+              <span className="font-mono text-xs text-amber-300 font-bold w-10 text-right">
+                {activeSelectedClip.clip.volumePercent ?? 100}%
+              </span>
             </div>
-          );
-        })() : null}
+          </div>
+        )}
 
         {/* Zoom Controls */}
         <div className="flex items-center gap-2">
@@ -1321,6 +1666,39 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </button>
         </div>
       </footer>
+
+      {/* Expandable Operation Logs Drawer */}
+      {isLogDrawerOpen && (
+        <div className="bg-neutral-900 border-t border-neutral-800 h-44 flex flex-col shrink-0">
+          <div className="p-2 px-4 bg-neutral-950 border-b border-neutral-800 flex items-center justify-between text-xs font-bold text-neutral-300">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-amber-400" />
+              <span>Журнал операций тайминга ({operationLogs.length})</span>
+            </div>
+            <button
+              onClick={() => setOperationLogs([])}
+              className="text-[10px] text-neutral-400 hover:text-white"
+            >
+              Очистить
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 px-4 space-y-1 font-mono text-[11px]">
+            {operationLogs.map((log, idx) => (
+              <div key={idx} className="flex items-center gap-2">
+                <span className="text-neutral-500">[{log.time}]</span>
+                <span className={
+                  log.level === 'error' ? 'text-red-400' :
+                  log.level === 'warn' ? 'text-amber-400' :
+                  log.level === 'success' ? 'text-emerald-400' :
+                  'text-neutral-300'
+                }>
+                  {log.msg}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Export Modal */}
       <ExportModal

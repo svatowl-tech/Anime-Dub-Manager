@@ -129,14 +129,16 @@ class WhisperLiveKitService {
     const env = { 
       ...process.env, 
       PYTHONIOENCODING: 'utf-8',
+      PYTHONUTF8: '1',
       PYTHONPATH: wlkPythonPath
     };
 
-    // Запуск сервера в фоновом режиме
+    // Запуск сервера в фоновом режиме напрямую без cmd.exe
     const child = spawn(pythonPath, args, { 
       env,
       detached: false,
-      shell: process.platform === 'win32'
+      shell: false,
+      windowsHide: true
     });
 
     trackProcess(child);

@@ -180,12 +180,17 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "--no-cache-dir",
         "deepfilternet>=0.5.6",
         "demucs>=4.0.1",
+        "onnxruntime>=1.16.0",
         "soundfile>=0.12.1",
         "numpy>=1.24.0,<2.0.0",
         "scipy>=1.10.0",
         "librosa>=0.10.0",
         "tqdm>=4.65.0",
-        "packaging>=23.0"
+        "packaging>=23.0",
+        "einops>=0.7.0",
+        "rotary-embedding-torch>=0.5.0",
+        "requests>=2.31.0",
+        "huggingface-hub>=0.20.0"
     ])
 
     # 5. Copy sidecars into environment bundle for self-containment

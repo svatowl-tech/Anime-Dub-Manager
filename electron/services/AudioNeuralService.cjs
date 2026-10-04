@@ -26,6 +26,7 @@ class AudioNeuralService {
     if (process.resourcesPath) {
       candidatePaths.push(path.join(process.resourcesPath, 'audio_ai_processor.py'));
       candidatePaths.push(path.join(process.resourcesPath, 'electron', 'services', 'audio_ai_processor.py'));
+      candidatePaths.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
     }
 
     for (const cand of candidatePaths) {
@@ -38,7 +39,8 @@ class AudioNeuralService {
   }
 
   /**
-   * Spawns Python sidecar CLI process and handles streaming stdout / stderr / progress.
+   * Spawns Python sidecar CLI process directly without cmd.exe / shell: true
+   * and handles streaming stdout / stderr / progress.
    */
   async _runPythonSidecar(args, { onProgress, onLog, abortSignal, operationName = 'AudioNeural' }) {
     const pythonPath = EnvironmentManager.getPythonPath();
@@ -48,13 +50,17 @@ class AudioNeuralService {
       throw new Error(`Скрипт нейросетевого процессора не найден: ${scriptPath}`);
     }
 
+    if (!fs.existsSync(pythonPath)) {
+      throw new Error(`Файл интерпретатора Python не найден по пути: ${pythonPath}`);
+    }
+
     const fullArgs = [scriptPath, ...args];
-    const displayCmd = `${pythonPath} ${fullArgs.join(' ')}`;
+    const displayCmd = `"${pythonPath}" "${scriptPath}" ${args.map(a => `"${a}"`).join(' ')}`;
 
     if (onLog) {
       onLog(`[Neural AI] Запуск ${operationName}: ${displayCmd}`, 'debug');
     }
-    log.info(`[AudioNeuralService] Spawning: ${displayCmd}`);
+    log.info(`[AudioNeuralService] Spawning directly: ${displayCmd}`);
 
     return new Promise((resolve, reject) => {
       let isSettled = false;
@@ -63,16 +69,31 @@ class AudioNeuralService {
       let stdoutBuffer = '';
       let stderrBuffer = '';
 
+      // Prepend python dir and pythonBaseDir to PATH so all native DLLs (CUDA/Torch/SoundFile) resolve cleanly
+      const pythonDir = path.dirname(pythonPath);
+      const pythonBaseDir = path.dirname(pythonDir);
+      const extraPaths = [pythonDir, pythonBaseDir];
+      if (process.platform === 'win32') {
+        extraPaths.push(path.join(pythonBaseDir, 'Library', 'bin'));
+      }
+      const delimiter = path.delimiter || (process.platform === 'win32' ? ';' : ':');
+      const updatedPath = `${extraPaths.join(delimiter)}${delimiter}${process.env.PATH || ''}`;
+
+      const env = {
+        ...process.env,
+        PATH: updatedPath,
+        PYTHONUNBUFFERED: '1',
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+        TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch')
+      };
+
+      // Launch python executable directly without cmd.exe
       const child = spawn(pythonPath, fullArgs, {
         cwd: path.dirname(scriptPath),
-        env: {
-          ...process.env,
-          PYTHONUNBUFFERED: '1',
-          PYTHONIOENCODING: 'utf-8',
-          TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch')
-        },
-        windowsHide: true,
-        shell: process.platform === 'win32'
+        env,
+        shell: false,
+        windowsHide: true
       });
 
       // Track process for emergency SIGKILL cancellation
@@ -174,15 +195,16 @@ class AudioNeuralService {
         torch: false,
         deepfilternet: false,
         demucs: false,
+        onnxruntime: false,
         error: e.message
       };
     }
   }
 
   /**
-   * DeepFilterNet3 Denoise
+   * Neural AI Speech Denoising (DeepFilterNet 3 ONNX / VR Architecture Denoise)
    */
-  async denoiseAudio({ inputPath, outputPath, attenuationLimitDb = -100.0, sensitivity = 1.0, wetDryBlend = 100.0, onProgress, onLog, abortSignal }) {
+  async denoiseAudio({ inputPath, outputPath, modelPath = null, modelId = 'deepfilternet3', attenuationLimitDb = -100.0, sensitivity = 1.0, wetDryBlend = 100.0, onProgress, onLog, abortSignal }) {
     if (!fs.existsSync(inputPath)) {
       throw new Error(`Входной файл не существует: ${inputPath}`);
     }
@@ -193,49 +215,130 @@ class AudioNeuralService {
       '--mode', 'denoise',
       '--input', inputPath,
       '--output', outputPath,
+      '--model_id', String(modelId),
       '--attenuation_limit_db', String(attenuationLimitDb),
       '--sensitivity', String(sensitivity),
       '--wet_dry_blend', String(wetDryBlend)
     ];
 
+    if (modelPath && fs.existsSync(modelPath)) {
+      args.push('--model_path', modelPath);
+    }
+
     await this._runPythonSidecar(args, {
       onProgress,
       onLog,
       abortSignal,
-      operationName: 'DeepFilterNet3 Denoise'
+      operationName: `Neural Denoise [${modelId}]`
     });
 
     return outputPath;
   }
 
   /**
-   * Demucs v4 Stem Separation
+   * Neural AI Room & Flutter Echo Dereverberation (DeepFilterNet3 / Reverb HQ FoxJoy ONNX / UVR De-Echo Normal / Aggressive)
    */
-  async separateStems({ inputPath, outputDir, model = 'htdemucs', shifts = 1, overlap = 0.25, segments = 30, onProgress, onLog, abortSignal }) {
+  async dereverbAudio({ inputPath, outputPath, modelPath = null, modelId = 'uvr_deecho_normal', reverbReduction = 0.8, sensitivity = 1.0, wetDryBlend = 100.0, onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'dereverb',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--model_id', String(modelId),
+      '--reverb_reduction', String(reverbReduction),
+      '--sensitivity', String(sensitivity),
+      '--wet_dry_blend', String(wetDryBlend)
+    ];
+
+    if (modelPath && fs.existsSync(modelPath)) {
+      args.push('--model_path', modelPath);
+    }
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Neural Dereverb [${modelId}]`
+    });
+
+    return outputPath;
+  }
+
+  /**
+   * Neural AI Stem Separation (Demucs v4, MDX-Net ONNX, RoFormer, Kim, Karaoke)
+   */
+  async separateStems({ inputPath, outputDir, model = 'htdemucs', modelName, modelPath = null, modelId = 'htdemucs', shifts = 1, overlap = 0.25, stems = 'both', prefix = '', onProgress, onLog, abortSignal }) {
     if (!fs.existsSync(inputPath)) {
       throw new Error(`Входной файл не существует: ${inputPath}`);
     }
 
     await fsPromises.mkdir(outputDir, { recursive: true });
 
+    const selectedModel = modelName || model || 'htdemucs';
     const args = [
       '--mode', 'separate',
       '--input', inputPath,
-      '--output', outputDir,
-      '--model', model,
+      '--output_dir', outputDir,
+      '--model_name', selectedModel,
+      '--model_id', String(modelId),
       '--shifts', String(shifts),
       '--overlap', String(overlap),
-      '--segments', String(segments)
+      '--stems', stems,
+      '--prefix', prefix
     ];
+
+    if (modelPath && fs.existsSync(modelPath)) {
+      args.push('--model_path', modelPath);
+    }
 
     const result = await this._runPythonSidecar(args, {
       onProgress,
       onLog,
       abortSignal,
-      operationName: 'Demucs Stem Separation'
+      operationName: `Neural Stem Separation [${selectedModel}]`
     });
 
     return result;
+  }
+
+  /**
+   * VoiceFixer Neural Harmonic Restorer (High-frequency harmonic synthesizer & formant presence)
+   */
+  async voiceFixer({ inputPath, outputPath, modelPath = null, airBandBoostDb = 3.5, harmonicSaturation = 0.45, formantClarity = 0.65, warmTubeEmulation = true, subBassProtect = true, onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'voicefixer',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--air_boost', String(airBandBoostDb),
+      '--saturation', String(harmonicSaturation),
+      '--clarity', String(formantClarity),
+      '--warm_tube', String(warmTubeEmulation),
+      '--sub_bass', String(subBassProtect)
+    ];
+
+    if (modelPath && fs.existsSync(modelPath)) {
+      args.push('--model_path', modelPath);
+    }
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: 'VoiceFixer Harmonic Restorer'
+    });
+
+    return outputPath;
   }
 }
 
