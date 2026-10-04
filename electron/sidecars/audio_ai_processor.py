@@ -27,6 +27,73 @@ import math
 import warnings
 import urllib.request
 import urllib.parse
+
+# Auto-detect and dynamically link AI_env site-packages if running with system or standalone Python
+def _bootstrap_site_packages():
+    import site
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    py_dir = os.path.dirname(os.path.abspath(sys.executable))
+    py_parent = os.path.dirname(py_dir)
+
+    candidates = [
+        cur_dir,
+        os.path.dirname(cur_dir),
+        os.path.dirname(os.path.dirname(cur_dir)),
+        py_dir,
+        py_parent,
+        os.getcwd()
+    ]
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(os.path.join(appdata, "anime-dub-manager"))
+    user_home = os.path.expanduser("~")
+    candidates.append(os.path.join(user_home, ".anime-dub-manager"))
+    candidates.append(user_home)
+
+    sub_dirs = [
+        os.path.join("Lib", "site-packages"),
+        os.path.join("lib", "site-packages"),
+        os.path.join("lib", f"python3.{sys.version_info.minor}", "site-packages"),
+        os.path.join("lib", "python3.10", "site-packages"),
+        os.path.join("ai_env", "python_env", "Lib", "site-packages"),
+        os.path.join("ai_env", "python_env", "lib", "site-packages"),
+        os.path.join("ai_env", "python_env", "lib", f"python3.{sys.version_info.minor}", "site-packages"),
+        os.path.join("ai_env", "python_env", "lib", "python3.10", "site-packages"),
+        os.path.join("python_env", "Lib", "site-packages"),
+        os.path.join("python_env", "lib", "site-packages"),
+        os.path.join("ai_env", "Lib", "site-packages"),
+        os.path.join("ai_env", "lib", "site-packages"),
+        os.path.join("ai_env", "ai_env", "python_env", "Lib", "site-packages"),
+        os.path.join("ai_env", "ai_env", "python_env", "lib", "site-packages"),
+        os.path.join("whisperlivekit", "venv", "Lib", "site-packages"),
+        os.path.join("whisperlivekit", "venv", "lib", f"python3.{sys.version_info.minor}", "site-packages"),
+    ]
+
+    for c in candidates:
+        for s in sub_dirs:
+            p = os.path.join(c, s)
+            if os.path.isdir(p):
+                if p not in sys.path:
+                    sys.path.insert(0, p)
+                try:
+                    site.addsitedir(p)
+                except Exception:
+                    pass
+
+    # Windows DLL directory loading for native extensions (torch, soundfile, onnxruntime)
+    if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+        for p in list(sys.path):
+            if os.path.isdir(p):
+                for dll_sub in ['', 'torch/lib', 'onnxruntime/capi']:
+                    dll_dir = os.path.join(p, dll_sub) if dll_sub else p
+                    if os.path.isdir(dll_dir):
+                        try:
+                            os.add_dll_directory(dll_dir)
+                        except Exception:
+                            pass
+
+_bootstrap_site_packages()
+
 import numpy as np
 
 # Suppress noisy warnings in CLI output

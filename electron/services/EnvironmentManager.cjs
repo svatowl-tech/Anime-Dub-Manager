@@ -337,8 +337,7 @@ class EnvironmentManager {
   /**
    * Возвращает папки site-packages внутри ai_env для проброса через PYTHONPATH.
    */
-  getPythonSitePackagesDirs() {
-    const isWin = process.platform === 'win32';
+  getPythonSitePackagesDirs(customPythonPath = null) {
     const dirs = [];
     const roots = [];
     if (typeof app !== 'undefined' && app.getPath) {
@@ -346,15 +345,40 @@ class EnvironmentManager {
     }
     roots.push(process.cwd());
 
+    // 1. Проверяем папки относительно переданного пути к Python
+    if (customPythonPath) {
+      const pyDir = path.dirname(customPythonPath);
+      const pyParent = path.dirname(pyDir);
+      const pyCandidates = [
+        path.join(pyDir, 'Lib', 'site-packages'),
+        path.join(pyDir, 'lib', 'site-packages'),
+        path.join(pyDir, 'lib', 'python3.10', 'site-packages'),
+        path.join(pyParent, 'Lib', 'site-packages'),
+        path.join(pyParent, 'lib', 'site-packages'),
+        path.join(pyParent, 'lib', 'python3.10', 'site-packages'),
+        path.join(pyParent, 'python_env', 'Lib', 'site-packages'),
+        path.join(pyParent, 'python_env', 'lib', 'site-packages')
+      ];
+      for (const c of pyCandidates) {
+        if (fs.existsSync(c)) dirs.push(c);
+      }
+    }
+
+    // 2. Проверяем стандартные корни userData и cwd
     for (const r of roots) {
       const aiEnv = path.join(r, 'ai_env');
       const candidates = [
         path.join(aiEnv, 'python_env', 'Lib', 'site-packages'),
+        path.join(aiEnv, 'python_env', 'lib', 'site-packages'),
         path.join(aiEnv, 'python_env', 'lib', 'python3.10', 'site-packages'),
         path.join(aiEnv, 'Lib', 'site-packages'),
+        path.join(aiEnv, 'lib', 'site-packages'),
         path.join(aiEnv, 'lib', 'python3.10', 'site-packages'),
         path.join(aiEnv, 'ai_env', 'python_env', 'Lib', 'site-packages'),
-        path.join(aiEnv, 'ai_env', 'python_env', 'lib', 'python3.10', 'site-packages')
+        path.join(aiEnv, 'ai_env', 'python_env', 'lib', 'site-packages'),
+        path.join(aiEnv, 'ai_env', 'python_env', 'lib', 'python3.10', 'site-packages'),
+        path.join(r, 'whisperlivekit', 'venv', 'Lib', 'site-packages'),
+        path.join(r, 'whisperlivekit', 'venv', 'lib', 'site-packages')
       ];
       for (const c of candidates) {
         if (fs.existsSync(c)) dirs.push(c);

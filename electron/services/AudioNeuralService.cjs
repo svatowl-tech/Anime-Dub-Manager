@@ -14,58 +14,64 @@ class AudioNeuralService {
 
   /**
    * Resolves absolute path to audio_ai_processor.py.
-   * If running inside an Electron ASAR bundle, extracts it to userData/sidecars
-   * so that external python.exe can execute it directly on disk.
+   * Always extracts/synchronizes the latest bundled version to userData/sidecars
+   * and updates any stale sidecars in ai_env so that external python.exe can execute it directly on disk.
    */
   getSidecarScriptPath() {
     const userData = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
-    const candidatePaths = [
-      // 1. Packaged inside ai_env in userData
-      path.join(userData, 'ai_env', 'sidecars', 'audio_ai_processor.py'),
-      path.join(userData, 'ai_env', 'ai_env', 'sidecars', 'audio_ai_processor.py'),
-      path.join(userData, 'sidecars', 'audio_ai_processor.py'),
-      // 2. Unpacked ASAR directories
-      __dirname.replace('app.asar', 'app.asar.unpacked') + '/audio_ai_processor.py',
-      path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), '..', 'sidecars', 'audio_ai_processor.py'),
-      // 3. Development / source locations
+    const targetScript = path.join(userData, 'sidecars', 'audio_ai_processor.py');
+    const aiEnvSidecarScript = path.join(userData, 'ai_env', 'sidecars', 'audio_ai_processor.py');
+
+    // 1. Look for the application's latest bundled sidecar script
+    const appBundledCandidates = [
+      path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
+      path.join(__dirname, 'audio_ai_processor.py'),
       path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
       path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py'),
-      path.join(__dirname, 'audio_ai_processor.py'),
-      path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
     ];
 
     if (process.resourcesPath) {
-      candidatePaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
-      candidatePaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'services', 'audio_ai_processor.py'));
-      candidatePaths.push(path.join(process.resourcesPath, 'audio_ai_processor.py'));
-      candidatePaths.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
+      appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
+      appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'services', 'audio_ai_processor.py'));
+      appBundledCandidates.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
+      appBundledCandidates.push(path.join(process.resourcesPath, 'audio_ai_processor.py'));
     }
 
-    for (const cand of candidatePaths) {
+    let sourceContent = null;
+    for (const cand of appBundledCandidates) {
       if (cand && fs.existsSync(cand)) {
-        // If this file is on a real filesystem (not inside app.asar), return it directly
-        if (!cand.includes('.asar')) {
-          return cand;
-        }
-        // If it is inside app.asar, extract it to disk so Python can execute it
         try {
-          const targetDiskScript = path.join(userData, 'sidecars', 'audio_ai_processor.py');
-          fs.mkdirSync(path.dirname(targetDiskScript), { recursive: true });
           const content = fs.readFileSync(cand);
-          fs.writeFileSync(targetDiskScript, content);
-          log.info(`[AudioNeuralService] Extracted sidecar from ASAR to ${targetDiskScript}`);
-          return targetDiskScript;
-        } catch (extractErr) {
-          log.warn(`[AudioNeuralService] Could not extract sidecar from ASAR: ${extractErr.message}`);
-        }
+          if (content && content.length > 500) {
+            sourceContent = content;
+            break;
+          }
+        } catch (e) {}
       }
     }
 
-    // Fallback: Check if targetDiskScript exists
-    const extractedScript = path.join(userData, 'sidecars', 'audio_ai_processor.py');
-    if (fs.existsSync(extractedScript)) {
-      return extractedScript;
+    // 2. If bundled master source found, sync to disk so Python can run the latest code
+    if (sourceContent) {
+      try {
+        fs.mkdirSync(path.dirname(targetScript), { recursive: true });
+        fs.writeFileSync(targetScript, sourceContent);
+        log.info(`[AudioNeuralService] Synchronized sidecar script to ${targetScript}`);
+      } catch (e) {}
+
+      // Also overwrite the stale copy in ai_env/sidecars if it exists
+      try {
+        if (fs.existsSync(path.dirname(aiEnvSidecarScript))) {
+          fs.writeFileSync(aiEnvSidecarScript, sourceContent);
+          log.info(`[AudioNeuralService] Updated ai_env sidecar script at ${aiEnvSidecarScript}`);
+        }
+      } catch (e) {}
+
+      return targetScript;
     }
+
+    // 3. Fallbacks
+    if (fs.existsSync(targetScript)) return targetScript;
+    if (fs.existsSync(aiEnvSidecarScript)) return aiEnvSidecarScript;
 
     return path.join(__dirname, 'audio_ai_processor.py');
   }
@@ -123,14 +129,14 @@ class AudioNeuralService {
       const updatedPath = `${extraPaths.join(delimiter)}${delimiter}${process.env.PATH || ''}`;
 
       // Propagate AI_env site-packages to PYTHONPATH
-      const sitePackages = EnvironmentManager.getPythonSitePackagesDirs();
+      const sitePackages = EnvironmentManager.getPythonSitePackagesDirs(pythonPath);
       const existingPythonPath = process.env.PYTHONPATH || '';
       const fullPythonPath = sitePackages.length > 0 
         ? `${sitePackages.join(delimiter)}${delimiter}${existingPythonPath}`
         : existingPythonPath;
 
       if (onLog && sitePackages.length > 0) {
-        onLog(`[Neural AI] Подключены библиотеки: ${sitePackages.join('; ')}`, 'debug');
+        onLog(`[Neural AI] Подключены библиотеки нейросети (${sitePackages.length}): ${sitePackages.join('; ')}`, 'info');
       }
 
       const env = {
