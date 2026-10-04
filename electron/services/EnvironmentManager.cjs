@@ -164,15 +164,26 @@ class EnvironmentManager {
 
   /**
    * Проверяет, действительно ли исполняемый файл Python запускается в системе (не битый симлинк/shim).
+   * Обязательно передает PATH с папкой интерпретатора для загрузки зависимых DLL (python310.dll, vcruntime140.dll).
    */
   _isPythonExecutableWorking(executablePath) {
     if (!executablePath) return false;
     try {
+      if (!fs.existsSync(executablePath)) return false;
       const { spawnSync } = require('child_process');
+      const dir = path.dirname(executablePath);
+      const parentDir = path.dirname(dir);
+      const delimiter = process.platform === 'win32' ? ';' : ':';
+      const customPath = `${dir}${delimiter}${parentDir}${delimiter}${process.env.PATH || ''}`;
+
       const test = spawnSync(executablePath, ['-c', 'import sys; sys.exit(0)'], {
         timeout: 4000,
         windowsHide: true,
-        stdio: 'ignore'
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          PATH: customPath
+        }
       });
       return test.status === 0;
     } catch (e) {
@@ -189,46 +200,76 @@ class EnvironmentManager {
     const systemCandidates = [];
 
     if (isWin) {
-      // 1. Поиск через where.exe
+      // 1. Поиск через where.exe для python.exe и python3.exe
       try {
         const whereRes = spawnSync('where.exe', ['python.exe'], { timeout: 3000, encoding: 'utf8', windowsHide: true });
         if (whereRes.status === 0 && whereRes.stdout) {
           const lines = whereRes.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
           for (const line of lines) {
-            // Исключаем заглушки WindowsApps (0 байт alias к магазину Windows)
-            if (!line.toLowerCase().includes('windowsapps')) {
-              systemCandidates.push(line);
-            }
+            systemCandidates.push(line);
           }
         }
       } catch (e) {}
 
-      // 2. Стандартные папки установки Python на Windows
+      try {
+        const whereRes3 = spawnSync('where.exe', ['python3.exe'], { timeout: 3000, encoding: 'utf8', windowsHide: true });
+        if (whereRes3.status === 0 && whereRes3.stdout) {
+          const lines = whereRes3.stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+          for (const line of lines) {
+            systemCandidates.push(line);
+          }
+        }
+      } catch (e) {}
+
+      // 2. Проверка стандартного Python Launcher (py.exe)
+      try {
+        const pyLauncher = 'C:\\Windows\\py.exe';
+        if (fs.existsSync(pyLauncher)) {
+          const pyRes = spawnSync(pyLauncher, ['-3', '-c', 'import sys; print(sys.executable)'], { timeout: 3000, encoding: 'utf8', windowsHide: true });
+          if (pyRes.status === 0 && pyRes.stdout) {
+            const detected = pyRes.stdout.trim();
+            if (detected && fs.existsSync(detected)) systemCandidates.push(detected);
+          }
+        }
+      } catch (e) {}
+
+      // 3. Стандартные папки установки Python на Windows
       const userProfile = process.env.USERPROFILE || '';
       const localAppData = process.env.LOCALAPPDATA || '';
       const progFiles = process.env.ProgramFiles || 'C:\\Program Files';
       const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
       const systemDrive = process.env.SystemDrive || 'C:';
 
-      const pythonVersions = ['Python310', 'Python311', 'Python312', 'Python39', 'Python38', 'Python313'];
+      const pythonVersions = ['Python310', 'Python311', 'Python312', 'Python313', 'Python39', 'Python38'];
       for (const ver of pythonVersions) {
         if (localAppData) systemCandidates.push(path.join(localAppData, 'Programs', 'Python', ver, 'python.exe'));
         if (progFiles) systemCandidates.push(path.join(progFiles, ver, 'python.exe'));
         if (progFilesX86) systemCandidates.push(path.join(progFilesX86, ver, 'python.exe'));
         systemCandidates.push(path.join(systemDrive, ver, 'python.exe'));
+        systemCandidates.push(path.join(systemDrive, 'Program Files', ver, 'python.exe'));
       }
 
-      // Conda / Miniconda
+      // 4. WindowsApps / Microsoft Store
+      if (localAppData) {
+        systemCandidates.push(path.join(localAppData, 'Microsoft', 'WindowsApps', 'python.exe'));
+        systemCandidates.push(path.join(localAppData, 'Microsoft', 'WindowsApps', 'python3.exe'));
+      }
+
+      // 5. Scoop / Chocolatey / Pyenv
       if (userProfile) {
+        systemCandidates.push(path.join(userProfile, 'scoop', 'apps', 'python', 'current', 'python.exe'));
+        systemCandidates.push(path.join(userProfile, '.pyenv', 'pyenv-win', 'shims', 'python.exe'));
         systemCandidates.push(path.join(userProfile, 'anaconda3', 'python.exe'));
         systemCandidates.push(path.join(userProfile, 'miniconda3', 'python.exe'));
       }
+      const programData = process.env.ProgramData || 'C:\\ProgramData';
+      systemCandidates.push(path.join(programData, 'chocolatey', 'bin', 'python.exe'));
     } else {
       systemCandidates.push('/usr/bin/python3', '/usr/local/bin/python3', '/opt/homebrew/bin/python3', 'python3', 'python');
     }
 
     for (const cand of systemCandidates) {
-      if (this._isPythonExecutableWorking(cand)) {
+      if (cand && this._isPythonExecutableWorking(cand)) {
         log.info(`[EnvironmentManager] Найден рабочий системный Python: ${cand}`);
         return cand;
       }
@@ -237,30 +278,56 @@ class EnvironmentManager {
   }
 
   /**
-   * Автоматически восстанавливает pyvenv.cfg, если home указывает на несуществующую папку CI-билда.
+   * Автоматически восстанавливает pyvenv.cfg и синхронизирует бинарники, 
+   * если home указывает на несуществующую папку CI-билда (например C:\hostedtoolcache).
    */
-  _autoRepairPyvenvCfg(envDir, workingPythonPath) {
-    if (!envDir || !workingPythonPath) return;
+  _autoRepairPyvenvCfg(envDir, workingPythonPath = null) {
+    if (!envDir || !fs.existsSync(envDir)) return;
+    const isWin = process.platform === 'win32';
     const cfgPath = path.join(envDir, 'pyvenv.cfg');
+
     try {
-      if (!fs.existsSync(cfgPath)) return;
-      const content = fs.readFileSync(cfgPath, 'utf8');
-      const lines = content.split(/\r?\n/);
-      let modified = false;
-      const newLines = lines.map(line => {
-        if (line.trim().startsWith('home =')) {
-          const oldHome = line.split('=')[1]?.trim();
-          if (oldHome && !fs.existsSync(oldHome)) {
-            const newHome = path.dirname(workingPythonPath);
-            log.info(`[EnvironmentManager] Восстановление pyvenv.cfg: ${oldHome} -> ${newHome}`);
-            modified = true;
-            return `home = ${newHome}`;
-          }
+      // 1. На Windows: если в корне envDir есть рабочий python.exe, но в Scripts/python.exe битый стаб venvlauncher,
+      // синхронизируем файлы из корня в Scripts/
+      if (isWin) {
+        const rootPy = path.join(envDir, 'python.exe');
+        const scriptsPy = path.join(envDir, 'Scripts', 'python.exe');
+        if (fs.existsSync(rootPy) && fs.existsSync(scriptsPy)) {
+          try {
+            // Копируем все dll и python.exe из корня в Scripts/
+            const entries = fs.readdirSync(envDir, { withFileTypes: true });
+            for (const ent of entries) {
+              if (ent.isFile() && (ent.name.toLowerCase().endsWith('.dll') || ent.name.toLowerCase() === 'python.exe')) {
+                fs.copyFileSync(path.join(envDir, ent.name), path.join(envDir, 'Scripts', ent.name));
+              }
+            }
+          } catch (e) {}
         }
-        return line;
-      });
-      if (modified) {
-        fs.writeFileSync(cfgPath, newLines.join('\n'), 'utf8');
+      }
+
+      // 2. Проверяем и восстанавливаем pyvenv.cfg
+      if (fs.existsSync(cfgPath)) {
+        const content = fs.readFileSync(cfgPath, 'utf8');
+        const lines = content.split(/\r?\n/);
+        let modified = false;
+
+        const newLines = lines.map(line => {
+          if (line.trim().startsWith('home =')) {
+            const oldHome = line.split('=')[1]?.trim();
+            // Если oldHome не существует или указывает на папку hostedtoolcache / CI
+            if (!oldHome || !fs.existsSync(oldHome) || oldHome.includes('hostedtoolcache') || oldHome === '.') {
+              let targetHome = workingPythonPath ? path.dirname(workingPythonPath) : envDir;
+              log.info(`[EnvironmentManager] Авто-ремонт pyvenv.cfg: ${oldHome} -> ${targetHome}`);
+              modified = true;
+              return `home = ${targetHome}`;
+            }
+          }
+          return line;
+        });
+
+        if (modified) {
+          fs.writeFileSync(cfgPath, newLines.join('\n'), 'utf8');
+        }
       }
     } catch (e) {
       log.warn('[EnvironmentManager] Не удалось обновить pyvenv.cfg:', e);
@@ -308,12 +375,13 @@ class EnvironmentManager {
       try {
         userData = app.getPath('userData');
         if (isWin) {
-          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'Scripts', 'python.exe'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'Scripts', 'python.exe'));
+          // Исполняемые файлы в портативной ai_env
           candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'python.exe'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'python', 'python.exe'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'Scripts', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'Scripts', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'Scripts', 'python.exe'));
           candidatePaths.push(path.join(userData, 'ai_env', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'Scripts', 'python.exe'));
           candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'Scripts', 'python.exe'));
         } else {
           candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'bin', 'python3'));
@@ -333,6 +401,7 @@ class EnvironmentManager {
     // Check application folder and cwd
     const cwd = process.cwd();
     if (isWin) {
+      candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'python.exe'));
       candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'Scripts', 'python.exe'));
       candidatePaths.push(path.join(cwd, 'ai_env', 'python.exe'));
       candidatePaths.push(path.join(cwd, 'venv', 'Scripts', 'python.exe'));
@@ -345,45 +414,52 @@ class EnvironmentManager {
       candidatePaths.push(path.join(cwd, '.venv', 'bin', 'python'));
     }
 
-    // 1. Сначала проверяем существующие файлы и тестируем их реальный запуск
+    // 1. Выполняем превентивный ремонт pyvenv.cfg для всех найденных окружений
+    const envDirsToRepair = new Set();
+    for (const cand of candidatePaths) {
+      if (cand && fs.existsSync(cand) && cand.includes('python_env')) {
+        const eDir = cand.includes('Scripts') || cand.includes('bin')
+          ? path.dirname(path.dirname(cand))
+          : path.dirname(cand);
+        envDirsToRepair.add(eDir);
+      }
+    }
+    for (const eDir of envDirsToRepair) {
+      this._autoRepairPyvenvCfg(eDir);
+    }
+
+    // 2. Проверяем кандидатов и тестируем их реальный запуск
     for (const cand of candidatePaths) {
       if (cand && fs.existsSync(cand)) {
         if (this._isPythonExecutableWorking(cand)) {
           return cand;
         }
-        // Если файл существует, но падает (типично для перенесенного Windows venv)
-        if (isWin && cand.includes('python_env')) {
-          log.warn(`[EnvironmentManager] Файл ${cand} существует, но не запускается. Пробуем авто-ремонт pyvenv.cfg...`);
-          const envDir = path.dirname(path.dirname(cand));
-          const sysPy = this._findSystemPython();
-          if (sysPy) {
-            this._autoRepairPyvenvCfg(envDir, sysPy);
-            if (this._isPythonExecutableWorking(cand)) {
-              log.info(`[EnvironmentManager] ✓ pyvenv.cfg успешно восстановлен. Запуск ${cand} подтвержден!`);
-              return cand;
-            }
-          }
-        }
       }
     }
 
-    // 2. Если в ai_env бинарник не запустился, ищем системный Python
+    // 3. Если бинарники в ai_env не запустились напрямую, ищем системный Python
     const systemPy = this._findSystemPython();
     if (systemPy) {
+      // Повторно ремонтируем ai_env с привязкой к рабочему системному Python
+      for (const eDir of envDirsToRepair) {
+        this._autoRepairPyvenvCfg(eDir, systemPy);
+      }
       return systemPy;
     }
 
-    // 3. Последняя попытка - стандартное имя в PATH
+    // 4. Последняя попытка - стандартное имя в PATH
     const fallbackName = isWin ? 'python' : 'python3';
     if (this._isPythonExecutableWorking(fallbackName)) {
       return fallbackName;
     }
 
-    // Если ни один вариант не работает, возвращаем путь к предполагаемому файлу
-    // (он выдаст понятную диагностическую ошибку при запуске)
-    if (candidatePaths.length > 0 && candidatePaths[0]) {
-      return candidatePaths[0];
+    // Если ни один вариант не работает, возвращаем лучший найденный существующий файл
+    for (const cand of candidatePaths) {
+      if (cand && fs.existsSync(cand)) {
+        return cand;
+      }
     }
+
     return fallbackName;
   }
 

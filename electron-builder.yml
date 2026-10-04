@@ -83,3 +83,5 @@ asarUnpack:
   - "**/node_modules/onnxruntime-node/**/*"
   - "**/node_modules/@xenova/transformers/**/*"
   - "**/node_modules/youtube-dl-exec/**/*"
+  - "**/electron/sidecars/**/*"
+  - "**/electron/services/audio_ai_processor.py"

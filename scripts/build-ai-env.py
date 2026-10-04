@@ -198,26 +198,65 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir"] + other_packages)
 
     if is_win:
-        # Copy base python dlls and executables into env_dir so it is fully standalone across machines
-        print("  [PORTABLE] Copying Windows Python base binaries into virtual environment...")
+        # Copy base python dlls, executables, standard library and DLLs folder into env_dir so it is fully standalone across machines
+        print("  [PORTABLE] Copying Windows Python base binaries and standard library into virtual environment...")
         base_dir = Path(sys.base_prefix)
-        for fn in ["python.exe", "pythonw.exe", "python3.dll", f"python3{sys.version_info.minor}.dll", "vcruntime140.dll"]:
-            src_f = base_dir / fn
-            if src_f.exists():
+        
+        # 1. Copy all base DLLs and executables into env_dir and env_dir/Scripts
+        for item in base_dir.iterdir():
+            if item.is_file() and item.suffix.lower() in [".dll", ".exe"]:
                 try:
-                    shutil.copy2(src_f, env_dir / fn)
-                    shutil.copy2(src_f, env_dir / "Scripts" / fn)
+                    shutil.copy2(item, env_dir / item.name)
+                    shutil.copy2(item, env_dir / "Scripts" / item.name)
                 except Exception:
                     pass
-        # Set pyvenv.cfg home = .
+
+        # 2. Copy standard DLLs folder (_socket.pyd, _ctypes.pyd, _ssl.pyd, etc.)
+        dlls_src = base_dir / "DLLs"
+        if dlls_src.exists():
+            shutil.copytree(dlls_src, env_dir / "DLLs", dirs_exist_ok=True)
+            print("  [PORTABLE] Copied DLLs/ folder (standard C-extensions)")
+
+        # 3. Copy standard library (os.py, encodings, json, etc.) except site-packages
+        lib_src = base_dir / "Lib"
+        lib_dst = env_dir / "Lib"
+        lib_dst.mkdir(parents=True, exist_ok=True)
+        if lib_src.exists():
+            for item in lib_src.iterdir():
+                if item.name.lower() == "site-packages":
+                    continue
+                dst_item = lib_dst / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dst_item, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(item, dst_item)
+            print("  [PORTABLE] Copied Lib/ standard library (encodings, os, json, etc.)")
+
+        # 4. Set self-contained pyvenv.cfg
         cfg_path = env_dir / "pyvenv.cfg"
-        if cfg_path.exists():
-            try:
-                lines = cfg_path.read_text(encoding="utf-8").splitlines()
-                new_lines = [("home = ." if l.strip().startswith("home =") else l) for l in lines]
-                cfg_path.write_text("\n".join(new_lines), encoding="utf-8")
-            except Exception:
-                pass
+        try:
+            cfg_path.write_text("home = .\ninclude-system-site-packages = false\nversion = 3.10.11\napplocal = true\n", encoding="utf-8")
+        except Exception:
+            pass
+
+    if is_linux or is_mac:
+        print("  [PORTABLE] Copying Unix standard library into virtual environment...")
+        base_dir = Path(sys.base_prefix)
+        py_ver = f"python3.{sys.version_info.minor}"
+        base_lib = base_dir / "lib" / py_ver
+        target_lib = env_dir / "lib" / py_ver
+        target_lib.mkdir(parents=True, exist_ok=True)
+        if base_lib.exists():
+            for item in base_lib.iterdir():
+                if item.name.lower() == "site-packages":
+                    continue
+                dst_item = target_lib / item.name
+                if not dst_item.exists():
+                    if item.is_dir():
+                        shutil.copytree(item, dst_item, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, dst_item)
+            print(f"  [PORTABLE] Copied Unix standard library to {target_lib}")
 
     # 5. Copy sidecars into environment bundle for self-containment
     print("\n[STEP 4] Bundling audio_ai_processor sidecar and metadata...")

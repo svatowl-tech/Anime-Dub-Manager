@@ -13,26 +13,58 @@ class AudioNeuralService {
   }
 
   /**
-   * Resolves absolute path to audio_ai_processor.py
+   * Resolves absolute path to audio_ai_processor.py.
+   * If running inside an Electron ASAR bundle, extracts it to userData/sidecars
+   * so that external python.exe can execute it directly on disk.
    */
   getSidecarScriptPath() {
+    const userData = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
     const candidatePaths = [
+      // 1. Packaged inside ai_env in userData
+      path.join(userData, 'ai_env', 'sidecars', 'audio_ai_processor.py'),
+      path.join(userData, 'ai_env', 'ai_env', 'sidecars', 'audio_ai_processor.py'),
+      path.join(userData, 'sidecars', 'audio_ai_processor.py'),
+      // 2. Unpacked ASAR directories
+      __dirname.replace('app.asar', 'app.asar.unpacked') + '/audio_ai_processor.py',
+      path.join(__dirname.replace('app.asar', 'app.asar.unpacked'), '..', 'sidecars', 'audio_ai_processor.py'),
+      // 3. Development / source locations
+      path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
+      path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py'),
       path.join(__dirname, 'audio_ai_processor.py'),
       path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
-      path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py'),
-      path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
     ];
 
     if (process.resourcesPath) {
+      candidatePaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
+      candidatePaths.push(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'services', 'audio_ai_processor.py'));
       candidatePaths.push(path.join(process.resourcesPath, 'audio_ai_processor.py'));
-      candidatePaths.push(path.join(process.resourcesPath, 'electron', 'services', 'audio_ai_processor.py'));
       candidatePaths.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
     }
 
     for (const cand of candidatePaths) {
-      if (fs.existsSync(cand)) {
-        return cand;
+      if (cand && fs.existsSync(cand)) {
+        // If this file is on a real filesystem (not inside app.asar), return it directly
+        if (!cand.includes('.asar')) {
+          return cand;
+        }
+        // If it is inside app.asar, extract it to disk so Python can execute it
+        try {
+          const targetDiskScript = path.join(userData, 'sidecars', 'audio_ai_processor.py');
+          fs.mkdirSync(path.dirname(targetDiskScript), { recursive: true });
+          const content = fs.readFileSync(cand);
+          fs.writeFileSync(targetDiskScript, content);
+          log.info(`[AudioNeuralService] Extracted sidecar from ASAR to ${targetDiskScript}`);
+          return targetDiskScript;
+        } catch (extractErr) {
+          log.warn(`[AudioNeuralService] Could not extract sidecar from ASAR: ${extractErr.message}`);
+        }
       }
+    }
+
+    // Fallback: Check if targetDiskScript exists
+    const extractedScript = path.join(userData, 'sidecars', 'audio_ai_processor.py');
+    if (fs.existsSync(extractedScript)) {
+      return extractedScript;
     }
 
     return path.join(__dirname, 'audio_ai_processor.py');
@@ -111,9 +143,15 @@ class AudioNeuralService {
         TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch')
       };
 
+      // Determine safe working directory: NEVER use a path inside an app.asar
+      let workingDir = path.dirname(scriptPath);
+      if (workingDir.includes('.asar')) {
+        workingDir = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
+      }
+
       // Launch python executable directly without cmd.exe
       const child = spawn(pythonPath, fullArgs, {
-        cwd: path.dirname(scriptPath),
+        cwd: workingDir,
         env,
         shell: false,
         windowsHide: true
