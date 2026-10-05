@@ -70,10 +70,53 @@ class AudioNeuralService {
     }
 
     // 3. Fallbacks
-    if (fs.existsSync(targetScript)) return targetScript;
-    if (fs.existsSync(aiEnvSidecarScript)) return aiEnvSidecarScript;
+    if (fs.existsSync(targetScript)) {
+      this._sanitizeSidecarScript(targetScript);
+      return targetScript;
+    }
+    if (fs.existsSync(aiEnvSidecarScript)) {
+      this._sanitizeSidecarScript(aiEnvSidecarScript);
+      return aiEnvSidecarScript;
+    }
 
     return path.join(__dirname, 'audio_ai_processor.py');
+  }
+
+  /**
+   * Очищает целевой скрипт на диске от устаревших meta_path хуков (_TorchTestingFinder),
+   * которые вызывали AttributeError: 'function' object has no attribute 'endswith' в inspect.py.
+   */
+  _sanitizeSidecarScript(scriptPath) {
+    if (!scriptPath || !fs.existsSync(scriptPath)) return;
+    try {
+      const code = fs.readFileSync(scriptPath, 'utf8');
+      if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim')) {
+        const bundledCandidates = [
+          path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
+          path.join(__dirname, 'audio_ai_processor.py'),
+          path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
+          path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py')
+        ];
+        if (process.resourcesPath) {
+          bundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
+          bundledCandidates.unshift(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
+        }
+        for (const c of bundledCandidates) {
+          if (fs.existsSync(c)) {
+            try {
+              const fresh = fs.readFileSync(c, 'utf8');
+              if (fresh && !fresh.includes('_TorchTestingFinder')) {
+                fs.writeFileSync(scriptPath, fresh, 'utf8');
+                log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на чистую версию без meta_path хуков.`);
+                break;
+              }
+            } catch (e) {}
+          }
+        }
+      }
+    } catch (err) {
+      log.warn('[AudioNeuralService] Ошибка при санитации скрипта:', err);
+    }
   }
 
   /**
@@ -83,6 +126,16 @@ class AudioNeuralService {
   async _runPythonSidecar(args, { onProgress, onLog, abortSignal, operationName = 'AudioNeural' }) {
     const pythonPath = EnvironmentManager.getPythonPath();
     const scriptPath = this.getSidecarScriptPath();
+
+    // Превентивное восстановление torch/testing/_internal/common_dtype.py на диске
+    try {
+      const pyDir = path.dirname(pythonPath);
+      EnvironmentManager._ensureTorchTestingIntegrity(pyDir);
+      EnvironmentManager._ensureTorchTestingIntegrity(path.dirname(pyDir));
+    } catch (e) {}
+
+    // Гарантированная санитация скрипта процессора
+    this._sanitizeSidecarScript(scriptPath);
 
     const pythonExists = fs.existsSync(pythonPath);
     const scriptExists = fs.existsSync(scriptPath);

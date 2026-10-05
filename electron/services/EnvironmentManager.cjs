@@ -329,8 +329,74 @@ class EnvironmentManager {
           fs.writeFileSync(cfgPath, newLines.join('\n'), 'utf8');
         }
       }
+
+      // 3. Проверяем и восстанавливаем целостность torch/testing/_internal/common_dtype.py
+      this._ensureTorchTestingIntegrity(envDir);
     } catch (e) {
       log.warn('[EnvironmentManager] Не удалось обновить pyvenv.cfg:', e);
+    }
+  }
+
+  /**
+   * Гарантирует наличие highest_precision_float в torch/testing/_internal/common_dtype.py
+   * для стабильной работы PyTorch 2.x без повреждения inspect.py.
+   */
+  _ensureTorchTestingIntegrity(envDir) {
+    if (!envDir || !fs.existsSync(envDir)) return;
+    try {
+      const siteCandidates = [
+        path.join(envDir, 'Lib', 'site-packages'),
+        path.join(envDir, 'lib', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.10', 'site-packages')
+      ];
+      const snippet = `\n# Auto-injected highest_precision_float compatibility shim for PyTorch 2.x
+def highest_precision_float(device=None):
+    import torch
+    if device is None:
+        try:
+            device = torch.get_default_device()
+        except Exception:
+            device = "cpu"
+    try:
+        if hasattr(torch, "device") and torch.device(device).type == "mps":
+            return torch.float32
+    except Exception:
+        pass
+    return getattr(torch, "float64", float)
+\n`;
+
+      for (const siteDir of siteCandidates) {
+        if (!fs.existsSync(siteDir)) continue;
+        const torchDir = path.join(siteDir, 'torch');
+        if (fs.existsSync(torchDir)) {
+          const testingDir = path.join(torchDir, 'testing');
+          const internalDir = path.join(testingDir, '_internal');
+          if (!fs.existsSync(internalDir)) {
+            fs.mkdirSync(internalDir, { recursive: true });
+          }
+          const testingInit = path.join(testingDir, '__init__.py');
+          if (!fs.existsSync(testingInit)) {
+            fs.writeFileSync(testingInit, '# torch testing init\n', 'utf8');
+          }
+          const internalInit = path.join(internalDir, '__init__.py');
+          if (!fs.existsSync(internalInit)) {
+            fs.writeFileSync(internalInit, '# torch testing internal init\n', 'utf8');
+          }
+          const commonDtype = path.join(internalDir, 'common_dtype.py');
+          if (fs.existsSync(commonDtype)) {
+            const content = fs.readFileSync(commonDtype, 'utf8');
+            if (!content.includes('highest_precision_float')) {
+              fs.appendFileSync(commonDtype, snippet, 'utf8');
+              log.info(`[EnvironmentManager] Восстановлен highest_precision_float в ${commonDtype}`);
+            }
+          } else {
+            fs.writeFileSync(commonDtype, snippet, 'utf8');
+            log.info(`[EnvironmentManager] Создан ${commonDtype} с highest_precision_float`);
+          }
+        }
+      }
+    } catch (err) {
+      log.warn('[EnvironmentManager] Предупреждение при проверке целостности torch:', err);
     }
   }
 

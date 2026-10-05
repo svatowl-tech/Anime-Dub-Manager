@@ -99,54 +99,82 @@ def _bootstrap_torch_shims():
     Guarantees PyTorch 2.x submodules (torch._decomp, torch._refs, torch._meta_registrations)
     can import cleanly without throwing:
     ImportError: cannot import name 'highest_precision_float' from 'torch.testing._internal.common_dtype'
-    even if torch.testing was stripped, pruned, or incomplete in portable installations.
+    
+    CRITICAL: Never install a dynamic proxy on sys.meta_path that returns dummy functions
+    for dunder attributes like __file__, as standard library inspect.getsourcefile / inspect.getmodule
+    will fail with: AttributeError: 'function' object has no attribute 'endswith'.
+    Instead, ensure the actual torch/testing/_internal/common_dtype.py on disk has the required definition.
     """
-    import types
-    from importlib.machinery import ModuleSpec
+    snippet = """
 
-    class _TestingDynamicShim(types.ModuleType):
-        def __init__(self, name):
-            super().__init__(name)
-            self.__path__ = []
+# Auto-injected highest_precision_float compatibility shim for PyTorch 2.x
+def highest_precision_float(device=None):
+    import torch
+    if device is None:
+        try:
+            device = torch.get_default_device()
+        except Exception:
+            device = "cpu"
+    try:
+        if hasattr(torch, "device") and torch.device(device).type == "mps":
+            return torch.float32
+    except Exception:
+        pass
+    return getattr(torch, "float64", float)
 
-        def __getattr__(self, name):
-            if name == 'highest_precision_float':
-                def highest_precision_float(*args):
-                    for a in args:
-                        s = str(a).lower()
-                        if 'float64' in s or 'double' in s:
-                            return a
-                    for a in args:
-                        s = str(a).lower()
-                        if 'float32' in s or 'float' in s:
-                            return a
-                    t = sys.modules.get('torch', None)
-                    return getattr(t, 'float32', float)
-                return highest_precision_float
-            if name in ['all_types', 'all_types_and_complex', 'all_types_and_half', 'floating_types', 'floating_and_complex_types', 'complex_types', 'integral_types']:
-                t = sys.modules.get('torch', None)
-                if t:
-                    return (getattr(t, 'float32', float), getattr(t, 'float64', float), getattr(t, 'int32', int), getattr(t, 'int64', int))
-                return ()
-            return lambda *args, **kwargs: None
+def highest_precision_complex(device=None):
+    import torch
+    if device is None:
+        try:
+            device = torch.get_default_device()
+        except Exception:
+            device = "cpu"
+    try:
+        if hasattr(torch, "device") and torch.device(device).type == "mps":
+            return getattr(torch, "complex64", complex)
+    except Exception:
+        pass
+    return getattr(torch, "complex128", complex)
+"""
 
-    class _TorchTestingLoader:
-        def __init__(self, fullname):
-            self.fullname = fullname
-        def create_module(self, spec):
-            return _TestingDynamicShim(self.fullname)
-        def exec_module(self, module):
-            pass
-
-    class _TorchTestingFinder:
-        def find_spec(self, fullname, path, target=None):
-            if fullname == 'torch.testing' or (isinstance(fullname, str) and fullname.startswith('torch.testing.')):
-                return ModuleSpec(fullname, _TorchTestingLoader(fullname), is_package=True)
-            return None
-
-    # Pre-emptively register finder before torch is imported
-    if not any(isinstance(f, _TorchTestingFinder) for f in sys.meta_path):
-        sys.meta_path.insert(0, _TorchTestingFinder())
+    # 1. Scan all site-packages in sys.path and candidates for torch package
+    for p in list(sys.path):
+        if not p or not os.path.isdir(p):
+            continue
+        torch_dir = os.path.join(p, "torch")
+        if os.path.isdir(torch_dir):
+            testing_dir = os.path.join(torch_dir, "testing")
+            internal_dir = os.path.join(testing_dir, "_internal")
+            try:
+                os.makedirs(internal_dir, exist_ok=True)
+                # Ensure __init__.py files exist
+                for d in [testing_dir, internal_dir]:
+                    init_p = os.path.join(d, "__init__.py")
+                    if not os.path.exists(init_p):
+                        try:
+                            with open(init_p, "w", encoding="utf-8") as f:
+                                f.write("# torch testing init\n")
+                        except Exception:
+                            pass
+                
+                common_dtype_file = os.path.join(internal_dir, "common_dtype.py")
+                if os.path.exists(common_dtype_file):
+                    try:
+                        with open(common_dtype_file, "r", encoding="utf-8", errors="ignore") as f:
+                            code = f.read()
+                        if "highest_precision_float" not in code:
+                            with open(common_dtype_file, "a", encoding="utf-8") as f:
+                                f.write(snippet)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        with open(common_dtype_file, "w", encoding="utf-8") as f:
+                            f.write(snippet)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
 _bootstrap_torch_shims()
 
