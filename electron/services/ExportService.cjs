@@ -527,28 +527,32 @@ class ExportService {
               if (latestFix) await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
             }
           } else {
-            if (latestOriginal) {
-              const origOut = path.join(targetDir, getExportName(latestOriginal, false));
-              await fs.copyFile(latestOriginal.path, origOut);
-              await logStep(`[Экспорт] Дорожка даббера «${nick}» экспортирована: ${path.basename(origOut)}`, 'info', dubberPercent);
+            if (original && original.length > 0) {
+              const sortedOriginals = [...original].sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+              for (let oIdx = 0; oIdx < sortedOriginals.length; oIdx++) {
+                const origFile = sortedOriginals[oIdx];
+                const ext = path.extname(origFile.path) || '.wav';
+                const origName = sortedOriginals.length === 1
+                  ? `${baseVideoName}_[${nick}]${ext}`
+                  : `${baseVideoName}_[${nick}]_дорожка${oIdx + 1}${ext}`;
+                const origOut = path.join(targetDir, origName);
+                await fs.copyFile(origFile.path, origOut);
+                await logStep(`[Экспорт] Дорожка даббера «${nick}» ${sortedOriginals.length > 1 ? `(слой ${oIdx + 1})` : ''}: ${path.basename(origOut)}`, 'info', dubberPercent);
+              }
             }
-            if (latestFix) {
-              const fixOut = path.join(targetDir, getExportName(latestFix, true));
-              await fs.copyFile(latestFix.path, fixOut);
-              await logStep(`[Экспорт] Дорожка фикса «${nick}» экспортирована: ${path.basename(fixOut)}`, 'info', dubberPercent);
-            }
-          }
 
-          // Export any additional original tracks/takes/layers from this dubber so nothing is lost
-          if (original && original.length > 1) {
-            const extraOriginals = original.filter(o => !latestOriginal || o.id !== latestOriginal.id);
-            for (let exIdx = 0; exIdx < extraOriginals.length; exIdx++) {
-              const extraFile = extraOriginals[exIdx];
-              const ext = path.extname(extraFile.path) || '.wav';
-              const extraName = getExportName(extraFile, false).replace(ext, `_дорожка${exIdx + 2}${ext}`);
-              const extraPath = path.join(targetDir, extraName);
-              await fs.copyFile(extraFile.path, extraPath);
-              await logStep(`[Экспорт] Дополнительная дорожка даббера «${nick}» (слой ${exIdx + 2}): ${extraName}`, 'info', dubberPercent);
+            if (fixes && fixes.length > 0) {
+              const sortedFixes = [...fixes].sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+              for (let fIdx = 0; fIdx < sortedFixes.length; fIdx++) {
+                const fixFile = sortedFixes[fIdx];
+                const ext = path.extname(fixFile.path) || '.wav';
+                const fixName = sortedFixes.length === 1
+                  ? `${baseVideoName}_[${nick}]_[фикс]${ext}`
+                  : `${baseVideoName}_[${nick}]_[фикс${fIdx + 1}]${ext}`;
+                const fixOut = path.join(targetDir, fixName);
+                await fs.copyFile(fixFile.path, fixOut);
+                await logStep(`[Экспорт] Дорожка фикса «${nick}» ${sortedFixes.length > 1 ? `(фикс ${fIdx + 1})` : ''}: ${path.basename(fixOut)}`, 'info', dubberPercent);
+              }
             }
           }
         }

@@ -1526,19 +1526,31 @@ class MixingPipelineService {
     }
 
     const audioExts = /\.(wav|mp3|flac|ogg|m4a|aac)$/i;
-    const searchDirs = [workingDir, path.join(workingDir, '00_исходные')].filter(d => fsSync.existsSync(d));
+    const rawDir = path.join(workingDir, '00_исходные');
+    const rawFiles = fsSync.existsSync(rawDir) ? fsSync.readdirSync(rawDir).filter(f => audioExts.test(f)) : [];
+    
+    // If 00_исходные has audio files, use ONLY 00_исходные to avoid picking up intermediate pipeline renders from workingDir
+    const searchDirs = rawFiles.length > 0 
+      ? [rawDir] 
+      : [workingDir].filter(d => fsSync.existsSync(d));
 
     const foundDubberTracks = [];
     for (const sDir of searchDirs) {
       const dirFiles = fsSync.readdirSync(sDir).filter(f => audioExts.test(f));
       for (const f of dirFiles) {
         if (
-          f.startsWith('01_') || f.startsWith('02_') || f.startsWith('03_') ||
-          f.startsWith('04_') || f.startsWith('05_') || f.startsWith('06_') ||
-          f.startsWith('07_') || f.startsWith('08_') || f.includes('00_original_audio')
+          /^\d{1,2}_/.test(f) ||
+          f.includes('00_original_audio') ||
+          /master|glue|denoise|deepfilter|mix|compress|release/i.test(f)
         ) {
           continue;
         }
+        const baseNoExt = f.replace(audioExts, '');
+        // Skip files without letters (e.g. pure numbers, timestamps, pipeline indices)
+        if (!/[a-zA-Zа-яА-ЯёЁ]/.test(baseNoExt) || /^[\d\s._-]+$/.test(baseNoExt)) {
+          continue;
+        }
+
         const fullP = path.join(sDir, f);
         const st = fsSync.statSync(fullP);
         
@@ -1547,13 +1559,30 @@ class MixingPipelineService {
         if (match && match[1]) {
           dubberNick = match[1];
         } else {
-          dubberNick = f.replace(audioExts, '').replace(/^.*?_/, '');
+          dubberNick = baseNoExt.replace(/^.*?_/, '');
+        }
+
+        // Clean out track/layer/fix suffixes from nickname: e.g. "Коля [Дорожка 1]" -> "Коля", "Коля_дорожка2" -> "Коля"
+        dubberNick = dubberNick
+          .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+          .replace(/_дорожка\d+/gi, '')
+          .replace(/[_\s-]+$/, '')
+          .trim();
+
+        // Skip numeric artifacts like "034", "03_4", "0 3 4", or names without letters
+        if (!dubberNick || !/[a-zA-Zа-яА-ЯёЁ]/.test(dubberNick) || /^[\d\s._-]+$/.test(dubberNick)) {
+          continue;
+        }
+
+        // Prevent duplicate paths or filenames
+        if (foundDubberTracks.some(t => t.path === fullP || t.name === f)) {
+          continue;
         }
 
         foundDubberTracks.push({
           id: f,
           name: f,
-          dubberNick,
+          dubberNick: dubberNick.trim(),
           path: fullP,
           size: st.size,
           exists: true

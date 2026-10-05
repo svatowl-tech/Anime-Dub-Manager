@@ -1071,6 +1071,16 @@ function handleIpcMock(channel: string, args: any[]): any {
     return { results };
   }
 
+  if (channel === 'timing-whisper-transcribe-clips') {
+    const inputData = args[0] || {};
+    const clips = inputData.clips || [];
+    const results = clips.map((c: any) => ({
+      id: c.id,
+      text: c.hint || ''
+    }));
+    return { results };
+  }
+
   if (channel === 'check-diarization-status') {
     return { isLoaded: true, isLoading: false, downloadProgress: 100, loadingStatus: 'Ready' };
   }

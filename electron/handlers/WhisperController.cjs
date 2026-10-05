@@ -208,6 +208,40 @@ function registerWhisperHandlers(getData) {
 
     return { results };
   }));
+
+  ipcMain.handle('timing-whisper-transcribe-clips', wrapIpcHandler(async (event, { audioFilePath, clips, model = 'tiny', language = 'ru' }) => {
+    if (!audioFilePath || !Array.isArray(clips) || clips.length === 0) {
+      return { results: [] };
+    }
+
+    const service = getWhisperService();
+    const results = [];
+
+    for (const clip of clips) {
+      try {
+        let recognizedText = '';
+        if (service && typeof service.transcribeSlice === 'function') {
+          recognizedText = await service.transcribeSlice(audioFilePath, clip.startSec, clip.endSec, {
+            model,
+            language,
+            initialPrompt: clip.hint || ''
+          });
+        }
+        results.push({
+          id: clip.id,
+          text: (recognizedText || '').trim()
+        });
+      } catch (err) {
+        log.warn(`[WhisperController] Timing clip transcribe error on clip ${clip.id}:`, err);
+        results.push({
+          id: clip.id,
+          text: ''
+        });
+      }
+    }
+
+    return { results };
+  }));
 }
 
 module.exports = { registerWhisperHandlers };

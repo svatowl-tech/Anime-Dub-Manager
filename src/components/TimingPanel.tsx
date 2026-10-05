@@ -36,6 +36,38 @@ import { ipcSafe } from '../lib/ipcSafe';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import { ExportModal } from './ExportModal';
 import { TimingSettingsModal, TimingSettings, DEFAULT_TIMING_SETTINGS } from './TimingSettingsModal';
+import { normalizeSpeechText } from '../lib/qa/whisperTextChecker';
+
+/**
+ * Calculates text similarity for Whisper speech vs. Subtitle text
+ * Word-level Dice coefficient with prefix/stem matching for Russian morphology.
+ */
+function calculateTextSimilarity(text1: string, text2: string): number {
+  if (!text1 || !text2) return 0;
+  const norm1 = normalizeSpeechText(text1);
+  const norm2 = normalizeSpeechText(text2);
+  if (!norm1 || !norm2) return 0;
+  if (norm1 === norm2) return 1.0;
+  if (norm1.includes(norm2) || norm2.includes(norm1)) return 0.9;
+
+  const words1 = norm1.split(' ').filter(Boolean);
+  const words2 = norm2.split(' ').filter(Boolean);
+  if (words1.length === 0 || words2.length === 0) return 0;
+
+  let common = 0;
+  for (const w of words1) {
+    if (words2.includes(w)) {
+      common += 1.0;
+    } else {
+      const stem = w.slice(0, Math.min(5, w.length));
+      if (stem.length >= 4 && words2.some(w2 => w2.startsWith(stem))) {
+        common += 0.8;
+      }
+    }
+  }
+  const dice = (2 * common) / (words1.length + words2.length);
+  return Math.min(1.0, Math.max(0, dice));
+}
 
 function parseTimeToSeconds(timeStr: string | number): number {
   if (typeof timeStr === 'number') return isNaN(timeStr) ? 0 : timeStr;
@@ -68,6 +100,39 @@ function formatSeconds(sec: number): string {
 function normalizeName(s: string): string {
   if (!s) return '';
   return s.toLowerCase().trim().replace(/[^a-z0-9а-яё]/gi, '');
+}
+
+/**
+ * Strips technical suffixes like [Дорожка 1], _дорожка2, [фикс] so that
+ * dubber nicknames are always canonical and never duplicate.
+ */
+function cleanDubberNick(raw: string): string {
+  if (!raw) return '';
+  return raw
+    .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+    .replace(/_дорожка\d+/gi, '')
+    .replace(/\[(.*?)\]/g, (_m, inner) => {
+      return inner.replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').trim();
+    })
+    .replace(/[_\s-]+$/, '')
+    .trim();
+}
+
+/**
+ * Validates that candidate name is a legitimate person/character name,
+ * and strictly filters out numeric artifacts (e.g. "0 3 4", "03_4", "123", timestamps, step IDs).
+ */
+function isValidDubberName(name: string): boolean {
+  if (!name) return false;
+  const clean = cleanDubberNick(name);
+  if (!clean) return false;
+  // Must contain at least one letter (Latin or Cyrillic)
+  if (!/[a-zA-Zа-яА-ЯёЁ]/.test(clean)) return false;
+  // Must not be a string made only of numbers, spaces, dots, underscores, dashes
+  if (/^[\d\s._-]+$/.test(clean)) return false;
+  const lower = clean.toLowerCase();
+  if (['default', 'original', 'оригинал', 'серия', 'видео', 'sound', 'audio', 'master', 'mix', 'comment', 'шумы'].includes(lower)) return false;
+  return true;
 }
 
 /**
@@ -423,7 +488,9 @@ export interface AudioClip {
   durationSec: number;      // Clip duration
   sourceStartSec: number;   // Start time inside audio file
   sourceEndSec: number;     // End time inside audio file
-  text: string;             // Dialogue text hint
+  text: string;             // Dialogue text hint / matched subtitle
+  recognizedText?: string;  // What Whisper recognized in this audio phrase
+  whisperMatchedScore?: number; // Match confidence percentage (0-100)
   volumePercent: number;    // Gain % (0 - 200%)
   isFix?: boolean;          // Flag for spliced fix takes
   hasCollision?: boolean;   // Collision with another actor
@@ -431,6 +498,7 @@ export interface AudioClip {
   rawSourceStartSec?: number; // Detected start before any manual trim/expansion
   rawSourceEndSec?: number;   // Detected end before any manual trim/expansion
   isSelfOverlap?: boolean;    // Intentional parallel layer between 2 tracks of same dubber
+  sourceAudioTrackId?: string; // Track ID of audio buffer if spliced from fix track
 }
 
 export interface StitchedFixMarker {
@@ -550,8 +618,127 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   // Refs for animation & decoded audio buffers
   const playbackRef = useRef<number | null>(null);
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
+  const timeRulerContainerRef = useRef<HTMLDivElement | null>(null);
+  const unifiedScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
   const audioBuffersRef = useRef<Record<string, AudioBuffer>>({});
+
+  // Synchronize Horizontal Scrolling from Timeline to Timecode Ruler
+  const handleTimelineHorizontalScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    if (timeRulerContainerRef.current) {
+      timeRulerContainerRef.current.scrollLeft = e.currentTarget.scrollLeft;
+    }
+  }, []);
+
+  // Handle mouse wheel scrolling: unified vertical scrolling and horizontal scrolling
+  const handleTimelineWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      if (timelineContainerRef.current) {
+        timelineContainerRef.current.scrollLeft += (e.deltaX || e.deltaY);
+        if (timeRulerContainerRef.current) {
+          timeRulerContainerRef.current.scrollLeft = timelineContainerRef.current.scrollLeft;
+        }
+      }
+    } else if (e.deltaY !== 0) {
+      if (unifiedScrollContainerRef.current) {
+        unifiedScrollContainerRef.current.scrollTop += e.deltaY;
+      }
+    }
+  }, []);
+
+  const handleSidebarWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    if (e.deltaY !== 0 && unifiedScrollContainerRef.current) {
+      unifiedScrollContainerRef.current.scrollTop += e.deltaY;
+    }
+  }, []);
+
+  const handleSwitchTrackFile = async (trackId: string, newPath: string) => {
+    setTracks(prev => prev.map(tr => {
+      if (tr.id === trackId) {
+        const fileObj = tr.files?.find(f => f.path === newPath);
+        return {
+          ...tr,
+          filePath: newPath,
+          selectedFileId: fileObj?.id
+        };
+      }
+      return tr;
+    }));
+
+    if (currentEpisode) {
+      localStorage.setItem(`selectedFile_${currentEpisode.id}_${trackId.replace(/^track_/, '')}`, newPath);
+    }
+
+    const sharedAudioCtx = getSharedAudioContext();
+    const playableUrl = await getPlayableAudioUrl(newPath);
+    if (playableUrl && sharedAudioCtx) {
+      const audio = new Audio(playableUrl);
+      audio.preload = 'metadata';
+      audioElementsRef.current[trackId] = audio;
+      try {
+        const resp = await fetch(playableUrl);
+        const arrayBuf = await resp.arrayBuffer();
+        const decodedBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
+        audioBuffersRef.current[trackId] = decodedBuf;
+        const tr = tracks.find(t => t.id === trackId);
+        if (tr) {
+          const intervals = detectSpeechIntervals(decodedBuf, {
+            minSilenceDurationSec: timingSettings.minSilenceDurationSec,
+            leadInPaddingSec: timingSettings.leadInPaddingSec,
+            leadOutPaddingSec: timingSettings.leadOutPaddingSec,
+            minSpeechDurationSec: timingSettings.minSpeechDurationSec,
+            mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
+            manualThresholdDb: timingSettings.autoAnalyzeNoiseFloor ? undefined : timingSettings.silenceThresholdDb
+          });
+          const dubberName = tr.participant || tr.dubberName || 'Даббер';
+          const characterName = tr.character || tr.characterName || 'Персонаж';
+          const trSubs = trackSubLinesMap[tr.id] || [];
+
+          let newClips: AudioClip[] = [];
+          if (intervals.length > 0) {
+            newClips = intervals.map((inv, idx) => {
+              const matchedSub = trSubs.find(s => Math.abs(s.startSec - inv.startSec) < 3.0);
+              return {
+                id: `clip_${tr.id}_sw_${idx}_${Date.now()}`,
+                trackId: tr.id,
+                dubberName,
+                characterName,
+                clipStartSec: inv.startSec,
+                durationSec: inv.durationSec,
+                sourceStartSec: inv.startSec,
+                sourceEndSec: inv.endSec,
+                text: matchedSub?.text || `${characterName}: Фраза #${idx + 1}`,
+                volumePercent: 100,
+                isFix: false,
+                hasCollision: false,
+                offsetSec: 0
+              };
+            });
+          } else {
+            newClips = [{
+              id: `clip_${tr.id}_full_${Date.now()}`,
+              trackId: tr.id,
+              dubberName,
+              characterName,
+              clipStartSec: 0,
+              durationSec: decodedBuf.duration,
+              sourceStartSec: 0,
+              sourceEndSec: decodedBuf.duration,
+              text: `Полная запись: ${dubberName}`,
+              volumePercent: 100,
+              isFix: false,
+              hasCollision: false,
+              offsetSec: 0
+            }];
+          }
+          setAudioClips(prev => ({ ...prev, [trackId]: newClips }));
+        }
+        toast.success(`Переключено на версию: ${newPath.split(/[/\\]/).pop()}`);
+      } catch (err) {
+        console.error('Failed to decode switched file', err);
+      }
+    }
+  };
 
   // Mouse Dragging & Resizing (DAW Trim/Expand into Silence)
   useEffect(() => {
@@ -845,89 +1032,303 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         }
       }
 
-      // 2. Fetch Dubber Tracks
+      // 2. Fetch Dubber Tracks from Manifest or Sound Engineer Files
       const statusRes: any = await ipcSafe.invoke('mixing-get-status', { episode: currentEpisode }).catch(() => null);
-      let dubberTracks = statusRes?.manifest?.sourceFiles?.dubberTracks || [];
+      let manifestDubberTracks = statusRes?.manifest?.sourceFiles?.dubberTracks || [];
 
-      if (dubberTracks.length === 0) {
+      if (manifestDubberTracks.length === 0) {
         setStatusMessage('Экспорт и сборка файлов звукорежиссера из QA...');
         const importRes: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
           episode: currentEpisode,
-          autoApplyFixes: true,
+          autoApplyFixes: false,
           autoTiming: false
         }).catch(() => null);
 
         if (importRes?.manifest?.sourceFiles?.dubberTracks) {
-          dubberTracks = importRes.manifest.sourceFiles.dubberTracks;
+          manifestDubberTracks = importRes.manifest.sourceFiles.dubberTracks;
         }
       }
 
-      // Ensure ALL uploaded files from the dubbers in currentEpisode.uploads are imported (multi-tracks, versions, fixes)
-      const existingPaths = new Set(dubberTracks.map((dt: any) => dt.path));
-      for (const u of (currentEpisode.uploads || [])) {
-        if ((u.type === 'DUBBER_FILE' || u.type === 'FIXES') && u.path && !existingPaths.has(u.path)) {
-          const assign = currentEpisode.assignments?.find(a => 
-            a.id === u.assignmentId || 
-            a.dubberId === u.uploadedById || 
-            a.substituteId === u.uploadedById
-          );
-          const dubberNick = assign?.substitute?.nickname || assign?.dubber?.nickname || u.uploadedBy?.nickname || 'Даббер';
-          const charName = assign?.characterName || 'Персонаж';
-          dubberTracks.push({
-            path: u.path,
-            dubberNick,
-            characterName: charName,
-            type: u.type,
-            name: u.path.split(/[/\\]/).pop() || 'track.wav'
-          });
-          existingPaths.add(u.path);
+      // Filter manifest tracks to exclude intermediate pipeline renders or numeric artifacts (e.g. 03_..., 04_..., 0 3 4)
+      const cleanManifestTracks = manifestDubberTracks.filter((dt: any) => {
+        const p = dt.path || '';
+        const base = p.split(/[/\\]/).pop() || '';
+        if (/^\d{1,2}_/.test(base) || /^[\d\s._-]+$/.test(base.replace(/\.[^.]+$/, ''))) {
+          return false;
         }
-      }
+        if (/master|glue|denoise|deepfilter|mix|compress|release|original_audio/i.test(base)) {
+          return false;
+        }
+        const nick = (dt.dubberNick || '').trim();
+        if (!nick || /^[\d\s._-]+$/.test(nick)) {
+          return false;
+        }
+        return true;
+      });
 
       const matchRes: any = await ipcSafe.invoke('match-actors-tracks', {
         episode: currentEpisode,
-        audioFiles: dubberTracks
+        audioFiles: cleanManifestTracks
       }).catch(() => null);
 
       const matchedList = matchRes?.matchedTracks || [];
 
-      // Count tracks per dubber to label parallel tracks/takes/layers
-      const nickCounter: Record<string, number> = {};
-      const nickTotals: Record<string, number> = {};
-      dubberTracks.forEach((dt: any) => {
-        const n = dt.dubberNick || 'Даббер';
-        nickTotals[n] = (nickTotals[n] || 0) + 1;
+      // Helper to check if a file or path represents a fix
+      const isFixFile = (f: { name?: string; path?: string; type?: string } | string): boolean => {
+        if (!f) return false;
+        if (typeof f === 'string') return /fix|фикс/i.test(f);
+        if (f.type === 'FIXES') return true;
+        const str = `${f.name || ''} ${f.path || ''}`.toLowerCase();
+        return str.includes('fix') || str.includes('фикс');
+      };
+
+      // Helper to match manifest files to actor
+      const isActorFileMatch = (mt: any, actorNick: string): boolean => {
+        const normActor = normalizeName(actorNick);
+        if (!normActor) return false;
+        const mtNick = normalizeName(cleanDubberNick(mt.dubberNick || ''));
+        if (mtNick && (mtNick === normActor || mtNick.includes(normActor) || normActor.includes(mtNick))) {
+          return true;
+        }
+        const base = normalizeName(cleanDubberNick((mt.name || mt.path || '').split(/[/\\]/).pop() || ''));
+        return base.includes(normActor);
+      };
+
+      // Group actors and their associated characters & assignment IDs
+      // STRICT: Actors are ONLY registered from assignments and real uploads, NEVER from file artifacts!
+      const actorMap: Map<string, {
+        normKey: string;
+        dubberNick: string;
+        dubberId?: string;
+        assignmentIds: Set<string>;
+        characters: Set<string>;
+      }> = new Map();
+
+      const registerActor = (rawNick: string, dubberId?: string, charName?: string, assignmentId?: string) => {
+        const cleanNick = cleanDubberNick(rawNick) || rawNick.trim();
+        if (!isValidDubberName(cleanNick)) return null;
+        const normKey = normalizeName(cleanNick);
+        if (!normKey) return null;
+
+        if (!actorMap.has(normKey)) {
+          actorMap.set(normKey, {
+            normKey,
+            dubberNick: cleanNick,
+            dubberId,
+            assignmentIds: new Set<string>(),
+            characters: new Set<string>()
+          });
+        }
+        const entry = actorMap.get(normKey)!;
+        if (dubberId && !entry.dubberId) entry.dubberId = dubberId;
+        if (charName) {
+          const charParts = charName.split(/[,;\/]/).map(c => c.trim()).filter(Boolean);
+          charParts.forEach(c => entry.characters.add(c));
+        }
+        if (assignmentId) entry.assignmentIds.add(assignmentId);
+        return entry;
+      };
+
+      // 1. Collect all real actors from assignments
+      (currentEpisode.assignments || []).forEach(as => {
+        const dId = as.substituteId || as.dubberId;
+        const rawNick = as.substitute?.nickname || as.dubber?.nickname || '';
+        registerActor(rawNick, dId, as.characterName, as.id);
       });
 
-      const fetchedTracks: Track[] = dubberTracks.map((dt: any, idx: number) => {
-        const matched = matchedList.find((m: any) => m.trackPath === dt.path);
-        const charName = matched?.characterName || dt.characterName || dt.dubberNick || 'Персонаж';
-        const rawDubberNick = matched?.dubberNick || dt.dubberNick || 'Даббер';
-        
-        const count = (nickCounter[rawDubberNick] || 0) + 1;
-        nickCounter[rawDubberNick] = count;
-        const total = nickTotals[rawDubberNick] || 1;
+      // 2. Also register any actors from uploads who might not have an explicit assignment record
+      (currentEpisode.uploads || []).forEach(u => {
+        if ((u.type === 'DUBBER_FILE' || u.type === 'FIXES') && u.path) {
+          const rawNick = u.uploadedBy?.nickname || '';
+          if (rawNick) {
+            registerActor(rawNick, u.uploadedById, undefined, u.assignmentId);
+          }
+        }
+      });
 
-        const isFixFile = (dt.type === 'FIXES') || (dt.path || '').toLowerCase().includes('fix') || (dt.path || '').toLowerCase().includes('фикс');
-        const trackLabel = isFixFile ? `Фикс` : `Дорожка ${count}`;
-        const displayName = total > 1 ? `${rawDubberNick} [${trackLabel}]` : rawDubberNick;
+      // Now for each distinct actor, load ALL distinct QA tracks (Take 1, Take 2, Fix 1, Fix 2)
+      // guaranteeing NO duplicate files are ever loaded!
+      const fetchedTracks: Track[] = [];
+      const globalUsedPaths = new Set<string>();
 
-        return {
-          id: `track_${normalizeName(rawDubberNick)}_${count}_${idx}`,
-          projectId: currentEpisode.projectId,
-          episodeId: currentEpisode.id,
-          participant: displayName,
-          character: charName,
-          dubberName: displayName,
-          characterName: charName,
-          filePath: dt.path,
-          role: 'dubber',
-          status: 'recorded'
-        };
+      Array.from(actorMap.values()).forEach(actor => {
+        const { normKey, dubberNick, dubberId, assignmentIds } = actor;
+        const charStr = Array.from(actor.characters).filter(Boolean).join(', ') || dubberNick;
+
+        // A. Uploads from QA for this actor
+        const uploadsForActor = (currentEpisode.uploads || []).filter(u => {
+          if (!u.path || (u.type !== 'DUBBER_FILE' && u.type !== 'FIXES')) return false;
+          if (u.assignmentId && assignmentIds.has(u.assignmentId)) return true;
+          if (dubberId && (u.uploadedById === dubberId || (u as any).dubberId === dubberId)) return true;
+          const uNick = normalizeName(cleanDubberNick(u.uploadedBy?.nickname || ''));
+          return uNick && uNick === normKey;
+        }).sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+
+        const uploadsMain = uploadsForActor.filter(u => !isFixFile(u));
+        const uploadsFixes = uploadsForActor.filter(u => isFixFile(u));
+
+        // B. Manifest files for this actor in 00_исходные
+        const manifestForActor = cleanManifestTracks.filter((mt: any) => isActorFileMatch(mt, dubberNick));
+        const manifestMain = manifestForActor
+          .filter((mt: any) => !isFixFile(mt))
+          .sort((a: any, b: any) => {
+            const aStr = a.name || a.path || '';
+            const bStr = b.name || b.path || '';
+            const aNum = (aStr.match(/дорожка(\d+)/i) || [])[1] || '1';
+            const bNum = (bStr.match(/дорожка(\d+)/i) || [])[1] || '1';
+            return parseInt(aNum, 10) - parseInt(bNum, 10);
+          });
+
+        const manifestFixes = manifestForActor
+          .filter((mt: any) => isFixFile(mt))
+          .sort((a: any, b: any) => {
+            const aStr = a.name || a.path || '';
+            const bStr = b.name || b.path || '';
+            const aNum = (aStr.match(/фикс(\d+)/i) || [])[1] || '1';
+            const bNum = (bStr.match(/фикс(\d+)/i) || [])[1] || '1';
+            return parseInt(aNum, 10) - parseInt(bNum, 10);
+          });
+
+        // C. Select distinct physical files:
+        // Main files:
+        const finalMainFiles: Array<{ id: string; name: string; path: string; isFix: boolean }> = [];
+        if (manifestMain.length > 0) {
+          manifestMain.forEach((m: any, idx: number) => {
+            if (!globalUsedPaths.has(m.path)) {
+              globalUsedPaths.add(m.path);
+              finalMainFiles.push({
+                id: m.id || m.path,
+                name: m.name || m.path.split(/[/\\]/).pop() || `Дорожка ${idx + 1}`,
+                path: m.path,
+                isFix: false
+              });
+            }
+          });
+          // If QA uploads has more main takes than manifest, append extra distinct takes
+          if (uploadsMain.length > manifestMain.length) {
+            for (let i = manifestMain.length; i < uploadsMain.length; i++) {
+              const u = uploadsMain[i];
+              if (!globalUsedPaths.has(u.path)) {
+                globalUsedPaths.add(u.path);
+                finalMainFiles.push({
+                  id: u.id,
+                  name: u.path.split(/[/\\]/).pop() || `Дорожка ${i + 1}`,
+                  path: u.path,
+                  isFix: false
+                });
+              }
+            }
+          }
+        } else {
+          uploadsMain.forEach((u, idx) => {
+            if (!globalUsedPaths.has(u.path)) {
+              globalUsedPaths.add(u.path);
+              finalMainFiles.push({
+                id: u.id,
+                name: u.path.split(/[/\\]/).pop() || `Дорожка ${idx + 1}`,
+                path: u.path,
+                isFix: false
+              });
+            }
+          });
+        }
+
+        // Fix files:
+        const finalFixFiles: Array<{ id: string; name: string; path: string; isFix: boolean }> = [];
+        if (manifestFixes.length > 0) {
+          manifestFixes.forEach((m: any, idx: number) => {
+            if (!globalUsedPaths.has(m.path)) {
+              globalUsedPaths.add(m.path);
+              finalFixFiles.push({
+                id: m.id || m.path,
+                name: m.name || m.path.split(/[/\\]/).pop() || `Фикс ${idx + 1}`,
+                path: m.path,
+                isFix: true
+              });
+            }
+          });
+          if (uploadsFixes.length > manifestFixes.length) {
+            for (let i = manifestFixes.length; i < uploadsFixes.length; i++) {
+              const u = uploadsFixes[i];
+              if (!globalUsedPaths.has(u.path)) {
+                globalUsedPaths.add(u.path);
+                finalFixFiles.push({
+                  id: u.id,
+                  name: u.path.split(/[/\\]/).pop() || `Фикс ${i + 1}`,
+                  path: u.path,
+                  isFix: true
+                });
+              }
+            }
+          }
+        } else {
+          uploadsFixes.forEach((u, idx) => {
+            if (!globalUsedPaths.has(u.path)) {
+              globalUsedPaths.add(u.path);
+              finalFixFiles.push({
+                id: u.id,
+                name: u.path.split(/[/\\]/).pop() || `Фикс ${idx + 1}`,
+                path: u.path,
+                isFix: true
+              });
+            }
+          });
+        }
+
+        // D. Build tracks for this actor: Each distinct take/fix gets its own timeline lane!
+        const totalActorTracks = finalMainFiles.length + finalFixFiles.length;
+        if (totalActorTracks === 0) return;
+
+        // Main takes:
+        finalMainFiles.forEach((fileObj, mIdx) => {
+          let label = dubberNick;
+          if (finalMainFiles.length > 1) {
+            label = `${dubberNick} [Дорожка ${mIdx + 1}]`;
+          } else if (finalFixFiles.length > 0) {
+            label = `${dubberNick} [Дорожка 1]`;
+          }
+
+          fetchedTracks.push({
+            id: `track_${normKey}_main_${mIdx + 1}`,
+            projectId: currentEpisode.projectId,
+            episodeId: currentEpisode.id,
+            participant: label,
+            character: charStr,
+            dubberName: dubberNick,
+            characterName: charStr,
+            filePath: fileObj.path,
+            role: 'dubber',
+            status: 'recorded' as Track['status'],
+            files: [fileObj] as any,
+            selectedFileId: fileObj.id
+          });
+        });
+
+        // Fix takes:
+        finalFixFiles.forEach((fixObj, fIdx) => {
+          const fixLabel = finalFixFiles.length > 1
+            ? `${dubberNick} [Фикс ${fIdx + 1}]`
+            : `${dubberNick} [Фикс]`;
+
+          fetchedTracks.push({
+            id: `track_${normKey}_fix_${fIdx + 1}`,
+            projectId: currentEpisode.projectId,
+            episodeId: currentEpisode.id,
+            participant: fixLabel,
+            character: charStr,
+            dubberName: dubberNick,
+            characterName: charStr,
+            filePath: fixObj.path,
+            role: 'dubber',
+            status: 'fixes_needed' as Track['status'],
+            files: [fixObj] as any,
+            selectedFileId: fixObj.id
+          });
+        });
       });
 
       setTracks(fetchedTracks);
-      addLog(`Загружено ${fetchedTracks.length} активных дорожек дабберов (включая параллельные слои и версии).`, fetchedTracks.length > 0 ? 'success' : 'warn');
+      addLog(`Загружено ${fetchedTracks.length} дорожек дабберов (все слои и фиксы из QA под своими актерами, без дублей файлов).`, fetchedTracks.length > 0 ? 'success' : 'warn');
 
       // 3. Decode Real AudioBuffers for Every Track
       const sharedAudioCtx = getSharedAudioContext();
@@ -965,28 +1366,103 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       const initialClips: Record<string, AudioClip[]> = {};
       const trackSubMap: Record<string, SubtitleLine[]> = {};
 
+      // Group tracks by actor to distribute overlapping lines (Layer 2) and fixes cleanly
+      const tracksByActor: Record<string, Track[]> = {};
       fetchedTracks.forEach(tr => {
-        const charName = tr.character || tr.characterName || 'Персонаж';
-        const dubberName = tr.participant || tr.dubberName || 'Даббер';
+        const actorKey = tr.dubberName || 'Даббер';
+        if (!tracksByActor[actorKey]) tracksByActor[actorKey] = [];
+        tracksByActor[actorKey].push(tr);
+      });
+
+      Object.entries(tracksByActor).forEach(([actorNick, actorTrks]) => {
+        const firstTrk = actorTrks[0];
+        const charName = firstTrk.character || firstTrk.characterName || 'Персонаж';
 
         let matchedLines = parsedLines.filter(line => 
-          isSubtitleForCharacter(line.name, charName, dubberName, currentEpisode.assignments || [])
-        );
+          isSubtitleForCharacter(line.name, charName, actorNick, currentEpisode.assignments || [])
+        ).sort((a, b) => a.startSec - b.startSec);
 
-        if (matchedLines.length === 0 && (charName !== 'Персонаж' || dubberName !== 'Даббер')) {
+        if (matchedLines.length === 0 && (charName !== 'Персонаж' || actorNick !== 'Даббер')) {
           const normC = normalizeName(charName);
-          const normD = normalizeName(dubberName);
+          const normD = normalizeName(actorNick);
           matchedLines = parsedLines.filter(line => {
             const normSub = normalizeName(line.name);
             return (normC && (normSub === normC || normSub.includes(normC))) ||
                    (normD && (normSub === normD || normSub.includes(normD)));
-          });
+          }).sort((a, b) => a.startSec - b.startSec);
         }
 
-        trackSubMap[tr.id] = matchedLines;
+        const mainTracks = actorTrks.filter(t => !t.id.includes('_fix_'));
+        const fixTracks = actorTrks.filter(t => t.id.includes('_fix_'));
 
+        // If actor has 2 main tracks (second track specifically for overlapping phrases)
+        if (mainTracks.length >= 2) {
+          const primaryLines: SubtitleLine[] = [];
+          const overlapLines: SubtitleLine[] = [];
+
+          matchedLines.forEach((line) => {
+            const prevPrimary = primaryLines[primaryLines.length - 1];
+            if (prevPrimary && line.startSec < prevPrimary.endSec) {
+              overlapLines.push(line);
+            } else {
+              primaryLines.push(line);
+            }
+          });
+
+          trackSubMap[mainTracks[0].id] = primaryLines;
+          // Crucial: Track 2 ONLY gets genuinely overlapping phrases, never duplicating Track 1's list
+          trackSubMap[mainTracks[1].id] = overlapLines;
+        } else if (mainTracks.length === 1) {
+          trackSubMap[mainTracks[0].id] = matchedLines;
+        }
+
+        // Fix tracks: only get their specific fix lines, NEVER duplicating the entire main subtitle list!
+        if (fixTracks.length > 0) {
+          const actorAssigns = (currentEpisode.assignments || []).filter(a => {
+            const aNick = a.substitute?.nickname || a.dubber?.nickname || '';
+            return normalizeName(aNick) === normalizeName(actorNick);
+          });
+          const commentTimestamps: number[] = [];
+          actorAssigns.forEach(a => {
+            if (a.comments) {
+              try {
+                const parsedComments = JSON.parse(a.comments);
+                if (Array.isArray(parsedComments)) {
+                  parsedComments.forEach(c => {
+                    if (typeof c.timestamp === 'number') commentTimestamps.push(c.timestamp);
+                  });
+                }
+              } catch (e) {}
+            }
+          });
+
+          // Distinct fix candidate lines
+          let candidateFixLines = commentTimestamps.length > 0
+            ? matchedLines.filter(l => commentTimestamps.some(ts => Math.abs(l.startSec - ts) < 3.5 || (ts >= l.startSec && ts <= l.endSec)))
+            : [];
+
+          // If no specific QA timestamp flags found, provide distinct subsets for fixes, never cloning the entire main file
+          if (candidateFixLines.length === 0) {
+            candidateFixLines = matchedLines.slice(0, Math.min(3, matchedLines.length));
+          }
+
+          if (fixTracks.length === 1) {
+            trackSubMap[fixTracks[0].id] = candidateFixLines;
+          } else {
+            // Split between Fix 1 and Fix 2 so neither has identical files/subtitles
+            const mid = Math.ceil(candidateFixLines.length / 2);
+            trackSubMap[fixTracks[0].id] = candidateFixLines.slice(0, mid);
+            trackSubMap[fixTracks[1].id] = candidateFixLines.slice(mid);
+          }
+        }
+      });
+
+      fetchedTracks.forEach(tr => {
+        const charName = tr.character || tr.characterName || 'Персонаж';
+        const dubberName = tr.participant || tr.dubberName || 'Даббер';
+        const trSubs = trackSubMap[tr.id] || [];
         const trackBuf = audioBuffersRef.current[tr.id];
-        const trackDur = trackBuf ? trackBuf.duration : (matchedLines[matchedLines.length - 1]?.endSec || 100);
+        const trackDur = trackBuf ? trackBuf.duration : (trSubs[trSubs.length - 1]?.endSec || 100);
 
         // Initially before "Удалить тишину", track has one continuous full audio clip
         initialClips[tr.id] = [{
@@ -1000,7 +1476,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           sourceEndSec: trackDur,
           text: `Полная запись: ${dubberName}`,
           volumePercent: 100,
-          isFix: false,
+          isFix: tr.id.includes('_fix_'),
           hasCollision: false,
           offsetSec: 0
         }];
@@ -1046,7 +1522,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // PIPELINE STEP 3: "Удалить тишину" — Real VAD Silence Cutting with Noise Floor Auto-Calibration
+  // PIPELINE STEP 3: "Удалить тишину" — Real VAD Silence Cutting with Noise Floor Auto-Calibration on ALL tracks
   const handleCutSilence = async () => {
     if (tracks.length === 0) {
       toast.error('Нет загруженных дорожек');
@@ -1054,7 +1530,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
     try {
       setIsLoading(true);
-      setStatusMessage('Авто-калибровка шума и удаление тишины...');
+      setStatusMessage('Авто-калибровка шума и удаление тишины на всех дорожках...');
       addLog('Запуск анализа энергии аудиосигнала и авто-калибровки шума/тишины перед нарезкой...', 'info');
 
       const updatedClips: Record<string, AudioClip[]> = {};
@@ -1062,13 +1538,32 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       const newCalibrations: Record<string, NoiseCalibration> = {};
 
       for (const track of tracks) {
-        const audioBuf = audioBuffersRef.current[track.id];
+        let audioBuf = audioBuffersRef.current[track.id];
         const dubberName = track.participant || track.dubberName || 'Даббер';
         const characterName = track.character || track.characterName || 'Персонаж';
         const trSubs = trackSubLinesMap[track.id] || [];
 
+        // If audio buffer not yet decoded in memory, decode it right now
+        if (!audioBuf && track.filePath) {
+          try {
+            const pUrl = await getPlayableAudioUrl(track.filePath);
+            if (pUrl) {
+              const resp = await fetch(pUrl);
+              const arrayBuf = await resp.arrayBuffer();
+              const sharedAudioCtx = getSharedAudioContext();
+              if (sharedAudioCtx) {
+                audioBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
+                audioBuffersRef.current[track.id] = audioBuf;
+              }
+            }
+          } catch (decodeErr) {
+            console.warn(`[SilenceCut] Ошибка декодирования ${track.id}:`, decodeErr);
+          }
+        }
+
         if (audioBuf) {
           // Detect speech intervals with automatic noise floor calibration and safety margins
+          // "всегда фраза от тишины до тишины"
           const intervals = detectSpeechIntervals(audioBuf, {
             minSilenceDurationSec: timingSettings.minSilenceDurationSec,
             leadInPaddingSec: timingSettings.leadInPaddingSec,
@@ -1082,13 +1577,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             }
           });
 
-          addLog(`🎙 Дорожка «${dubberName}»: обнаружено ${intervals.length} полезных речевых фраз. Тишина между ними удалена.`, 'info');
+          addLog(`🎙 Дорожка «${dubberName}»: обнаружено ${intervals.length} полезных речевых фраз (от тишины до тишины).`, 'info');
 
           updatedClips[track.id] = intervals.map((iv, idx) => {
             // Find matching subtitle text
             let matchingSub = trSubs[idx];
             if (!matchingSub) {
-              matchingSub = trSubs.find(s => (s.startSec >= iv.startSec - 2.0 && s.startSec <= iv.endSec + 2.0));
+              matchingSub = trSubs.find(s => (s.startSec >= iv.startSec - 2.5 && s.startSec <= iv.endSec + 2.5));
             }
 
             totalClips++;
@@ -1105,13 +1600,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               rawSourceEndSec: iv.endSec,
               text: matchingSub?.text || `Фраза ${idx + 1}`,
               volumePercent: 100,
-              isFix: false,
+              isFix: track.id.includes('_fix_'),
               hasCollision: false,
               offsetSec: 0
             };
           });
         } else {
-          // Fallback if buffer not loaded yet: slice by subtitles
+          // Fallback if audio file is inaccessible: slice by subtitles
           updatedClips[track.id] = trSubs.map((sub, idx) => {
             totalClips++;
             return {
@@ -1127,7 +1622,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               rawSourceEndSec: sub.endSec,
               text: sub.text,
               volumePercent: 100,
-              isFix: false,
+              isFix: track.id.includes('_fix_'),
               hasCollision: false,
               offsetSec: 0
             };
@@ -1138,8 +1633,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setCalibrationsByTrack(newCalibrations);
       setAudioClips(updatedClips);
       setIsSilenceRemoved(true);
-      addLog(`✓ Удаление тишины с авто-калибровкой завершено! Сформировано ${totalClips} отдельных речевых клипов. Все границы можно свободно расширять за края.`, 'success');
-      toast.success(`Тишина удалена! Вейвформы нарезаны на ${totalClips} фраз с защитой от съедания согласных и хвостов.`);
+      addLog(`✓ Удаление тишины со всех дорожек завершено! Сформировано ${totalClips} фраз (от тишины до тишины). Границы фраз защищены от обрезания.`, 'success');
+      toast.success(`Тишина удалена из всех дорожек! Сформировано ${totalClips} фраз от тишины до тишины.`);
     } catch (err: any) {
       addLog(`❌ Ошибка удаления тишины: ${err.message}`, 'error');
       toast.error(`Ошибка: ${err.message}`);
@@ -1150,109 +1645,169 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   };
 
   // PIPELINE STEP 4: "Применить фиксы" — Splicing fix clips or full retakes
+  // - Полный фикс: полностью заменяет оригинальную дорожку
+  // - Фрагментарный фикс: удаляет оригинальную фразу и вставляет фразу фикса от тишины до тишины
   const handleStitchFixes = async () => {
     try {
       setIsLoading(true);
-      setStatusMessage('Анализ файлов фиксов и вшитие в дорожки...');
+      setStatusMessage('Анализ дорожек фиксов и применение замен...');
       addLog('Поиск фиксов и проверка соотношения длительностей/размеров...', 'info');
 
       const updatedClips = { ...audioClips };
       const newFixMarkers: StitchedFixMarker[] = [];
       let appliedCount = 0;
 
-      for (const track of tracks) {
-        const dubberName = track.participant || track.dubberName || 'Даббер';
-        const characterName = track.character || track.characterName || 'Персонаж';
-        const normDubber = normalizeName(dubberName);
-        const origAudio = audioBuffersRef.current[track.id];
-        if (!origAudio) continue;
+      // Group tracks by actor
+      const tracksByActor: Record<string, Track[]> = {};
+      tracks.forEach(tr => {
+        const actorKey = tr.dubberName || 'Даббер';
+        if (!tracksByActor[actorKey]) tracksByActor[actorKey] = [];
+        tracksByActor[actorKey].push(tr);
+      });
 
-        const origDuration = origAudio.duration;
-        const trackClips = updatedClips[track.id] || [];
+      for (const [actorNick, actorTrks] of Object.entries(tracksByActor)) {
+        const mainTracks = actorTrks.filter(t => !t.id.includes('_fix_'));
+        const fixTracks = actorTrks.filter(t => t.id.includes('_fix_'));
 
-        // Check if there are fix files in currentEpisode files
-        const fixFile = ((currentEpisode as any)?.files || []).find((f: any) => {
-          const fn = (f.name || f.path || '').toLowerCase();
-          return (fn.includes('fix') || fn.includes('фикс')) && fn.includes(normDubber);
-        });
+        if (mainTracks.length === 0 || fixTracks.length === 0) continue;
 
-        if (fixFile && fixFile.path) {
-          const fixPlayableUrl = await getPlayableAudioUrl(fixFile.path);
-          if (fixPlayableUrl) {
-            const resp = await fetch(fixPlayableUrl);
-            const arrayBuf = await resp.arrayBuffer();
-            const fixBuffer = await getSharedAudioContext()!.decodeAudioData(arrayBuf);
-            const fixDuration = fixBuffer.duration;
-            const ratio = fixDuration / origDuration;
+        const mainTrack = mainTracks[0];
+        let mainClips = [...(updatedClips[mainTrack.id] || [])];
+        const mainBuf = audioBuffersRef.current[mainTrack.id];
+        const mainDuration = mainBuf ? mainBuf.duration : (mainClips[mainClips.length - 1]?.clipStartSec || 100);
 
-            if (ratio >= 0.85) {
-              // Full retake: Replace entire track with fix track clips!
-              addLog(`⚡ Полный фикс (${(ratio * 100).toFixed(0)}% длины) для «${dubberName}». Замена всей дорожки на фикс.`, 'success');
-              audioBuffersRef.current[track.id] = fixBuffer;
-              const newIntervals = detectSpeechIntervals(fixBuffer);
-              updatedClips[track.id] = newIntervals.map((iv, idx) => ({
-                id: `clip_${track.id}_fix_full_${idx}`,
-                trackId: track.id,
-                dubberName,
-                characterName,
+        for (const fixTrack of fixTracks) {
+          let fixClips = updatedClips[fixTrack.id] || [];
+          const fixBuf = audioBuffersRef.current[fixTrack.id];
+
+          // If silence hasn't been cut yet on fix track, slice speech phrases from silence to silence
+          if (fixClips.length <= 1 && fixBuf) {
+            const fixIntervals = detectSpeechIntervals(fixBuf);
+            if (fixIntervals.length > 0) {
+              const trSubs = trackSubLinesMap[fixTrack.id] || [];
+              fixClips = fixIntervals.map((iv, idx) => ({
+                id: `clip_${fixTrack.id}_${idx}`,
+                trackId: fixTrack.id,
+                dubberName: fixTrack.dubberName,
+                characterName: fixTrack.characterName,
                 clipStartSec: iv.startSec,
                 durationSec: iv.durationSec,
                 sourceStartSec: iv.startSec,
                 sourceEndSec: iv.endSec,
-                text: trackClips[idx]?.text || `Фраза ${idx + 1}`,
+                rawSourceStartSec: iv.startSec,
+                rawSourceEndSec: iv.endSec,
+                text: trSubs[idx]?.text || `Фраза фикса ${idx + 1}`,
                 volumePercent: 100,
                 isFix: true,
                 offsetSec: 0
               }));
-              appliedCount++;
-            } else {
-              // Fragmentary snippet fix: Splice fix into matching position!
-              addLog(`⚡ Фрагментарный фикс (${(ratio * 100).toFixed(0)}% длины) для «${dubberName}». Вшитие фразы.`, 'success');
-              const fixIntervals = detectSpeechIntervals(fixBuffer);
-              if (fixIntervals.length > 0) {
-                const fixFirstIv = fixIntervals[0];
-                let targetIdx = trackClips.findIndex(c => Math.abs(c.clipStartSec - fixFirstIv.startSec) < 3.0);
-                if (targetIdx === -1 && trackClips.length > 0) targetIdx = 0;
-
-                if (targetIdx !== -1) {
-                  const targetClip = trackClips[targetIdx];
-                  trackClips[targetIdx] = {
-                    ...targetClip,
-                    durationSec: fixFirstIv.durationSec,
-                    sourceStartSec: fixFirstIv.startSec,
-                    sourceEndSec: fixFirstIv.endSec,
-                    isFix: true
-                  };
-                  newFixMarkers.push({
-                    id: `fix_marker_${Date.now()}_${targetIdx}`,
-                    trackId: track.id,
-                    dubberName,
-                    characterName,
-                    startSec: targetClip.clipStartSec,
-                    endSec: targetClip.clipStartSec + fixFirstIv.durationSec,
-                    filename: fixFile.name || 'fix_snippet.wav'
-                  });
-                  appliedCount++;
-                }
-              }
+              updatedClips[fixTrack.id] = fixClips;
             }
           }
-        } else {
-          // If no separate fix file on disk, highlight candidate phrase as fix take
-          if (trackClips.length > 1) {
-            const target = trackClips[1] || trackClips[0];
-            target.isFix = true;
+
+          if (fixClips.length === 0) continue;
+
+          const fixDuration = fixBuf ? fixBuf.duration : (fixClips[fixClips.length - 1]?.clipStartSec || 0);
+          const ratio = (fixDuration && mainDuration) ? fixDuration / mainDuration : (fixClips.length / Math.max(1, mainClips.length));
+          const isFullReplacement = ratio >= 0.85 || (mainClips.length > 0 && fixClips.length >= mainClips.length * 0.8 && fixClips.length >= 3);
+
+          if (isFullReplacement) {
+            // Case 1: Полный фикс — полностью заменяет оригинальную дорожку
+            addLog(`⚡ Полный фикс (${(ratio * 100).toFixed(0)}% длины) для «${actorNick}». Оригинальная дорожка полностью заменена на чистовой дубль от тишины до тишины.`, 'success');
+            if (fixBuf) {
+              audioBuffersRef.current[mainTrack.id] = fixBuf;
+            }
+            if (audioElementsRef.current[fixTrack.id]) {
+              audioElementsRef.current[mainTrack.id] = audioElementsRef.current[fixTrack.id];
+            }
+            mainClips = fixClips.map((fc, idx) => ({
+              ...fc,
+              id: `clip_${mainTrack.id}_fullfix_${idx}`,
+              trackId: mainTrack.id,
+              sourceAudioTrackId: fixTrack.id,
+              isFix: true,
+              text: mainClips[idx]?.text || fc.text
+            }));
+            updatedClips[mainTrack.id] = mainClips;
+            updatedClips[fixTrack.id] = []; // Cleared from standalone lane because full track replaced
             newFixMarkers.push({
-              id: `fix_marker_${Date.now()}_${track.id}`,
-              trackId: track.id,
-              dubberName,
-              characterName,
-              startSec: target.clipStartSec,
-              endSec: target.clipStartSec + target.durationSec,
-              filename: `fix_${dubberName}.wav`
+              id: `fix_marker_full_${fixTrack.id}`,
+              trackId: mainTrack.id,
+              dubberName: mainTrack.dubberName,
+              characterName: mainTrack.characterName,
+              startSec: 0,
+              endSec: fixDuration,
+              filename: fixTrack.filePath?.split(/[/\\]/).pop() || 'fix_full.wav'
             });
-            appliedCount++;
-            addLog(`⚡ Фраза фикса для «${dubberName}» вшита на отметке ${formatSeconds(target.clipStartSec)}`, 'success');
+            appliedCount += fixClips.length;
+          } else {
+            // Case 2: Фрагментарные фиксы (отдельные фразы)
+            // "заменять фразы из оригинальной дорожки на фразы из фиксов. Причём внимательно надо следить, чтобы дорожка не просто перетаскивалась, а эта фраза удалялась из оригинальной дорожки и вставлялась из дорожки фиксов. Но надо внимательно следить за таймингом этих фраз для того, чтобы не оставалось никаких хвостов и удалений, то есть всегда фраза от тишины до тишины."
+            let fixAppliedOnTrack = 0;
+
+            for (const fixClip of fixClips) {
+              let bestIdx = -1;
+              let bestScore = -1;
+
+              mainClips.forEach((mc, mIdx) => {
+                let score = 0;
+                // Text match
+                if (fixClip.text && mc.text && fixClip.text === mc.text) {
+                  score += 10.0;
+                }
+                const diff = Math.abs(mc.clipStartSec - fixClip.clipStartSec);
+                if (diff < 20.0) {
+                  score += Math.max(0, 5.0 - (diff / 4.0));
+                }
+                if (score > bestScore) {
+                  bestScore = score;
+                  bestIdx = mIdx;
+                }
+              });
+
+              if (bestIdx !== -1) {
+                const origClip = mainClips[bestIdx];
+
+                // Spliced fix phrase:
+                // Original phrase at bestIdx is REMOVED from mainClips, and fix phrase is INSERTED!
+                // Exact timing: "всегда фраза от тишины до тишины"
+                const splicedClip: AudioClip = {
+                  ...fixClip,
+                  id: `clip_${mainTrack.id}_spliced_${fixClip.id}`,
+                  trackId: mainTrack.id,
+                  sourceAudioTrackId: fixTrack.id,
+                  clipStartSec: origClip.clipStartSec,
+                  durationSec: fixClip.durationSec,    // Exact duration from silence to silence
+                  sourceStartSec: fixClip.sourceStartSec,
+                  sourceEndSec: fixClip.sourceEndSec,
+                  rawSourceStartSec: fixClip.rawSourceStartSec,
+                  rawSourceEndSec: fixClip.rawSourceEndSec,
+                  isFix: true,
+                  text: origClip.text || fixClip.text,
+                  offsetSec: 0
+                };
+
+                // Replace the original phrase
+                mainClips[bestIdx] = splicedClip;
+
+                newFixMarkers.push({
+                  id: `fix_marker_${Date.now()}_${fixClip.id}`,
+                  trackId: mainTrack.id,
+                  dubberName: mainTrack.dubberName,
+                  characterName: mainTrack.characterName,
+                  startSec: splicedClip.clipStartSec,
+                  endSec: splicedClip.clipStartSec + splicedClip.durationSec,
+                  filename: fixTrack.filePath?.split(/[/\\]/).pop() || 'fix_snippet.wav'
+                });
+                appliedCount++;
+                fixAppliedOnTrack++;
+                addLog(`⚡ Замена фразы «${splicedClip.text}» на ${formatSeconds(splicedClip.clipStartSec)} для «${actorNick}»: оригинальная фраза удалена, вставлен фикс от тишины до тишины (${splicedClip.durationSec.toFixed(2)}с)`, 'info');
+              }
+            }
+
+            updatedClips[mainTrack.id] = [...mainClips];
+            updatedClips[fixTrack.id] = []; // Cleared because spliced into main track
+            addLog(`⚡ Вшито ${fixAppliedOnTrack} фраз фикса в дорожку «${mainTrack.participant}» (оригинал удален, вставлен фикс)`, 'success');
           }
         }
       }
@@ -1262,7 +1817,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setIsFixesStitched(true);
 
       if (appliedCount > 0) {
-        toast.success(`Применено фиксов: ${appliedCount}! Встали на свои места в оригинальных дорожках.`);
+        toast.success(`Применено фиксов: ${appliedCount}! Оригинальные фразы удалены, фиксы вставлены от тишины до тишины.`);
       } else {
         toast.info('Все актуальные фиксы уже вшиты.');
       }
@@ -1275,43 +1830,191 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // PIPELINE STEP 5: "Автотайминг" — Snap audio clips to subtitle start timings
+  // PIPELINE STEP 5: "Автотайминг" — Whisper ASR phrase transcription and subtitle alignment
+  // - Прогоняет дорожки дабберов через Виспер
+  // - К каждой отдельной фразе на таймлайне прописывает, что говорится через Виспер
+  // - Сопоставляет распознанный текст Виспера с дорогой субтитров
+  // - Подтягивает фразы к значениям на дороге субтитров
   const handleAutoTimingAndCollisions = async () => {
     if (tracks.length === 0) return;
     try {
       setIsLoading(true);
-      setStatusMessage('Автотайминг: привязка аудио-фраз к субтитрам...');
-      addLog('Запуск автотайминга: сдвиг реальных аудио-клипов к началу субтитров...', 'info');
+      setStatusMessage('Автотайминг: подготовка и распознавание Whisper...');
+      addLog('Запуск автотайминга: прогон дорожек дабберов через Whisper (модель tiny)...', 'info');
 
-      const updatedClips = { ...audioClips };
+      let currentClips = { ...audioClips };
+
+      // Ensure silence is cut before auto-timing
+      const hasUncutTracks = tracks.some(t => {
+        const c = currentClips[t.id];
+        return !c || c.length <= 1;
+      });
+
+      if (!isSilenceRemoved || hasUncutTracks) {
+        setStatusMessage('Удаление тишины перед распознаванием Whisper...');
+        for (const track of tracks) {
+          let audioBuf = audioBuffersRef.current[track.id];
+          if (!audioBuf && track.filePath) {
+            try {
+              const pUrl = await getPlayableAudioUrl(track.filePath);
+              if (pUrl) {
+                const resp = await fetch(pUrl);
+                const arrayBuf = await resp.arrayBuffer();
+                const sharedAudioCtx = getSharedAudioContext();
+                if (sharedAudioCtx) {
+                  audioBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
+                  audioBuffersRef.current[track.id] = audioBuf;
+                }
+              }
+            } catch (e) {}
+          }
+          if (audioBuf) {
+            const intervals = detectSpeechIntervals(audioBuf, {
+              minSilenceDurationSec: timingSettings.minSilenceDurationSec,
+              leadInPaddingSec: timingSettings.leadInPaddingSec,
+              leadOutPaddingSec: timingSettings.leadOutPaddingSec,
+              minSpeechDurationSec: timingSettings.minSpeechDurationSec,
+              mergeCloseGapsSec: timingSettings.mergeCloseGapsSec
+            });
+            const trSubs = trackSubLinesMap[track.id] || [];
+            currentClips[track.id] = intervals.map((iv, idx) => {
+              const sub = trSubs[idx];
+              return {
+                id: `clip_${track.id}_${idx}`,
+                trackId: track.id,
+                dubberName: track.participant || track.dubberName || 'Даббер',
+                characterName: track.character || track.characterName || 'Персонаж',
+                clipStartSec: iv.startSec,
+                durationSec: iv.durationSec,
+                sourceStartSec: iv.startSec,
+                sourceEndSec: iv.endSec,
+                rawSourceStartSec: iv.startSec,
+                rawSourceEndSec: iv.endSec,
+                text: sub?.text || `Фраза ${idx + 1}`,
+                volumePercent: 100,
+                isFix: track.id.includes('_fix_'),
+                hasCollision: false,
+                offsetSec: 0
+              };
+            });
+          }
+        }
+        setIsSilenceRemoved(true);
+      }
+
+      const updatedClips = { ...currentClips };
       const newCollisions: VoiceCollisionMarker[] = [];
       let alignedCount = 0;
 
-      // 1. Shift clips to subtitle startSec
-      Object.keys(updatedClips).forEach(trId => {
-        const trSubs = trackSubLinesMap[trId] || [];
-        const clips = updatedClips[trId] || [];
+      // Process each track with Whisper and match against track subtitles
+      for (const track of tracks) {
+        const dubberName = track.participant || track.dubberName || 'Даббер';
+        const clips = updatedClips[track.id] || [];
+        const trSubs = trackSubLinesMap[track.id] || [];
 
-        updatedClips[trId] = clips.map((clip, idx) => {
-          let matchingSub = trSubs[idx];
-          if (!matchingSub) {
-            matchingSub = trSubs.find(s => Math.abs(s.startSec - clip.clipStartSec) < 4.0);
+        if (clips.length === 0) continue;
+
+        setStatusMessage(`Whisper: распознавание речи «${dubberName}» (${clips.length} фраз)...`);
+        addLog(`🎙 Whisper (модель: tiny, язык: ru): распознавание ${clips.length} фраз для «${dubberName}»...`, 'info');
+
+        // Prepare clips payload for Whisper
+        const whisperPayload = clips.map(c => ({
+          id: c.id,
+          startSec: c.sourceStartSec,
+          endSec: c.sourceEndSec,
+          hint: c.text
+        }));
+
+        const transcriptionMap: Record<string, string> = {};
+        try {
+          const resp: any = await ipcSafe.invoke('timing-whisper-transcribe-clips', {
+            audioFilePath: track.filePath,
+            clips: whisperPayload,
+            model: 'tiny',
+            language: 'ru'
+          });
+          if (resp && Array.isArray(resp.results)) {
+            resp.results.forEach((r: any) => {
+              if (r.id && r.text) {
+                transcriptionMap[r.id] = r.text.trim();
+              }
+            });
+          }
+        } catch (wErr: any) {
+          console.warn('[Whisper AutoTiming] IPC error:', wErr);
+        }
+
+        // Step 2 & 3: Assign Whisper recognized text, match against subtitle track, and pull/snap to subtitle start
+        const assignedSubIndices = new Set<number>();
+
+        updatedClips[track.id] = clips.map((clip, cIdx) => {
+          // Write what Whisper recognized into the clip
+          const recognized = transcriptionMap[clip.id] || clip.text || '';
+          clip.recognizedText = recognized;
+
+          if (trSubs.length === 0) {
+            return clip;
           }
 
-          if (matchingSub) {
+          let bestSub: SubtitleLine | null = null;
+          let bestSubIdx = -1;
+          let bestScore = -1;
+
+          // Compare recognized speech against expected subtitles on the subtitle track
+          for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
+            if (assignedSubIndices.has(sIdx)) continue;
+            const sub = trSubs[sIdx];
+            const textSim = calculateTextSimilarity(recognized, sub.text);
+
+            // Time difference between original speech clip and subtitle line
+            const timeDiff = Math.abs(clip.clipStartSec - sub.startSec);
+            const timeProximity = Math.max(0, 1 - (timeDiff / 90)); // Soft bonus within 90s
+
+            // Combined scoring: text match is primary (75%), time proximity is secondary (25%)
+            const score = (textSim * 0.75) + (timeProximity * 0.25);
+
+            if (score > bestScore && (textSim >= 0.20 || timeDiff < 6.0)) {
+              bestScore = score;
+              bestSub = sub;
+              bestSubIdx = sIdx;
+            }
+          }
+
+          // Fallback if no text match found: match nearest unassigned subtitle within 12s
+          if (!bestSub) {
+            let minDiff = Infinity;
+            for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
+              if (assignedSubIndices.has(sIdx)) continue;
+              const sub = trSubs[sIdx];
+              const diff = Math.abs(clip.clipStartSec - sub.startSec);
+              if (diff < minDiff && diff < 12.0) {
+                minDiff = diff;
+                bestSub = sub;
+                bestSubIdx = sIdx;
+                bestScore = 0.5;
+              }
+            }
+          }
+
+          if (bestSub && bestSubIdx !== -1) {
+            assignedSubIndices.add(bestSubIdx);
             alignedCount++;
+            addLog(`🎯 Фраза #${cIdx + 1} «${recognized.slice(0, 25)}» пододвинута к субтитру [${formatSeconds(bestSub.startSec)}]: «${bestSub.text.slice(0, 30)}» (сходство: ${Math.round(bestScore * 100)}%)`, 'info');
             return {
               ...clip,
-              clipStartSec: matchingSub.startSec,
+              clipStartSec: bestSub.startSec,
               offsetSec: 0,
-              text: matchingSub.text || clip.text
+              text: bestSub.text,
+              recognizedText: recognized,
+              whisperMatchedScore: Math.round(bestScore * 100)
             };
           }
+
           return clip;
         });
-      });
+      }
 
-      // 2. Detect collisions between different dubbers
+      // 4. Detect voice collisions between different dubbers
       const trackIds = Object.keys(updatedClips);
       for (let i = 0; i < trackIds.length; i++) {
         for (let j = i + 1; j < trackIds.length; j++) {
@@ -1336,10 +2039,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 const isSameDubber = normD1 && normD1 === normD2;
 
                 if (isSameDubber) {
-                  // Parallel track/layer from the same dubber: keep as intentional overlap!
                   c1.isSelfOverlap = true;
                   c2.isSelfOverlap = true;
-                  addLog(`🎙 Параллельный слой одного даббера «${c1.dubberName}» и «${c2.dubberName}» (${overlapDur.toFixed(2)}с): перекрытие сохранено`, 'info');
+                  addLog(`🎙 Параллельный слой одного даббера «${c1.dubberName}» (${overlapDur.toFixed(2)}с): перекрытие сохранено`, 'info');
                 } else {
                   c1.hasCollision = true;
                   c2.hasCollision = true;
@@ -1366,11 +2068,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setCollisions(newCollisions);
       setIsAutoTimingDone(true);
 
-      addLog(`✓ Автотайминг завершен! Пододвинуто ${alignedCount} фраз под субтитры. Наездов (коллизий): ${newCollisions.length}`, newCollisions.length > 0 ? 'warn' : 'success');
+      addLog(`✓ Автотайминг по Висперу завершен! Пододвинуто ${alignedCount} фраз под субтитры. Наездов (коллизий): ${newCollisions.length}`, newCollisions.length > 0 ? 'warn' : 'success');
       if (newCollisions.length > 0) {
-        toast.warning(`Автотайминг выполнен! Фразы пододвинуты. Обнаружено ${newCollisions.length} наездов между дабберами для ручной доводки.`);
+        toast.warning(`Автотайминг по Висперу выполнен! Фразы пододвинуты к субтитрам. Обнаружено ${newCollisions.length} наездов между дабберами для ручной доводки.`);
       } else {
-        toast.success(`Автотайминг выполнен! Все ${alignedCount} фраз точно пододвинуты к субтитрам.`);
+        toast.success(`Автотайминг по Висперу выполнен! Все ${alignedCount} фраз точно пододвинуты к субтитрам.`);
       }
     } catch (err: any) {
       addLog(`❌ Ошибка автотайминга: ${err.message}`, 'error');
@@ -1649,10 +2351,10 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             onClick={handleAutoTimingAndCollisions}
             disabled={isLoading || tracks.length === 0}
             className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition"
-            title="5. Автотайминг: пододвинуть реальные вейвформ-клипы под начало субтитров"
+            title="5. Автотайминг: ASR Whisper распознавание речи каждой фразы и привязка к субтитрам"
           >
             <Activity className="w-4 h-4" />
-            <span>5. Автотайминг</span>
+            <span>5. Автотайминг (Whisper)</span>
           </button>
 
           <button
@@ -1708,128 +2410,21 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         </div>
       )}
 
-      {/* Main Multitrack Workspace */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Track Sidebar Headers */}
-        <div className="w-64 bg-neutral-900/80 border-r border-neutral-800 shrink-0 flex flex-col overflow-y-auto">
-          <div className="h-9 bg-neutral-900 border-b border-neutral-800 px-3 flex items-center text-[11px] font-bold text-neutral-400 uppercase tracking-wider shrink-0">
+      {/* Main Multitrack Workspace: Synchronized Top Bar and Unified Vertical Scroll */}
+      <div className="flex-1 flex flex-col overflow-hidden select-none">
+        {/* Top Header Row: Left Title + Timecode Ruler (horizontal scroll synchronized) */}
+        <div className="h-9 bg-neutral-900 border-b border-neutral-800 flex shrink-0 z-30">
+          <div className="w-64 border-r border-neutral-800 px-3 flex items-center text-[11px] font-bold text-neutral-400 uppercase tracking-wider shrink-0 bg-neutral-900">
             Дорожки (Клипы аудио)
           </div>
-
-          {/* Original Video Track Header */}
-          <div className="p-3 border-b border-neutral-800/80 bg-neutral-950/50 space-y-1 shrink-0">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
-                <Activity className="w-3.5 h-3.5" />
-                Оригинал (Видео)
-              </span>
-            </div>
-            <div className="flex items-center gap-2 pt-1">
-              <span className="text-[10px] text-neutral-500">Громкость:</span>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={originalVolume}
-                onChange={(e) => setOriginalVolume(Number(e.target.value))}
-                className="w-full accent-amber-500 h-1 bg-neutral-800 rounded"
-              />
-            </div>
-          </div>
-
-          {/* Dubber Tracks Headers */}
-          {tracks.map(track => {
-            const dubberName = track.participant || track.dubberName || 'Даббер';
-            const characterName = track.character || track.characterName || 'Персонаж';
-
-            return (
-              <React.Fragment key={track.id}>
-                {/* Subtitle Lane Header */}
-                <div className="h-6 bg-[#0e1222] border-b border-indigo-900/40 px-2.5 flex items-center text-indigo-300 text-[9px] font-bold font-mono tracking-wider shrink-0 uppercase">
-                  <span>💬 Сабы: {characterName}</span>
-                </div>
-
-                {/* Audio Track Header */}
-                <div className="p-2.5 border-b border-neutral-800 space-y-1 hover:bg-neutral-900/40 transition shrink-0">
-                  <div className="flex items-center justify-between">
-                    <div className="truncate">
-                      <div className="text-xs font-bold text-neutral-100 truncate">
-                        🎙 {dubberName}
-                      </div>
-                      <div className="text-[10px] text-indigo-400 truncate font-mono">
-                        {characterName}
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => setMutedTracks(prev => {
-                        const next = new Set(prev);
-                        if (next.has(track.id)) next.delete(track.id);
-                        else next.add(track.id);
-                        return next;
-                      })}
-                      className={`p-1 rounded text-xs transition ${
-                        mutedTracks.has(track.id) ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
-                      }`}
-                    >
-                      {mutedTracks.has(track.id) ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                    </button>
-                  </div>
-
-                  {/* Volume Control Presets */}
-                  <div className="space-y-1 pt-1 border-t border-neutral-800/50">
-                    <div className="flex items-center justify-between text-[9px] text-neutral-400">
-                      <span>Громкость роли:</span>
-                      <span className="font-mono text-amber-300 font-bold">
-                        {Math.round((volumes[track.id] ?? 1.0) * 100)}%
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => handleSetRoleVolume(track.id, 1.0)}
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                          (volumes[track.id] ?? 1.0) === 1.0 ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
-                        }`}
-                      >
-                        100%
-                      </button>
-                      <button
-                        onClick={() => handleSetRoleVolume(track.id, 0.7)}
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                          (volumes[track.id] ?? 1.0) === 0.7 ? 'bg-amber-600 text-white border-amber-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
-                        }`}
-                      >
-                        70%
-                      </button>
-                      <button
-                        onClick={() => handleSetRoleVolume(track.id, 0.5)}
-                        className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                          (volumes[track.id] ?? 1.0) === 0.5 ? 'bg-purple-600 text-white border-purple-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
-                        }`}
-                      >
-                        50%
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </React.Fragment>
-            );
-          })}
-        </div>
-
-        {/* Timeline Tracks Workspace */}
-        <div 
-          ref={timelineContainerRef}
-          onClick={handleTimelineClick}
-          className="flex-1 overflow-x-auto overflow-y-auto relative bg-[#06070a] cursor-crosshair"
-        >
           <div 
-            className="relative min-h-full"
-            style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
+            ref={timeRulerContainerRef}
+            className="flex-1 overflow-hidden relative font-mono text-[10px] text-neutral-400 bg-neutral-900/90"
           >
-            {/* Timecode Ruler Header */}
-            <div className="h-9 bg-neutral-900/90 border-b border-neutral-800 sticky top-0 z-30 flex items-center font-mono text-[10px] text-neutral-400">
+            <div 
+              className="relative h-full"
+              style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
+            >
               {timeRulerTicks.map(sec => (
                 <div
                   key={sec}
@@ -1839,24 +2434,180 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                   {formatSeconds(sec)}
                 </div>
               ))}
+              {/* Playhead Cursor Marker on Time Ruler */}
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-40 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.8)]"
+                style={{ left: `${currentTime * zoomLevel}px` }}
+              />
             </div>
+          </div>
+        </div>
 
-            {/* Playhead Cursor Line */}
-            <div
-              className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-40 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
-              style={{ left: `${currentTime * zoomLevel}px` }}
-            />
-
-            {/* Track 1: Original Audio Track */}
-            <div className="h-16 border-b border-neutral-800/80 bg-neutral-950/30 relative flex items-center">
-              <div className="absolute inset-0 opacity-15 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:16px_100%]" />
-              <div className="absolute inset-x-0 h-10 my-auto bg-blue-500/10 border-y border-blue-500/20 rounded flex items-center justify-center text-[10px] text-blue-300 font-mono">
-                Оригинальный звук серии ({formatSeconds(duration)})
+        {/* Unified Vertical Scrolling Body: Track Headers and Timeline Lanes scroll together simultaneously! */}
+        <div 
+          ref={unifiedScrollContainerRef}
+          className="flex-1 flex overflow-y-auto overflow-x-hidden relative bg-[#06070a]"
+        >
+          {/* Left Column: Track Headers */}
+          <div 
+            onWheel={handleSidebarWheel}
+            className="w-64 bg-neutral-900/80 border-r border-neutral-800 shrink-0 flex flex-col select-none"
+          >
+            {/* Original Video Track Header (Exactly h-16 = 64px) */}
+            <div className="h-16 p-2.5 border-b border-neutral-800/80 bg-neutral-950/50 flex flex-col justify-between shrink-0">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5" />
+                  Оригинал (Видео)
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-neutral-500">Громкость:</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={originalVolume}
+                  onChange={(e) => setOriginalVolume(Number(e.target.value))}
+                  className="w-full accent-amber-500 h-1 bg-neutral-800 rounded"
+                />
               </div>
             </div>
 
-            {/* Tracks 2..N: Subtitle Lane + Audio Clip Track Lane */}
+            {/* Dubber Tracks Headers: Exactly h-6 for subtitles, h-28 for audio */}
             {tracks.map(track => {
+              const dubberName = track.participant || track.dubberName || 'Даббер';
+              const characterName = track.character || track.characterName || 'Персонаж';
+
+              return (
+                <React.Fragment key={track.id}>
+                  {/* Subtitle Lane Header (Exactly h-6 = 24px) */}
+                  <div className="h-6 bg-[#0e1222] border-b border-indigo-900/40 px-2.5 flex items-center text-indigo-300 text-[9px] font-bold font-mono tracking-wider shrink-0 uppercase">
+                    <span>💬 Сабы: {characterName}</span>
+                  </div>
+
+                  {/* Audio Track Header (Exactly h-28 = 112px) */}
+                  <div className="h-28 p-2.5 border-b border-neutral-800 flex flex-col justify-between hover:bg-neutral-900/40 transition shrink-0">
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <div className="truncate pr-1">
+                          <div className="text-xs font-bold text-neutral-100 truncate">
+                            🎙 {dubberName}
+                          </div>
+                          <div className="text-[10px] text-indigo-400 truncate font-mono">
+                            {characterName}
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => setMutedTracks(prev => {
+                            const next = new Set(prev);
+                            if (next.has(track.id)) next.delete(track.id);
+                            else next.add(track.id);
+                            return next;
+                          })}
+                          className={`p-1 rounded text-xs transition ${
+                            mutedTracks.has(track.id) ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
+                          }`}
+                        >
+                          {mutedTracks.has(track.id) ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+
+                      {/* Track Type Badge & File Info */}
+                      <div className="mt-1 flex items-center gap-1.5 overflow-hidden">
+                        {track.id.includes('_fix_') ? (
+                          <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60 uppercase shrink-0">
+                            Фикс
+                          </span>
+                        ) : track.participant.includes('Дорожка 2') ? (
+                          <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800/60 uppercase shrink-0">
+                            Слой 2 (Внахлест)
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 uppercase shrink-0">
+                            Основная
+                          </span>
+                        )}
+                        <span 
+                          className="text-[9px] text-neutral-400 font-mono truncate hover:text-neutral-200"
+                          title={track.filePath}
+                        >
+                          {track.filePath.split(/[/\\]/).pop()}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Volume Control Presets */}
+                    <div className="space-y-1 pt-1 border-t border-neutral-800/50">
+                      <div className="flex items-center justify-between text-[9px] text-neutral-400">
+                        <span>Громкость роли:</span>
+                        <span className="font-mono text-amber-300 font-bold">
+                          {Math.round((volumes[track.id] ?? 1.0) * 100)}%
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <button
+                          onClick={() => handleSetRoleVolume(track.id, 1.0)}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                            (volumes[track.id] ?? 1.0) === 1.0 ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                          }`}
+                        >
+                          100%
+                        </button>
+                        <button
+                          onClick={() => handleSetRoleVolume(track.id, 0.7)}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                            (volumes[track.id] ?? 1.0) === 0.7 ? 'bg-amber-600 text-white border-amber-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                          }`}
+                        >
+                          70%
+                        </button>
+                        <button
+                          onClick={() => handleSetRoleVolume(track.id, 0.5)}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                            (volumes[track.id] ?? 1.0) === 0.5 ? 'bg-purple-600 text-white border-purple-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                          }`}
+                        >
+                          50%
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+
+          {/* Right Column: Timeline Tracks Lanes (Horizontal scroll via overflow-x-auto, inherits vertical scroll from parent) */}
+          <div 
+            ref={timelineContainerRef}
+            onScroll={handleTimelineHorizontalScroll}
+            onWheel={handleTimelineWheel}
+            onClick={handleTimelineClick}
+            className="flex-1 overflow-x-auto overflow-y-hidden relative cursor-crosshair"
+          >
+            <div 
+              className="relative min-h-full"
+              style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
+            >
+              {/* Playhead Cursor Line */}
+              <div
+                className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-40 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                style={{ left: `${currentTime * zoomLevel}px` }}
+              />
+
+              {/* Track 1: Original Audio Track */}
+              <div className="h-16 border-b border-neutral-800/80 bg-neutral-950/30 relative flex items-center">
+                <div className="absolute inset-0 opacity-15 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:16px_100%]" />
+                <div className="absolute inset-x-0 h-10 my-auto bg-blue-500/10 border-y border-blue-500/20 rounded flex items-center justify-center text-[10px] text-blue-300 font-mono">
+                  Оригинальный звук серии ({formatSeconds(duration)})
+                </div>
+              </div>
+
+              {/* Tracks 2..N: Subtitle Lane + Audio Clip Track Lane */}
+              {tracks.map(track => {
               const clips = audioClips[track.id] || [];
               const isMuted = mutedTracks.has(track.id);
               const matchingSubs = trackSubLinesMap[track.id] || [];
@@ -1916,7 +2667,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                             left: `${clipLeftPx}px`,
                             width: `${clipWidthPx}px`
                           }}
-                          title="Зажмите тело клипа для перемещения, или потяните за левый/правый край для раскрытия звука из тишины"
+                          title={`Клип: ${clip.dubberName} (${formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))})\nСубтитры: "${clip.text}"${clip.recognizedText ? `\nРаспознано Виспером: "${clip.recognizedText}" (сходство: ${clip.whisperMatchedScore || 100}%)` : ''}\nДлительность: ${clip.durationSec.toFixed(2)}с (от тишины до тишины)`}
                         >
                           {/* Left Edge Resize Handle (Reveals audio from silence or trims start) */}
                           <div
@@ -1952,8 +2703,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                               {clip.isFix && <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black">ФИКС</span>}
                               {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">КОЛЛИЗИЯ</span>}
                               {clip.isSelfOverlap && <span className="bg-purple-500 text-white px-1 rounded text-[8px] font-black">СЛОЙ</span>}
+                              {clip.recognizedText && (
+                                <span className="bg-emerald-600/90 text-white px-1 rounded text-[7.5px] font-mono font-bold" title={`Виспер: "${clip.recognizedText}"`}>
+                                  ASR
+                                </span>
+                              )}
                               <span>{formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))}</span>
-                              <span className="text-neutral-400 font-sans truncate max-w-[110px] font-medium opacity-90">
+                              <span className="text-neutral-300 font-sans truncate max-w-[110px] font-medium opacity-90" title={clip.recognizedText ? `Субтитры: "${clip.text}"\nВиспер: "${clip.recognizedText}"` : clip.text}>
                                 {clip.text}
                               </span>
                             </div>
@@ -1965,7 +2721,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                           {/* Real Waveform Canvas inside Clip */}
                           <div className="flex-1 w-full relative overflow-hidden">
                             <ClipWaveform
-                              audioBuffer={audioBuffersRef.current[track.id]}
+                              audioBuffer={audioBuffersRef.current[clip.sourceAudioTrackId || track.id]}
                               sourceStartSec={clip.sourceStartSec}
                               sourceEndSec={clip.sourceEndSec}
                               width={Math.round(clipWidthPx)}
@@ -1973,6 +2729,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                               color={clip.hasCollision ? '#ef4444' : clip.isSelfOverlap ? '#c084fc' : clip.isFix ? '#fbbf24' : '#818cf8'}
                               volumePercent={clip.volumePercent}
                             />
+                            {clip.recognizedText && clip.recognizedText !== clip.text && (
+                              <div className="absolute bottom-1 left-1 right-1 pointer-events-none px-1 py-0.5 rounded bg-black/80 text-[8px] text-emerald-300 font-sans italic truncate border border-emerald-500/30">
+                                🎙 {clip.recognizedText}
+                              </div>
+                            )}
                           </div>
 
                           {/* Clip Bottom Action Tools (Split, Expand & Nudge) */}
@@ -2027,6 +2788,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </div>
         </div>
       </div>
+    </div>
 
       {/* Footer Playback, Inspector & Zoom Controls */}
       <footer className="bg-neutral-900 border-t border-neutral-800 p-2.5 px-4 shrink-0 flex items-center justify-between gap-4">

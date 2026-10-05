@@ -38,7 +38,13 @@ function extractNicknamesFromFilename(filePath) {
   const bracketMatches = baseName.matchAll(/[\[\(\{]([^\]\)\}]+)[\]\)\}]/g);
   for (const m of bracketMatches) {
     const token = m[1].trim();
-    if (token && !STRIP_TERMS.includes(token.toLowerCase()) && !/^\d+$/.test(token)) {
+    if (
+      token &&
+      /[a-zA-Zа-яА-ЯёЁ]/.test(token) &&
+      !STRIP_TERMS.includes(token.toLowerCase()) &&
+      !/^\d+$/.test(token) &&
+      !/^[\d\s._-]+$/.test(token)
+    ) {
       candidates.push(token);
     }
   }
@@ -49,14 +55,19 @@ function extractNicknamesFromFilename(filePath) {
     const cleaned = part.replace(/^\[|\]$|^\(|\)$/g, '').trim();
     const isEpisodeNum = /^(ep\d+|\d+p|\d+серия|\d+)$/i.test(cleaned);
     const isGenericTerm = STRIP_TERMS.includes(cleaned.toLowerCase());
-    if (cleaned && !isEpisodeNum && !isGenericTerm && cleaned.length >= 2) {
+    const hasLetters = /[a-zA-Zа-яА-ЯёЁ]/.test(cleaned);
+    const isNumericArtifact = /^[\d\s._-]+$/.test(cleaned);
+
+    if (cleaned && hasLetters && !isNumericArtifact && !isEpisodeNum && !isGenericTerm && cleaned.length >= 2) {
       candidates.push(cleaned);
     }
   }
 
   // 3. Fallback whole basename if clean
   if (candidates.length === 0) {
-    candidates.push(baseName);
+    if (/[a-zA-Zа-яА-ЯёЁ]/.test(baseName) && !/^[\d\s._-]+$/.test(baseName)) {
+      candidates.push(baseName);
+    }
   }
 
   return Array.from(new Set(candidates));
@@ -358,6 +369,12 @@ class AutoTimingService {
         const cands = extractNicknamesFromFilename(track.path);
         if (cands.length > 0) nick = cands[0];
         else nick = path.basename(track.path, path.extname(track.path));
+      }
+
+      // Strictly discard numeric artifacts like "0 3 4", "03_4", or names without letters
+      if (!nick || !/[a-zA-Zа-яА-ЯёЁ]/.test(nick) || /^[\d\s._-]+$/.test(nick)) {
+        log.info(`[AutoTiming] Skipping numeric/invalid artifact track in fallback: ${track.path}`);
+        continue;
       }
 
       const isFix = isTrackFix(track);
