@@ -107,7 +107,7 @@ jobs:
               out/ai_env_macos_arm64.zip
             artifact_name: AI_env-macOS-arm64
           - name: macOS (Intel x64)
-            os: macos-13
+            os: macos-15-intel
             tag: macos_x64
             release_files: |
               out/ai_env_macos_x64.zip

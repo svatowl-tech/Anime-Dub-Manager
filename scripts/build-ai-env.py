@@ -280,7 +280,7 @@ except Exception as e:
 
     # 6. Preload base models for offline operation
     print("\n[STEP 6] Preloading AI base models for offline operation (DeepFilterNet3, Demucs htdemucs)...")
-    models_dir = build_temp_ai_env / "models"
+    models_dir = build_temp_dir / "models"
     torch_models_dir = models_dir / "torch"
     hf_models_dir = models_dir / "huggingface"
     df_models_dir = models_dir / "deepfilternet"
@@ -313,7 +313,7 @@ try:
 except Exception as e:
     print(f"  [WARN] Demucs preload warning: {{e}}")
 """
-    preload_py_file = build_temp_ai_env / "preload_models.py"
+    preload_py_file = build_temp_dir / "preload_models.py"
     preload_py_file.write_text(preload_script, encoding="utf-8")
 
     preload_env = {
