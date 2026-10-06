@@ -150,38 +150,55 @@ class AutoTimingService {
     const signKeywords = ['sign', 'text', 'title', 'signs', 'titles', 'caption', 'надпись', 'текст', 'титр', 'титры', 'заставка', 'экран', 'note', 'info'];
 
     for (const line of subLines) {
-      let charName = (line.name || '').trim();
-      const styleName = (line.style || '').toLowerCase();
-      if (!charName || charName === 'Default') continue;
-      
-      // Check if sign
-      const isSign = signKeywords.some(kw => charName.toLowerCase().includes(kw) || styleName.includes(kw));
+      let rawChar = (line.name || '').trim();
+      const styleName = (line.style || '').trim();
+      const lowerStyle = styleName.toLowerCase();
+
+      // Check if sign or commentary
+      const isSign = signKeywords.some(kw => (rawChar && rawChar.toLowerCase().includes(kw)) || lowerStyle.includes(kw));
       if (isSign) continue;
 
-      // Apply character alias if defined
-      const canonicalChar = aliases[charName] || charName;
+      // If Actor field is empty or 'Default', check if style indicates the character
+      if ((!rawChar || rawChar.toLowerCase() === 'default') && styleName && lowerStyle !== 'default' && !lowerStyle.includes('alt') && !lowerStyle.includes('sign')) {
+        rawChar = styleName;
+      }
 
-      if (!charactersMap.has(canonicalChar)) {
-        charactersMap.set(canonicalChar, {
-          characterName: canonicalChar,
-          originalNames: new Set([charName]),
-          linesCount: 0,
-          lines: []
+      if (!rawChar) continue;
+
+      // Support multi-character lines: e.g. "Таня, Серебряков" or "Таня / Виша"
+      const subCharacters = rawChar.split(/[,;&/]|(?:\s+и\s+)/i).map(s => s.trim()).filter(Boolean);
+      const charsToProcess = subCharacters.length > 0 ? subCharacters : [rawChar];
+
+      for (const charName of charsToProcess) {
+        if (!charName || charName.toLowerCase() === 'default') continue;
+
+        // Apply character alias if defined
+        const canonicalChar = aliases[charName] || charName;
+
+        if (!charactersMap.has(canonicalChar)) {
+          charactersMap.set(canonicalChar, {
+            characterName: canonicalChar,
+            originalNames: new Set([charName]),
+            linesCount: 0,
+            lines: []
+          });
+        }
+        
+        const charInfo = charactersMap.get(canonicalChar);
+        charInfo.originalNames.add(charName);
+        charInfo.linesCount++;
+        charInfo.lines.push({
+          id: line.id,
+          rawLineIndex: line.rawLineIndex,
+          startSec: parseTimeToSeconds(line.start),
+          endSec: parseTimeToSeconds(line.end),
+          startFormatted: line.start,
+          endFormatted: line.end,
+          text: line.text,
+          name: charName,
+          style: line.style
         });
       }
-      
-      const charInfo = charactersMap.get(canonicalChar);
-      charInfo.originalNames.add(charName);
-      charInfo.linesCount++;
-      charInfo.lines.push({
-        id: line.id,
-        rawLineIndex: line.rawLineIndex,
-        startSec: parseTimeToSeconds(line.start),
-        endSec: parseTimeToSeconds(line.end),
-        startFormatted: line.start,
-        endFormatted: line.end,
-        text: line.text
-      });
     }
 
     // Sort lines for each character chronologically

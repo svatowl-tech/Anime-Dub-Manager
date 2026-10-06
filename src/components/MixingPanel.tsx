@@ -2513,7 +2513,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                     type="text"
                     value={customTargetDir}
                     onChange={(e) => setCustomTargetDir(e.target.value)}
-                    placeholder={workingDir || "По умолчанию: папка Сведение"}
+                    placeholder={workingDir || "По умолчанию: папка Сведения в папке серии"}
                     className="flex-1 px-3 py-2 bg-neutral-950 border border-neutral-800 rounded-lg text-neutral-200 font-mono text-xs focus:outline-none focus:border-blue-500"
                   />
                   <button

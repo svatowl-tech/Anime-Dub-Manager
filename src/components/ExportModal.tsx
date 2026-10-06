@@ -80,6 +80,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   useEffect(() => {
     if (isOpen && episode) {
+      if (role !== 'DABBER') {
+        // Query mixing status to get canonical episode Сведения folder
+        ipcSafe.invoke('mixing-get-status', { episode }).then((res: any) => {
+          if (res && res.workingDir) {
+            setTargetDir(res.workingDir);
+          }
+        }).catch(() => {});
+      }
+
       const baseFile = episode.rawPath || episode.subPath;
       if (baseFile) {
         const isWin = baseFile.includes('\\');
@@ -90,9 +99,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           const projectTitle = sanitizeFolderName(episode.project?.title || '');
           const epNum = episode.number !== undefined ? `_Ep${episode.number}` : '';
           const prefix = projectTitle ? `${projectTitle}${epNum}_` : (epNum ? `Ep${episode.number}_` : '');
-          const roleLabel = role === 'DABBER' ? 'Для_даберов' : 'Для_звукаря';
-          const subDirName = `${prefix}${roleLabel}`;
-          setTargetDir(`${dir}${sep}${subDirName}`);
+
+          if (role === 'DABBER') {
+            const subDirName = `${prefix}Для_даберов`;
+            setTargetDir(`${dir}${sep}${subDirName}`);
+          } else {
+            const dirBasename = dir.split(/[/\\]/).pop() || '';
+            const isEpDir = /^(episode|ep|серия|выпуск)[\s_.-]*\d+/i.test(dirBasename) ||
+                            /^\d+$/.test(dirBasename) ||
+                            dirBasename.includes(String(episode.number || ''));
+            const epDir = isEpDir ? dir : `${dir}${sep}Episode_${episode.number || 1}`;
+            setTargetDir(`${epDir}${sep}Сведения`);
+          }
         }
       }
     } else if (!isOpen) {

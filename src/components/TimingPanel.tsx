@@ -14,6 +14,9 @@ import {
   ZoomIn, 
   ZoomOut, 
   Maximize2, 
+  Minimize2,
+  ChevronDown,
+  ChevronUp,
   ChevronRight, 
   Mic, 
   Volume2, 
@@ -27,8 +30,10 @@ import {
   Activity,
   Check,
   X,
+  Trash2,
   FileAudio,
-  Settings
+  Settings,
+  Loader2
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Episode, Track, SubtitleLine, RoleAssignment } from '../types';
@@ -136,44 +141,77 @@ function isValidDubberName(name: string): boolean {
 }
 
 /**
- * Strict role-based subtitle line matching.
+ * Robust role-based subtitle line matching with alias expansion and style fallback.
  */
 function isSubtitleForCharacter(
   subName: string,
   charName: string,
   dubberNick: string,
-  assignments: RoleAssignment[] = []
+  assignments: RoleAssignment[] = [],
+  subStyle?: string,
+  aliases?: Record<string, string>
 ): boolean {
-  if (!subName) return false;
-  const normSub = normalizeName(subName);
-  if (!normSub || normSub === 'default' || normSub === 'comment' || normSub === 'шумы') return false;
+  const candidates = [subName, subStyle].filter(Boolean) as string[];
+  if (candidates.length === 0) return false;
 
   const normChar = normalizeName(charName);
   const normNick = normalizeName(dubberNick);
 
   const dubberAssigns = assignments.filter(a => {
-    const aNick = normalizeName(a.dubber?.nickname || (a as any).dubberNickname || '');
-    const aId = a.dubberId;
-    return (aNick && aNick === normNick) || (aId && (aId === dubberNick || aId === normNick));
+    const aNick = normalizeName(a.substitute?.nickname || a.dubber?.nickname || (a as any).dubberNickname || '');
+    const aId = a.substituteId || a.dubberId;
+    return (aNick && (aNick === normNick || normNick.includes(aNick) || aNick.includes(normNick))) ||
+           (aId && (aId === dubberNick || aId === normNick));
   });
 
   const assignedCharNames = dubberAssigns.map(a => normalizeName(a.characterName)).filter(Boolean);
-  if (normChar) assignedCharNames.push(normChar);
+  if (normChar && !assignedCharNames.includes(normChar)) assignedCharNames.push(normChar);
 
-  for (const cName of assignedCharNames) {
-    if (!cName) continue;
-    if (normSub === cName || normSub.includes(cName) || cName.includes(normSub)) {
+  // Add alias expansions if available
+  if (aliases) {
+    Object.entries(aliases).forEach(([orig, target]) => {
+      const nOrig = normalizeName(orig);
+      const nTarg = normalizeName(target);
+      if (assignedCharNames.includes(nTarg) && nOrig && !assignedCharNames.includes(nOrig)) {
+        assignedCharNames.push(nOrig);
+      }
+      if (assignedCharNames.includes(nOrig) && nTarg && !assignedCharNames.includes(nTarg)) {
+        assignedCharNames.push(nTarg);
+      }
+    });
+  }
+
+  for (const rawCand of candidates) {
+    if (!rawCand) continue;
+    const normCand = normalizeName(rawCand);
+    if (!normCand || normCand === 'default' || normCand === 'comment' || normCand === 'шумы' || normCand === 'sign' || normCand === 'titles') continue;
+
+    // Direct match against assigned characters
+    for (const cName of assignedCharNames) {
+      if (!cName) continue;
+      if (normCand === cName || normCand.includes(cName) || cName.includes(normCand)) {
+        return true;
+      }
+      // Stem / prefix matching (e.g. Серебряков vs Серебрякова, Дегуршафф vs Дегуршафа)
+      if (cName.length >= 4 && normCand.length >= 4) {
+        const cStem = cName.slice(0, Math.min(5, cName.length - 1));
+        const sStem = normCand.slice(0, Math.min(5, normCand.length - 1));
+        if (cStem === sStem) return true;
+      }
+    }
+
+    // Direct match against dubber nickname
+    if (normNick) {
+      if (normCand === normNick || normCand.includes(normNick) || normNick.includes(normCand)) {
+        return true;
+      }
+    }
+
+    // Split multi-character candidates (e.g. "Таня / Серебряков", "Виша, Таня", "Stan & Kori")
+    const parts = rawCand.split(/[,;&/]|(?:\s+и\s+)/i).map(normalizeName).filter(Boolean);
+    if (parts.some(p => assignedCharNames.some(c => c === p || c.includes(p) || p.includes(c)) || p === normNick || (normChar && (p.includes(normChar) || normChar.includes(p))))) {
       return true;
     }
-  }
-
-  if (normNick && (normSub === normNick || normSub.includes(normNick) || normNick.includes(normSub))) {
-    return true;
-  }
-
-  const parts = subName.split(/[,;&/]/).map(normalizeName).filter(Boolean);
-  if (parts.some(p => assignedCharNames.includes(p) || p === normNick || (normChar && p.includes(normChar)))) {
-    return true;
   }
 
   return false;
@@ -542,7 +580,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [isFixesStitched, setIsFixesStitched] = useState<boolean>(false);
   const [isAutoTimingDone, setIsAutoTimingDone] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isImporting, setIsImporting] = useState<boolean>(false);
+  const [importProgress, setImportProgress] = useState<number>(0);
   const [statusMessage, setStatusMessage] = useState<string>('');
+  const [importDecodedTracks, setImportDecodedTracks] = useState<Array<{ id: string; name: string; duration?: number; status: 'pending' | 'decoding' | 'done' | 'error' }>>([]);
+  const [trackHeightMode, setTrackHeightMode] = useState<'standard' | 'compact' | 'fit'>('standard');
   const [exportingToMixing, setIsExportingToMixing] = useState<boolean>(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState<boolean>(false);
   const [isExportingSE, setIsExportingSE] = useState<boolean>(false);
@@ -624,13 +666,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const audioBuffersRef = useRef<Record<string, AudioBuffer>>({});
 
   // Synchronize Horizontal Scrolling from Timeline to Timecode Ruler
-  const handleTimelineHorizontalScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+  const handleTimelineScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     if (timeRulerContainerRef.current) {
       timeRulerContainerRef.current.scrollLeft = e.currentTarget.scrollLeft;
     }
   }, []);
 
-  // Handle mouse wheel scrolling: unified vertical scrolling and horizontal scrolling
+  // Handle mouse wheel scrolling: horizontal scroll with shift or trackpad swipe
   const handleTimelineWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
     if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
       if (timelineContainerRef.current) {
@@ -639,16 +681,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           timeRulerContainerRef.current.scrollLeft = timelineContainerRef.current.scrollLeft;
         }
       }
-    } else if (e.deltaY !== 0) {
-      if (unifiedScrollContainerRef.current) {
-        unifiedScrollContainerRef.current.scrollTop += e.deltaY;
-      }
-    }
-  }, []);
-
-  const handleSidebarWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
-    if (e.deltaY !== 0 && unifiedScrollContainerRef.current) {
-      unifiedScrollContainerRef.current.scrollTop += e.deltaY;
     }
   }, []);
 
@@ -920,11 +952,62 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     toast.info('Границы клипа сброшены к начальной детекции');
   };
 
+  // Delete clip (remove noise, splashes, extra sounds so they are excluded from mixing)
+  const handleDeleteClip = (clipId: string, explicitTrackId?: string) => {
+    let targetTrackId = explicitTrackId;
+    let deletedClip: AudioClip | null = null;
+
+    if (!targetTrackId) {
+      for (const trId of Object.keys(audioClips)) {
+        const found = (audioClips[trId] || []).find(c => c.id === clipId);
+        if (found) {
+          targetTrackId = trId;
+          deletedClip = found;
+          break;
+        }
+      }
+    } else {
+      deletedClip = (audioClips[targetTrackId] || []).find(c => c.id === clipId) || null;
+    }
+
+    if (!targetTrackId || !deletedClip) return;
+
+    setAudioClips(prev => {
+      const trClips = prev[targetTrackId!] || [];
+      const updated = trClips.filter(c => c.id !== clipId);
+      return { ...prev, [targetTrackId!]: updated };
+    });
+
+    if (selectedClipId === clipId) {
+      setSelectedClipId(null);
+    }
+
+    addLog(`🗑 Удалена фраза/шум: «${deletedClip.text}» (${deletedClip.dubberName}, ${formatSeconds(deletedClip.clipStartSec)}, ${deletedClip.durationSec.toFixed(2)}с). Фраза исключена из монтажа.`, 'info');
+    
+    toast.success(`Фраза удалена из тайминга и исключена из финального монтажа`, {
+      action: {
+        label: 'Отменить',
+        onClick: () => {
+          if (deletedClip && targetTrackId) {
+            setAudioClips(prev => {
+              const trClips = prev[targetTrackId!] || [];
+              const restored = [...trClips, deletedClip!].sort((a, b) => a.clipStartSec - b.clipStartSec);
+              return { ...prev, [targetTrackId!]: restored };
+            });
+            toast.info(`Фраза «${deletedClip.text}» восстановлена`);
+            addLog(`↩ Восстановлена фраза «${deletedClip.text}» на дорожке ${deletedClip.dubberName}`, 'info');
+          }
+        }
+      }
+    });
+  };
+
   const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const container = timelineContainerRef.current;
-    if (!container) return;
-    const rect = container.getBoundingClientRect();
-    const clickX = e.clientX - rect.left + container.scrollLeft;
+    const target = e.target as HTMLElement;
+    if (target.closest('.group\\/edge') || target.tagName === 'BUTTON') return;
+    const lane = e.currentTarget;
+    const rect = lane.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
     const newTime = Math.max(0, Math.min(duration, clickX / zoomLevel));
     setCurrentTime(newTime);
     Object.values(audioElementsRef.current).forEach(audio => {
@@ -933,21 +1016,42 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     addLog(`⏩ Перемещение плейбэка на ${formatSeconds(newTime)}`, 'info');
   };
 
-  // Spacebar Key Listener for Play / Pause
+  const handleTimeRulerClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const ruler = timeRulerContainerRef.current;
+    if (!ruler) return;
+    const rect = ruler.getBoundingClientRect();
+    const clickX = e.clientX - rect.left + ruler.scrollLeft;
+    const newTime = Math.max(0, Math.min(duration, clickX / zoomLevel));
+    setCurrentTime(newTime);
+    Object.values(audioElementsRef.current).forEach(audio => {
+      try { audio.currentTime = newTime; } catch (err) {}
+    });
+    addLog(`⏩ Перемещение плейбэка на ${formatSeconds(newTime)}`, 'info');
+  };
+
+  // Spacebar Key Listener for Play / Pause & Delete/Backspace to delete selected clip
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
+      const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+      if (isInput) return;
+
+      if (e.code === 'Space') {
         e.preventDefault();
         setIsPlaying(prev => {
           const next = !prev;
           addLog(next ? `▶ Воспроизведение запущено` : `⏸ Воспроизведение остановлено`, 'info');
           return next;
         });
+      } else if (e.code === 'Delete' || e.code === 'Backspace') {
+        if (selectedClipId) {
+          e.preventDefault();
+          handleDeleteClip(selectedClipId);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [addLog]);
+  }, [selectedClipId, audioClips, addLog]);
 
   // Audio Playback Loop & Time Sync
   useEffect(() => {
@@ -1001,11 +1105,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   }, [isPlaying, tracks, mutedTracks, volumes, duration, addLog]);
 
   // Load Subtitles & Dubber Tracks from Episode
-  const loadEpisodeData = useCallback(async () => {
+  const loadEpisodeData = useCallback(async (isImportFlow = false) => {
     if (!currentEpisode) return;
     try {
       setIsLoading(true);
-      setStatusMessage('Загрузка субтитров и файлов звукорежиссёра...');
+      if (!isImportFlow) {
+        setImportProgress(5);
+        setStatusMessage('Загрузка субтитров и файлов звукорежиссёра...');
+      }
       addLog(`=== Начало загрузки тайминга серии #${currentEpisode.number} (${currentEpisode.project?.title || 'Проект'}) ===`, 'info');
 
       // 1. Load Subtitles
@@ -1031,6 +1138,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           addLog(`✓ Успешно распарсено ${parsedLines.length} строк субтитров.`, 'success');
         }
       }
+      if (!isImportFlow) setImportProgress(15);
 
       // 2. Fetch Dubber Tracks from Manifest or Sound Engineer Files
       const statusRes: any = await ipcSafe.invoke('mixing-get-status', { episode: currentEpisode }).catch(() => null);
@@ -1049,11 +1157,11 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         }
       }
 
-      // Filter manifest tracks to exclude intermediate pipeline renders or numeric artifacts (e.g. 03_..., 04_..., 0 3 4)
+      // Filter manifest tracks to exclude intermediate pipeline renders or numeric artifacts (e.g. 01_denoise..., 0 3 4)
       const cleanManifestTracks = manifestDubberTracks.filter((dt: any) => {
         const p = dt.path || '';
         const base = p.split(/[/\\]/).pop() || '';
-        if (/^\d{1,2}_/.test(base) || /^[\d\s._-]+$/.test(base.replace(/\.[^.]+$/, ''))) {
+        if (/^(0[1-9]|1[0-9])_(denoise|deepfilter|glue|compress|master|video_mux|eq|limiter|reverb|delay|mix)/i.test(base) || /^[\d\s._-]+$/.test(base.replace(/\.[^.]+$/, ''))) {
           return false;
         }
         if (/master|glue|denoise|deepfilter|mix|compress|release|original_audio/i.test(base)) {
@@ -1279,6 +1387,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         const totalActorTracks = finalMainFiles.length + finalFixFiles.length;
         if (totalActorTracks === 0) return;
 
+        // If actor has NO main files, but has fix files, promote the primary fix file to be their main file!
+        if (finalMainFiles.length === 0 && finalFixFiles.length > 0) {
+          const promoted = finalFixFiles.shift()!;
+          promoted.isFix = false;
+          finalMainFiles.push(promoted);
+        }
+
         // Main takes:
         finalMainFiles.forEach((fileObj, mIdx) => {
           let label = dubberNick;
@@ -1330,10 +1445,30 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setTracks(fetchedTracks);
       addLog(`Загружено ${fetchedTracks.length} дорожек дабберов (все слои и фиксы из QA под своими актерами, без дублей файлов).`, fetchedTracks.length > 0 ? 'success' : 'warn');
 
-      // 3. Decode Real AudioBuffers for Every Track
+      // 3. Decode Real AudioBuffers for Every Track with Progress Bar updates
       const sharedAudioCtx = getSharedAudioContext();
+      const tracksToDecode = fetchedTracks.filter(t => t.filePath);
+      
+      setImportDecodedTracks(tracksToDecode.map(t => ({
+        id: t.id,
+        name: t.participant,
+        status: 'pending'
+      })));
+
+      let decodedIdx = 0;
       for (const tr of fetchedTracks) {
         if (tr.filePath) {
+          decodedIdx++;
+          const startPct = isImportFlow ? 45 : 20;
+          const pctSpan = isImportFlow ? 45 : 70;
+          const curPct = Math.round(startPct + (pctSpan * decodedIdx / Math.max(1, tracksToDecode.length)));
+          setImportProgress(curPct);
+          setStatusMessage(`Декодирование аудиоволны [${decodedIdx}/${tracksToDecode.length}]: «${tr.participant}» (${curPct}%)...`);
+
+          setImportDecodedTracks(prev => prev.map(item => 
+            item.id === tr.id ? { ...item, status: 'decoding' } : item
+          ));
+
           const playableUrl = await getPlayableAudioUrl(tr.filePath);
           if (playableUrl) {
             const audio = new Audio(playableUrl);
@@ -1348,9 +1483,15 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 audioBuffersRef.current[tr.id] = decodedBuf;
                 setDuration(prev => Math.max(prev, decodedBuf.duration));
                 addLog(`📈 Реальная аудиоволна декодирована для «${tr.participant}» (${decodedBuf.duration.toFixed(1)}s)`, 'success');
+                setImportDecodedTracks(prev => prev.map(item => 
+                  item.id === tr.id ? { ...item, status: 'done', duration: decodedBuf.duration } : item
+                ));
               }
             } catch (decodeErr) {
               console.warn(`[AudioDecode] Не удалось декодировать аудио для ${tr.id}:`, decodeErr);
+              setImportDecodedTracks(prev => prev.map(item => 
+                item.id === tr.id ? { ...item, status: 'error' } : item
+              ));
             }
           }
         }
@@ -1361,6 +1502,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           if (url) setVideoUrl(url);
         });
       }
+
+      setImportProgress(isImportFlow ? 95 : 95);
+      setStatusMessage('Формирование дорожек и привязка субтитров на таймлайне...');
 
       // 4. Map Subtitles and Initialize Initial Audio Clips (continuous full file before silence cut)
       const initialClips: Record<string, AudioClip[]> = {};
@@ -1374,12 +1518,20 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         tracksByActor[actorKey].push(tr);
       });
 
+      const projectAliases = currentEpisode.project?.characterAliases
+        ? (typeof currentEpisode.project.characterAliases === 'string'
+            ? JSON.parse(currentEpisode.project.characterAliases || '{}')
+            : currentEpisode.project.characterAliases)
+        : undefined;
+
+      const allMappedSubIds = new Set<string>();
+
       Object.entries(tracksByActor).forEach(([actorNick, actorTrks]) => {
         const firstTrk = actorTrks[0];
         const charName = firstTrk.character || firstTrk.characterName || 'Персонаж';
 
         let matchedLines = parsedLines.filter(line => 
-          isSubtitleForCharacter(line.name, charName, actorNick, currentEpisode.assignments || [])
+          isSubtitleForCharacter(line.name, charName, actorNick, currentEpisode.assignments || [], line.style, projectAliases)
         ).sort((a, b) => a.startSec - b.startSec);
 
         if (matchedLines.length === 0 && (charName !== 'Персонаж' || actorNick !== 'Даббер')) {
@@ -1387,10 +1539,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           const normD = normalizeName(actorNick);
           matchedLines = parsedLines.filter(line => {
             const normSub = normalizeName(line.name);
-            return (normC && (normSub === normC || normSub.includes(normC))) ||
-                   (normD && (normSub === normD || normSub.includes(normD)));
+            const normStyle = normalizeName(line.style);
+            return (normC && (normSub === normC || normSub.includes(normC) || normStyle === normC || normStyle.includes(normC))) ||
+                   (normD && (normSub === normD || normSub.includes(normD) || normStyle === normD || normStyle.includes(normD)));
           }).sort((a, b) => a.startSec - b.startSec);
         }
+
+        matchedLines.forEach(l => allMappedSubIds.add(String(l.id)));
 
         const mainTracks = actorTrks.filter(t => !t.id.includes('_fix_'));
         const fixTracks = actorTrks.filter(t => t.id.includes('_fix_'));
@@ -1414,10 +1569,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           trackSubMap[mainTracks[1].id] = overlapLines;
         } else if (mainTracks.length === 1) {
           trackSubMap[mainTracks[0].id] = matchedLines;
+        } else if (mainTracks.length === 0 && fixTracks.length > 0) {
+          // If actor only has a fix track, give all matched lines to it
+          trackSubMap[fixTracks[0].id] = matchedLines;
         }
 
-        // Fix tracks: only get their specific fix lines, NEVER duplicating the entire main subtitle list!
-        if (fixTracks.length > 0) {
+        // Fix tracks: only get their specific fix lines if a separate main track exists!
+        if (fixTracks.length > 0 && mainTracks.length > 0) {
           const actorAssigns = (currentEpisode.assignments || []).filter(a => {
             const aNick = a.substitute?.nickname || a.dubber?.nickname || '';
             return normalizeName(aNick) === normalizeName(actorNick);
@@ -1456,6 +1614,41 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           }
         }
       });
+
+      // Fallback: If any dialogue subtitle lines were not matched to any track, assign them to the closest character track
+      const unmatchedDialogueLines = parsedLines.filter(l => {
+        if (allMappedSubIds.has(String(l.id))) return false;
+        const normName = normalizeName(l.name);
+        const normStyle = normalizeName(l.style);
+        return !['sign', 'text', 'title', 'signs', 'titles', 'надпись', 'титры', 'заставка', 'note', 'info'].some(k => normName.includes(k) || normStyle.includes(k));
+      });
+
+      if (unmatchedDialogueLines.length > 0 && fetchedTracks.length > 0) {
+        unmatchedDialogueLines.forEach(l => {
+          // Find best candidate track
+          const normLName = normalizeName(l.name);
+          const normLStyle = normalizeName(l.style);
+          let targetTrack = fetchedTracks.find(t => {
+            const trChar = normalizeName(t.character || t.characterName || '');
+            const trNick = normalizeName(t.participant || t.dubberName || '');
+            return (normLName && (trChar.includes(normLName) || normLName.includes(trChar) || trNick.includes(normLName) || normLName.includes(trNick))) ||
+                   (normLStyle && (trChar.includes(normLStyle) || normLStyle.includes(trChar)));
+          });
+
+          if (!targetTrack) {
+            targetTrack = fetchedTracks[0];
+          }
+
+          if (targetTrack) {
+            if (!trackSubMap[targetTrack.id]) trackSubMap[targetTrack.id] = [];
+            trackSubMap[targetTrack.id].push(l);
+            trackSubMap[targetTrack.id].sort((a, b) => a.startSec - b.startSec);
+            allMappedSubIds.add(String(l.id));
+          }
+        });
+      }
+
+      addLog(`✓ Привязано ${allMappedSubIds.size} из ${parsedLines.length} строк субтитров к дорожкам актеров.`, 'success');
 
       fetchedTracks.forEach(tr => {
         const charName = tr.character || tr.characterName || 'Персонаж';
@@ -1501,24 +1694,49 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     loadEpisodeData();
   }, [currentEpisode?.id]);
 
-  // PIPELINE STEP 1: Export / Backup all tracks
+  // PIPELINE STEP 1: Import all tracks from QA
   const handleImportFromQA = async () => {
     if (!currentEpisode) return;
     try {
       setIsLoading(true);
-      setStatusMessage('Бэкап и сборка дорожек до манипуляций...');
-      await ipcSafe.invoke('mixing-import-sound-engineer-files', {
-        episode: currentEpisode,
-        autoApplyFixes: false,
-        autoTiming: false
+      setIsImporting(true);
+      setImportProgress(5);
+      setStatusMessage('1/2. Сборка и экспорт файлов дорожек из QA...');
+      addLog('Запуск импорта и подготовки дорожек из QA...', 'info');
+
+      const unsub = ipcSafe.on('mixing-progress', (p: any) => {
+        if (p && typeof p.percent === 'number') {
+          const scaled = Math.min(42, Math.round(5 + p.percent * 0.37));
+          setImportProgress(scaled);
+          if (p.message) setStatusMessage(`1/2. ${p.message}`);
+        }
       });
-      await loadEpisodeData();
-      toast.success('Бэкап дорожек выполнен! Исходные файлы загружены в тайминг.');
+
+      try {
+        await ipcSafe.invoke('mixing-import-sound-engineer-files', {
+          episode: currentEpisode,
+          autoApplyFixes: false,
+          autoTiming: false
+        });
+      } finally {
+        if (typeof unsub === 'function') unsub();
+      }
+
+      setImportProgress(45);
+      setStatusMessage('2/2. Загрузка и декодирование аудиоволн на таймлайн...');
+      await loadEpisodeData(true);
+      setImportProgress(100);
+      toast.success('Импорт дорожек выполнен! Исходные файлы загружены в тайминг.');
     } catch (err: any) {
+      addLog(`❌ Ошибка импорта: ${err.message || String(err)}`, 'error');
       toast.error(`Ошибка импорта: ${err.message || String(err)}`);
     } finally {
-      setIsLoading(false);
-      setStatusMessage('');
+      setTimeout(() => {
+        setIsLoading(false);
+        setIsImporting(false);
+        setImportProgress(0);
+        setStatusMessage('');
+      }, 500);
     }
   };
 
@@ -2151,8 +2369,74 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     if (!currentEpisode) return;
     try {
       setIsExportingToMixing(true);
+
+      // Explicitly resolve canonical target directory for mixing (Episode folder -> Сведения)
+      let targetDir = '';
+      try {
+        const res: any = await ipcSafe.invoke('mixing-get-status', { episode: currentEpisode });
+        if (res && res.workingDir) {
+          targetDir = res.workingDir;
+        }
+      } catch (e) {}
+
+      if (!targetDir) {
+        const baseFile = currentEpisode.rawPath || currentEpisode.subPath;
+        if (baseFile) {
+          const isWin = baseFile.includes('\\');
+          const sep = isWin ? '\\' : '/';
+          const lastSlashIndex = Math.max(baseFile.lastIndexOf('/'), baseFile.lastIndexOf('\\'));
+          const epFolder = lastSlashIndex !== -1 ? baseFile.substring(0, lastSlashIndex) : baseFile;
+          targetDir = `${epFolder}${sep}Сведения`;
+        }
+      }
+
+      // Save updated timing metadata (with all deleted phrases excluded)
+      const timingMetadata = {
+        version: '1.0',
+        updatedAt: new Date().toISOString(),
+        episodeNumber: currentEpisode?.number || 1,
+        defaultVolumePercent: 100,
+        rolesVolumeMap: tracks.reduce((acc, tr) => {
+          const roleName = tr.character || tr.characterName || tr.participant || 'Персонаж';
+          const dubberNick = tr.participant || tr.dubberName || 'Даббер';
+          const volPct = Math.round((volumes[tr.id] ?? 1.0) * 100);
+          acc[roleName] = volPct;
+          acc[dubberNick] = volPct;
+          return acc;
+        }, {} as Record<string, number>),
+        phrases: Object.keys(audioClips).flatMap(trId => {
+          const clips = audioClips[trId] || [];
+          return clips.map(b => {
+            const volPct = b.volumePercent ?? Math.round((volumes[trId] ?? 1.0) * 100);
+            return {
+              id: b.id,
+              dubberNick: b.dubberName,
+              characterName: b.characterName,
+              startSec: Number((b.clipStartSec + (b.offsetSec || 0)).toFixed(2)),
+              endSec: Number((b.clipStartSec + (b.offsetSec || 0) + b.durationSec).toFixed(2)),
+              durationSec: Number(b.durationSec.toFixed(2)),
+              text: b.text,
+              volumePercent: volPct,
+              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2)),
+              pan: 0,
+              timeStretch: 1.0,
+              headTrimSec: 0,
+              tailTrimSec: 0
+            };
+          });
+        })
+      };
+
+      try {
+        await ipcSafe.invoke('mixing-save-timing-metadata', {
+          episode: currentEpisode,
+          timingMetadata
+        });
+      } catch (e) {}
+
       await ipcSafe.invoke('export-sound-engineer-files', {
         episode: currentEpisode,
+        targetDir: targetDir || undefined,
         skipConversion: false,
         smartExport: true,
         autoApplyFixes: true,
@@ -2316,11 +2600,20 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           <button
             onClick={handleImportFromQA}
             disabled={isLoading}
-            className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl text-xs font-semibold flex items-center gap-2 border border-neutral-700 transition"
-            title="1. Бэкап и экспорт всех дорожек до манипуляций"
+            className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl text-xs font-semibold flex items-center gap-2 border border-neutral-700 transition disabled:opacity-60"
+            title="1. Импорт дорожек: импорт и сборка дорожек дабберов из QA в тайминг"
           >
-            <Download className="w-4 h-4 text-blue-400" />
-            <span>1. Бэкап дорожек</span>
+            {isImporting ? (
+              <>
+                <Loader2 className="w-4 h-4 text-blue-400 animate-spin shrink-0" />
+                <span>Импорт {importProgress > 0 ? `(${importProgress}%)` : '...'}</span>
+              </>
+            ) : (
+              <>
+                <Download className="w-4 h-4 text-blue-400" />
+                <span>1. Импорт дорожек</span>
+              </>
+            )}
           </button>
 
           <button
@@ -2410,8 +2703,99 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         </div>
       )}
 
+      {/* Import & Processing Progress Bar */}
+      {isLoading && (
+        <div className="bg-neutral-900/95 border-b border-indigo-500/40 px-4 py-2 flex flex-col gap-1.5 shadow-lg z-40 shrink-0 animate-in fade-in slide-in-from-top-1 duration-200">
+          <div className="flex items-center justify-between text-xs">
+            <div className="flex items-center gap-2">
+              <Loader2 className="w-3.5 h-3.5 text-blue-400 animate-spin shrink-0" />
+              <span className="font-semibold text-neutral-200">
+                {statusMessage || 'Импорт и обработка дорожек на таймлайн...'}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-mono text-indigo-300 font-bold bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-700/50">
+                {importProgress}%
+              </span>
+            </div>
+          </div>
+          <div className="w-full bg-neutral-950 rounded-full h-2 overflow-hidden border border-neutral-800">
+            <div 
+              className="bg-gradient-to-r from-blue-500 via-indigo-500 to-amber-400 h-full rounded-full transition-all duration-300 shadow-[0_0_12px_rgba(99,102,241,0.6)]"
+              style={{ width: `${Math.max(4, Math.min(100, importProgress))}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Track Navigation & View Modes Bar */}
+      <div className="bg-[#0b0d14] border-b border-neutral-800 px-4 py-1.5 flex items-center justify-between gap-3 text-xs shrink-0 select-none">
+        {/* Left: Tracks Count Badge & Quick Track Jump Buttons */}
+        <div className="flex items-center gap-2 overflow-x-auto py-0.5 scrollbar-thin max-w-[70%]">
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800 text-neutral-300 font-semibold shrink-0">
+            <Layers className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Дорожки: <strong className="text-white font-mono">{tracks.length}</strong></span>
+          </div>
+
+          {tracks.map((t) => {
+            const clipsCount = (audioClips[t.id] || []).length;
+            const isMuted = mutedTracks.has(t.id);
+            return (
+              <button
+                key={t.id}
+                onClick={() => {
+                  const el = document.getElementById(`track-row-${t.id}`);
+                  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }}
+                className={`px-2.5 py-1 rounded-lg border text-[11px] flex items-center gap-1.5 shrink-0 transition ${
+                  isMuted 
+                    ? 'bg-red-950/40 border-red-900/60 text-red-300 hover:bg-red-900/50' 
+                    : 'bg-neutral-900/90 hover:bg-neutral-800 border-neutral-800 hover:border-neutral-700 text-neutral-200'
+                }`}
+                title={`Перейти к дорожке: ${t.participant} (${clipsCount} фраз). Нажмите для прокрутки.`}
+              >
+                <span className={`w-2 h-2 rounded-full shrink-0 ${isMuted ? 'bg-red-500' : 'bg-emerald-500'}`} />
+                <span className="font-bold truncate max-w-[130px]">{t.participant}</span>
+                <span className="text-[10px] text-neutral-400 font-mono">({clipsCount})</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Right: Height view toggle */}
+        <div className="flex items-center gap-1 shrink-0 bg-neutral-900 border border-neutral-800 rounded-lg p-0.5">
+          <button
+            onClick={() => setTrackHeightMode('standard')}
+            className={`px-2 py-1 rounded text-[11px] font-medium transition ${
+              trackHeightMode === 'standard' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+            }`}
+            title="Стандартная высота: 112px для детального редактирования вейвформы"
+          >
+            Стандартный (112px)
+          </button>
+          <button
+            onClick={() => setTrackHeightMode('compact')}
+            className={`px-2 py-1 rounded text-[11px] font-medium transition ${
+              trackHeightMode === 'compact' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+            }`}
+            title="Компактный вид: 64px — все 8 дорожек помещаются на экране"
+          >
+            Компактный (64px)
+          </button>
+          <button
+            onClick={() => setTrackHeightMode('fit')}
+            className={`px-2 py-1 rounded text-[11px] font-medium transition ${
+              trackHeightMode === 'fit' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+            }`}
+            title="Уместить все дорожки на одном экране без скролла"
+          >
+            Уместить все ({tracks.length})
+          </button>
+        </div>
+      </div>
+
       {/* Main Multitrack Workspace: Synchronized Top Bar and Unified Vertical Scroll */}
-      <div className="flex-1 flex flex-col overflow-hidden select-none">
+      <div className="flex-1 flex flex-col overflow-hidden relative select-none">
         {/* Top Header Row: Left Title + Timecode Ruler (horizontal scroll synchronized) */}
         <div className="h-9 bg-neutral-900 border-b border-neutral-800 flex shrink-0 z-30">
           <div className="w-64 border-r border-neutral-800 px-3 flex items-center text-[11px] font-bold text-neutral-400 uppercase tracking-wider shrink-0 bg-neutral-900">
@@ -2419,7 +2803,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </div>
           <div 
             ref={timeRulerContainerRef}
-            className="flex-1 overflow-hidden relative font-mono text-[10px] text-neutral-400 bg-neutral-900/90"
+            onClick={handleTimeRulerClick}
+            className="flex-1 overflow-hidden relative font-mono text-[10px] text-neutral-400 bg-neutral-900/90 cursor-pointer"
           >
             <div 
               className="relative h-full"
@@ -2443,352 +2828,481 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </div>
         </div>
 
-        {/* Unified Vertical Scrolling Body: Track Headers and Timeline Lanes scroll together simultaneously! */}
+        {/* Unified DAW Multitrack Workspace: Single scroll container handles vertical and horizontal DAW scrolling */}
         <div 
-          ref={unifiedScrollContainerRef}
-          className="flex-1 flex overflow-y-auto overflow-x-hidden relative bg-[#06070a]"
+          ref={timelineContainerRef}
+          onScroll={handleTimelineScroll}
+          onWheel={handleTimelineWheel}
+          className="flex-1 overflow-auto relative bg-[#06070a]"
         >
-          {/* Left Column: Track Headers */}
-          <div 
-            onWheel={handleSidebarWheel}
-            className="w-64 bg-neutral-900/80 border-r border-neutral-800 shrink-0 flex flex-col select-none"
-          >
-            {/* Original Video Track Header (Exactly h-16 = 64px) */}
-            <div className="h-16 p-2.5 border-b border-neutral-800/80 bg-neutral-950/50 flex flex-col justify-between shrink-0">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
-                  <Activity className="w-3.5 h-3.5" />
-                  Оригинал (Видео)
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] text-neutral-500">Громкость:</span>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={originalVolume}
-                  onChange={(e) => setOriginalVolume(Number(e.target.value))}
-                  className="w-full accent-amber-500 h-1 bg-neutral-800 rounded"
-                />
+          {/* Prominent Import Progress Card Overlay during initial import or re-import */}
+          {isLoading && tracks.length === 0 && (
+            <div className="absolute inset-0 bg-[#07090e]/95 backdrop-blur-sm z-50 flex flex-col items-center justify-center p-6 text-center">
+              <div className="max-w-xl w-full bg-neutral-900/90 border border-indigo-500/40 rounded-2xl p-6 shadow-2xl flex flex-col gap-4 animate-in zoom-in-95 duration-200">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3 text-left">
+                    <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
+                      <Activity className="w-5 h-5 animate-pulse" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-white">Импорт и декодирование аудиодорожек</h3>
+                      <p className="text-xs text-neutral-400">Подготовка DAW-таймлайна для серии #{currentEpisode?.number || 1}</p>
+                    </div>
+                  </div>
+                  <span className="font-mono text-base font-extrabold text-indigo-400 bg-indigo-950/80 px-3 py-1 rounded-lg border border-indigo-700/60">
+                    {importProgress}%
+                  </span>
+                </div>
+
+                {/* Big Progress Bar */}
+                <div className="space-y-1.5">
+                  <div className="w-full bg-neutral-950 rounded-full h-3 overflow-hidden border border-neutral-800 p-0.5">
+                    <div 
+                      className="bg-gradient-to-r from-blue-500 via-indigo-500 to-amber-400 h-full rounded-full transition-all duration-300 shadow-[0_0_16px_rgba(99,102,241,0.8)]"
+                      style={{ width: `${Math.max(4, Math.min(100, importProgress))}%` }}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-neutral-400">
+                    <span className="truncate pr-2 font-mono text-neutral-300">{statusMessage || 'Обработка...'}</span>
+                    <span className="shrink-0 text-indigo-300 font-mono">{importProgress}%</span>
+                  </div>
+                </div>
+
+                {/* Track decoding checklist */}
+                {importDecodedTracks.length > 0 && (
+                  <div className="bg-neutral-950/70 border border-neutral-800/80 rounded-xl p-3 max-h-48 overflow-y-auto text-left text-xs space-y-1.5 font-mono">
+                    <div className="text-[10px] text-neutral-400 font-sans uppercase font-bold tracking-wider mb-1 flex items-center justify-between">
+                      <span>Декодирование дорожек ({importDecodedTracks.filter(t => t.status === 'done').length}/{importDecodedTracks.length}):</span>
+                      <span className="text-indigo-400">WebAudio PCM</span>
+                    </div>
+                    {importDecodedTracks.map(t => (
+                      <div key={t.id} className="flex items-center justify-between py-0.5 text-[11px]">
+                        <span className="flex items-center gap-2 truncate pr-2 text-neutral-200">
+                          {t.status === 'done' ? <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" /> :
+                           t.status === 'decoding' ? <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin shrink-0" /> :
+                           t.status === 'error' ? <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0" /> :
+                           <Clock className="w-3.5 h-3.5 text-neutral-600 shrink-0" />}
+                          <span className={t.status === 'decoding' ? 'text-indigo-300 font-bold' : ''}>{t.name}</span>
+                        </span>
+                        <span className="text-[10px] text-neutral-500 shrink-0">
+                          {t.duration ? `${t.duration.toFixed(1)}s` : t.status === 'decoding' ? 'декодирование...' : 'ожидание'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
+          )}
 
-            {/* Dubber Tracks Headers: Exactly h-6 for subtitles, h-28 for audio */}
-            {tracks.map(track => {
-              const dubberName = track.participant || track.dubberName || 'Даббер';
-              const characterName = track.character || track.characterName || 'Персонаж';
-
-              return (
-                <React.Fragment key={track.id}>
-                  {/* Subtitle Lane Header (Exactly h-6 = 24px) */}
-                  <div className="h-6 bg-[#0e1222] border-b border-indigo-900/40 px-2.5 flex items-center text-indigo-300 text-[9px] font-bold font-mono tracking-wider shrink-0 uppercase">
-                    <span>💬 Сабы: {characterName}</span>
-                  </div>
-
-                  {/* Audio Track Header (Exactly h-28 = 112px) */}
-                  <div className="h-28 p-2.5 border-b border-neutral-800 flex flex-col justify-between hover:bg-neutral-900/40 transition shrink-0">
-                    <div>
-                      <div className="flex items-center justify-between">
-                        <div className="truncate pr-1">
-                          <div className="text-xs font-bold text-neutral-100 truncate">
-                            🎙 {dubberName}
-                          </div>
-                          <div className="text-[10px] text-indigo-400 truncate font-mono">
-                            {characterName}
-                          </div>
-                        </div>
-
-                        <button
-                          onClick={() => setMutedTracks(prev => {
-                            const next = new Set(prev);
-                            if (next.has(track.id)) next.delete(track.id);
-                            else next.add(track.id);
-                            return next;
-                          })}
-                          className={`p-1 rounded text-xs transition ${
-                            mutedTracks.has(track.id) ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
-                          }`}
-                        >
-                          {mutedTracks.has(track.id) ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                        </button>
-                      </div>
-
-                      {/* Track Type Badge & File Info */}
-                      <div className="mt-1 flex items-center gap-1.5 overflow-hidden">
-                        {track.id.includes('_fix_') ? (
-                          <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60 uppercase shrink-0">
-                            Фикс
-                          </span>
-                        ) : track.participant.includes('Дорожка 2') ? (
-                          <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800/60 uppercase shrink-0">
-                            Слой 2 (Внахлест)
-                          </span>
-                        ) : (
-                          <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 uppercase shrink-0">
-                            Основная
-                          </span>
-                        )}
-                        <span 
-                          className="text-[9px] text-neutral-400 font-mono truncate hover:text-neutral-200"
-                          title={track.filePath}
-                        >
-                          {track.filePath.split(/[/\\]/).pop()}
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Volume Control Presets */}
-                    <div className="space-y-1 pt-1 border-t border-neutral-800/50">
-                      <div className="flex items-center justify-between text-[9px] text-neutral-400">
-                        <span>Громкость роли:</span>
-                        <span className="font-mono text-amber-300 font-bold">
-                          {Math.round((volumes[track.id] ?? 1.0) * 100)}%
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => handleSetRoleVolume(track.id, 1.0)}
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                            (volumes[track.id] ?? 1.0) === 1.0 ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
-                          }`}
-                        >
-                          100%
-                        </button>
-                        <button
-                          onClick={() => handleSetRoleVolume(track.id, 0.7)}
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                            (volumes[track.id] ?? 1.0) === 0.7 ? 'bg-amber-600 text-white border-amber-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
-                          }`}
-                        >
-                          70%
-                        </button>
-                        <button
-                          onClick={() => handleSetRoleVolume(track.id, 0.5)}
-                          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
-                            (volumes[track.id] ?? 1.0) === 0.5 ? 'bg-purple-600 text-white border-purple-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
-                          }`}
-                        >
-                          50%
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                </React.Fragment>
-              );
-            })}
-          </div>
-
-          {/* Right Column: Timeline Tracks Lanes (Horizontal scroll via overflow-x-auto, inherits vertical scroll from parent) */}
           <div 
-            ref={timelineContainerRef}
-            onScroll={handleTimelineHorizontalScroll}
-            onWheel={handleTimelineWheel}
-            onClick={handleTimelineClick}
-            className="flex-1 overflow-x-auto overflow-y-hidden relative cursor-crosshair"
+            className="flex flex-col relative"
+            style={{ width: `${256 + Math.max(800, duration * zoomLevel)}px` }}
           >
-            <div 
-              className="relative min-h-full"
-              style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
-            >
-              {/* Playhead Cursor Line */}
-              <div
-                className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-40 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
-                style={{ left: `${currentTime * zoomLevel}px` }}
-              />
+            {/* Track 1: Original Audio Track Row (h-16 = 64px) */}
+            <div className="flex h-16 border-b border-neutral-800/80 bg-neutral-950/50 shrink-0">
+              {/* Sticky Header */}
+              <div className="w-64 sticky left-0 z-20 shrink-0 bg-neutral-950 border-r border-neutral-800/80 p-2.5 flex flex-col justify-between select-none">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5">
+                    <Activity className="w-3.5 h-3.5" />
+                    Оригинал (Видео)
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] text-neutral-500">Громкость:</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={originalVolume}
+                    onChange={(e) => setOriginalVolume(Number(e.target.value))}
+                    className="w-full accent-amber-500 h-1 bg-neutral-800 rounded"
+                  />
+                </div>
+              </div>
 
-              {/* Track 1: Original Audio Track */}
-              <div className="h-16 border-b border-neutral-800/80 bg-neutral-950/30 relative flex items-center">
+              {/* Original Track Lane */}
+              <div 
+                onClick={handleTimelineClick}
+                className="relative shrink-0 flex items-center bg-neutral-950/30 overflow-hidden cursor-crosshair"
+                style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
+              >
+                {/* Playhead Cursor Line */}
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                  style={{ left: `${currentTime * zoomLevel}px` }}
+                />
                 <div className="absolute inset-0 opacity-15 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:16px_100%]" />
                 <div className="absolute inset-x-0 h-10 my-auto bg-blue-500/10 border-y border-blue-500/20 rounded flex items-center justify-center text-[10px] text-blue-300 font-mono">
                   Оригинальный звук серии ({formatSeconds(duration)})
                 </div>
               </div>
+            </div>
 
-              {/* Tracks 2..N: Subtitle Lane + Audio Clip Track Lane */}
-              {tracks.map(track => {
+            {/* Tracks 2..N: Subtitle Row + Audio Clip Track Row for each track */}
+            {tracks.map(track => {
               const clips = audioClips[track.id] || [];
               const isMuted = mutedTracks.has(track.id);
               const matchingSubs = trackSubLinesMap[track.id] || [];
+              const dubberName = track.participant || track.dubberName || 'Даббер';
+              const characterName = track.character || track.characterName || 'Персонаж';
+
+              const subHeightClass = trackHeightMode === 'compact' ? 'h-5' : trackHeightMode === 'fit' ? 'h-4' : 'h-6';
+              const audioHeightClass = trackHeightMode === 'compact' ? 'h-16' : trackHeightMode === 'fit' ? 'h-14' : 'h-28';
 
               return (
-                <React.Fragment key={track.id}>
-                  {/* Clean Subtitle Cues Lane (Above Audio Track) */}
-                  <div className="h-6 border-b border-indigo-900/40 bg-[#0c1020] relative flex items-center overflow-hidden">
-                    {matchingSubs.map(sub => (
+                <div key={track.id} id={`track-row-${track.id}`} className="flex flex-col shrink-0">
+                  {/* Subtitle Lane Row */}
+                  <div className={`flex ${subHeightClass} border-b border-indigo-900/40 bg-[#0e1222] shrink-0`}>
+                    <div className="w-64 sticky left-0 z-20 shrink-0 bg-[#0e1222] border-r border-indigo-900/40 px-2.5 flex items-center text-indigo-300 text-[9px] font-bold font-mono tracking-wider uppercase select-none">
+                      <span className="truncate">💬 Сабы: {characterName}</span>
+                    </div>
+                    <div 
+                      onClick={handleTimelineClick}
+                      className="relative shrink-0 bg-[#0c1020] flex items-center overflow-hidden cursor-crosshair"
+                      style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
+                    >
+                      {/* Playhead Cursor Line */}
                       <div
-                        key={sub.id}
-                        className="absolute inset-y-0.5 bg-indigo-900/70 border border-indigo-500/60 rounded px-1.5 text-[9px] text-indigo-100 font-mono truncate flex items-center leading-none shadow-sm"
-                        style={{
-                          left: `${sub.startSec * zoomLevel}px`,
-                          width: `${Math.max(24, (sub.endSec - sub.startSec) * zoomLevel)}px`
-                        }}
-                        title={`Субтитры [${formatSeconds(sub.startSec)} - ${formatSeconds(sub.endSec)}]: ${sub.text}`}
-                      >
-                        💬 {sub.text}
-                      </div>
-                    ))}
+                        className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                        style={{ left: `${currentTime * zoomLevel}px` }}
+                      />
+                      {matchingSubs.map(sub => (
+                        <div
+                          key={sub.id}
+                          className="absolute inset-y-0.5 bg-indigo-900/70 border border-indigo-500/60 rounded px-1.5 text-[9px] text-indigo-100 font-mono truncate flex items-center leading-none shadow-sm"
+                          style={{
+                            left: `${sub.startSec * zoomLevel}px`,
+                            width: `${Math.max(24, (sub.endSec - sub.startSec) * zoomLevel)}px`
+                          }}
+                          title={`Субтитры [${formatSeconds(sub.startSec)} - ${formatSeconds(sub.endSec)}]: ${sub.text}`}
+                        >
+                          💬 {sub.text}
+                        </div>
+                      ))}
+                    </div>
                   </div>
 
-                  {/* DAW Audio Waveform Lane: Empty where silence, Real Waveforms inside clips */}
-                  <div 
-                    className={`h-28 border-b border-neutral-800/80 relative flex items-center bg-[#090b10] overflow-hidden select-none transition ${
-                      isMuted ? 'opacity-30' : ''
-                    }`}
-                  >
-                    {/* Subtle DAW track background grid lines */}
-                    <div className="absolute inset-0 opacity-10 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:32px_100%]" />
-                    <div className="absolute inset-x-0 top-1/2 h-px bg-neutral-800/40 pointer-events-none" />
-
-                    {/* Sliced Real Audio Clips with PCM Waveforms */}
-                    {clips.map(clip => {
-                      const clipLeftPx = (clip.clipStartSec + (clip.offsetSec || 0)) * zoomLevel;
-                      const clipWidthPx = Math.max(36, clip.durationSec * zoomLevel);
-                      const isSelected = selectedClipId === clip.id;
-
-                      return (
-                        <div
-                          key={clip.id}
-                          onClick={(e) => { e.stopPropagation(); setSelectedClipId(clip.id); }}
-                          onMouseDown={(e) => handleClipMouseDown(e, track.id, clip)}
-                          className={`absolute top-1 bottom-1 rounded-md border flex flex-col justify-between overflow-hidden shadow-lg transition-all cursor-grab active:cursor-grabbing select-none ${
-                            clip.hasCollision
-                              ? 'bg-red-950/90 border-red-500 shadow-red-500/20'
-                              : clip.isSelfOverlap
-                              ? 'bg-purple-950/90 border-purple-400 shadow-purple-500/20'
-                              : clip.isFix
-                              ? 'bg-amber-950/90 border-amber-400 shadow-amber-500/20'
-                              : isSelected
-                              ? 'bg-indigo-900/90 border-indigo-300 ring-2 ring-indigo-400 shadow-indigo-500/30'
-                              : 'bg-[#151a2d]/90 border-indigo-600/80 hover:border-indigo-400'
-                          }`}
-                          style={{
-                            left: `${clipLeftPx}px`,
-                            width: `${clipWidthPx}px`
-                          }}
-                          title={`Клип: ${clip.dubberName} (${formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))})\nСубтитры: "${clip.text}"${clip.recognizedText ? `\nРаспознано Виспером: "${clip.recognizedText}" (сходство: ${clip.whisperMatchedScore || 100}%)` : ''}\nДлительность: ${clip.durationSec.toFixed(2)}с (от тишины до тишины)`}
-                        >
-                          {/* Left Edge Resize Handle (Reveals audio from silence or trims start) */}
-                          <div
-                            onMouseDown={(e) => handleResizeMouseDown(e, track.id, clip, 'start')}
-                            className="absolute top-0 bottom-0 left-0 w-2.5 z-30 cursor-ew-resize group/edge flex items-center justify-center hover:bg-amber-400/40 transition-colors"
-                            title="Потяните влево для раскрытия начала фразы из тишины, или вправо для подрезки"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <div className="w-0.5 h-6 rounded-full bg-neutral-400/50 group-hover/edge:bg-amber-300 group-hover/edge:w-1 transition-all" />
-                          </div>
-
-                          {/* Right Edge Resize Handle (Reveals audio from silence or trims tail) */}
-                          <div
-                            onMouseDown={(e) => handleResizeMouseDown(e, track.id, clip, 'end')}
-                            className="absolute top-0 bottom-0 right-0 w-2.5 z-30 cursor-ew-resize group/edge flex items-center justify-center hover:bg-amber-400/40 transition-colors"
-                            title="Потяните вправо для раскрытия хвоста фразы (вздоха/затухания) из тишины, или влево для подрезки"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <div className="w-0.5 h-6 rounded-full bg-neutral-400/50 group-hover/edge:bg-amber-300 group-hover/edge:w-1 transition-all" />
-                          </div>
-
-                          {/* Clip Top Header Badge */}
-                          <div className={`px-2 py-0.5 text-[9px] font-mono flex items-center justify-between border-b ${
-                            clip.isFix 
-                              ? 'bg-amber-900/60 border-amber-500/40 text-amber-200' 
-                              : clip.hasCollision
-                              ? 'bg-red-900/60 border-red-500/40 text-red-200'
-                              : clip.isSelfOverlap
-                              ? 'bg-purple-900/60 border-purple-500/40 text-purple-200'
-                              : 'bg-indigo-950/80 border-indigo-800/50 text-indigo-200'
-                          }`}>
-                            <div className="flex items-center gap-1 truncate font-bold">
-                              {clip.isFix && <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black">ФИКС</span>}
-                              {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">КОЛЛИЗИЯ</span>}
-                              {clip.isSelfOverlap && <span className="bg-purple-500 text-white px-1 rounded text-[8px] font-black">СЛОЙ</span>}
-                              {clip.recognizedText && (
-                                <span className="bg-emerald-600/90 text-white px-1 rounded text-[7.5px] font-mono font-bold" title={`Виспер: "${clip.recognizedText}"`}>
-                                  ASR
-                                </span>
-                              )}
-                              <span>{formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))}</span>
-                              <span className="text-neutral-300 font-sans truncate max-w-[110px] font-medium opacity-90" title={clip.recognizedText ? `Субтитры: "${clip.text}"\nВиспер: "${clip.recognizedText}"` : clip.text}>
-                                {clip.text}
-                              </span>
+                  {/* Audio Track Row */}
+                  <div className={`flex ${audioHeightClass} border-b border-neutral-800 bg-[#090b10] shrink-0`}>
+                    {/* Sticky Audio Header */}
+                    <div className={`w-64 sticky left-0 z-20 shrink-0 bg-neutral-900 border-r border-neutral-800 ${trackHeightMode === 'fit' ? 'p-1.5' : 'p-2.5'} flex flex-col justify-between hover:bg-neutral-900/90 transition select-none`}>
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <div className="truncate pr-1">
+                            <div className="text-xs font-bold text-neutral-100 truncate">
+                              🎙 {dubberName}
                             </div>
-                            <span className="text-[8px] font-bold text-amber-300 shrink-0">
-                              {clip.volumePercent || 100}%
+                            <div className="text-[10px] text-indigo-400 truncate font-mono">
+                              {characterName}
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => setMutedTracks(prev => {
+                              const next = new Set(prev);
+                              if (next.has(track.id)) next.delete(track.id);
+                              else next.add(track.id);
+                              return next;
+                            })}
+                            className={`p-1 rounded text-xs transition ${
+                              mutedTracks.has(track.id) ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
+                            }`}
+                          >
+                            {mutedTracks.has(track.id) ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                          </button>
+                        </div>
+
+                        {/* Track Type Badge & File Info */}
+                        <div className="mt-0.5 flex items-center gap-1.5 overflow-hidden">
+                          {track.id.includes('_fix_') ? (
+                            <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60 uppercase shrink-0">
+                              Фикс
                             </span>
-                          </div>
+                          ) : track.participant.includes('Дорожка 2') ? (
+                            <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-purple-950/80 text-purple-300 border border-purple-800/60 uppercase shrink-0">
+                              Слой 2 (Внахлест)
+                            </span>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-indigo-950/80 text-indigo-300 border border-indigo-800/60 uppercase shrink-0">
+                              Основная
+                            </span>
+                          )}
+                          <span 
+                            className="text-[9px] text-neutral-400 font-mono truncate hover:text-neutral-200"
+                            title={track.filePath}
+                          >
+                            {track.filePath.split(/[/\\]/).pop()}
+                          </span>
+                        </div>
+                      </div>
 
-                          {/* Real Waveform Canvas inside Clip */}
-                          <div className="flex-1 w-full relative overflow-hidden">
-                            <ClipWaveform
-                              audioBuffer={audioBuffersRef.current[clip.sourceAudioTrackId || track.id]}
-                              sourceStartSec={clip.sourceStartSec}
-                              sourceEndSec={clip.sourceEndSec}
-                              width={Math.round(clipWidthPx)}
-                              height={68}
-                              color={clip.hasCollision ? '#ef4444' : clip.isSelfOverlap ? '#c084fc' : clip.isFix ? '#fbbf24' : '#818cf8'}
-                              volumePercent={clip.volumePercent}
-                            />
-                            {clip.recognizedText && clip.recognizedText !== clip.text && (
-                              <div className="absolute bottom-1 left-1 right-1 pointer-events-none px-1 py-0.5 rounded bg-black/80 text-[8px] text-emerald-300 font-sans italic truncate border border-emerald-500/30">
-                                🎙 {clip.recognizedText}
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Clip Bottom Action Tools (Split, Expand & Nudge) */}
-                          <div className="px-1 py-0.5 bg-black/50 flex items-center justify-between opacity-0 hover:opacity-100 transition text-[8px] z-20">
-                            <div className="flex items-center gap-0.5">
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleSplitClip(track.id, clip.id); }}
-                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 font-bold"
-                                title="Разрезать клип на 2 части"
-                              >
-                                ✂
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleExpandClip(track.id, clip.id, 'start', 0.25); }}
-                                className="px-1 py-0.5 bg-amber-950/70 hover:bg-amber-800 text-amber-300 rounded border border-amber-700/60 font-mono"
-                                title="Раскрыть начало на +0.25с из тишины"
-                              >
-                                ◀+0.25с
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleExpandClip(track.id, clip.id, 'end', 0.25); }}
-                                className="px-1 py-0.5 bg-amber-950/70 hover:bg-amber-800 text-amber-300 rounded border border-amber-700/60 font-mono"
-                                title="Раскрыть хвост на +0.25с из тишины"
-                              >
-                                +0.25с▶
-                              </button>
-                            </div>
-                            <div className="flex items-center gap-0.5">
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, -0.05); }}
-                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 font-mono"
-                                title="-50 мс"
-                              >
-                                -50ms
-                              </button>
-                              <button
-                                onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, 0.05); }}
-                                className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 font-mono"
-                                title="+50 мс"
-                              >
-                                +50ms
-                              </button>
-                            </div>
+                      {/* Volume Control Presets */}
+                      {trackHeightMode === 'compact' || trackHeightMode === 'fit' ? (
+                        <div className="flex items-center justify-between pt-0.5 border-t border-neutral-800/40 text-[9px] text-neutral-400">
+                          <span className="font-mono text-amber-300 font-bold">
+                            {Math.round((volumes[track.id] ?? 1.0) * 100)}%
+                          </span>
+                          <div className="flex items-center gap-0.5">
+                            <button
+                              onClick={() => handleSetRoleVolume(track.id, 1.0)}
+                              className={`px-1 py-0.5 rounded text-[8px] font-semibold border ${
+                                (volumes[track.id] ?? 1.0) === 1.0 ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                              }`}
+                            >
+                              100%
+                            </button>
+                            <button
+                              onClick={() => handleSetRoleVolume(track.id, 0.7)}
+                              className={`px-1 py-0.5 rounded text-[8px] font-semibold border ${
+                                (volumes[track.id] ?? 1.0) === 0.7 ? 'bg-amber-600 text-white border-amber-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                              }`}
+                            >
+                              70%
+                            </button>
                           </div>
                         </div>
-                      );
-                    })}
+                      ) : (
+                        <div className="space-y-1 pt-1 border-t border-neutral-800/50">
+                          <div className="flex items-center justify-between text-[9px] text-neutral-400">
+                            <span>Громкость роли:</span>
+                            <span className="font-mono text-amber-300 font-bold">
+                              {Math.round((volumes[track.id] ?? 1.0) * 100)}%
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleSetRoleVolume(track.id, 1.0)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                                (volumes[track.id] ?? 1.0) === 1.0 ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                              }`}
+                            >
+                              100%
+                            </button>
+                            <button
+                              onClick={() => handleSetRoleVolume(track.id, 0.7)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                                (volumes[track.id] ?? 1.0) === 0.7 ? 'bg-amber-600 text-white border-amber-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                              }`}
+                            >
+                              70%
+                            </button>
+                            <button
+                              onClick={() => handleSetRoleVolume(track.id, 0.5)}
+                              className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border transition ${
+                                (volumes[track.id] ?? 1.0) === 0.5 ? 'bg-purple-600 text-white border-purple-500' : 'bg-neutral-800 text-neutral-400 border-neutral-700'
+                              }`}
+                            >
+                              50%
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Audio Lane */}
+                    <div 
+                      onClick={handleTimelineClick}
+                      className={`relative shrink-0 flex items-center bg-[#090b10] overflow-hidden select-none transition cursor-crosshair ${
+                        isMuted ? 'opacity-30' : ''
+                      }`}
+                      style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
+                    >
+                      {/* Playhead Cursor Line */}
+                      <div
+                        className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                        style={{ left: `${currentTime * zoomLevel}px` }}
+                      />
+                      {/* Subtle DAW track background grid lines */}
+                      <div className="absolute inset-0 opacity-10 bg-[linear-gradient(90deg,#3b82f6_1px,transparent_1px)] bg-[size:32px_100%]" />
+                      <div className="absolute inset-x-0 top-1/2 h-px bg-neutral-800/40 pointer-events-none" />
+
+                      {/* Sliced Real Audio Clips with PCM Waveforms */}
+                      {clips.map(clip => {
+                        const clipLeftPx = (clip.clipStartSec + (clip.offsetSec || 0)) * zoomLevel;
+                        const clipWidthPx = Math.max(36, clip.durationSec * zoomLevel);
+                        const isSelected = selectedClipId === clip.id;
+
+                        return (
+                          <div
+                            key={clip.id}
+                            onClick={(e) => { e.stopPropagation(); setSelectedClipId(clip.id); }}
+                            onMouseDown={(e) => handleClipMouseDown(e, track.id, clip)}
+                            className={`absolute top-1 bottom-1 rounded-md border flex flex-col justify-between overflow-hidden shadow-lg transition-all cursor-grab active:cursor-grabbing select-none ${
+                              clip.hasCollision
+                                ? 'bg-red-950/90 border-red-500 shadow-red-500/20'
+                                : clip.isSelfOverlap
+                                ? 'bg-purple-950/90 border-purple-400 shadow-purple-500/20'
+                                : clip.isFix
+                                ? 'bg-amber-950/90 border-amber-400 shadow-amber-500/20'
+                                : isSelected
+                                ? 'bg-indigo-900/90 border-indigo-300 ring-2 ring-indigo-400 shadow-indigo-500/30'
+                                : 'bg-[#151a2d]/90 border-indigo-600/80 hover:border-indigo-400'
+                            }`}
+                            style={{
+                              left: `${clipLeftPx}px`,
+                              width: `${clipWidthPx}px`
+                            }}
+                            title={`Клип: ${clip.dubberName} (${formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))})\nСубтитры: "${clip.text}"${clip.recognizedText ? `\nРаспознано Виспером: "${clip.recognizedText}" (сходство: ${clip.whisperMatchedScore || 100}%)` : ''}\nДлительность: ${clip.durationSec.toFixed(2)}с (от тишины до тишины)`}
+                          >
+                            {/* Left Edge Resize Handle (Reveals audio from silence or trims start) */}
+                            <div
+                              onMouseDown={(e) => handleResizeMouseDown(e, track.id, clip, 'start')}
+                              className="absolute top-0 bottom-0 left-0 w-2.5 z-30 cursor-ew-resize group/edge flex items-center justify-center hover:bg-amber-400/40 transition-colors"
+                              title="Потяните влево для раскрытия начала фразы из тишины, или вправо для подрезки"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="w-0.5 h-6 rounded-full bg-neutral-400/50 group-hover/edge:bg-amber-300 group-hover/edge:w-1 transition-all" />
+                            </div>
+
+                            {/* Right Edge Resize Handle (Reveals audio from silence or trims tail) */}
+                            <div
+                              onMouseDown={(e) => handleResizeMouseDown(e, track.id, clip, 'end')}
+                              className="absolute top-0 bottom-0 right-0 w-2.5 z-30 cursor-ew-resize group/edge flex items-center justify-center hover:bg-amber-400/40 transition-colors"
+                              title="Потяните вправо для раскрытия хвоста фразы (вздоха/затухания) из тишины, или влево для подрезки"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="w-0.5 h-6 rounded-full bg-neutral-400/50 group-hover/edge:bg-amber-300 group-hover/edge:w-1 transition-all" />
+                            </div>
+
+                            {/* Clip Top Header Badge */}
+                            <div className={`px-2 py-0.5 text-[9px] font-mono flex items-center justify-between border-b ${
+                              clip.isFix 
+                                ? 'bg-amber-900/60 border-amber-500/40 text-amber-200' 
+                                : clip.hasCollision
+                                ? 'bg-red-900/60 border-red-500/40 text-red-200'
+                                : clip.isSelfOverlap
+                                ? 'bg-purple-900/60 border-purple-500/40 text-purple-200'
+                                : 'bg-indigo-950/80 border-indigo-800/50 text-indigo-200'
+                            }`}>
+                              <div className="flex items-center gap-1 truncate font-bold">
+                                {clip.isFix && <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black">ФИКС</span>}
+                                {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">КОЛЛИЗИЯ</span>}
+                                {clip.isSelfOverlap && <span className="bg-purple-500 text-white px-1 rounded text-[8px] font-black">СЛОЙ</span>}
+                                {clip.recognizedText && (
+                                  <span className="bg-emerald-600/90 text-white px-1 rounded text-[7.5px] font-mono font-bold" title={`Виспер: "${clip.recognizedText}"`}>
+                                    ASR
+                                  </span>
+                                )}
+                                <span>{formatSeconds(clip.clipStartSec + (clip.offsetSec || 0))}</span>
+                                <span className="text-neutral-300 font-sans truncate max-w-[110px] font-medium opacity-90" title={clip.recognizedText ? `Субтитры: "${clip.text}"\nВиспер: "${clip.recognizedText}"` : clip.text}>
+                                  {clip.text}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <span className="text-[8px] font-bold text-amber-300">
+                                  {clip.volumePercent || 100}%
+                                </span>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteClip(clip.id, track.id);
+                                  }}
+                                  className="p-0.5 text-neutral-400 hover:text-red-300 hover:bg-red-900/60 rounded transition"
+                                  title="Удалить фразу / лишний звук (Delete)"
+                                >
+                                  <Trash2 className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Real Waveform Canvas inside Clip */}
+                            <div className="flex-1 w-full relative overflow-hidden">
+                              <ClipWaveform
+                                audioBuffer={audioBuffersRef.current[clip.sourceAudioTrackId || track.id]}
+                                sourceStartSec={clip.sourceStartSec}
+                                sourceEndSec={clip.sourceEndSec}
+                                width={Math.round(clipWidthPx)}
+                                height={68}
+                                color={clip.hasCollision ? '#ef4444' : clip.isSelfOverlap ? '#c084fc' : clip.isFix ? '#fbbf24' : '#818cf8'}
+                                volumePercent={clip.volumePercent}
+                              />
+                              {clip.recognizedText && clip.recognizedText !== clip.text && (
+                                <div className="absolute bottom-1 left-1 right-1 pointer-events-none px-1 py-0.5 rounded bg-black/80 text-[8px] text-emerald-300 font-sans italic truncate border border-emerald-500/30">
+                                  🎙 {clip.recognizedText}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Clip Bottom Action Tools (Split, Expand & Nudge) */}
+                            <div className="px-1 py-0.5 bg-black/50 flex items-center justify-between opacity-0 hover:opacity-100 transition text-[8px] z-20">
+                              <div className="flex items-center gap-0.5">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleSplitClip(track.id, clip.id); }}
+                                  className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 font-bold"
+                                  title="Разрезать клип на 2 части"
+                                >
+                                  ✂
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleExpandClip(track.id, clip.id, 'start', 0.25); }}
+                                  className="px-1 py-0.5 bg-amber-950/70 hover:bg-amber-800 text-amber-300 rounded border border-amber-700/60 font-mono"
+                                  title="Раскрыть начало на +0.25с из тишины"
+                                >
+                                  ◀+0.25с
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleExpandClip(track.id, clip.id, 'end', 0.25); }}
+                                  className="px-1 py-0.5 bg-amber-950/70 hover:bg-amber-800 text-amber-300 rounded border border-amber-700/60 font-mono"
+                                  title="Раскрыть хвост на +0.25с из тишины"
+                                >
+                                  +0.25с▶
+                                </button>
+                              </div>
+                              <div className="flex items-center gap-0.5">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, -0.05); }}
+                                  className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 font-mono"
+                                  title="-50 мс"
+                                >
+                                  -50ms
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleNudgeClip(track.id, clip.id, 0.05); }}
+                                  className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded border border-neutral-700 font-mono"
+                                  title="+50 мс"
+                                >
+                                  +50ms
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleDeleteClip(clip.id, track.id); }}
+                                  className="px-1 py-0.5 bg-red-950/80 hover:bg-red-800 text-red-300 hover:text-white rounded border border-red-700/60 font-bold ml-0.5 transition"
+                                  title="Удалить фразу из тайминга и монтажа (Delete)"
+                                >
+                                  <Trash2 className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
-                </React.Fragment>
+                </div>
               );
             })}
+
+            {/* Bottom floating scroll hint when in standard height mode and tracks exceed screen */}
+            {tracks.length > 4 && trackHeightMode === 'standard' && (
+              <div className="sticky bottom-3 z-30 flex justify-center pointer-events-none mt-2">
+                <button
+                  onClick={() => {
+                    if (timelineContainerRef.current) {
+                      timelineContainerRef.current.scrollTop += 300;
+                    }
+                  }}
+                  className="pointer-events-auto bg-neutral-900/95 hover:bg-neutral-800 text-neutral-200 border border-indigo-500/50 hover:border-indigo-400 px-4 py-1.5 rounded-full text-xs font-semibold shadow-2xl flex items-center gap-2 backdrop-blur transition hover:scale-105"
+                >
+                  <ChevronDown className="w-3.5 h-3.5 text-indigo-400 animate-bounce" />
+                  <span>Всего {tracks.length} дорожек. Нажмите для скролла или переключите «Компактный вид»</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
-    </div>
 
       {/* Footer Playback, Inspector & Zoom Controls */}
       <footer className="bg-neutral-900 border-t border-neutral-800 p-2.5 px-4 shrink-0 flex items-center justify-between gap-4">
@@ -2865,6 +3379,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 title="Сбросить границы клипа к исходной детекции"
               >
                 Сброс
+              </button>
+              <button
+                onClick={() => handleDeleteClip(activeSelectedClip.clip.id, activeSelectedClip.trackId)}
+                className="px-2 py-0.5 bg-red-950/80 hover:bg-red-800 text-red-300 hover:text-white rounded text-[10px] font-semibold border border-red-700/60 transition flex items-center gap-1 ml-1"
+                title="Удалить выбранную фразу / шум (Delete)"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>Удалить (Del)</span>
               </button>
             </div>
           </div>

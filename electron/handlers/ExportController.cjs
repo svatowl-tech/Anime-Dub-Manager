@@ -117,12 +117,58 @@ function registerExportHandlers(getData, mainWindow) {
     };
   }));
 
-  ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming }) => {
-    if (!episode || !targetDir) throw new Error('Missing required parameters');
+  ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, payloadOrEpisode, maybeTargetDir, maybeSkipConv, maybeSmartExp, maybeAddProc, maybeAutoFix, maybeIncSubs, maybeAutoTiming) => {
+    let episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming;
+    
+    if (payloadOrEpisode && typeof payloadOrEpisode === 'object') {
+      if (payloadOrEpisode.episode) {
+        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming } = payloadOrEpisode);
+      } else if (payloadOrEpisode.id || payloadOrEpisode.number !== undefined || payloadOrEpisode.projectId) {
+        episode = payloadOrEpisode;
+        targetDir = maybeTargetDir;
+        skipConversion = maybeSkipConv;
+        smartExport = maybeSmartExp;
+        additionalProcessing = maybeAddProc;
+        autoApplyFixes = maybeAutoFix;
+        includeSubtitles = maybeIncSubs;
+        autoTiming = maybeAutoTiming;
+      } else {
+        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming } = payloadOrEpisode);
+      }
+    } else {
+      episode = payloadOrEpisode;
+      targetDir = maybeTargetDir;
+      skipConversion = maybeSkipConv;
+      smartExport = maybeSmartExp;
+      additionalProcessing = maybeAddProc;
+      autoApplyFixes = maybeAutoFix;
+      includeSubtitles = maybeIncSubs;
+      autoTiming = maybeAutoTiming;
+    }
+
+    if (!episode) {
+      const episodesData = await getData('episodes.json').catch(() => []);
+      if (Array.isArray(episodesData) && episodesData.length > 0) {
+        episode = episodesData[0];
+      }
+    }
+
+    if (!episode) throw new Error('Missing required parameter: episode');
     
     const config = await getData('config.json');
     const baseDir = config.baseDir || app.getPath('userData');
-    const exportDir = path.isAbsolute(targetDir) ? targetDir : path.join(baseDir, targetDir);
+    const MixingPipelineService = require('../services/MixingPipelineService.cjs');
+    
+    let exportDir = targetDir;
+    if (!exportDir || typeof exportDir !== 'string' || !exportDir.trim()) {
+      exportDir = MixingPipelineService.getDefaultTargetDir(episode, baseDir);
+    } else if (!path.isAbsolute(exportDir.trim())) {
+      const epDir = MixingPipelineService.getEpisodeDir(episode, baseDir);
+      exportDir = path.resolve(epDir, exportDir.trim());
+    } else {
+      exportDir = exportDir.trim();
+    }
+    
     const projectsData = await getData('projects.json');
     const participantsData = await getData('participants.json');
 

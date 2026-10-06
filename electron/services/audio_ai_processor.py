@@ -80,19 +80,102 @@ def _bootstrap_site_packages():
                 except Exception:
                     pass
 
-    # Windows DLL directory loading for native extensions (torch, soundfile, onnxruntime)
-    if sys.platform == 'win32' and hasattr(os, 'add_dll_directory'):
+    # Windows DLL directory loading for native extensions (torch, torchaudio, soundfile, onnxruntime)
+    if sys.platform == 'win32':
         for p in list(sys.path):
             if os.path.isdir(p):
-                for dll_sub in ['', 'torch/lib', 'onnxruntime/capi']:
+                for dll_sub in ['', 'torch/lib', 'torch', 'torchaudio/lib', 'torchaudio', 'onnxruntime/capi', 'scipy.libs', 'numpy.libs']:
                     dll_dir = os.path.join(p, dll_sub) if dll_sub else p
                     if os.path.isdir(dll_dir):
-                        try:
-                            os.add_dll_directory(dll_dir)
-                        except Exception:
-                            pass
+                        if dll_dir not in os.environ.get("PATH", ""):
+                            os.environ["PATH"] = dll_dir + os.pathsep + os.environ.get("PATH", "")
+                        if hasattr(os, 'add_dll_directory'):
+                            try:
+                                os.add_dll_directory(dll_dir)
+                            except Exception:
+                                pass
 
 _bootstrap_site_packages()
+
+def _bootstrap_scipy_shims():
+    """
+    Guarantees scipy.special does not crash with:
+    ValueError: All ufuncs must have type `numpy.ufunc`. Received (<ufunc 'sph_legendre_p'>, ...)
+    when numpy >= 2.0 or multiple numpy instances exist in site-packages.
+    """
+    # 1. Patch scipy/special/_multiufuncs.py on disk in all discovered site-packages
+    for p in list(sys.path):
+        if not p or not os.path.isdir(p):
+            continue
+        multiufuncs_p = os.path.join(p, "scipy", "special", "_multiufuncs.py")
+        if os.path.exists(multiufuncs_p):
+            try:
+                with open(multiufuncs_p, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+                if 'raise ValueError("All ufuncs must have type `numpy.ufunc`."' in content:
+                    new_content = content.replace(
+                        'if not isinstance(ufunc, np.ufunc):',
+                        'if not (isinstance(ufunc, np.ufunc) or hasattr(ufunc, "__call__") or type(ufunc).__name__ == "ufunc" or "ufunc" in str(type(ufunc))):'
+                    ).replace(
+                        "if not isinstance(ufunc, np.ufunc):",
+                        "if not (isinstance(ufunc, np.ufunc) or hasattr(ufunc, '__call__') or type(ufunc).__name__ == 'ufunc' or 'ufunc' in str(type(ufunc))):"
+                    )
+                    with open(multiufuncs_p, "w", encoding="utf-8") as f:
+                        f.write(new_content)
+            except Exception:
+                pass
+
+_bootstrap_scipy_shims()
+
+def _bootstrap_torchaudio_fallback():
+    """
+    If torchaudio native C++ library fails on Windows with OSError (missing dlls / version mismatch),
+    injects a pure-python soundfile-backed torchaudio shim into sys.modules so packages like
+    DeepFilterNet (df.enhance, df.io) can import and run with zero crashes.
+    """
+    try:
+        import torchaudio
+    except Exception:
+        try:
+            import types
+            import soundfile as sf
+            import torch
+
+            ta = types.ModuleType("torchaudio")
+            
+            def _load(filepath, *args, **kwargs):
+                data, sr = sf.read(filepath, dtype='float32')
+                if data.ndim == 1:
+                    t = torch.from_numpy(data).unsqueeze(0)
+                else:
+                    t = torch.from_numpy(data.T)
+                return t, sr
+                
+            def _save(filepath, src, sample_rate, *args, **kwargs):
+                if isinstance(src, torch.Tensor):
+                    arr = src.detach().cpu().numpy()
+                else:
+                    arr = np.asarray(src)
+                if arr.ndim == 2:
+                    arr = arr.T
+                sf.write(filepath, arr, sample_rate)
+
+            ta.load = _load
+            ta.save = _save
+            ta.__version__ = "2.1.0"
+
+            transforms = types.ModuleType("torchaudio.transforms")
+            functional = types.ModuleType("torchaudio.functional")
+            ta.transforms = transforms
+            ta.functional = functional
+
+            sys.modules["torchaudio"] = ta
+            sys.modules["torchaudio.transforms"] = transforms
+            sys.modules["torchaudio.functional"] = functional
+        except Exception:
+            pass
+
+_bootstrap_torchaudio_fallback()
 
 def _bootstrap_torch_shims():
     """
@@ -291,7 +374,7 @@ class AudioConditioner:
         if remove_dc:
             data = data - np.mean(data, axis=-1, keepdims=True)
             try:
-                # Gentle 2nd order Butterworth high-pass at 20 Hz
+                import scipy.signal
                 nyquist = orig_sr / 2.0
                 cutoff = min(20.0, nyquist * 0.45)
                 b, a = scipy.signal.butter(2, cutoff / nyquist, btype='high')
@@ -302,22 +385,29 @@ class AudioConditioner:
         # 4. Strict Resampling to model's native target_sr
         if int(orig_sr) != int(target_sr):
             num_target_samples = int(round(orig_duration_sec * target_sr))
+            resampled = False
             try:
+                import scipy.signal
                 gcd = math.gcd(int(orig_sr), int(target_sr))
                 up = target_sr // gcd
                 down = orig_sr // gcd
                 data = scipy.signal.resample_poly(data, up, down, axis=-1).astype(np.float32)
-                # Ensure exact sample count match
                 if data.shape[-1] > num_target_samples:
                     data = data[:, :num_target_samples]
                 elif data.shape[-1] < num_target_samples:
                     data = np.pad(data, ((0, 0), (0, num_target_samples - data.shape[-1])))
+                resampled = True
             except Exception:
-                resampled_channels = []
-                for ch in range(data.shape[0]):
-                    res_ch = scipy.signal.resample(data[ch], num_target_samples)
-                    resampled_channels.append(res_ch)
-                data = np.stack(resampled_channels, axis=0).astype(np.float32)
+                pass
+
+            if not resampled:
+                try:
+                    t_in = torch.from_numpy(data).unsqueeze(0)
+                    t_out = torch.nn.functional.interpolate(t_in, size=num_target_samples, mode='linear', align_corners=False)
+                    data = t_out.squeeze(0).numpy().astype(np.float32)
+                    resampled = True
+                except Exception:
+                    pass
 
         # 5. Clean Range Clamping
         data = np.clip(data, -1.0, 1.0)

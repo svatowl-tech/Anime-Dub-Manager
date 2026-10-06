@@ -1387,22 +1387,91 @@ class MixingPipelineService {
     }
   }
 
-  getDefaultTargetDir(episode, baseDir = '') {
+  getEpisodeDir(episode, baseDir = '') {
+    if (!episode) return '';
+    const epNum = episode.number !== undefined ? episode.number : 1;
+
+    // 1. Try to derive directly from rawPath or subPath
+    const refPath = episode?.rawPath || episode?.subPath;
+    if (refPath && typeof refPath === 'string' && path.isAbsolute(refPath)) {
+      try {
+        const fileDir = path.dirname(refPath);
+        const fileDirName = path.basename(fileDir).toLowerCase();
+        
+        // Check if fileDir is directly the episode folder (e.g. Episode_1, Ep1, Серия_1, 01, ep_01, or contains epNum)
+        const isExplicitEpFolder = /^(episode|ep|серия|выпуск)[\s_.-]*\d+/i.test(fileDirName) ||
+                                   /^\d+$/.test(fileDirName) ||
+                                   fileDirName.includes(String(epNum));
+        
+        if (isExplicitEpFolder) {
+          return fileDir;
+        }
+
+        // If fileDir is the project folder, check if an episode subfolder exists
+        const candidates = [
+          path.join(fileDir, `Episode_${epNum}`),
+          path.join(fileDir, `Серия_${epNum}`),
+          path.join(fileDir, `Ep_${epNum}`),
+          path.join(fileDir, `ep_${epNum}`),
+          path.join(fileDir, String(epNum).padStart(2, '0')),
+          path.join(fileDir, String(epNum))
+        ];
+        for (const cand of candidates) {
+          if (fsSync.existsSync(cand)) {
+            return cand;
+          }
+        }
+
+        // If fileDir is where media files are stored directly, check if fileDir has raw video
+        if (fsSync.existsSync(refPath)) {
+          return path.join(fileDir, `Episode_${epNum}`);
+        }
+        return fileDir;
+      } catch (e) {}
+    }
+
+    // 2. Derive using baseDir and project title
     const root = this.getBaseRoot(baseDir, episode);
     const projectTitle = (episode?.project?.title || 'Project').replace(/[\/:*?"<>|]/g, '_');
-    const epNum = episode?.number !== undefined ? episode.number : 1;
-    return path.join(root, 'Сведение', `${projectTitle}_Серия_${epNum}`);
+    
+    const projDir = path.join(root, projectTitle);
+    const candFolders = [
+      path.join(projDir, `Episode_${epNum}`),
+      path.join(projDir, `Серия_${epNum}`),
+      path.join(projDir, `Ep_${epNum}`),
+      path.join(projDir, String(epNum).padStart(2, '0')),
+      path.join(projDir, String(epNum))
+    ];
+    for (const cand of candFolders) {
+      if (fsSync.existsSync(cand)) {
+        return cand;
+      }
+    }
+
+    return path.join(projDir, `Episode_${epNum}`);
+  }
+
+  getDefaultTargetDir(episode, baseDir = '') {
+    const epDir = this.getEpisodeDir(episode, baseDir);
+    // User request:
+    // "все данные по работе со звуком сохранялись в папке текущей серии проекта.
+    // Просто там подпапка создалась Сведения, и в этой же папке всё сохранялось, чтобы всё хранилось в одном месте и не было разношёрстности."
+    const svedeniyaPath = path.join(epDir, 'Сведения');
+    const svedenieLegacyPath = path.join(epDir, 'Сведение');
+    if (!fsSync.existsSync(svedeniyaPath) && fsSync.existsSync(svedenieLegacyPath)) {
+      return svedenieLegacyPath;
+    }
+    return svedeniyaPath;
   }
 
   resolveWorkingDir(targetDir, episode, baseDir = '') {
-    const root = this.getBaseRoot(baseDir, episode);
     if (!targetDir || typeof targetDir !== 'string' || !targetDir.trim()) {
-      return this.getDefaultTargetDir(episode, root);
+      return this.getDefaultTargetDir(episode, baseDir);
     }
     const trimmed = targetDir.trim();
     if (!path.isAbsolute(trimmed)) {
-      // Relative path: resolve relative to base root, NEVER relative to process.cwd() (C:\Program Files...)!
-      return path.resolve(root, trimmed);
+      const epDir = this.getEpisodeDir(episode, baseDir);
+      return path.resolve(epDir, trimmed);
     }
     return trimmed;
   }
@@ -1419,7 +1488,7 @@ class MixingPipelineService {
         const fallbackRoot = (app && typeof app.getPath === 'function')
           ? app.getPath('userData')
           : path.join(require('os').homedir(), '.anime-dub-manager');
-        const fallbackDir = path.join(fallbackRoot, 'Сведение', path.basename(dirPath));
+        const fallbackDir = path.join(fallbackRoot, 'Сведения', path.basename(path.dirname(dirPath)), path.basename(dirPath));
         await fs.mkdir(fallbackDir, { recursive: true });
         if (logFn) logFn(`Директория перенаправлена в безопасную пользовательскую папку: «${fallbackDir}»`, 'info');
         return fallbackDir;
@@ -1527,26 +1596,34 @@ class MixingPipelineService {
 
     const audioExts = /\.(wav|mp3|flac|ogg|m4a|aac)$/i;
     const rawDir = path.join(workingDir, '00_исходные');
-    const rawFiles = fsSync.existsSync(rawDir) ? fsSync.readdirSync(rawDir).filter(f => audioExts.test(f)) : [];
-    
-    // If 00_исходные has audio files, use ONLY 00_исходные to avoid picking up intermediate pipeline renders from workingDir
-    const searchDirs = rawFiles.length > 0 
-      ? [rawDir] 
-      : [workingDir].filter(d => fsSync.existsSync(d));
+    const backupDir = path.join(workingDir, 'бэкап', 'исходные_дорожки_до_автотайминга');
+    const backupRoot = path.join(workingDir, 'бэкап');
+
+    const searchDirs = [rawDir, workingDir, backupDir, backupRoot].filter(d => fsSync.existsSync(d));
+
+    // Pipeline step output prefixes that should not be considered original dubber source files
+    const pipelinePrefixes = (manifest.pipeline || []).map((s, idx) => {
+      const numPrefix = `${String(idx + 1).padStart(2, '0')}_${s.moduleId}`;
+      return [s.prefix, numPrefix, `${s.moduleId}_`];
+    }).flat().filter(Boolean);
+
+    const isStepOutputFile = (filename) => {
+      const lower = filename.toLowerCase();
+      if (lower.includes('00_original_audio') || lower.includes('[сведено]') || lower.includes('video_mux')) return true;
+      if (/^(0[1-9]|1[0-9])_(denoise|deepfilter|glue|compress|master|video_mux|eq|limiter|reverb|delay|mix)/i.test(filename)) return true;
+      return pipelinePrefixes.some(pfx => pfx && filename.startsWith(pfx));
+    };
 
     const foundDubberTracks = [];
     for (const sDir of searchDirs) {
       const dirFiles = fsSync.readdirSync(sDir).filter(f => audioExts.test(f));
       for (const f of dirFiles) {
-        if (
-          /^\d{1,2}_/.test(f) ||
-          f.includes('00_original_audio') ||
-          /master|glue|denoise|deepfilter|mix|compress|release/i.test(f)
-        ) {
+        if (isStepOutputFile(f)) {
           continue;
         }
+
         const baseNoExt = f.replace(audioExts, '');
-        // Skip files without letters (e.g. pure numbers, timestamps, pipeline indices)
+        // Skip files without letters (e.g. pure numbers, timestamps, step indices)
         if (!/[a-zA-Zа-яА-ЯёЁ]/.test(baseNoExt) || /^[\d\s._-]+$/.test(baseNoExt)) {
           continue;
         }
@@ -1574,8 +1651,8 @@ class MixingPipelineService {
           continue;
         }
 
-        // Prevent duplicate paths or filenames
-        if (foundDubberTracks.some(t => t.path === fullP || t.name === f)) {
+        // Prevent duplicate paths or same dubber track already found from a higher priority directory (e.g. 00_исходные)
+        if (foundDubberTracks.some(t => t.path === fullP || (t.name === f && t.size === st.size))) {
           continue;
         }
 
@@ -1584,6 +1661,24 @@ class MixingPipelineService {
           name: f,
           dubberNick: dubberNick.trim(),
           path: fullP,
+          size: st.size,
+          exists: true
+        });
+      }
+    }
+
+    // Fallback: If no files found on disk yet, but episode has QA uploads, use episode uploads
+    if (foundDubberTracks.length === 0 && Array.isArray(episode?.uploads)) {
+      const qaUploads = episode.uploads.filter(u => (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && u.path && fsSync.existsSync(u.path));
+      for (const u of qaUploads) {
+        const f = path.basename(u.path);
+        const st = fsSync.statSync(u.path);
+        const dubberNick = (u.dubberNick || u.dubberName || u.name || f).replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').trim();
+        foundDubberTracks.push({
+          id: f,
+          name: f,
+          dubberNick: dubberNick || 'Даббер',
+          path: u.path,
           size: st.size,
           exists: true
         });
