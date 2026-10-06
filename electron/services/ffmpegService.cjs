@@ -41,8 +41,16 @@ let processIdCounter = 0;
 function addProcess(commandLine, commandInstance = null) {
   const id = ++processIdCounter;
   activeProcesses.push({ id, commandLine, command: commandInstance });
-  if (commandInstance && commandInstance.ffmpegProc) {
-    trackProcess(commandInstance.ffmpegProc);
+  if (commandInstance) {
+    if (commandInstance.ffmpegProc) {
+      trackProcess(commandInstance.ffmpegProc);
+    } else if (typeof commandInstance.on === 'function') {
+      commandInstance.once('start', () => {
+        if (commandInstance.ffmpegProc) {
+          trackProcess(commandInstance.ffmpegProc);
+        }
+      });
+    }
   }
   return id;
 }
@@ -749,9 +757,9 @@ async function transferAudioPhrase(sourcePath, targetPath, startSec, endSec, opt
 
   await new Promise((resolve, reject) => {
     const filterComplex = [
-      `[0:a]aresample=48000,aformat=channel_layouts=stereo[target_base]`,
-      `[1:a]aresample=48000,aformat=channel_layouts=stereo,adelay=${delayMs}|${delayMs}[phrase_delayed]`,
-      `[target_base][phrase_delayed]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1'[out]`
+      `[0:a]aresample=48000:async=1,aformat=sample_fmts=s16:channel_layouts=stereo[target_base]`,
+      `[1:a]aresample=48000:async=1,aformat=sample_fmts=s16:channel_layouts=stereo,adelay=${delayMs}|${delayMs}[phrase_delayed]`,
+      `[target_base][phrase_delayed]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1',alimiter=limit=0.95:attack=5:release=50[out]`
     ].join(';');
 
     const cmd = ffmpeg()
@@ -1035,15 +1043,15 @@ async function applyFixesToOriginalAudio(originalPath, fixPath, outputPath, opti
   else if (ext === '.m4a' || ext === '.aac') audioCodec = 'aac';
 
   // Build filter chain with resample and amix
-  let fixInputFilter = `aresample=48000,aformat=channel_layouts=stereo`;
+  let fixInputFilter = `aresample=48000:async=1,aformat=sample_fmts=s16:channel_layouts=stereo`;
   if (delayMs > 0) {
     fixInputFilter = `adelay=${delayMs}|${delayMs},${fixInputFilter}`;
   }
 
   const filterComplex = [
-    `[0:a]aresample=48000,aformat=channel_layouts=stereo,${origMuteFilter}[orig_muted]`,
+    `[0:a]aresample=48000:async=1,aformat=sample_fmts=s16:channel_layouts=stereo,${origMuteFilter}[orig_muted]`,
     `[1:a]${fixInputFilter}[fix_ready]`,
-    `[orig_muted][fix_ready]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1'[out]`
+    `[orig_muted][fix_ready]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1',alimiter=limit=0.95:attack=5:release=50[out]`
   ].join(';');
 
   const tempOut = path.join(path.dirname(outputPath), `temp_auto_fix_${Date.now()}_${Math.random().toString(36).slice(2, 7)}${ext}`);

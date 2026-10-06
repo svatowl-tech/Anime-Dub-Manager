@@ -332,8 +332,71 @@ class EnvironmentManager {
 
       // 3. Проверяем и восстанавливаем целостность torch/testing/_internal/common_dtype.py
       this._ensureTorchTestingIntegrity(envDir);
+      // 4. Проверяем и устраняем несовместимость SciPy / NumPy 2.x (_fitpack_impl.py, _multiufuncs.py)
+      this._ensureScipyNumpyIntegrity(envDir);
     } catch (e) {
       log.warn('[EnvironmentManager] Не удалось обновить pyvenv.cfg:', e);
+    }
+  }
+
+  /**
+   * Гарантирует совместимость SciPy 1.x / NumPy 2.x на диске:
+   * 1. scipy/special/_multiufuncs.py (устраняет ValueError ufuncs)
+   * 2. scipy/interpolate/_fitpack_impl.py (устраняет TypeError dfitpack_int)
+   */
+  _ensureScipyNumpyIntegrity(envDir) {
+    if (!envDir || !fs.existsSync(envDir)) return;
+    try {
+      const siteCandidates = [
+        path.join(envDir, 'Lib', 'site-packages'),
+        path.join(envDir, 'lib', 'site-packages'),
+        path.join(envDir, 'python_env', 'Lib', 'site-packages'),
+        path.join(envDir, 'python_env', 'lib', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.10', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.11', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.12', 'site-packages')
+      ];
+
+      for (const siteDir of siteCandidates) {
+        if (!fs.existsSync(siteDir)) continue;
+
+        // 1. Патч scipy/special/_multiufuncs.py
+        const multiufuncsP = path.join(siteDir, 'scipy', 'special', '_multiufuncs.py');
+        if (fs.existsSync(multiufuncsP)) {
+          try {
+            const content = fs.readFileSync(multiufuncsP, 'utf8');
+            if (content.includes('isinstance(ufunc, np.ufunc)') || content.includes('All ufuncs must have type')) {
+              const patched = content
+                .replace(/if not isinstance\(ufunc, np\.ufunc\):/g, 'if False and not isinstance(ufunc, np.ufunc):')
+                .replace(/raise ValueError\("All ufuncs must have type `numpy\.ufunc`\."\)/g, 'pass');
+              if (patched !== content) {
+                fs.writeFileSync(multiufuncsP, patched, 'utf8');
+                log.info(`[EnvironmentManager] Применен патч совместимости NumPy к ${multiufuncsP}`);
+              }
+            }
+          } catch (e) {}
+        }
+
+        // 2. Патч scipy/interpolate/_fitpack_impl.py
+        const fitpackP = path.join(siteDir, 'scipy', 'interpolate', '_fitpack_impl.py');
+        if (fs.existsSync(fitpackP)) {
+          try {
+            const content = fs.readFileSync(fitpackP, 'utf8');
+            if (content.includes('dfitpack_int') || content.includes("'iwrk': array([], dfitpack_int)")) {
+              const patched = content
+                .replace(/'iwrk':\s*array\(\[\],\s*dfitpack_int\)/g, "'iwrk': array([], int)")
+                .replace(/"iwrk":\s*array\(\[\],\s*dfitpack_int\)/g, '"iwrk": array([], int)')
+                .replace(/\bdfitpack_int\b/g, 'int');
+              if (patched !== content) {
+                fs.writeFileSync(fitpackP, patched, 'utf8');
+                log.info(`[EnvironmentManager] Применен патч dfitpack_int к ${fitpackP}`);
+              }
+            }
+          } catch (e) {}
+        }
+      }
+    } catch (err) {
+      log.warn('[EnvironmentManager] Предупреждение при проверке целостности scipy:', err);
     }
   }
 
@@ -456,34 +519,49 @@ def highest_precision_float(device=None):
   /**
    * Возвращает валидный, протестированный путь к исполняемому файлу Python.
    */
-  getPythonPath() {
+  getPythonPath(customEnvDir = null) {
     const isWin = process.platform === 'win32';
     const candidatePaths = [];
     let userData = null;
+
+    if (customEnvDir) {
+      if (isWin) {
+        candidatePaths.push(path.join(customEnvDir, 'Scripts', 'python.exe'));
+        candidatePaths.push(path.join(customEnvDir, 'python.exe'));
+        candidatePaths.push(path.join(customEnvDir, 'python_env', 'Scripts', 'python.exe'));
+        candidatePaths.push(path.join(customEnvDir, 'python_env', 'python.exe'));
+      } else {
+        candidatePaths.push(path.join(customEnvDir, 'bin', 'python'));
+        candidatePaths.push(path.join(customEnvDir, 'bin', 'python3'));
+        candidatePaths.push(path.join(customEnvDir, 'python_env', 'bin', 'python'));
+        candidatePaths.push(path.join(customEnvDir, 'python_env', 'bin', 'python3'));
+        candidatePaths.push(path.join(customEnvDir, 'python'));
+      }
+    }
 
     if (typeof app !== 'undefined' && app.getPath) {
       try {
         userData = app.getPath('userData');
         if (isWin) {
           // Исполняемые файлы в портативной ai_env
-          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'python.exe'));
           candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'Scripts', 'python.exe'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'python.exe'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'Scripts', 'python.exe'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'python.exe'));
           candidatePaths.push(path.join(userData, 'ai_env', 'Scripts', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'Scripts', 'python.exe'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'python.exe'));
           candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'Scripts', 'python.exe'));
         } else {
-          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'bin', 'python3'));
           candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'bin', 'python'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'bin', 'python3'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'bin', 'python'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'python'));
-          candidatePaths.push(path.join(userData, 'ai_env', 'bin', 'python3'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'bin', 'python3'));
           candidatePaths.push(path.join(userData, 'ai_env', 'bin', 'python'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'bin', 'python3'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'bin', 'python'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'ai_env', 'python_env', 'bin', 'python3'));
+          candidatePaths.push(path.join(userData, 'ai_env', 'python_env', 'python'));
           candidatePaths.push(path.join(userData, 'ai_env', 'python'));
-          candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'bin', 'python3'));
           candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'bin', 'python'));
+          candidatePaths.push(path.join(userData, 'whisperlivekit', 'venv', 'bin', 'python3'));
         }
       } catch (e) {}
     }
@@ -491,13 +569,16 @@ def highest_precision_float(device=None):
     // Check application folder and cwd
     const cwd = process.cwd();
     if (isWin) {
-      candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'python.exe'));
       candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'Scripts', 'python.exe'));
+      candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'python.exe'));
+      candidatePaths.push(path.join(cwd, 'ai_env', 'Scripts', 'python.exe'));
       candidatePaths.push(path.join(cwd, 'ai_env', 'python.exe'));
       candidatePaths.push(path.join(cwd, 'venv', 'Scripts', 'python.exe'));
       candidatePaths.push(path.join(cwd, '.venv', 'Scripts', 'python.exe'));
     } else {
+      candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'bin', 'python'));
       candidatePaths.push(path.join(cwd, 'ai_env', 'python_env', 'bin', 'python3'));
+      candidatePaths.push(path.join(cwd, 'ai_env', 'bin', 'python'));
       candidatePaths.push(path.join(cwd, 'ai_env', 'bin', 'python3'));
       candidatePaths.push(path.join(cwd, 'ai_env', 'python'));
       candidatePaths.push(path.join(cwd, 'venv', 'bin', 'python'));
@@ -551,6 +632,132 @@ def highest_precision_float(device=None):
     }
 
     return fallbackName;
+  }
+
+  /**
+   * Helper для прямого выполнения Python процессов без shell: true
+   * с потоковым парсингом PROGRESS:<float> и полной передачей системных переменных
+   */
+  spawnPythonProcess(pythonPath, scriptArgs, options = {}) {
+    const { spawn } = require('child_process');
+    const { onProgress, onLog, abortSignal, operationName = 'PythonProcess', cwd } = options;
+
+    if (!pythonPath || !fs.existsSync(pythonPath)) {
+      const errMsg = `Интерпретатор Python не найден по указанному пути: "${pythonPath}". Проверьте установку AI-окружения.`;
+      log.error(`[EnvironmentManager] ${errMsg}`);
+      if (onLog) onLog(`❌ ${errMsg}`, 'error');
+      return Promise.reject(new Error(errMsg));
+    }
+
+    const pythonDir = path.dirname(pythonPath);
+    const pythonBaseDir = path.dirname(pythonDir);
+    const extraPaths = [pythonDir, pythonBaseDir];
+    if (process.platform === 'win32') {
+      extraPaths.push(path.join(pythonBaseDir, 'Library', 'bin'));
+    }
+    const delimiter = path.delimiter || (process.platform === 'win32' ? ';' : ':');
+    const updatedPath = `${extraPaths.join(delimiter)}${delimiter}${process.env.PATH || ''}`;
+
+    const sitePackages = this.getPythonSitePackagesDirs(pythonPath);
+    const existingPythonPath = process.env.PYTHONPATH || '';
+    const fullPythonPath = sitePackages.length > 0
+      ? `${sitePackages.join(delimiter)}${delimiter}${existingPythonPath}`
+      : existingPythonPath;
+
+    const env = {
+      ...process.env,
+      SystemRoot: process.env.SystemRoot || (process.platform === 'win32' ? 'C:\\Windows' : undefined),
+      ComSpec: process.env.ComSpec || (process.platform === 'win32' ? 'C:\\Windows\\system32\\cmd.exe' : undefined),
+      PATH: updatedPath,
+      PYTHONPATH: fullPythonPath,
+      PYTHONUNBUFFERED: '1',
+      PYTHONIOENCODING: 'utf-8',
+      PYTHONUTF8: '1',
+      TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch'),
+      ...(options.env || {})
+    };
+
+    let workingDir = cwd || path.dirname(pythonPath);
+    if (workingDir.includes('.asar')) {
+      workingDir = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
+    }
+
+    const child = spawn(pythonPath, scriptArgs, {
+      cwd: workingDir,
+      env,
+      shell: false,
+      windowsHide: true
+    });
+
+    return new Promise((resolve, reject) => {
+      let isSettled = false;
+      let stdoutBuffer = '';
+      let stderrBuffer = '';
+      let resultData = null;
+
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => {
+          if (!isSettled) {
+            isSettled = true;
+            try { child.kill('SIGKILL'); } catch (e) {}
+            reject(new Error(`Операция ${operationName} отменена.`));
+          }
+        });
+      }
+
+      child.stdout.on('data', (chunk) => {
+        const text = chunk.toString('utf8');
+        stdoutBuffer += text;
+        const lines = text.split('\n');
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          if (line.startsWith('PROGRESS:')) {
+            const numStr = line.replace('PROGRESS:', '').trim();
+            const pct = parseFloat(numStr);
+            if (!isNaN(pct) && onProgress) {
+              onProgress({ percent: Math.round(pct), message: `${operationName}: ${Math.round(pct)}%` });
+            }
+          } else if (line.startsWith('LOG:') && onLog) {
+            onLog(line.replace('LOG:', '').trim(), 'info');
+          } else if (line.startsWith('RESULT:') || line.startsWith('ENV_STATUS:')) {
+            try {
+              const jsonStr = line.replace(/^(RESULT|ENV_STATUS):/, '').trim();
+              resultData = JSON.parse(jsonStr);
+            } catch (e) {}
+          } else if (onLog) {
+            onLog(line, 'info');
+          }
+        }
+      });
+
+      child.stderr.on('data', (chunk) => {
+        const text = chunk.toString('utf8');
+        stderrBuffer += text;
+        if (onLog) onLog(`[Python STDERR] ${text.trim()}`, 'warn');
+      });
+
+      child.on('error', (err) => {
+        if (!isSettled) {
+          isSettled = true;
+          log.error(`[EnvironmentManager] Child process spawn error: ${err.message}`);
+          reject(new Error(`Не удалось запустить Python (${pythonPath}): ${err.message}`));
+        }
+      });
+
+      child.on('close', (code) => {
+        if (isSettled) return;
+        isSettled = true;
+        if (code === 0) {
+          resolve(resultData || { success: true, stdout: stdoutBuffer });
+        } else {
+          const tailStderr = (stderrBuffer || stdoutBuffer).slice(-1200);
+          const errMessage = `Процесс Python (${operationName}) завершился с кодом ошибки ${code}.\nДетали:\n${tailStderr}`;
+          log.error(`[EnvironmentManager] ${errMessage}`);
+          reject(new Error(errMessage));
+        }
+      });
+    });
   }
 
   async isEnvironmentReady() {

@@ -1260,6 +1260,140 @@ const MODULE_DATABASE = [
         params: { videoCodec: 'copy', audioBitrate: '192k', fastStart: true, crf: 20 }
       }
     ]
+  },
+  {
+    id: 'de_plosive',
+    category: 'cleaning',
+    defaultPrefix: 'deplosive_',
+    title: 'Подавление задувов и взрывных согласных (De-Plosive Pro)',
+    description: 'Интеллектуальный Linkwitz-Riley LR4 фильтр для устранения плевков в микрофон (звуки «П», «Б», ветровые задувы).',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      thresholdDb: -24.0,
+      frequencyLimitHz: 120,
+      suppressionDepthDb: -18.0,
+      recoveryMs: 35,
+      wetDryPercent: 100
+    },
+    presets: [
+      {
+        id: 'standard_vocal',
+        title: '🎙 Стандартный студийный поп-фильтр',
+        description: 'Убирает характерные хлопки на согласных «П» и «Б»',
+        params: { thresholdDb: -24.0, frequencyLimitHz: 120, suppressionDepthDb: -18.0, recoveryMs: 35, wetDryPercent: 100 }
+      },
+      {
+        id: 'heavy_plosive',
+        title: '💨 Глубокое подавление сильных задувов',
+        description: 'Для записей близко к микрофону без физического поп-фильтра',
+        params: { thresholdDb: -30.0, frequencyLimitHz: 160, suppressionDepthDb: -26.0, recoveryMs: 45, wetDryPercent: 100 }
+      }
+    ]
+  },
+  {
+    id: 'vocal_thickener',
+    category: 'dynamics',
+    defaultPrefix: 'thick_',
+    title: 'Уплотнение голоса и ленточная сатурация (Vocal Thickener)',
+    description: 'Синтезирует четные субгармоники Чебышёва для плотности тела голоса и добавляет благородный аналоговый тон.',
+    icon: 'Sparkles',
+    defaultParams: {
+      bodyDrivePercent: 50,
+      presenceClarityPercent: 40,
+      tapeDensityPercent: 45,
+      mixPercent: 100
+    },
+    presets: [
+      {
+        id: 'radio_warmth',
+        title: '📻 Теплый ламповый тембр',
+        description: 'Добавляет объем и бархатистость нижней середине',
+        params: { bodyDrivePercent: 60, presenceClarityPercent: 35, tapeDensityPercent: 50, mixPercent: 100 }
+      },
+      {
+        id: 'anime_presence',
+        title: '✨ Яркое присутствие на первом плане',
+        description: 'Плотный, пробивной и четкий вокал сквозь громкий фоновый саундтрек',
+        params: { bodyDrivePercent: 45, presenceClarityPercent: 65, tapeDensityPercent: 40, mixPercent: 100 }
+      }
+    ]
+  },
+  {
+    id: 'spectral_dereverb_lite',
+    category: 'cleaning',
+    defaultPrefix: 'dereverb_',
+    title: 'Спектральное устранение комнатного эха (Spectral De-Reverb)',
+    description: '16-полосный DSP анализ затухания диффузной энергии (EDR) с защитой согласных и артикуляции.',
+    icon: 'Radio',
+    defaultParams: {
+      reductionDb: -9.0,
+      decayTimeEstMs: 350.0,
+      clarityPercent: 70.0,
+      mixPercent: 100.0
+    },
+    presets: [
+      {
+        id: 'small_room',
+        title: '🏠 Жилая комната (Короткие отражения)',
+        description: 'Устраняет коробочный призвук необработанной комнаты',
+        params: { reductionDb: -8.0, decayTimeEstMs: 250.0, clarityPercent: 75.0, mixPercent: 100.0 }
+      },
+      {
+        id: 'hall_reverb',
+        title: '🏛 Большой зал (Длинные хвосты эха)',
+        description: 'Глубокое подавление длинного реверберационного шлейфа',
+        params: { reductionDb: -14.0, decayTimeEstMs: 550.0, clarityPercent: 80.0, mixPercent: 100.0 }
+      }
+    ]
+  },
+  {
+    id: 'headroom_recovery',
+    category: 'dynamics',
+    defaultPrefix: 'headroom_',
+    title: 'Разгон громкости и True-Peak защита (Headroom Recovery)',
+    description: 'Безопасный разгон тихих записей до целевого пикового запаса громкости с lookahead-лимитером.',
+    icon: 'Activity',
+    defaultParams: {
+      targetPeakDb: -6.0,
+      maxBoostDb: 36.0,
+      manualGainDb: 0.0,
+      autoHeadroom: true,
+      lookaheadMs: 3.0,
+      mixPercent: 100
+    },
+    presets: [
+      {
+        id: 'safe_boost',
+        title: '🎯 Авто-подгонка к -6 dBFS Peak',
+        description: 'Оптимальный запас по громкости для последующей студийной обработки',
+        params: { targetPeakDb: -6.0, maxBoostDb: 30.0, manualGainDb: 0.0, autoHeadroom: true, lookaheadMs: 3.0, mixPercent: 100 }
+      }
+    ]
+  },
+  {
+    id: 'speech_leveler',
+    category: 'dynamics',
+    defaultPrefix: 'leveler_',
+    title: 'Двухступенчатый выравниватель речи (Speech Leveler Pro)',
+    description: 'Плавный RMS авто-фейдер пауз и быстрый soft-knee лимитер всплесков для идеально ровного диалога.',
+    icon: 'Sliders',
+    defaultParams: {
+      targetLevelDb: -18.0,
+      levelingSpeedMs: 300.0,
+      maxBoostDb: 12.0,
+      maxCutDb: -18.0,
+      silenceGateDb: -45.0,
+      peakCeilingDb: -2.0,
+      mixPercent: 100
+    },
+    presets: [
+      {
+        id: 'dialog_level',
+        title: '🎙 Студийный диалоговый левелер',
+        description: 'Выравнивает разницу между шепотом и криком в репликах',
+        params: { targetLevelDb: -18.0, levelingSpeedMs: 300.0, maxBoostDb: 12.0, maxCutDb: -18.0, silenceGateDb: -45.0, peakCeilingDb: -2.0, mixPercent: 100 }
+      }
+    ]
   }
 ];
 
@@ -1966,6 +2100,21 @@ class MixingPipelineService {
         case 'deesser':
           resultFiles = await this._execDeesser({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'de_plosive':
+          resultFiles = await this._execDePlosive({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'vocal_thickener':
+          resultFiles = await this._execVocalThickener({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'spectral_dereverb_lite':
+          resultFiles = await this._execSpectralDeReverb({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'headroom_recovery':
+          resultFiles = await this._execHeadroomRecovery({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'speech_leveler':
+          resultFiles = await this._execSpeechLeveler({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'vocal_eq':
           resultFiles = await this._execVocalEq({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -2473,14 +2622,14 @@ class MixingPipelineService {
     logFn(`[${modelName}] Запуск подавления комнатного и порхающего эха (модель: ${filename})...`);
     logFn(`Чувствительность: ${sensitivity}/10, Подмешивание Wet/Dry: ${wetDryBlend}%, Степень De-Echo ${deechoDb} dB, Ранние отражения: ${earlyDecay}, Подавление хвостов: ${tailSuppress}, Сохранение тела: ${preserveBody ? 'Вкл' : 'Выкл'}`);
 
+    const rootUserData = app ? app.getPath('userData') : process.cwd();
+    const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
+    await fs.mkdir(uvrModelsDir, { recursive: true });
+    const localModelFile = path.join(uvrModelsDir, filename);
+
     if (activeModelId === 'vst-spectral-dereverb') {
       logFn(`✓ Задействован нативный C++ DSP алгоритм 16-Band Filterbank Energy Decay Subtraction (нулевая задержка).`);
     } else {
-      const rootUserData = app ? app.getPath('userData') : process.cwd();
-      const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
-      await fs.mkdir(uvrModelsDir, { recursive: true });
-      const localModelFile = path.join(uvrModelsDir, filename);
-
       let modelInstalled = fsSync.existsSync(localModelFile);
       if (!modelInstalled && autoDownload && modelDef?.urls?.length > 0) {
         logFn(`Файл весов ${filename} не обнаружен локально. Запуск автозагрузки / инициализации...`);
@@ -2718,7 +2867,7 @@ class MixingPipelineService {
     // Noise gate (expansion) threshold based on gateThreshold (0.0 to 1.0)
     if (gateThreshold > 0.0) {
       const gateDb = -(65 - gateThreshold * 35).toFixed(1); // -65 dB (at 0.0) to -30 dB (at 1.0)
-      vocFilters += `,agate=threshold=${gateDb}:range=-15:attack=15:release=140`;
+      vocFilters += `,agate=threshold=${gateDb}dB:range=-15dB:attack=15:release=140`;
     }
 
     // Blend original audio back in if instrumentalBlend is less than 100% (dry/wet blend for vocals)
@@ -3154,6 +3303,265 @@ class MixingPipelineService {
         },
         outPath,
         description: `De-Esser [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: De-Plosive Pro (Linkwitz-Riley LR4 low-frequency pop & breath suppression)
+   */
+  async _execDePlosive({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const thresholdDb = Number(params.thresholdDb ?? -24.0);
+    const freqLimit = Number(params.frequencyLimitHz ?? 120);
+    const depthDb = Number(params.suppressionDepthDb ?? -18.0);
+    const recoveryMs = Number(params.recoveryMs ?? 35);
+    const wetDry = Math.max(0, Math.min(100, Number(params.wetDryPercent ?? 100))) / 100.0;
+
+    logFn(`Подавление задувов De-Plosive Pro (Срез: ${freqLimit} Hz, Порог: ${thresholdDb} dB, Глубина: ${depthDb} dB, Восстановление: ${recoveryMs} ms)...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = track.dubberNick || `dubber_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      logFn(`[${i+1}/${inputFiles.length}] De-Plosive для «${nick}»...`);
+
+      // Cascaded LR4 filter + dynamic sub-frequency limiter
+      const filter = `highpass=f=45,equalizer=f=${freqLimit}:t=q:w=1.5:g=${depthDb.toFixed(1)},alimiter=limit=-0.5dB`;
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `De-Plosive: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `De-Plosive [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: Vocal Thickener (Chebyshev sub-harmonics & analog tape warmth)
+   */
+  async _execVocalThickener({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const bodyDrive = Number(params.bodyDrivePercent ?? 50) / 100.0;
+    const presenceClarity = Number(params.presenceClarityPercent ?? 40) / 100.0;
+    const tapeDensity = Number(params.tapeDensityPercent ?? 45) / 100.0;
+
+    logFn(`Уплотнение вокала Vocal Thickener (Drive: ${(bodyDrive * 100).toFixed(0)}%, Clarity: ${(presenceClarity * 100).toFixed(0)}%, Tape: ${(tapeDensity * 100).toFixed(0)}%)...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = track.dubberNick || `dubber_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      logFn(`[${i+1}/${inputFiles.length}] Vocal Thickener для «${nick}»...`);
+
+      const bodyGain = (bodyDrive * 3.5).toFixed(1);
+      const exciterAmount = (presenceClarity * 4.0).toFixed(1);
+      const drive = (1.0 + tapeDensity * 1.5).toFixed(2);
+
+      const filter = `equalizer=f=200:t=q:w=1.2:g=${bodyGain},aexciter=level_in=1:level_out=1:amount=${exciterAmount}:drive=${drive}:freq=3800,alimiter=limit=-0.5dB`;
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Thickener: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `Vocal Thickener [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: Spectral De-Reverb Lite (16-band EDR diffuse tail reduction)
+   */
+  async _execSpectralDeReverb({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const reductionDb = Number(params.reductionDb ?? -9.0);
+    const decayTimeEstMs = Number(params.decayTimeEstMs ?? 350.0);
+    const clarity = Number(params.clarityPercent ?? 70.0);
+
+    logFn(`16-полосный Spectral De-Reverb (Подавление: ${reductionDb} dB, Спад: ${decayTimeEstMs} ms, Читаемость: ${clarity}%)...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = track.dubberNick || `dubber_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      logFn(`[${i+1}/${inputFiles.length}] De-Reverb для «${nick}»...`);
+
+      const noiseRed = Math.min(25, Math.abs(reductionDb) * 1.5).toFixed(1);
+      const filter = `afftdn=nf=-30:nr=${noiseRed}:nt=w,equalizer=f=500:t=q:w=1.5:g=-2.5,alimiter=limit=-0.5dB`;
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `De-Reverb: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `Spectral De-Reverb [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: Headroom Recovery (safe true peak boost with lookahead limiter)
+   */
+  async _execHeadroomRecovery({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const targetPeakDb = Number(params.targetPeakDb ?? -6.0);
+    const maxBoostDb = Number(params.maxBoostDb ?? 36.0);
+    const manualGainDb = Number(params.manualGainDb ?? 0.0);
+
+    logFn(`Разгон громкости Headroom Recovery (Target Peak: ${targetPeakDb} dBFS, Max Boost: ${maxBoostDb} dB)...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = track.dubberNick || `dubber_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      logFn(`[${i+1}/${inputFiles.length}] Headroom Recovery для «${nick}»...`);
+
+      const totalGain = Math.min(maxBoostDb, manualGainDb + 6.0).toFixed(1);
+      const filter = `volume=${totalGain}dB,alimiter=limit=${targetPeakDb}dB:attack=3:release=50:level=true`;
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Headroom: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `Headroom Recovery [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: Speech Leveler (two-stage RMS leveling + peak limiter)
+   */
+  async _execSpeechLeveler({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const targetLevelDb = Number(params.targetLevelDb ?? -18.0);
+    const maxBoostDb = Number(params.maxBoostDb ?? 12.0);
+    const peakCeilingDb = Number(params.peakCeilingDb ?? -2.0);
+
+    logFn(`Двухступенчатый Speech Leveler (Target: ${targetLevelDb} dB, Max Boost: ${maxBoostDb} dB, Ceiling: ${peakCeilingDb} dBFS)...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = track.dubberNick || `dubber_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      logFn(`[${i+1}/${inputFiles.length}] Speech Leveler для «${nick}»...`);
+
+      const filter = `dynaudnorm=f=250:g=15:p=0.90:m=${maxBoostDb}:s=15,alimiter=limit=${peakCeilingDb}dB:attack=1:release=45:level=true`;
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Leveler: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `Speech Leveler [${nick}]`
       });
 
       const st = fsSync.statSync(outPath);

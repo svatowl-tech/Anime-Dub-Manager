@@ -127,26 +127,36 @@ class AudioNeuralService {
     const pythonPath = EnvironmentManager.getPythonPath();
     const scriptPath = this.getSidecarScriptPath();
 
-    // Превентивное восстановление torch/testing/_internal/common_dtype.py на диске
+    // Превентивное восстановление torch/testing/_internal/common_dtype.py и SciPy/NumPy 2.x совместимости на диске
     try {
       const pyDir = path.dirname(pythonPath);
       EnvironmentManager._ensureTorchTestingIntegrity(pyDir);
       EnvironmentManager._ensureTorchTestingIntegrity(path.dirname(pyDir));
+      EnvironmentManager._ensureScipyNumpyIntegrity(pyDir);
+      EnvironmentManager._ensureScipyNumpyIntegrity(path.dirname(pyDir));
     } catch (e) {}
 
     // Гарантированная санитация скрипта процессора
     this._sanitizeSidecarScript(scriptPath);
 
-    const pythonExists = fs.existsSync(pythonPath);
-    const scriptExists = fs.existsSync(scriptPath);
+    const pythonExists = Boolean(pythonPath && fs.existsSync(pythonPath));
+    const scriptExists = Boolean(scriptPath && fs.existsSync(scriptPath));
 
     if (onLog) {
       onLog(`[Neural AI Диагностика] Интерпретатор: ${pythonPath} (найден: ${pythonExists ? 'Да' : 'НЕТ'})`, 'info');
       onLog(`[Neural AI Диагностика] Скрипт процессора: ${scriptPath} (найден: ${scriptExists ? 'Да' : 'НЕТ'})`, 'info');
     }
 
+    if (!pythonExists) {
+      const errMsg = `Интерпретатор Python не найден по указанному пути: "${pythonPath}". Проверьте путь или переустановите AI-окружение в настройках.`;
+      if (onLog) onLog(`❌ [Neural AI Ошибка] ${errMsg}`, 'error');
+      throw new Error(errMsg);
+    }
+
     if (!scriptExists) {
-      throw new Error(`Скрипт нейросетевого процессора не найден: ${scriptPath}`);
+      const errMsg = `Скрипт нейросетевого процессора не найден: "${scriptPath}".`;
+      if (onLog) onLog(`❌ [Neural AI Ошибка] ${errMsg}`, 'error');
+      throw new Error(errMsg);
     }
 
     if (!EnvironmentManager._isPythonExecutableWorking(pythonPath)) {
@@ -162,7 +172,7 @@ class AudioNeuralService {
     if (onLog) {
       onLog(`[Neural AI] Запуск команды: ${displayCmd}`, 'info');
     }
-    log.info(`[AudioNeuralService] Spawning directly: ${displayCmd}`);
+    log.info(`[AudioNeuralService] Spawning directly (shell: false): ${displayCmd}`);
 
     return new Promise((resolve, reject) => {
       let isSettled = false;
@@ -194,6 +204,8 @@ class AudioNeuralService {
 
       const env = {
         ...process.env,
+        SystemRoot: process.env.SystemRoot || (process.platform === 'win32' ? 'C:\\Windows' : undefined),
+        ComSpec: process.env.ComSpec || (process.platform === 'win32' ? 'C:\\Windows\\system32\\cmd.exe' : undefined),
         PATH: updatedPath,
         PYTHONPATH: fullPythonPath,
         PYTHONUNBUFFERED: '1',
@@ -208,7 +220,7 @@ class AudioNeuralService {
         workingDir = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
       }
 
-      // Launch python executable directly without cmd.exe
+      // Launch python executable directly without cmd.exe / shell: true
       const child = spawn(pythonPath, fullArgs, {
         cwd: workingDir,
         env,

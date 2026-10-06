@@ -33,7 +33,9 @@ import {
   Trash2,
   FileAudio,
   Settings,
-  Loader2
+  Loader2,
+  ShieldCheck,
+  Radio
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Episode, Track, SubtitleLine, RoleAssignment } from '../types';
@@ -42,6 +44,7 @@ import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/shar
 import { ExportModal } from './ExportModal';
 import { TimingSettingsModal, TimingSettings, DEFAULT_TIMING_SETTINGS } from './TimingSettingsModal';
 import { normalizeSpeechText } from '../lib/qa/whisperTextChecker';
+import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 
 /**
  * Calculates text similarity for Whisper speech vs. Subtitle text
@@ -664,6 +667,10 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const unifiedScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
   const audioBuffersRef = useRef<Record<string, AudioBuffer>>({});
+
+  const [aiProcessingTrackId, setAiProcessingTrackId] = useState<string | null>(null);
+  const [activeAiMenuTrackId, setActiveAiMenuTrackId] = useState<string | null>(null);
+  const [waveformRefreshKey, setWaveformRefreshKey] = useState<number>(0);
 
   // Synchronize Horizontal Scrolling from Timeline to Timecode Ruler
   const handleTimelineScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
@@ -2365,6 +2372,82 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     });
   };
 
+  const handleAICleanupTrack = async (
+    trackId: string,
+    actionType: 'deplosive' | 'thickener' | 'leveler' | 'dereverb' | 'headroom' | 'voicefixer' | 'denoise'
+  ) => {
+    const audioBuf = audioBuffersRef.current[trackId];
+    if (!audioBuf) {
+      toast.error('Аудиодорожка еще не декодирована');
+      return;
+    }
+    const tr = tracks.find(t => t.id === trackId);
+    const dubberName = tr?.participant || tr?.dubberName || 'Даббер';
+
+    try {
+      setAiProcessingTrackId(trackId);
+      setActiveAiMenuTrackId(null);
+      const sharedAudioCtx = getSharedAudioContext();
+      if (!sharedAudioCtx) return;
+
+      const numChannels = audioBuf.numberOfChannels;
+      const sampleRate = audioBuf.sampleRate;
+      const length = audioBuf.length;
+
+      const newAudioBuf = sharedAudioCtx.createBuffer(numChannels, length, sampleRate);
+
+      for (let ch = 0; ch < numChannels; ch++) {
+        const inputData = new Float32Array(audioBuf.getChannelData(ch));
+        let processedData: Float32Array;
+
+        switch (actionType) {
+          case 'deplosive':
+            toast.info(`[AI De-Plosive] Подавление задувов и хлопков «П»/«Б» для «${dubberName}»...`);
+            processedData = await globalAudioAICleanupEngine.processDePlosive(inputData, { sampleRate });
+            break;
+          case 'thickener':
+            toast.info(`[AI Vocal Thickener] Добавление плотности и ленточной сатурации для «${dubberName}»...`);
+            processedData = await globalAudioAICleanupEngine.processVocalThickener(inputData, { sampleRate });
+            break;
+          case 'leveler':
+            toast.info(`[AI Speech Leveler] Выравнивание скачков громкости речи для «${dubberName}»...`);
+            processedData = await globalAudioAICleanupEngine.processSpeechLeveler(inputData, { sampleRate });
+            break;
+          case 'dereverb':
+            toast.info(`[AI Spectral De-Reverb] Подавление комнатного эха для «${dubberName}»...`);
+            processedData = await globalAudioAICleanupEngine.processSpectralDeReverb(inputData, { sampleRate });
+            break;
+          case 'headroom':
+            toast.info(`[AI Headroom Recovery] Разгон тихих фраз с True-Peak лимитером для «${dubberName}»...`);
+            processedData = await globalAudioAICleanupEngine.processHeadroomRecovery(inputData, { sampleRate });
+            break;
+          case 'voicefixer':
+            toast.info(`[AI VoiceFixer] Восстановление обертонов и верхов для «${dubberName}»...`);
+            processedData = await globalAudioAICleanupEngine.processVoiceFixer(inputData, { sampleRate });
+            break;
+          case 'denoise':
+            toast.info(`[AI Denoise] Шумоподавление для «${dubberName}»...`);
+            processedData = await globalAudioAICleanupEngine.processDenoise(inputData, { modelId: 'deepfilternet3', intensityPercent: 75, sampleRate });
+            break;
+          default:
+            processedData = inputData;
+        }
+
+        newAudioBuf.copyToChannel(new Float32Array(processedData), ch);
+      }
+
+      audioBuffersRef.current[trackId] = newAudioBuf;
+      setWaveformRefreshKey(prev => prev + 1);
+      toast.success(`✓ [AI Cleanup] Дорожка «${dubberName}» успешно обработана!`);
+      addLog(`✨ [AI Cleanup] Дорожка «${dubberName}» успешно обработана фильтром ${actionType}`, 'success');
+    } catch (e: any) {
+      toast.error(`Ошибка обработки: ${e.message || String(e)}`);
+      addLog(`❌ [AI Cleanup] Ошибка: ${e.message}`, 'error');
+    } finally {
+      setAiProcessingTrackId(null);
+    }
+  };
+
   const handleExportToMixing = async () => {
     if (!currentEpisode) return;
     try {
@@ -2434,18 +2517,25 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         });
       } catch (e) {}
 
-      await ipcSafe.invoke('export-sound-engineer-files', {
+      const res: any = await ipcSafe.invoke('timing-export-to-mixing', {
         episode: currentEpisode,
         targetDir: targetDir || undefined,
-        skipConversion: false,
-        smartExport: true,
-        autoApplyFixes: true,
-        autoTiming: true
+        tracks,
+        audioClips,
+        volumes,
+        timingMetadata
       });
-      toast.success('Оттаймленные дорожки переданы в Сведение видео!');
+
+      if (res && res.success === false) {
+        throw new Error(res.error || 'Не удалось экспортировать дорожки в сведение');
+      }
+
+      toast.success('Готовые сведённые дорожки переданы в Сведение видео!');
+      addLog('✓ Все оттаймленные дорожки дабберов успешно сведены и отправлены в Сведение', 'success');
       if (onNavigate) onNavigate('mixing');
     } catch (err: any) {
       toast.error(`Ошибка: ${err.message}`);
+      addLog(`❌ Ошибка передачи в сведение: ${err.message}`, 'error');
     } finally {
       setIsExportingToMixing(false);
     }
@@ -3100,6 +3190,98 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                           </div>
                         </div>
                       )}
+
+                      {/* AI Audio Cleanup & Polish Action Menu */}
+                      <div className="relative mt-1">
+                        <button
+                          onClick={() => setActiveAiMenuTrackId(activeAiMenuTrackId === track.id ? null : track.id)}
+                          disabled={aiProcessingTrackId === track.id}
+                          className={`w-full px-2 py-1 rounded text-[10px] font-bold flex items-center justify-between border transition ${
+                            aiProcessingTrackId === track.id
+                              ? 'bg-amber-950/70 border-amber-800 text-amber-300 animate-pulse'
+                              : 'bg-indigo-950/60 hover:bg-indigo-900/80 border-indigo-800/60 text-indigo-200'
+                          }`}
+                          title="Интеллектуальная AI очистка, De-Plosive, De-Reverb и сатурация дорожки"
+                        >
+                          <span className="flex items-center gap-1.5 truncate">
+                            {aiProcessingTrackId === track.id ? (
+                              <Loader2 className="w-3 h-3 animate-spin text-amber-400 shrink-0" />
+                            ) : (
+                              <Sparkles className="w-3 h-3 text-indigo-400 shrink-0" />
+                            )}
+                            <span>{aiProcessingTrackId === track.id ? 'Обработка AI...' : '✨ AI Тюнинг'}</span>
+                          </span>
+                          <ChevronDown className="w-3 h-3 opacity-60" />
+                        </button>
+
+                        {activeAiMenuTrackId === track.id && (
+                          <div className="absolute left-0 bottom-full mb-1 z-50 w-60 bg-neutral-900 border border-neutral-700 rounded-xl shadow-2xl p-1.5 text-xs flex flex-col gap-1 backdrop-blur-md">
+                            <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-indigo-400 border-b border-neutral-800">
+                              AI & DSP Реставрация речи
+                            </div>
+                            <button
+                              onClick={() => handleAICleanupTrack(track.id, 'deplosive')}
+                              className="w-full px-2.5 py-1.5 rounded-lg hover:bg-indigo-950/80 hover:text-indigo-200 text-neutral-300 flex items-center gap-2 text-left transition"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-[11px]">De-Plosive Pro</span>
+                                <span className="text-[9px] text-neutral-400">Подавление задувов и хлопков «П»/«Б»</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => handleAICleanupTrack(track.id, 'thickener')}
+                              className="w-full px-2.5 py-1.5 rounded-lg hover:bg-indigo-950/80 hover:text-indigo-200 text-neutral-300 flex items-center gap-2 text-left transition"
+                            >
+                              <Sparkles className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-[11px]">Vocal Thickener</span>
+                                <span className="text-[9px] text-neutral-400">Плотность тела + ленточная сатурация</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => handleAICleanupTrack(track.id, 'leveler')}
+                              className="w-full px-2.5 py-1.5 rounded-lg hover:bg-indigo-950/80 hover:text-indigo-200 text-neutral-300 flex items-center gap-2 text-left transition"
+                            >
+                              <Sliders className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-[11px]">Speech Leveler</span>
+                                <span className="text-[9px] text-neutral-400">Выравнивание скачков громкости</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => handleAICleanupTrack(track.id, 'dereverb')}
+                              className="w-full px-2.5 py-1.5 rounded-lg hover:bg-indigo-950/80 hover:text-indigo-200 text-neutral-300 flex items-center gap-2 text-left transition"
+                            >
+                              <Radio className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-[11px]">Spectral De-Reverb</span>
+                                <span className="text-[9px] text-neutral-400">Подавление комнатного эха</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => handleAICleanupTrack(track.id, 'headroom')}
+                              className="w-full px-2.5 py-1.5 rounded-lg hover:bg-indigo-950/80 hover:text-indigo-200 text-neutral-300 flex items-center gap-2 text-left transition"
+                            >
+                              <Activity className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-[11px]">Headroom Recovery</span>
+                                <span className="text-[9px] text-neutral-400">Разгон тихих фраз к -6 dBFS</span>
+                              </div>
+                            </button>
+                            <button
+                              onClick={() => handleAICleanupTrack(track.id, 'voicefixer')}
+                              className="w-full px-2.5 py-1.5 rounded-lg hover:bg-indigo-950/80 hover:text-indigo-200 text-neutral-300 flex items-center gap-2 text-left transition"
+                            >
+                              <CheckCircle2 className="w-3.5 h-3.5 text-pink-400 shrink-0" />
+                              <div className="flex flex-col">
+                                <span className="font-semibold text-[11px]">VoiceFixer Air-Boost</span>
+                                <span className="text-[9px] text-neutral-400">Восстановление гармоник и верхов</span>
+                              </div>
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {/* Audio Lane */}

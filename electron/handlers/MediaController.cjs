@@ -90,17 +90,45 @@ function registerMediaHandlers(getData, mainWindow, taskQueue) {
         break;
       }
       case 'export-dabber-files': {
-        const { episode, targetDir, skipConversion, additionalProcessing } = payload;
+        const { episode, targetDir, skipConversion, additionalProcessing, options } = payload;
         taskFn = async (id, ep, tDir, sConv, addProc, onProgress, onCommand) => {
-          return await ExportService.exportDabberFiles(ep, tDir, sConv, addProc, config, participantsData, projectsData, onProgress, onCommand);
+          return await ExportService.exportDabberFiles({
+            episode: ep,
+            targetDir: tDir,
+            options: {
+              skipConversion: sConv ?? options?.skipConversion ?? false,
+              additionalProcessing: addProc ?? options?.additionalProcessing ?? false
+            },
+            config,
+            participantsData,
+            projectsData,
+            onProgress,
+            onCommand
+          });
         };
         args = [episode, targetDir, skipConversion, additionalProcessing];
         break;
       }
       case 'export-sound-engineer-files': {
-        const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming } = payload;
+        const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, options } = payload;
         taskFn = async (id, ep, tDir, sConv, sExp, addProc, autoFix, incSubs, aTiming, onProgress, onCommand) => {
-          return await ExportService.exportSoundEngineerFiles(ep, tDir, sConv, sExp, addProc, autoFix, config, projectsData, participantsData, onProgress, onCommand, incSubs !== false, aTiming === true);
+          return await ExportService.exportSoundEngineerFiles({
+            episode: ep,
+            targetDir: tDir,
+            options: {
+              skipConversion: sConv ?? options?.skipConversion ?? false,
+              smartExport: sExp ?? options?.smartExport ?? false,
+              additionalProcessing: addProc ?? options?.additionalProcessing ?? false,
+              autoApplyFixes: autoFix ?? options?.autoApplyFixes ?? false,
+              includeSubtitles: (incSubs ?? options?.includeSubtitles) !== false,
+              autoTiming: (aTiming ?? options?.autoTiming) === true
+            },
+            config,
+            projectsData,
+            participantsData,
+            onProgress,
+            onCommand
+          });
         };
         args = [episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles !== false, autoTiming === true];
         break;

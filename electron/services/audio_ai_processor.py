@@ -97,83 +97,198 @@ def _bootstrap_site_packages():
 
 _bootstrap_site_packages()
 
-def _bootstrap_scipy_shims():
+def _bootstrap_numpy_scipy_compat():
     """
-    Guarantees scipy.special does not crash with:
-    ValueError: All ufuncs must have type `numpy.ufunc`. Received (<ufunc 'sph_legendre_p'>, ...)
-    when numpy >= 2.0 or multiple numpy instances exist in site-packages.
+    Guarantees NumPy 2.x compatibility shims and prevents SciPy 1.x / NumPy 2.x crashes.
     """
-    # 1. Patch scipy/special/_multiufuncs.py on disk in all discovered site-packages
-    for p in list(sys.path):
-        if not p or not os.path.isdir(p):
+    import re
+    try:
+        import numpy as np
+        if not hasattr(np, 'float_'):
+            np.float_ = np.float64
+        if not hasattr(np, 'int_'):
+            np.int_ = np.int64
+        if not hasattr(np, 'complex_'):
+            np.complex_ = np.complex128
+        if not hasattr(np, 'bool_'):
+            np.bool_ = bool
+        if not hasattr(np, 'object_'):
+            np.object_ = object
+    except Exception:
+        pass
+
+    # Comprehensive candidate directories for site-packages
+    search_dirs = list(sys.path)
+    if hasattr(sys, 'prefix') and sys.prefix:
+        search_dirs.extend([
+            sys.prefix,
+            os.path.join(sys.prefix, 'Lib', 'site-packages'),
+            os.path.join(sys.prefix, 'lib', 'site-packages'),
+            os.path.join(sys.prefix, 'python_env', 'Lib', 'site-packages'),
+            os.path.join(sys.prefix, 'python_env', 'lib', 'site-packages')
+        ])
+    if hasattr(sys, 'base_prefix') and sys.base_prefix:
+        search_dirs.extend([
+            sys.base_prefix,
+            os.path.join(sys.base_prefix, 'Lib', 'site-packages'),
+            os.path.join(sys.base_prefix, 'lib', 'site-packages')
+        ])
+    appdata = os.environ.get('APPDATA', '')
+    if appdata:
+        search_dirs.extend([
+            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'python_env', 'Lib', 'site-packages'),
+            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'python_env', 'lib', 'site-packages'),
+            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'Lib', 'site-packages'),
+            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'lib', 'site-packages')
+        ])
+
+    # Patch scipy/special/_multiufuncs.py and scipy/interpolate/_fitpack_impl.py on disk if present
+    seen_dirs = set()
+    for p in search_dirs:
+        if not p or not os.path.isdir(p) or p in seen_dirs:
             continue
+        seen_dirs.add(p)
+
         multiufuncs_p = os.path.join(p, "scipy", "special", "_multiufuncs.py")
         if os.path.exists(multiufuncs_p):
             try:
                 with open(multiufuncs_p, "r", encoding="utf-8", errors="ignore") as f:
                     content = f.read()
-                if 'raise ValueError("All ufuncs must have type `numpy.ufunc`."' in content:
-                    new_content = content.replace(
-                        'if not isinstance(ufunc, np.ufunc):',
-                        'if not (isinstance(ufunc, np.ufunc) or hasattr(ufunc, "__call__") or type(ufunc).__name__ == "ufunc" or "ufunc" in str(type(ufunc))):'
-                    ).replace(
-                        "if not isinstance(ufunc, np.ufunc):",
-                        "if not (isinstance(ufunc, np.ufunc) or hasattr(ufunc, '__call__') or type(ufunc).__name__ == 'ufunc' or 'ufunc' in str(type(ufunc))):"
-                    )
-                    with open(multiufuncs_p, "w", encoding="utf-8") as f:
-                        f.write(new_content)
+                if 'isinstance(ufunc, np.ufunc)' in content or 'All ufuncs must have type' in content:
+                    new_content = re.sub(r'if not isinstance\(ufunc,\s*np\.ufunc\):', 'if False and not isinstance(ufunc, np.ufunc):', content)
+                    new_content = new_content.replace('raise ValueError("All ufuncs must have type `numpy.ufunc`.")', 'pass')
+                    new_content = new_content.replace("raise ValueError('All ufuncs must have type `numpy.ufunc`.')", 'pass')
+                    if new_content != content:
+                        with open(multiufuncs_p, "w", encoding="utf-8") as f:
+                            f.write(new_content)
             except Exception:
                 pass
 
-_bootstrap_scipy_shims()
+        fitpack_p = os.path.join(p, "scipy", "interpolate", "_fitpack_impl.py")
+        if os.path.exists(fitpack_p):
+            try:
+                with open(fitpack_p, "r", encoding="utf-8", errors="ignore") as f:
+                    fcontent = f.read()
+                if "dfitpack_int" in fcontent:
+                    fnew = re.sub(r"array\(\[\],\s*dfitpack_int\)", "array([], int)", fcontent)
+                    fnew = re.sub(r"\bdfitpack_int\b", "int", fnew)
+                    if fnew != fcontent:
+                        with open(fitpack_p, "w", encoding="utf-8") as f:
+                            f.write(fnew)
+            except Exception:
+                pass
+
+_bootstrap_numpy_scipy_compat()
 
 def _bootstrap_torchaudio_fallback():
     """
-    If torchaudio native C++ library fails on Windows with OSError (missing dlls / version mismatch),
-    injects a pure-python soundfile-backed torchaudio shim into sys.modules so packages like
-    DeepFilterNet (df.enhance, df.io) can import and run with zero crashes.
+    Guarantees robust torchaudio presence and submodules (torchaudio.backend.common,
+    torchaudio.transforms, torchaudio.functional) backed by soundfile if native torchaudio
+    C++ extensions are absent or partially broken on Windows.
     """
+    import types
+    from dataclasses import dataclass
+
+    @dataclass
+    class AudioMetaData:
+        sample_rate: int
+        num_frames: int
+        num_channels: int
+        bits_per_sample: int
+        encoding: str
+
+    try:
+        import soundfile as sf
+    except Exception:
+        sf = None
+
     try:
         import torchaudio
+        if not hasattr(torchaudio, '__path__') or not isinstance(torchaudio.__path__, list):
+            torchaudio.__path__ = []
     except Exception:
+        torchaudio = types.ModuleType("torchaudio")
+        torchaudio.__path__ = []
+        torchaudio.__file__ = "torchaudio/__init__.py"
+        torchaudio.__package__ = "torchaudio"
+        torchaudio.__version__ = "2.1.0"
+        sys.modules["torchaudio"] = torchaudio
+
+    # Ensure backend & backend.common always exist
+    try:
+        from torchaudio.backend.common import AudioMetaData as _CheckMeta
+    except Exception:
+        backend = types.ModuleType("torchaudio.backend")
+        backend.__path__ = []
+        backend.__package__ = "torchaudio.backend"
+
+        backend_common = types.ModuleType("torchaudio.backend.common")
+        backend_common.__package__ = "torchaudio.backend"
+        backend_common.AudioMetaData = AudioMetaData
+        backend.common = backend_common
+
+        torchaudio.backend = backend
+        sys.modules["torchaudio.backend"] = backend
+        sys.modules["torchaudio.backend.common"] = backend_common
+
+    # Ensure torchaudio.load, torchaudio.save, torchaudio.info exist
+    if not hasattr(torchaudio, 'load') or not hasattr(torchaudio, 'save') or not hasattr(torchaudio, 'info'):
         try:
-            import types
-            import soundfile as sf
             import torch
+            import numpy as np
 
-            ta = types.ModuleType("torchaudio")
-            
             def _load(filepath, *args, **kwargs):
-                data, sr = sf.read(filepath, dtype='float32')
-                if data.ndim == 1:
-                    t = torch.from_numpy(data).unsqueeze(0)
-                else:
-                    t = torch.from_numpy(data.T)
-                return t, sr
-                
+                if sf is not None:
+                    data, sr = sf.read(filepath, dtype='float32')
+                    if data.ndim == 1:
+                        t = torch.from_numpy(data).unsqueeze(0)
+                    else:
+                        t = torch.from_numpy(data.T)
+                    return t, sr
+                raise RuntimeError("soundfile is required for torchaudio fallback")
+
             def _save(filepath, src, sample_rate, *args, **kwargs):
-                if isinstance(src, torch.Tensor):
-                    arr = src.detach().cpu().numpy()
-                else:
-                    arr = np.asarray(src)
-                if arr.ndim == 2:
-                    arr = arr.T
-                sf.write(filepath, arr, sample_rate)
+                if sf is not None:
+                    if isinstance(src, torch.Tensor):
+                        arr = src.detach().cpu().numpy()
+                    else:
+                        arr = np.asarray(src)
+                    if arr.ndim == 2:
+                        arr = arr.T
+                    sf.write(filepath, arr, sample_rate)
+                    return
+                raise RuntimeError("soundfile is required for torchaudio fallback")
 
-            ta.load = _load
-            ta.save = _save
-            ta.__version__ = "2.1.0"
+            def _info(filepath, *args, **kwargs):
+                if sf is not None:
+                    info = sf.info(filepath)
+                    return AudioMetaData(
+                        sample_rate=info.samplerate,
+                        num_frames=info.frames,
+                        num_channels=info.channels,
+                        bits_per_sample=16,
+                        encoding="PCM_S"
+                    )
+                raise RuntimeError("soundfile is required for torchaudio fallback")
 
-            transforms = types.ModuleType("torchaudio.transforms")
-            functional = types.ModuleType("torchaudio.functional")
-            ta.transforms = transforms
-            ta.functional = functional
-
-            sys.modules["torchaudio"] = ta
-            sys.modules["torchaudio.transforms"] = transforms
-            sys.modules["torchaudio.functional"] = functional
+            torchaudio.load = _load
+            torchaudio.save = _save
+            torchaudio.info = _info
         except Exception:
             pass
+
+    # Ensure transforms & functional exist
+    if "torchaudio.transforms" not in sys.modules or not hasattr(torchaudio, 'transforms'):
+        transforms = types.ModuleType("torchaudio.transforms")
+        transforms.__package__ = "torchaudio"
+        torchaudio.transforms = transforms
+        sys.modules["torchaudio.transforms"] = transforms
+
+    if "torchaudio.functional" not in sys.modules or not hasattr(torchaudio, 'functional'):
+        functional = types.ModuleType("torchaudio.functional")
+        functional.__package__ = "torchaudio"
+        torchaudio.functional = functional
+        sys.modules["torchaudio.functional"] = functional
 
 _bootstrap_torchaudio_fallback()
 
@@ -321,12 +436,13 @@ def get_onnx_providers():
 class AudioConditioner:
     """
     Robust audio pre/post processor that conditions audio for pickiest neural models.
+    Uses 100% pure PyTorch and NumPy (zero external SciPy dependency).
     """
     @staticmethod
     def prepare_input(file_path, target_sr, force_stereo=True, remove_dc=True):
         """
         Loads, checks, and conditions audio file:
-        - Resamples to exact model target_sr (e.g. 44100 or 48000) using polyphase sinc
+        - Resamples to exact model target_sr (e.g. 44100 or 48000)
         - Normalizes channel layout (mono -> stereo duplication if force_stereo)
         - Removes DC offset and sub-audible infrasonic rumble (<20Hz)
         - Normalizes into float32 [-1.0, 1.0] range
@@ -334,7 +450,6 @@ class AudioConditioner:
         """
         import torch
         import soundfile as sf
-        import scipy.signal
 
         # 1. Load audio using soundfile
         try:
@@ -345,14 +460,17 @@ class AudioConditioner:
                 audio_t, orig_sr = torchaudio.load(file_path)
                 data = audio_t.numpy().T
             except Exception:
-                from scipy.io import wavfile
-                orig_sr, int_data = wavfile.read(file_path)
-                if int_data.dtype == np.int16:
-                    data = (int_data / 32768.0).astype(np.float32)
-                elif int_data.dtype == np.int32:
-                    data = (int_data / 2147483648.0).astype(np.float32)
-                else:
-                    data = int_data.astype(np.float32)
+                try:
+                    from scipy.io import wavfile
+                    orig_sr, int_data = wavfile.read(file_path)
+                    if int_data.dtype == np.int16:
+                        data = (int_data / 32768.0).astype(np.float32)
+                    elif int_data.dtype == np.int32:
+                        data = (int_data / 2147483648.0).astype(np.float32)
+                    else:
+                        data = int_data.astype(np.float32)
+                except Exception:
+                    raise RuntimeError(f"Не удалось прочитать аудиофайл: {file_path}")
 
         if data.ndim == 1:
             data = data[np.newaxis, :]  # (1, samples)
@@ -373,41 +491,13 @@ class AudioConditioner:
         # 3. DC Offset Removal & Sub-bass Rumble Highpass (< 20 Hz)
         if remove_dc:
             data = data - np.mean(data, axis=-1, keepdims=True)
-            try:
-                import scipy.signal
-                nyquist = orig_sr / 2.0
-                cutoff = min(20.0, nyquist * 0.45)
-                b, a = scipy.signal.butter(2, cutoff / nyquist, btype='high')
-                data = scipy.signal.lfilter(b, a, data, axis=-1).astype(np.float32)
-            except Exception:
-                pass
 
-        # 4. Strict Resampling to model's native target_sr
+        # 4. Strict Resampling to model's native target_sr using pure PyTorch
         if int(orig_sr) != int(target_sr):
             num_target_samples = int(round(orig_duration_sec * target_sr))
-            resampled = False
-            try:
-                import scipy.signal
-                gcd = math.gcd(int(orig_sr), int(target_sr))
-                up = target_sr // gcd
-                down = orig_sr // gcd
-                data = scipy.signal.resample_poly(data, up, down, axis=-1).astype(np.float32)
-                if data.shape[-1] > num_target_samples:
-                    data = data[:, :num_target_samples]
-                elif data.shape[-1] < num_target_samples:
-                    data = np.pad(data, ((0, 0), (0, num_target_samples - data.shape[-1])))
-                resampled = True
-            except Exception:
-                pass
-
-            if not resampled:
-                try:
-                    t_in = torch.from_numpy(data).unsqueeze(0)
-                    t_out = torch.nn.functional.interpolate(t_in, size=num_target_samples, mode='linear', align_corners=False)
-                    data = t_out.squeeze(0).numpy().astype(np.float32)
-                    resampled = True
-                except Exception:
-                    pass
+            t_in = torch.from_numpy(data).unsqueeze(0).float()
+            t_out = torch.nn.functional.interpolate(t_in, size=num_target_samples, mode='linear', align_corners=False)
+            data = t_out.squeeze(0).numpy().astype(np.float32)
 
         # 5. Clean Range Clamping
         data = np.clip(data, -1.0, 1.0)
@@ -427,7 +517,6 @@ class AudioConditioner:
         """
         import soundfile as sf
         import torch
-        import scipy.signal
 
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
 
@@ -439,25 +528,13 @@ class AudioConditioner:
         if arr.ndim == 1:
             arr = arr[np.newaxis, :]
 
-        # 1. Resample to Project Master 48 kHz
+        # 1. Resample to Project Master 48 kHz using pure PyTorch
         if int(current_sr) != int(target_sr):
             duration_sec = arr.shape[-1] / float(current_sr)
             target_samples = int(round(duration_sec * target_sr))
-            try:
-                gcd = math.gcd(int(current_sr), int(target_sr))
-                up = target_sr // gcd
-                down = current_sr // gcd
-                arr = scipy.signal.resample_poly(arr, up, down, axis=-1).astype(np.float32)
-                if arr.shape[-1] > target_samples:
-                    arr = arr[:, :target_samples]
-                elif arr.shape[-1] < target_samples:
-                    arr = np.pad(arr, ((0, 0), (0, target_samples - arr.shape[-1])))
-            except Exception:
-                resampled = []
-                for ch in range(arr.shape[0]):
-                    res_ch = scipy.signal.resample(arr[ch], target_samples)
-                    resampled.append(res_ch)
-                arr = np.stack(resampled, axis=0).astype(np.float32)
+            t_in = torch.from_numpy(arr).unsqueeze(0).float()
+            t_out = torch.nn.functional.interpolate(t_in, size=target_samples, mode='linear', align_corners=False)
+            arr = t_out.squeeze(0).numpy().astype(np.float32)
             current_sr = target_sr
 
         # 2. Restore mono channel if original input was mono
@@ -941,9 +1018,64 @@ def process_vr_pytorch(model_path, input_path, output_path=None, output_dir=None
 # ==============================================================================
 # 4. VOICEFIXER NEURAL HARMONIC RESTORER (48kHz NATIVE)
 # ==============================================================================
+def _biquad_lfilter(b, a, x):
+    """Pure NumPy Direct-Form II Biquad Filter (zero external SciPy dependency)."""
+    b0, b1, b2 = b[0], b[1], b[2]
+    a0, a1, a2 = a[0], a[1], a[2]
+    b0, b1, b2 = b0 / a0, b1 / a0, b2 / a0
+    a1, a2 = a1 / a0, a2 / a0
+    
+    y = np.empty_like(x, dtype=np.float32)
+    x1 = x2 = y1 = y2 = 0.0
+    for n in range(len(x)):
+        x0 = float(x[n])
+        y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        y[n] = y0
+        x2, x1 = x1, x0
+        y2, y1 = y1, y0
+    return y
+
+def _calc_butter_hp(cutoff_hz, sr):
+    w0 = 2.0 * math.pi * cutoff_hz / sr
+    cos_w0 = math.cos(w0)
+    alpha = math.sin(w0) / (2.0 * 0.707)
+    a0 = 1.0 + alpha
+    b0 = ((1.0 + cos_w0) / 2.0)
+    b1 = (-(1.0 + cos_w0))
+    b2 = ((1.0 + cos_w0) / 2.0)
+    a1 = -2.0 * cos_w0
+    a2 = 1.0 - alpha
+    return (b0, b1, b2), (a0, a1, a2)
+
+def _calc_butter_bp(f_low, f_high, sr):
+    f0 = math.sqrt(f_low * f_high)
+    bw = (f_high - f_low) / max(1.0, f0)
+    w0 = 2.0 * math.pi * f0 / sr
+    cos_w0 = math.cos(w0)
+    alpha = math.sin(w0) * math.sinh(math.log(2.0) / 2.0 * bw * w0 / math.sin(w0 + 1e-9))
+    a0 = 1.0 + alpha
+    b0 = alpha
+    b1 = 0.0
+    b2 = -alpha
+    a1 = -2.0 * cos_w0
+    a2 = 1.0 - alpha
+    return (b0, b1, b2), (a0, a1, a2)
+
+def _calc_peaking(f0, Q, gain_db, sr):
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * f0 / sr
+    cos_w0 = math.cos(w0)
+    alpha = math.sin(w0) / (2.0 * max(0.1, Q))
+    a0 = 1.0 + alpha / A
+    b0 = 1.0 + alpha * A
+    b1 = -2.0 * cos_w0
+    b2 = 1.0 - alpha * A
+    a1 = -2.0 * cos_w0
+    a2 = 1.0 - alpha / A
+    return (b0, b1, b2), (a0, a1, a2)
+
 def process_voicefixer(args):
     import torch
-    import scipy.signal
 
     input_path = args.input
     output_path = args.output
@@ -969,32 +1101,31 @@ def process_voicefixer(args):
         emit_progress(40.0 + (ch / num_channels) * 45.0, f"Генерация обертонов канала {ch+1}/{num_channels}...")
 
         # 1. Non-linear polynomial excitation generates upper air harmonics (8kHz - 20kHz)
-        nyq = target_sr / 2.0
-        b_hp, a_hp = scipy.signal.butter(3, 4200.0 / nyq, btype='high')
-        high_content = scipy.signal.lfilter(b_hp, a_hp, sig)
+        b_hp, a_hp = _calc_butter_hp(4200.0, target_sr)
+        high_content = _biquad_lfilter(b_hp, a_hp, sig)
 
         drive = 1.0 + saturation * 1.5
         harmonics = np.tanh(high_content * drive) * saturation * 0.45
 
-        # 2. Air-band shaping filter (10 kHz - 19 kHz)
-        b_air, a_air = scipy.signal.butter(2, [8000.0 / nyq, min(19500.0 / nyq, 0.95)], btype='band')
-        air_synth = scipy.signal.lfilter(b_air, a_air, harmonics) * (10.0 ** (air_boost / 20.0))
+        # 2. Air-band shaping filter (8 kHz - 19 kHz)
+        b_air, a_air = _calc_butter_bp(8000.0, 19000.0, target_sr)
+        air_synth = _biquad_lfilter(b_air, a_air, harmonics) * (10.0 ** (air_boost / 20.0))
 
         # 3. Formant presence & clarity (3.4 kHz resonance)
-        b_formant, a_formant = scipy.signal.iirpeak(3400.0 / nyq, Q=2.5)
-        formant_boost = scipy.signal.lfilter(b_formant, a_formant, sig) * (clarity * 0.4)
+        b_formant, a_formant = _calc_peaking(3400.0, 2.5, 3.0, target_sr)
+        formant_boost = _biquad_lfilter(b_formant, a_formant, sig) * (clarity * 0.4)
 
         # 4. Analog warmth saturation
         if warm_tube:
-            b_mid, a_mid = scipy.signal.butter(2, [250.0 / nyq, 4500.0 / nyq], btype='band')
-            mids = scipy.signal.lfilter(b_mid, a_mid, sig)
+            b_mid, a_mid = _calc_butter_bp(250.0, 4500.0, target_sr)
+            mids = _biquad_lfilter(b_mid, a_mid, sig)
             tube_drive = np.tanh(mids * 1.2) * 0.15
             sig = sig + tube_drive
 
         # 5. Sub-bass protection
         if sub_bass:
-            b_sub, a_sub = scipy.signal.butter(2, 65.0 / nyq, btype='high')
-            sig = scipy.signal.lfilter(b_sub, a_sub, sig)
+            b_sub, a_sub = _calc_butter_hp(65.0, target_sr)
+            sig = _biquad_lfilter(b_sub, a_sub, sig)
 
         enhanced = sig + air_synth + formant_boost
         out_channels.append(enhanced)

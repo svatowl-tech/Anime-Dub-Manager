@@ -43,7 +43,33 @@ async function copyLargeFile(src, dest, onProgress, startP = 0, endP = 100) {
  * Service for handling complex export operations.
  */
 class ExportService {
-  static async exportDabberFiles(episode, targetDir, skipConversion, additionalProcessing, config, participantsData, projectsData, onProgress, onCommand) {
+  static async exportDabberFiles(paramsOrEpisode, maybeTargetDir, maybeSkipConv, maybeAddProc, maybeConfig, maybeParticipantsData, maybeProjectsData, maybeOnProgress, maybeOnCommand) {
+    let episode, targetDir, skipConversion, additionalProcessing, config, participantsData, projectsData, onProgress, onCommand;
+
+    if (paramsOrEpisode && typeof paramsOrEpisode === 'object' && (paramsOrEpisode.episode || (!paramsOrEpisode.number && !paramsOrEpisode.id && paramsOrEpisode.targetDir))) {
+      const p = paramsOrEpisode;
+      episode = p.episode;
+      targetDir = p.targetDir;
+      const opts = p.options || {};
+      skipConversion = p.skipConversion ?? opts.skipConversion ?? false;
+      additionalProcessing = p.additionalProcessing ?? opts.additionalProcessing ?? false;
+      config = p.config || {};
+      participantsData = p.participantsData || [];
+      projectsData = p.projectsData || [];
+      onProgress = p.onProgress;
+      onCommand = p.onCommand;
+    } else {
+      episode = paramsOrEpisode;
+      targetDir = maybeTargetDir;
+      skipConversion = maybeSkipConv;
+      additionalProcessing = maybeAddProc;
+      config = maybeConfig;
+      participantsData = maybeParticipantsData;
+      projectsData = maybeProjectsData;
+      onProgress = maybeOnProgress;
+      onCommand = maybeOnCommand;
+    }
+
     if (!episode || !targetDir) throw new Error('Missing required parameters');
     log.info(`Exporting dabber files for episode ${episode.number} to ${targetDir}`);
     await fs.mkdir(targetDir, { recursive: true });
@@ -167,20 +193,55 @@ class ExportService {
     return { success: true, targetDir, yandexUrl: null };
   }
 
-  static async exportSoundEngineerFiles(episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, config, projectsData, participantsData, onProgress, onCommand, includeSubtitles = true, autoTiming = false) {
-    if (!episode || !targetDir) throw new Error('Missing required parameters');
+  static async exportSoundEngineerFiles(paramsOrEpisode, maybeTargetDir, maybeSkipConv, maybeSmartExp, maybeAddProc, maybeAutoFix, maybeConfig, maybeProjectsData, maybeParticipantsData, maybeOnProgress, maybeOnCommand, maybeIncSubs, maybeAutoTiming) {
+    let episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, config, projectsData, participantsData, onProgress, onCommand;
 
-    // Handle legacy signature where autoApplyFixes was omitted
-    if (typeof autoApplyFixes === 'object' && !projectsData) {
-      includeSubtitles = typeof onCommand === 'boolean' ? onCommand : true;
-      onCommand = onProgress;
-      onProgress = participantsData;
-      participantsData = projectsData;
-      projectsData = config;
-      config = autoApplyFixes;
-      autoApplyFixes = false;
-      autoTiming = false;
+    if (paramsOrEpisode && typeof paramsOrEpisode === 'object' && (paramsOrEpisode.episode || (!paramsOrEpisode.number && !paramsOrEpisode.id && paramsOrEpisode.targetDir))) {
+      const p = paramsOrEpisode;
+      episode = p.episode;
+      targetDir = p.targetDir;
+      const opts = p.options || {};
+      skipConversion = p.skipConversion ?? opts.skipConversion ?? false;
+      smartExport = p.smartExport ?? opts.smartExport ?? false;
+      additionalProcessing = p.additionalProcessing ?? opts.additionalProcessing ?? false;
+      autoApplyFixes = p.autoApplyFixes ?? opts.autoApplyFixes ?? false;
+      includeSubtitles = (p.includeSubtitles ?? opts.includeSubtitles) !== false;
+      autoTiming = (p.autoTiming ?? opts.autoTiming) === true;
+      config = p.config || {};
+      projectsData = p.projectsData || [];
+      participantsData = p.participantsData || [];
+      onProgress = p.onProgress;
+      onCommand = p.onCommand;
+    } else {
+      // Positional args fallback
+      episode = paramsOrEpisode;
+      targetDir = maybeTargetDir;
+      skipConversion = maybeSkipConv;
+      smartExport = maybeSmartExp;
+      additionalProcessing = maybeAddProc;
+      autoApplyFixes = maybeAutoFix;
+      config = maybeConfig;
+      projectsData = maybeProjectsData;
+      participantsData = maybeParticipantsData;
+      onProgress = maybeOnProgress;
+      onCommand = maybeOnCommand;
+      includeSubtitles = maybeIncSubs !== false;
+      autoTiming = maybeAutoTiming === true;
+
+      // Handle legacy signature where autoApplyFixes was omitted
+      if (typeof autoApplyFixes === 'object' && !projectsData) {
+        includeSubtitles = typeof onCommand === 'boolean' ? onCommand : true;
+        onCommand = onProgress;
+        onProgress = participantsData;
+        participantsData = projectsData;
+        projectsData = config;
+        config = autoApplyFixes;
+        autoApplyFixes = false;
+        autoTiming = false;
+      }
     }
+
+    if (!episode || !targetDir) throw new Error('Missing required parameters');
 
     await fs.mkdir(targetDir, { recursive: true });
 
@@ -418,7 +479,7 @@ class ExportService {
             mergedResult, 
             targetDir, 
             baseVideoName, 
-            {}, 
+            { targetDir }, 
             onProgress, 
             logStep
           );
@@ -566,7 +627,26 @@ class ExportService {
     }
   }
 
-  static async buildRelease(episode, targetDir, customAudioPath, customRawPath, onProgress, onCommand) {
+  static async buildRelease(paramsOrEpisode, maybeTargetDir, maybeCustomAudio, maybeCustomRaw, maybeOnProgress, maybeOnCommand) {
+    let episode, targetDir, customAudioPath, customRawPath, onProgress, onCommand;
+
+    if (paramsOrEpisode && typeof paramsOrEpisode === 'object' && (paramsOrEpisode.episode || (!paramsOrEpisode.number && !paramsOrEpisode.id && paramsOrEpisode.targetDir))) {
+      const p = paramsOrEpisode;
+      episode = p.episode;
+      targetDir = p.targetDir;
+      customAudioPath = p.customAudioPath;
+      customRawPath = p.customRawPath;
+      onProgress = p.onProgress;
+      onCommand = p.onCommand;
+    } else {
+      episode = paramsOrEpisode;
+      targetDir = maybeTargetDir;
+      customAudioPath = maybeCustomAudio;
+      customRawPath = maybeCustomRaw;
+      onProgress = maybeOnProgress;
+      onCommand = maybeOnCommand;
+    }
+
     if (!episode || !targetDir) throw new Error('Missing required parameters');
     log.info(`Building release for episode ${episode.number} in ${targetDir}`);
     const { rawPath, subPath, uploads, number, project } = episode;

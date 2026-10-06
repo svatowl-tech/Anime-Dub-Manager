@@ -62,6 +62,7 @@ import {
 import { ipcSafe } from '../lib/ipcSafe';
 import { resolveLocalPath } from '../lib/webFileSystem';
 import { sanitizeFolderName } from '../lib/pathUtils';
+import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 
 export interface MixingLogEntry {
   id: string;
