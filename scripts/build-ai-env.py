@@ -174,8 +174,8 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "--no-cache-dir"
     ])
 
-    # 4. Install PyTorch & TorchAudio (Strictly version-matched)
-    print("\n[STEP 3] Installing strictly matched PyTorch and TorchAudio...")
+    # 4. Install PyTorch & TorchAudio (Strictly version-matched 2.2.2)
+    print("\n[STEP 3] Installing strictly matched PyTorch and TorchAudio (2.2.2)...")
     if use_cpu_wheels and (is_win or is_linux):
         print("  [OPT] Installing CPU PyTorch wheels directly from PyTorch CPU index...")
         run_cmd([
@@ -194,9 +194,13 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
             "torchaudio==2.2.2"
         ])
 
-    # 5. Install DeepFilterNet, Demucs, and audio processing stack with LOCKED NumPy 1.26.4
-    print("\n[STEP 4] Installing DeepFilterNet3, Demucs v4 & audio packages (Locking NumPy 1.26.4)...")
-    other_packages = [
+    # 5. Install DeepFilterNet, Demucs, and audio processing stack with LOCKED NumPy 1.26.4 & Torch 2.2.2
+    print("\n[STEP 4] Installing DeepFilterNet3, Demucs v4 & audio packages (Locking NumPy 1.26.4 and Torch 2.2.2)...")
+    extra_index_args = ["--extra-index-url", "https://download.pytorch.org/whl/cpu"] if (use_cpu_wheels and (is_win or is_linux)) else []
+    
+    pinned_stack = [
+        "torch==2.2.2",
+        "torchaudio==2.2.2",
         "numpy==1.26.4",
         "deepfilternet>=0.5.6,<0.6.0",
         "demucs>=4.0.0,<4.1.0",
@@ -210,30 +214,67 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "rotary-embedding-torch>=0.5.0",
         "requests>=2.31.0"
     ]
-    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir"] + other_packages)
+    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir"] + extra_index_args + pinned_stack)
 
-    # Re-enforce numpy 1.26.4 strictly to prevent any transitive dependency from pulling in NumPy 2.x
-    print("  [STRICT] Re-enforcing NumPy 1.26.4 pinning...")
+    # Re-enforce numpy 1.26.4, torch 2.2.2 and torchaudio 2.2.2 strictly to prevent any transitive override
+    print("  [STRICT] Re-enforcing NumPy 1.26.4 and TorchAudio 2.2.2 pinning...")
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "numpy==1.26.4"])
+    if use_cpu_wheels and (is_win or is_linux):
+        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "--index-url", "https://download.pytorch.org/whl/cpu", "torch==2.2.2", "torchaudio==2.2.2"])
+    else:
+        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "torch==2.2.2", "torchaudio==2.2.2"])
 
     # Verify PyTorch / TorchAudio / NumPy integrity inside venv
     print("\n[STEP 5] Verifying environment integrity and imports inside venv...")
     verify_script = """
 import sys
-import numpy as np
-import torch
-import torchaudio
-import torchaudio.functional
-import torchaudio.compliance
-import df
-import demucs.pretrained
+import traceback
 
-print(f"  [VERIFY OK] Python: {sys.version}")
-print(f"  [VERIFY OK] NumPy: {np.__version__}")
-assert np.__version__.startswith("1.26"), f"CRITICAL: Expected NumPy 1.26.x, got {np.__version__}"
-print(f"  [VERIFY OK] PyTorch: {torch.__version__}")
-print(f"  [VERIFY OK] TorchAudio: {torchaudio.__version__}")
-print("  [VERIFY OK] torchaudio.compliance & torchaudio.functional imports succeeded.")
+print(f"  [VERIFY] Python: {sys.version}")
+
+try:
+    import numpy as np
+    print(f"  [VERIFY OK] NumPy: {np.__version__}")
+    assert np.__version__.startswith("1.26"), f"CRITICAL: Expected NumPy 1.26.x, got {np.__version__}"
+except Exception as e:
+    print(f"  [VERIFY FAILED] NumPy: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    import torch
+    print(f"  [VERIFY OK] PyTorch: {torch.__version__}")
+except Exception as e:
+    print(f"  [VERIFY FAILED] PyTorch: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    import torchaudio
+    print(f"  [VERIFY OK] TorchAudio: {torchaudio.__version__}")
+    import torchaudio.functional
+    import torchaudio.compliance
+    print("  [VERIFY OK] torchaudio.compliance & torchaudio.functional imports succeeded.")
+except Exception as e:
+    print(f"  [VERIFY FAILED] TorchAudio: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    import df
+    print("  [VERIFY OK] DeepFilterNet (df) import succeeded.")
+except Exception as e:
+    print(f"  [VERIFY FAILED] DeepFilterNet: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    import demucs.pretrained
+    print("  [VERIFY OK] Demucs import succeeded.")
+except Exception as e:
+    print(f"  [VERIFY FAILED] Demucs: {e}")
+    traceback.print_exc()
+    sys.exit(1)
 """
     run_cmd([str(venv_python), "-c", verify_script])
 
