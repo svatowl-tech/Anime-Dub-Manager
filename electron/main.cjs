@@ -99,12 +99,14 @@ let registerWhisperHandlers = () => {};
 let registerLocalTranslateHandlers = () => {};
 let registerDiarizationHandlers = () => {};
 let registerEnvironmentHandlers = () => {};
+let registerAudioAnalysisHandlers = () => {};
 
 try {
   ({ registerWhisperHandlers } = require('./handlers/WhisperController.cjs'));
   ({ registerLocalTranslateHandlers } = require('./handlers/LocalTranslateController.cjs'));
   ({ registerDiarizationHandlers } = require('./handlers/DiarizationController.cjs'));
   ({ registerEnvironmentHandlers } = require('./handlers/EnvironmentController.cjs'));
+  ({ registerAudioAnalysisHandlers } = require('./handlers/AudioAnalysisController.cjs'));
 } catch (reqErr) {
   log.error('Failed to require optional AI controllers:', reqErr);
 }
@@ -445,6 +447,7 @@ app.whenReady().then(async () => {
     registerLocalTranslateHandlers();
     registerDiarizationHandlers(getData);
     registerEnvironmentHandlers();
+    registerAudioAnalysisHandlers();
     log.info('All IPC handlers registered successfully.');
   } catch (ipcErr) {
     log.error('Fatal error registering IPC handlers:', ipcErr);

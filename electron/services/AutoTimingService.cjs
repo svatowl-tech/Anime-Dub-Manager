@@ -396,16 +396,71 @@ class AutoTimingService {
       });
     }
 
+    // Apply Version Priority Rule and Deduplication per actor
+    const deduplicatedMatchedTracks = [];
+    const tracksByActor = new Map();
+
+    const cleanNickStr = (str) => String(str || '').replace(/\[.*\]/g, '').replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '').replace(/[^\w\d\s\u0400-\u04FF_-]/g, '').trim().toLowerCase();
+
+    for (const mt of matchedTracks) {
+      const actorKey = cleanNickStr(mt.dubberNick || mt.characterName);
+      if (!tracksByActor.has(actorKey)) {
+        tracksByActor.set(actorKey, []);
+      }
+      tracksByActor.get(actorKey).push(mt);
+    }
+
+    for (const actorTracks of tracksByActor.values()) {
+      if (actorTracks.length === 1) {
+        deduplicatedMatchedTracks.push(actorTracks[0]);
+        continue;
+      }
+
+      const mainTracks = actorTracks.filter(t => !t.isFix);
+      const fixTracks = actorTracks.filter(t => t.isFix);
+
+      const newestMain = mainTracks.length > 0 ? mainTracks[mainTracks.length - 1] : null;
+      const newestFix = fixTracks.length > 0 ? fixTracks[fixTracks.length - 1] : null;
+
+      if (newestMain && newestFix) {
+        let mainSize = 0;
+        let fixSize = 0;
+        try { mainSize = fs.statSync(newestMain.trackPath).size; } catch (e) {}
+        try { fixSize = fs.statSync(newestFix.trackPath).size; } catch (e) {}
+
+        const ratio = (mainSize > 0 && fixSize > 0) ? (fixSize / mainSize) : 0;
+
+        // Rule 2a: Full Fix (size/duration >= 70%)
+        // Draft track (DUBBER_FILE) is COMPLETELY EXCLUDED!
+        if (ratio >= 0.70 || fixSize === 0) {
+          newestFix.isFix = false;
+          deduplicatedMatchedTracks.push(newestFix);
+        } else {
+          // Rule 2b: Local snippet (< 70%)
+          if (!newestMain.fixTargetLines || newestMain.fixTargetLines.length === 0) {
+            newestMain.fixTargetLines = newestFix.fixTargetLines;
+          }
+          newestMain.patchSnippetPath = newestFix.trackPath;
+          deduplicatedMatchedTracks.push(newestMain);
+        }
+      } else if (newestFix) {
+        newestFix.isFix = false;
+        deduplicatedMatchedTracks.push(newestFix);
+      } else if (newestMain) {
+        deduplicatedMatchedTracks.push(newestMain);
+      }
+    }
+
     const unassignedActors = Array.from(charactersMap.keys()).filter(c => !usedCharacters.has(c));
     const nickCounts = new Map();
-    for (const mt of matchedTracks) {
+    for (const mt of deduplicatedMatchedTracks) {
       const c = (nickCounts.get(mt.dubberNick) || 0) + 1;
       nickCounts.set(mt.dubberNick, c);
       mt.subTrackIndex = c;
     }
 
     return {
-      matchedTracks,
+      matchedTracks: deduplicatedMatchedTracks,
       unassignedActors,
       unassignedTracks,
       allCharacters: Array.from(charactersMap.values())
@@ -1312,20 +1367,32 @@ class AutoTimingService {
         : '  • Наложений и коллизий между дорожками не обнаружено (все фразы звучат чисто).\n') +
       `\n\nДЕТАЛИЗАЦИЯ ПО ДОРОЖКАМ:\n`;
 
+    const rawDir = path.join(targetDir, '00_исходные');
+    if (fs.existsSync(targetDir)) {
+      try { fs.mkdirSync(rawDir, { recursive: true }); } catch (e) {}
+    }
+
     for (let tIdx = 0; tIdx < tracksToRender.length; tIdx++) {
       const item = tracksToRender[tIdx];
       const { track, phrases } = item;
-      const ext = path.extname(track.trackPath) || '.wav';
       const nick = track.dubberNick || 'Даббер';
+      const cleanNick = String(nick)
+        .replace(/\[.*\]/g, '')
+        .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
+        .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
+        .trim() || 'dubber';
+
       const sameNickTracks = tracksToRender.filter(t => (t.track.dubberNick || 'Даббер') === nick);
       const isMultiTrack = sameNickTracks.length > 1;
       const subIdx = track.subTrackIndex || (sameNickTracks.indexOf(item) + 1);
-      const trackSuffix = isMultiTrack ? `_дорожка${subIdx}` : '';
-      const outFilename = `${baseVideoName}_[${nick}]${trackSuffix}${ext}`;
+      const trackSuffix = isMultiTrack ? `_${subIdx}` : '';
+
+      const outFilename = `00_timed_${cleanNick}${trackSuffix}.wav`;
       const outFilePath = path.join(targetDir, outFilename);
+      const outRawFilePath = path.join(rawDir, outFilename);
 
       const trackProgressPercent = 70 + Math.round(((tIdx + 1) / tracksToRender.length) * 28);
-      const logMsg = `Сборка дорожки [${tIdx + 1}/${tracksToRender.length}]: «${nick}» (${track.characterName}) — фраз: ${phrases.length}`;
+      const logMsg = `Сборка мастер-дорожки [${tIdx + 1}/${tracksToRender.length}]: «${nick}» (${track.characterName}) — фраз: ${phrases.length}`;
       log.info(`[AutoTiming Render] ${logMsg} -> ${outFilePath}`);
       if (onLog) onLog(logMsg);
       if (onProgress) onProgress({ percent: trackProgressPercent, message: logMsg });
@@ -1338,6 +1405,7 @@ class AutoTimingService {
 
       if (phrases.length === 0) {
         await fs.promises.copyFile(track.trackPath, outFilePath);
+        try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
         renderedTracks.push({
           dubberNick: nick,
           characterName: track.characterName,
@@ -1349,6 +1417,7 @@ class AutoTimingService {
 
       try {
         await this.assembleMultiSourceTrack(track.trackPath, phrases, outFilePath, { ...options, targetDir });
+        try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
         renderedTracks.push({
           dubberNick: nick,
           characterName: track.characterName,
@@ -1360,6 +1429,7 @@ class AutoTimingService {
         log.error(`[AutoTiming Render] Ошибка потоковой сборки для ${nick}, резервное копирование оригинала:`, renderErr);
         if (onLog) onLog(`[Предупреждение] Ошибка сборки ${nick}: ${renderErr.message}. Скопирован оригинал.`, 'warn');
         await fs.promises.copyFile(track.trackPath, outFilePath);
+        try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
         renderedTracks.push({
           dubberNick: nick,
           characterName: track.characterName,
@@ -1373,6 +1443,22 @@ class AutoTimingService {
         const fixMark = p.isReplacedByFix ? ' [ВШИТ ФИКС]' : '';
         reportContent += `  [${formatSeconds(p.targetStartSec)} - ${formatSeconds(p.targetEndSec)}] Исходное время: ${formatSeconds(p.sourceStartSec)} | Сдвиг: ${(p.targetStartSec - p.sourceStartSec) >= 0 ? '+' : ''}${(p.targetStartSec - p.sourceStartSec).toFixed(2)}с | Саб: ${p.subStartSec.toFixed(2)}с${fixMark}\n` +
           `    Текст: "${p.subText || '—'}"\n`;
+      }
+    }
+
+    // Clean up temporary slice micro-files from export directory and 00_исходные
+    const cleanupDirs = [targetDir, rawDir];
+    for (const cDir of cleanupDirs) {
+      if (fs.existsSync(cDir)) {
+        try {
+          const files = fs.readdirSync(cDir);
+          for (const f of files) {
+            const lower = f.toLowerCase();
+            if ((lower.includes('slice') || lower.startsWith('temp_') || lower.endsWith('.raw')) && !f.startsWith('00_timed_')) {
+              try { fs.unlinkSync(path.join(cDir, f)); } catch (e) {}
+            }
+          }
+        } catch (e) {}
       }
     }
 

@@ -5,6 +5,7 @@ const log = require('electron-log');
 const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
 const ExportService = require('../services/ExportService.cjs');
 const AutoTimingService = require('../services/AutoTimingService.cjs');
+const AudioAnalysisService = require('../services/AudioAnalysisService.cjs');
 
 function registerExportHandlers(getData, mainWindow) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow);
@@ -266,73 +267,132 @@ function registerExportHandlers(getData, mainWindow) {
       } catch (e) {}
     }
 
-    // 3. Render only the final, complete continuous audio track for each dubber
+    // 3. Render ONLY ONE master continuous audio track per unique actor/dubber (00_timed_Actor.wav)
     const trackList = tracks || [];
     const clipsMap = audioClips || {};
     const volsMap = volumes || {};
     const renderedTracks = [];
 
-    for (let tIdx = 0; tIdx < trackList.length; tIdx++) {
-      const tr = trackList[tIdx];
-      const nick = tr.dubberName || tr.participant || `dubber_${tIdx + 1}`;
-      const charName = tr.characterName || tr.character || 'Персонаж';
-      const clips = (clipsMap[tr.id] || []).filter(c => !c.isDeleted);
-      
-      const outFilename = `${baseVideoName}_[${nick}].wav`;
-      const outFilePath = path.join(exportDir, outFilename);
-      const outRawFilePath = path.join(rawDir, `${String(tIdx + 1).padStart(2, '0')}_${nick}.wav`);
+    const getCleanNick = (rawNick) => {
+      if (!rawNick) return 'dubber';
+      let clean = String(rawNick)
+        .replace(/\[.*\]/g, '')
+        .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
+        .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
+        .trim();
+      return clean || 'dubber';
+    };
 
-      // Find valid file path for track
-      let sourceTrackFile = tr.filePath;
-      if ((!sourceTrackFile || !require('fs').existsSync(sourceTrackFile)) && episode.uploads) {
-        const matchingUpload = episode.uploads.find(u => 
-          (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && 
-          (u.uploadedById === tr.id || u.participantId === tr.id || (u.fileName && u.fileName.includes(nick)))
-        );
-        if (matchingUpload && matchingUpload.path && require('fs').existsSync(matchingUpload.path)) {
-          sourceTrackFile = matchingUpload.path;
+    // Group all tracks by unique actor
+    const actorTracksMap = new Map();
+    for (const tr of trackList) {
+      const rawNick = tr.dubberName || tr.participant || 'Даббер';
+      const cleanNick = getCleanNick(rawNick);
+      if (!actorTracksMap.has(cleanNick)) {
+        actorTracksMap.set(cleanNick, {
+          nick: cleanNick,
+          characterName: tr.characterName || tr.character || 'Персонаж',
+          tracks: []
+        });
+      }
+      actorTracksMap.get(cleanNick).tracks.push(tr);
+    }
+
+    const actorEntries = Array.from(actorTracksMap.values());
+    for (let aIdx = 0; aIdx < actorEntries.length; aIdx++) {
+      const { nick, characterName, tracks: actorTrs } = actorEntries[aIdx];
+      const outFilename = `00_timed_${nick}.wav`;
+      const outFilePath = path.join(exportDir, outFilename);
+      const outRawFilePath = path.join(rawDir, outFilename);
+
+      // Collect all phrases for this actor across main tracks and fix layers
+      const phrases = [];
+      let primarySourceFile = null;
+
+      for (const tr of actorTrs) {
+        let sourceFile = tr.filePath;
+        if ((!sourceFile || !require('fs').existsSync(sourceFile)) && episode.uploads) {
+          const matchingUpload = episode.uploads.find(u => 
+            (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && 
+            (u.uploadedById === tr.id || u.participantId === tr.id || (u.fileName && u.fileName.includes(nick)))
+          );
+          if (matchingUpload && matchingUpload.path && require('fs').existsSync(matchingUpload.path)) {
+            sourceFile = matchingUpload.path;
+          }
+        }
+
+        if (sourceFile && require('fs').existsSync(sourceFile) && !primarySourceFile) {
+          primarySourceFile = sourceFile;
+        }
+
+        const clips = (clipsMap[tr.id] || []).filter(c => !c.isDeleted);
+        for (const c of clips) {
+          phrases.push({
+            sourceAudioPath: c.sourceAudioPath || sourceFile || primarySourceFile,
+            sourceStartSec: c.sourceStartSec,
+            sourceEndSec: c.sourceEndSec,
+            targetStartSec: Number((c.clipStartSec + (c.offsetSec || 0)).toFixed(2)),
+            targetEndSec: Number((c.clipStartSec + (c.offsetSec || 0) + c.durationSec).toFixed(2)),
+            durationSec: Number(c.durationSec.toFixed(2)),
+            volumePercent: c.volumePercent ?? Math.round((volsMap[tr.id] ?? 1.0) * 100),
+            isFix: c.isFix || tr.id.includes('_fix_')
+          });
         }
       }
 
-      const phrases = clips.map(c => ({
-        sourceAudioPath: c.sourceAudioPath || sourceTrackFile,
-        sourceStartSec: c.sourceStartSec,
-        sourceEndSec: c.sourceEndSec,
-        targetStartSec: Number((c.clipStartSec + (c.offsetSec || 0)).toFixed(2)),
-        targetEndSec: Number((c.clipStartSec + (c.offsetSec || 0) + c.durationSec).toFixed(2)),
-        durationSec: Number(c.durationSec.toFixed(2)),
-        volumePercent: c.volumePercent ?? Math.round((volsMap[tr.id] ?? 1.0) * 100)
-      }));
+      // Sort phrases chronologically
+      phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
 
-      if (phrases.length > 0 && sourceTrackFile && require('fs').existsSync(sourceTrackFile)) {
-        await AutoTimingService.assembleMultiSourceTrack(sourceTrackFile, phrases, outFilePath, { targetDir: exportDir, timingMetadata });
-        try {
-          await fs.copyFile(outFilePath, outRawFilePath);
-        } catch (e) {}
-      } else if (sourceTrackFile && require('fs').existsSync(sourceTrackFile)) {
-        await fs.copyFile(sourceTrackFile, outFilePath);
+      if (phrases.length > 0 && primarySourceFile && require('fs').existsSync(primarySourceFile)) {
+        await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, phrases, outFilePath, { targetDir: exportDir, timingMetadata });
+      } else if (primarySourceFile && require('fs').existsSync(primarySourceFile)) {
+        await fs.copyFile(primarySourceFile, outFilePath);
+      }
+
+      if (require('fs').existsSync(outFilePath)) {
         try {
           await fs.copyFile(outFilePath, outRawFilePath);
         } catch (e) {}
       }
 
       renderedTracks.push({
-        trackId: tr.id,
         dubberNick: nick,
-        characterName: charName,
+        characterName,
         outputPath: outFilePath,
         phrasesCount: phrases.length
       });
 
-      onProgress({ percent: Math.round(((tIdx + 1) / Math.max(1, trackList.length)) * 100) });
+      onProgress({ percent: Math.round(((aIdx + 1) / Math.max(1, actorEntries.length)) * 100) });
     }
 
-    // 4. Save timing metadata
+    // Clean up any leftover slice files or temporary artifacts from mixing directory and 00_исходные
+    const cleanupDirs = [exportDir, rawDir];
+    for (const dir of cleanupDirs) {
+      if (require('fs').existsSync(dir)) {
+        const files = await fs.readdir(dir).catch(() => []);
+        for (const f of files) {
+          const lower = f.toLowerCase();
+          if (lower.includes('slice') || lower.startsWith('temp_') || lower.endsWith('.raw')) {
+            if (!f.startsWith('00_timed_')) {
+              await fs.unlink(path.join(dir, f)).catch(() => {});
+            }
+          }
+        }
+      }
+    }
+
+    // 4. Save timing metadata and Audio Analysis passport
     if (timingMetadata) {
       try {
         await fs.writeFile(path.join(exportDir, 'timing_metadata.json'), JSON.stringify(timingMetadata, null, 2), 'utf8');
         await fs.writeFile(path.join(rawDir, 'timing_metadata.json'), JSON.stringify(timingMetadata, null, 2), 'utf8');
-      } catch (e) {}
+        await AudioAnalysisService.saveTimingAnalysis(exportDir, {
+          timingMetadata,
+          renderedTracks
+        });
+      } catch (e) {
+        log.warn('[ExportController] Error saving timing analysis passport:', e.message);
+      }
     }
 
     // 5. Trigger mixing status refresh to build mixing_manifest.json

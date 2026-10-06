@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Environment Builder for Anime Dub Manager (ADM)
-Creates a portable, self-contained AI runtime (DeepFilterNet3, Demucs v4, PyTorch)
+Creates a portable, self-contained Python AI runtime (DeepFilterNet3, Demucs v4, PyTorch, NumPy 1.26.4)
 and packages it into lightweight cross-platform zip archives for GitHub Releases CI/CD (<2GB limit).
 """
 
@@ -22,6 +22,7 @@ if hasattr(sys.stdout, 'reconfigure'):
     except Exception:
         pass
 
+
 def get_platform_tag():
     system = platform.system().lower()
     machine = platform.machine().lower()
@@ -36,9 +37,11 @@ def get_platform_tag():
         return "linux_x64"
     return f"{system}_{machine}"
 
-def run_cmd(cmd, cwd=None, env=None):
-    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else cmd
+
+def run_cmd(cmd, cwd=None, env=None, check=True):
+    cmd_str = ' '.join(cmd) if isinstance(cmd, list) else str(cmd)
     print(f"  [EXEC] {cmd_str}")
+    sys.stdout.flush()
     
     merged_env = os.environ.copy()
     merged_env["PYTHONIOENCODING"] = "utf-8"
@@ -47,8 +50,12 @@ def run_cmd(cmd, cwd=None, env=None):
         merged_env.update(env)
         
     res = subprocess.run(cmd, cwd=cwd, env=merged_env, shell=isinstance(cmd, str))
-    if res.returncode != 0:
-        raise RuntimeError(f"Command failed with exit code {res.returncode}: {cmd}")
+    if check and res.returncode != 0:
+        sys.stderr.write(f"  [ERROR] Command failed with exit code {res.returncode}: {cmd_str}\n")
+        sys.stderr.flush()
+        raise RuntimeError(f"Command failed with exit code {res.returncode}: {cmd_str}")
+    return res.returncode
+
 
 def prune_unneeded_files(target_dir, strip_cuda=True):
     """
@@ -86,6 +93,7 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
                     pass
     print(f"  [CLEANUP] Removed unneeded files and directories ({removed_count} items pruned).")
 
+
 def make_zip(source_dir, output_zip_path, root_folder_name="ai_env"):
     print(f"  [ZIP] Packaging '{source_dir}' -> '{output_zip_path}' (Root: '{root_folder_name}')...")
     os.makedirs(os.path.dirname(os.path.abspath(output_zip_path)), exist_ok=True)
@@ -113,6 +121,7 @@ def make_zip(source_dir, output_zip_path, root_folder_name="ai_env"):
     if size_bytes >= max_limit:
         raise ValueError(f"CRITICAL: Archive size {size_mb:.2f} MB exceeds GitHub Release 2GB limit!")
 
+
 def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     root_dir = Path(__file__).resolve().parent.parent
     build_temp_dir = root_dir / "build_temp_ai_env"
@@ -125,8 +134,9 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     is_linux = "linux" in tag or platform.system().lower() == "linux"
 
     print("=" * 60)
-    print(f"[BUILD] Building AI_env for platform: {tag}")
+    print(f"[BUILD] Building AI_env for platform tag: {tag}")
     print(f"[PATH] Project Root: {root_dir}")
+    print(f"[PATH] Output Directory: {out_dir}")
     print("=" * 60)
 
     # 1. Clean previous temp builds
@@ -154,8 +164,6 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
 
     # 3. Upgrade pip, wheel, setuptools
     # Note: DeepFilterNet 0.5.6 strictly requires `packaging>=23.0,<24.0`.
-    # Recent wheel (>=0.45) and setuptools (>=70) pull in packaging>=24.0, which causes ResolutionImpossible.
-    # We constrain setuptools and wheel to maintain full compatibility with DeepFilterNet.
     print("\n[STEP 2] Upgrading pip, setuptools, wheel (DeepFilterNet compatible)...")
     run_cmd([
         str(venv_python), "-m", "pip", "install", "--upgrade",
@@ -166,47 +174,150 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "--no-cache-dir"
     ])
 
-    # 4. Install optimized PyTorch & dependencies
-    print("\n[STEP 3] Installing PyTorch, DeepFilterNet3, Demucs v4 & audio packages...")
-    
-    # For Windows & Linux, install PyTorch CPU wheels strictly from the CPU index first.
-    # This prevents pip from querying PyPI and pulling 4GB of NVIDIA CUDA 13 / triton packages!
+    # 4. Install PyTorch & TorchAudio (Strictly version-matched)
+    print("\n[STEP 3] Installing strictly matched PyTorch and TorchAudio...")
     if use_cpu_wheels and (is_win or is_linux):
-        print("  [OPT] Installing CPU PyTorch wheels directly from CPU index (zero CUDA bloat)...")
+        print("  [OPT] Installing CPU PyTorch wheels directly from PyTorch CPU index...")
         run_cmd([
             str(venv_python), "-m", "pip", "install", 
             "--no-cache-dir",
             "--index-url", "https://download.pytorch.org/whl/cpu",
-            "torch>=2.1.0,<=2.3.1", 
-            "torchaudio>=2.1.0,<=2.3.1"
+            "torch==2.2.2", 
+            "torchaudio==2.2.2"
+        ])
+    else:
+        print("  [OPT] Installing PyTorch & TorchAudio from PyPI...")
+        run_cmd([
+            str(venv_python), "-m", "pip", "install", 
+            "--no-cache-dir",
+            "torch==2.2.2", 
+            "torchaudio==2.2.2"
         ])
 
+    # 5. Install DeepFilterNet, Demucs, and audio processing stack with LOCKED NumPy 1.26.4
+    print("\n[STEP 4] Installing DeepFilterNet3, Demucs v4 & audio packages (Locking NumPy 1.26.4)...")
     other_packages = [
-        "deepfilternet>=0.5.6",
-        "demucs>=4.0.1",
-        "onnxruntime>=1.16.0",
+        "numpy==1.26.4",
+        "deepfilternet>=0.5.6,<0.6.0",
+        "demucs>=4.0.0,<4.1.0",
         "soundfile>=0.12.1",
-        "numpy>=1.24.0,<2.0.0",
-        "scipy>=1.10.0",
+        "scipy>=1.10.0,<1.14.0",
         "librosa>=0.10.0",
+        "onnxruntime>=1.16.0",
+        "huggingface-hub>=0.20.0",
         "tqdm>=4.65.0",
-        "packaging>=23.0,<24.0",
         "einops>=0.7.0",
         "rotary-embedding-torch>=0.5.0",
-        "requests>=2.31.0",
-        "huggingface-hub>=0.20.0"
+        "requests>=2.31.0"
     ]
-    if not (use_cpu_wheels and (is_win or is_linux)):
-        other_packages = ["torch>=2.1.0,<=2.3.1", "torchaudio>=2.1.0,<=2.3.1"] + other_packages
-
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir"] + other_packages)
 
+    # Re-enforce numpy 1.26.4 strictly to prevent any transitive dependency from pulling in NumPy 2.x
+    print("  [STRICT] Re-enforcing NumPy 1.26.4 pinning...")
+    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "numpy==1.26.4"])
+
+    # Verify PyTorch / TorchAudio / NumPy integrity inside venv
+    print("\n[STEP 5] Verifying environment integrity and imports inside venv...")
+    verify_script = """
+import sys
+import numpy as np
+import torch
+import torchaudio
+import torchaudio.functional
+import torchaudio.compliance
+import df
+import demucs.pretrained
+
+print(f"  [VERIFY OK] Python: {sys.version}")
+print(f"  [VERIFY OK] NumPy: {np.__version__}")
+assert np.__version__.startswith("1.26"), f"CRITICAL: Expected NumPy 1.26.x, got {np.__version__}"
+print(f"  [VERIFY OK] PyTorch: {torch.__version__}")
+print(f"  [VERIFY OK] TorchAudio: {torchaudio.__version__}")
+print("  [VERIFY OK] torchaudio.compliance & torchaudio.functional imports succeeded.")
+"""
+    run_cmd([str(venv_python), "-c", verify_script])
+
+    # 6. Preload base models for offline operation
+    print("\n[STEP 6] Preloading AI base models for offline operation (DeepFilterNet3, Demucs htdemucs)...")
+    models_dir = build_temp_ai_env / "models"
+    torch_models_dir = models_dir / "torch"
+    hf_models_dir = models_dir / "huggingface"
+    df_models_dir = models_dir / "deepfilternet"
+    
+    torch_models_dir.mkdir(parents=True, exist_ok=True)
+    hf_models_dir.mkdir(parents=True, exist_ok=True)
+    df_models_dir.mkdir(parents=True, exist_ok=True)
+
+    preload_script = f"""
+import os
+import sys
+
+os.environ["TORCH_HOME"] = r"{torch_models_dir}"
+os.environ["HF_HOME"] = r"{hf_models_dir}"
+os.environ["DEEPFILTERNET_CACHE"] = r"{df_models_dir}"
+
+print("  -> Preloading DeepFilterNet3 weights...")
+try:
+    import df
+    model, df_state, _ = df.init_df("DeepFilterNet3", log_level="none")
+    print("  [OK] DeepFilterNet3 model preloaded.")
+except Exception as e:
+    print(f"  [WARN] DeepFilterNet3 preload warning: {{e}}")
+
+print("  -> Preloading Demucs base model (htdemucs)...")
+try:
+    import demucs.pretrained
+    model = demucs.pretrained.get_model('htdemucs')
+    print("  [OK] Demucs htdemucs model preloaded.")
+except Exception as e:
+    print(f"  [WARN] Demucs preload warning: {{e}}")
+"""
+    preload_py_file = build_temp_ai_env / "preload_models.py"
+    preload_py_file.write_text(preload_script, encoding="utf-8")
+
+    preload_env = {
+        "TORCH_HOME": str(torch_models_dir),
+        "HF_HOME": str(hf_models_dir),
+        "DEEPFILTERNET_CACHE": str(df_models_dir)
+    }
+    
+    run_cmd([str(venv_python), str(preload_py_file)], env=preload_env, check=False)
+    if preload_py_file.exists():
+        try:
+            os.remove(preload_py_file)
+        except Exception:
+            pass
+
+    # Copy user cache checkpoints to build_temp_ai_env/models if created in default home cache
+    user_home = Path.home()
+    default_torch_checkpoints = user_home / ".cache" / "torch" / "hub" / "checkpoints"
+    if default_torch_checkpoints.exists():
+        target_ckpt = torch_models_dir / "hub" / "checkpoints"
+        target_ckpt.mkdir(parents=True, exist_ok=True)
+        for f in default_torch_checkpoints.glob("*"):
+            if f.is_file():
+                try:
+                    shutil.copy2(f, target_ckpt / f.name)
+                    print(f"  [PORTABLE] Bundled preloaded checkpoint: {f.name}")
+                except Exception:
+                    pass
+
+    default_df_cache = user_home / ".cache" / "deepfilternet"
+    if default_df_cache.exists():
+        for f in default_df_cache.glob("*"):
+            try:
+                if f.is_dir():
+                    shutil.copytree(f, df_models_dir / f.name, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(f, df_models_dir / f.name)
+            except Exception:
+                pass
+
+    # 7. Copy base Python binaries & stdlib for portable execution
+    print("\n[STEP 7] Bundling portable Python base binaries and standard library...")
     if is_win:
-        # Copy base python dlls, executables, standard library and DLLs folder into env_dir so it is fully standalone across machines
-        print("  [PORTABLE] Copying Windows Python base binaries and standard library into virtual environment...")
         base_dir = Path(sys.base_prefix)
-        
-        # 1. Copy all base DLLs and executables into env_dir and env_dir/Scripts
+        # 1. Copy base DLLs and python.exe into env_dir and Scripts/
         for item in base_dir.iterdir():
             if item.is_file() and item.suffix.lower() in [".dll", ".exe"]:
                 try:
@@ -215,13 +326,13 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
                 except Exception:
                     pass
 
-        # 2. Copy standard DLLs folder (_socket.pyd, _ctypes.pyd, _ssl.pyd, etc.)
+        # 2. Copy DLLs folder (_socket.pyd, _ctypes.pyd, _ssl.pyd, etc.)
         dlls_src = base_dir / "DLLs"
         if dlls_src.exists():
             shutil.copytree(dlls_src, env_dir / "DLLs", dirs_exist_ok=True)
             print("  [PORTABLE] Copied DLLs/ folder (standard C-extensions)")
 
-        # 3. Copy standard library (os.py, encodings, json, etc.) except site-packages
+        # 3. Copy Lib/ standard library (encodings, os, json, etc.)
         lib_src = base_dir / "Lib"
         lib_dst = env_dir / "Lib"
         lib_dst.mkdir(parents=True, exist_ok=True)
@@ -244,7 +355,6 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
             pass
 
     if is_linux or is_mac:
-        print("  [PORTABLE] Copying Unix standard library into virtual environment...")
         base_dir = Path(sys.base_prefix)
         py_ver = f"python3.{sys.version_info.minor}"
         base_lib = base_dir / "lib" / py_ver
@@ -262,8 +372,8 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
                         shutil.copy2(item, dst_item)
             print(f"  [PORTABLE] Copied Unix standard library to {target_lib}")
 
-    # 5. Copy sidecars into environment bundle for self-containment
-    print("\n[STEP 4] Bundling audio_ai_processor sidecar and metadata...")
+    # 8. Copy sidecars into environment bundle for self-containment
+    print("\n[STEP 8] Bundling audio_ai_processor sidecar script...")
     sidecar_src = root_dir / "electron" / "sidecars" / "audio_ai_processor.py"
     sidecar_dst_dir = build_temp_dir / "sidecars"
     sidecar_dst_dir.mkdir(parents=True, exist_ok=True)
@@ -271,16 +381,16 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         shutil.copy2(sidecar_src, sidecar_dst_dir / "audio_ai_processor.py")
         print(f"  [OK] Copied audio_ai_processor.py to {sidecar_dst_dir}")
 
-    # 6. Create portable launcher / environment marker
+    # 9. Create portable launcher / environment marker
     version_info_path = build_temp_dir / "env_info.json"
     with open(version_info_path, "w", encoding="utf-8") as f:
-        f.write(f'{{\n  "platform": "{tag}",\n  "python_version": "{platform.python_version()}",\n  "deepfilternet": true,\n  "demucs": true\n}}\n')
+        f.write(f'{{\n  "platform": "{tag}",\n  "python_version": "{platform.python_version()}",\n  "numpy_version": "1.26.4",\n  "deepfilternet": true,\n  "demucs": true\n}}\n')
 
-    # 7. Prune bloat
+    # 10. Prune bloat
     prune_unneeded_files(build_temp_dir, strip_cuda=(use_cpu_wheels and (is_win or is_linux)))
 
-    # 8. Package zip archives
-    print("\n[STEP 5] Archiving AI_env bundle with maximum compression...")
+    # 11. Package zip archives
+    print("\n[STEP 9] Archiving AI_env bundle with maximum compression...")
     primary_zip_name = f"ai_env_{tag}.zip"
     primary_zip_path = out_dir / primary_zip_name
     make_zip(str(build_temp_dir), str(primary_zip_path), root_folder_name="ai_env")
@@ -291,13 +401,14 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         shutil.copyfile(primary_zip_path, compat_zip_path)
         print(f"  [OK] Created backward-compatible alias: {compat_zip_path}")
 
-    print("\n[DONE] AI_env build completed successfully!")
-    print(f"  Output: {primary_zip_path}")
+    print("\n[SUCCESS] Portable AI_env build completed successfully!")
+    print(f"  Primary Archive: {primary_zip_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build portable AI_env for Anime Dub Manager")
-    parser.add_argument("--out", default="out", help="Output directory for zipped packages")
-    parser.add_argument("--tag", default=None, help="Custom platform tag (e.g. windows_x64, macos_arm64, linux_x64)")
+    parser.add_argument("--out", "--out-dir", dest="out", default="out", help="Output directory for zipped packages")
+    parser.add_argument("--tag", default=None, help="Custom platform tag (e.g. windows_x64, macos_arm64, macos_x64, linux_x64)")
     parser.add_argument("--cuda", action="store_true", help="Build with CUDA wheels instead of CPU wheels")
     args = parser.parse_args()
     

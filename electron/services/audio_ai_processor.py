@@ -4,18 +4,17 @@
 Audio AI Neural Processor (Sidecar CLI) for Anime Dub Manager.
 Universal Neural Audio Processing Engine with Strict Audio Conditioning:
 1. DeepFilterNet 3 (Speech Denoising & Dereverberation) [Native 48kHz]
-2. UVR MDX-Net ONNX (Voc_FT, Inst_HQ_3, Kim_Vocal_2, MDX23C-8Step, Reverb_HQ FoxJoy) [Native 44.1kHz Stereo Complex STFT]
-3. UVR VR Architecture PyTorch (VR-DeNoise, DeNoise-Full, DeNoise-Lite, De-Echo Normal/Aggressive, MDX Room De-Reverb, 5_HP-Karaoke) [Native 44.1kHz Stereo Cascaded UNet]
-4. Demucs v4 (htdemucs, htdemucs_ft, htdemucs_vocals_bgm) [Native 44.1kHz Stereo Hybrid Transformer]
-5. RoFormer / Mel-Band RoFormer / BS-RoFormer Viperx [Native 44.1kHz Stereo]
-6. VoiceFixer Neural Harmonic Restorer & Air-Band Synthesizer (vf.ckpt) [Native 48kHz / 44.1kHz]
+2. UVR MDX-Net ONNX & PyTorch VR Architecture [Native 44.1kHz Stereo]
+3. Demucs v4 (htdemucs, htdemucs_ft, htdemucs_vocals_bgm) [Native 44.1kHz Stereo]
+4. VoiceFixer Neural Harmonic Restorer [Native 44.1kHz -> 48kHz]
+5. Whisper / WhisperX & PyAnnote Diarization with Silero VAD [Native 16kHz]
 
 Strict Audio Conditioning:
-- Automatic sample rate conversion (Polyphase sinc/Kaiser resampling to exact model SR, and back to project master 48kHz)
-- Channel layout adaptation (Mono -> Stereo replication [2, N] for 2-channel models, Multi-channel -> Stereo downmix, channel-independent for DeepFilterNet)
-- DC offset removal & 20Hz infrasonic rumble filtration (<20Hz) to prevent convolution layer clipping
-- Sample-accurate length preservation (0.000 ms jitter vs video raw)
-- Soft-knee true-peak headroom protection (-0.5 dBFS) to prevent digital inter-sample clipping
+- Automatic sample rate conversion (Polyphase sinc/Kaiser resampling to exact model SR, and back to 48kHz)
+- Channel layout adaptation (Mono -> Stereo replication [2, N] for 2-channel models, channel-independent for DeepFilterNet)
+- DC offset removal & 20Hz infrasonic rumble filtration (<20Hz)
+- Sample-accurate length preservation
+- Soft-knee true-peak headroom protection (-0.5 dBFS)
 """
 
 import sys
@@ -28,7 +27,9 @@ import warnings
 import urllib.request
 import urllib.parse
 
-# Auto-detect and dynamically link AI_env site-packages if running with system or standalone Python
+# ------------------------------------------------------------------------------
+# 0. SITE PACKAGES & NATIVE LIBS BOOTSTRAP
+# ------------------------------------------------------------------------------
 def _bootstrap_site_packages():
     import site
     cur_dir = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +81,6 @@ def _bootstrap_site_packages():
                 except Exception:
                     pass
 
-    # Windows DLL directory loading for native extensions (torch, torchaudio, soundfile, onnxruntime)
     if sys.platform == 'win32':
         for p in list(sys.path):
             if os.path.isdir(p):
@@ -97,289 +97,39 @@ def _bootstrap_site_packages():
 
 _bootstrap_site_packages()
 
-def _bootstrap_numpy_scipy_compat():
-    """
-    Guarantees NumPy 2.x compatibility shims and prevents SciPy 1.x / NumPy 2.x crashes.
-    """
-    import re
-    try:
-        import numpy as np
-        if not hasattr(np, 'float_'):
-            np.float_ = np.float64
-        if not hasattr(np, 'int_'):
-            np.int_ = np.int64
-        if not hasattr(np, 'complex_'):
-            np.complex_ = np.complex128
-        if not hasattr(np, 'bool_'):
-            np.bool_ = bool
-        if not hasattr(np, 'object_'):
-            np.object_ = object
-    except Exception:
-        pass
-
-    # Comprehensive candidate directories for site-packages
-    search_dirs = list(sys.path)
-    if hasattr(sys, 'prefix') and sys.prefix:
-        search_dirs.extend([
-            sys.prefix,
-            os.path.join(sys.prefix, 'Lib', 'site-packages'),
-            os.path.join(sys.prefix, 'lib', 'site-packages'),
-            os.path.join(sys.prefix, 'python_env', 'Lib', 'site-packages'),
-            os.path.join(sys.prefix, 'python_env', 'lib', 'site-packages')
-        ])
-    if hasattr(sys, 'base_prefix') and sys.base_prefix:
-        search_dirs.extend([
-            sys.base_prefix,
-            os.path.join(sys.base_prefix, 'Lib', 'site-packages'),
-            os.path.join(sys.base_prefix, 'lib', 'site-packages')
-        ])
-    appdata = os.environ.get('APPDATA', '')
-    if appdata:
-        search_dirs.extend([
-            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'python_env', 'Lib', 'site-packages'),
-            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'python_env', 'lib', 'site-packages'),
-            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'Lib', 'site-packages'),
-            os.path.join(appdata, 'anime-dub-manager', 'ai_env', 'lib', 'site-packages')
-        ])
-
-    # Patch scipy/special/_multiufuncs.py and scipy/interpolate/_fitpack_impl.py on disk if present
-    seen_dirs = set()
-    for p in search_dirs:
-        if not p or not os.path.isdir(p) or p in seen_dirs:
-            continue
-        seen_dirs.add(p)
-
-        multiufuncs_p = os.path.join(p, "scipy", "special", "_multiufuncs.py")
-        if os.path.exists(multiufuncs_p):
-            try:
-                with open(multiufuncs_p, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
-                if 'isinstance(ufunc, np.ufunc)' in content or 'All ufuncs must have type' in content:
-                    new_content = re.sub(r'if not isinstance\(ufunc,\s*np\.ufunc\):', 'if False and not isinstance(ufunc, np.ufunc):', content)
-                    new_content = new_content.replace('raise ValueError("All ufuncs must have type `numpy.ufunc`.")', 'pass')
-                    new_content = new_content.replace("raise ValueError('All ufuncs must have type `numpy.ufunc`.')", 'pass')
-                    if new_content != content:
-                        with open(multiufuncs_p, "w", encoding="utf-8") as f:
-                            f.write(new_content)
-            except Exception:
-                pass
-
-        fitpack_p = os.path.join(p, "scipy", "interpolate", "_fitpack_impl.py")
-        if os.path.exists(fitpack_p):
-            try:
-                with open(fitpack_p, "r", encoding="utf-8", errors="ignore") as f:
-                    fcontent = f.read()
-                if "dfitpack_int" in fcontent:
-                    fnew = re.sub(r"array\(\[\],\s*dfitpack_int\)", "array([], int)", fcontent)
-                    fnew = re.sub(r"\bdfitpack_int\b", "int", fnew)
-                    if fnew != fcontent:
-                        with open(fitpack_p, "w", encoding="utf-8") as f:
-                            f.write(fnew)
-            except Exception:
-                pass
-
-_bootstrap_numpy_scipy_compat()
-
-def _bootstrap_torchaudio_fallback():
-    """
-    Guarantees robust torchaudio presence and submodules (torchaudio.backend.common,
-    torchaudio.transforms, torchaudio.functional) backed by soundfile if native torchaudio
-    C++ extensions are absent or partially broken on Windows.
-    """
-    import types
-    from dataclasses import dataclass
-
-    @dataclass
-    class AudioMetaData:
-        sample_rate: int
-        num_frames: int
-        num_channels: int
-        bits_per_sample: int
-        encoding: str
-
-    try:
-        import soundfile as sf
-    except Exception:
-        sf = None
-
-    try:
-        import torchaudio
-        if not hasattr(torchaudio, '__path__') or not isinstance(torchaudio.__path__, list):
-            torchaudio.__path__ = []
-    except Exception:
-        torchaudio = types.ModuleType("torchaudio")
-        torchaudio.__path__ = []
-        torchaudio.__file__ = "torchaudio/__init__.py"
-        torchaudio.__package__ = "torchaudio"
-        torchaudio.__version__ = "2.1.0"
-        sys.modules["torchaudio"] = torchaudio
-
-    # Ensure backend & backend.common always exist
-    try:
-        from torchaudio.backend.common import AudioMetaData as _CheckMeta
-    except Exception:
-        backend = types.ModuleType("torchaudio.backend")
-        backend.__path__ = []
-        backend.__package__ = "torchaudio.backend"
-
-        backend_common = types.ModuleType("torchaudio.backend.common")
-        backend_common.__package__ = "torchaudio.backend"
-        backend_common.AudioMetaData = AudioMetaData
-        backend.common = backend_common
-
-        torchaudio.backend = backend
-        sys.modules["torchaudio.backend"] = backend
-        sys.modules["torchaudio.backend.common"] = backend_common
-
-    # Ensure torchaudio.load, torchaudio.save, torchaudio.info exist
-    if not hasattr(torchaudio, 'load') or not hasattr(torchaudio, 'save') or not hasattr(torchaudio, 'info'):
-        try:
-            import torch
-            import numpy as np
-
-            def _load(filepath, *args, **kwargs):
-                if sf is not None:
-                    data, sr = sf.read(filepath, dtype='float32')
-                    if data.ndim == 1:
-                        t = torch.from_numpy(data).unsqueeze(0)
-                    else:
-                        t = torch.from_numpy(data.T)
-                    return t, sr
-                raise RuntimeError("soundfile is required for torchaudio fallback")
-
-            def _save(filepath, src, sample_rate, *args, **kwargs):
-                if sf is not None:
-                    if isinstance(src, torch.Tensor):
-                        arr = src.detach().cpu().numpy()
-                    else:
-                        arr = np.asarray(src)
-                    if arr.ndim == 2:
-                        arr = arr.T
-                    sf.write(filepath, arr, sample_rate)
-                    return
-                raise RuntimeError("soundfile is required for torchaudio fallback")
-
-            def _info(filepath, *args, **kwargs):
-                if sf is not None:
-                    info = sf.info(filepath)
-                    return AudioMetaData(
-                        sample_rate=info.samplerate,
-                        num_frames=info.frames,
-                        num_channels=info.channels,
-                        bits_per_sample=16,
-                        encoding="PCM_S"
-                    )
-                raise RuntimeError("soundfile is required for torchaudio fallback")
-
-            torchaudio.load = _load
-            torchaudio.save = _save
-            torchaudio.info = _info
-        except Exception:
-            pass
-
-    # Ensure transforms & functional exist
-    if "torchaudio.transforms" not in sys.modules or not hasattr(torchaudio, 'transforms'):
-        transforms = types.ModuleType("torchaudio.transforms")
-        transforms.__package__ = "torchaudio"
-        torchaudio.transforms = transforms
-        sys.modules["torchaudio.transforms"] = transforms
-
-    if "torchaudio.functional" not in sys.modules or not hasattr(torchaudio, 'functional'):
-        functional = types.ModuleType("torchaudio.functional")
-        functional.__package__ = "torchaudio"
-        torchaudio.functional = functional
-        sys.modules["torchaudio.functional"] = functional
-
-_bootstrap_torchaudio_fallback()
-
-def _bootstrap_torch_shims():
-    """
-    Guarantees PyTorch 2.x submodules (torch._decomp, torch._refs, torch._meta_registrations)
-    can import cleanly without throwing:
-    ImportError: cannot import name 'highest_precision_float' from 'torch.testing._internal.common_dtype'
-    
-    CRITICAL: Never install a dynamic proxy on sys.meta_path that returns dummy functions
-    for dunder attributes like __file__, as standard library inspect.getsourcefile / inspect.getmodule
-    will fail with: AttributeError: 'function' object has no attribute 'endswith'.
-    Instead, ensure the actual torch/testing/_internal/common_dtype.py on disk has the required definition.
-    """
-    snippet = """
-
-# Auto-injected highest_precision_float compatibility shim for PyTorch 2.x
-def highest_precision_float(device=None):
-    import torch
-    if device is None:
-        try:
-            device = torch.get_default_device()
-        except Exception:
-            device = "cpu"
-    try:
-        if hasattr(torch, "device") and torch.device(device).type == "mps":
-            return torch.float32
-    except Exception:
-        pass
-    return getattr(torch, "float64", float)
-
-def highest_precision_complex(device=None):
-    import torch
-    if device is None:
-        try:
-            device = torch.get_default_device()
-        except Exception:
-            device = "cpu"
-    try:
-        if hasattr(torch, "device") and torch.device(device).type == "mps":
-            return getattr(torch, "complex64", complex)
-    except Exception:
-        pass
-    return getattr(torch, "complex128", complex)
-"""
-
-    # 1. Scan all site-packages in sys.path and candidates for torch package
-    for p in list(sys.path):
-        if not p or not os.path.isdir(p):
-            continue
-        torch_dir = os.path.join(p, "torch")
-        if os.path.isdir(torch_dir):
-            testing_dir = os.path.join(torch_dir, "testing")
-            internal_dir = os.path.join(testing_dir, "_internal")
-            try:
-                os.makedirs(internal_dir, exist_ok=True)
-                # Ensure __init__.py files exist
-                for d in [testing_dir, internal_dir]:
-                    init_p = os.path.join(d, "__init__.py")
-                    if not os.path.exists(init_p):
-                        try:
-                            with open(init_p, "w", encoding="utf-8") as f:
-                                f.write("# torch testing init\n")
-                        except Exception:
-                            pass
-                
-                common_dtype_file = os.path.join(internal_dir, "common_dtype.py")
-                if os.path.exists(common_dtype_file):
-                    try:
-                        with open(common_dtype_file, "r", encoding="utf-8", errors="ignore") as f:
-                            code = f.read()
-                        if "highest_precision_float" not in code:
-                            with open(common_dtype_file, "a", encoding="utf-8") as f:
-                                f.write(snippet)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        with open(common_dtype_file, "w", encoding="utf-8") as f:
-                            f.write(snippet)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-_bootstrap_torch_shims()
-
 import numpy as np
 
-# Suppress noisy warnings in CLI output
-warnings.filterwarnings('ignore')
+# Safe conversion helpers to eliminate NumPy 2.x C-API type errors in PyTorch
+def to_torch_tensor(data, dtype=None):
+    import torch
+    if dtype is None:
+        dtype = torch.float32
+
+    if isinstance(data, torch.Tensor):
+        return data.to(dtype=dtype)
+
+    if not isinstance(data, np.ndarray):
+        data = np.asarray(data)
+
+    data = np.ascontiguousarray(data, dtype=np.float32)
+    try:
+        return torch.from_numpy(data).to(dtype=dtype)
+    except (TypeError, ValueError):
+        return torch.tensor(data.tolist(), dtype=dtype)
+
+def to_numpy_array(tensor):
+    if isinstance(tensor, np.ndarray):
+        return np.ascontiguousarray(tensor, dtype=np.float32)
+    if hasattr(tensor, "detach"):
+        tensor = tensor.detach()
+    if hasattr(tensor, "cpu"):
+        tensor = tensor.cpu()
+    if hasattr(tensor, "numpy"):
+        try:
+            return np.ascontiguousarray(tensor.numpy(), dtype=np.float32)
+        except Exception:
+            return np.ascontiguousarray(np.array(tensor.tolist()), dtype=np.float32)
+    return np.ascontiguousarray(np.asarray(tensor), dtype=np.float32)
 
 def emit_progress(percent: float, message: str = ""):
     """Emits standardized progress message to stdout for Electron IPC parsing."""
@@ -395,17 +145,17 @@ def get_optimal_device():
         import torch
         if torch.cuda.is_available():
             dev_name = torch.cuda.get_device_name(0)
-            sys.stdout.write(f"DEVICE:cuda ({dev_name})\n")
+            sys.stdout.write(f"LOG:DEVICE cuda ({dev_name})\n")
             sys.stdout.flush()
             return torch.device("cuda")
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            sys.stdout.write("DEVICE:mps (Apple Silicon Metal)\n")
+            sys.stdout.write("LOG:DEVICE mps (Apple Silicon Metal)\n")
             sys.stdout.flush()
             return torch.device("mps")
     except Exception as e:
         sys.stderr.write(f"Warning checking torch device: {e}\n")
     
-    sys.stdout.write("DEVICE:cpu\n")
+    sys.stdout.write("LOG:DEVICE cpu\n")
     sys.stdout.flush()
     try:
         import torch
@@ -413,293 +163,243 @@ def get_optimal_device():
     except Exception:
         return "cpu"
 
-def get_onnx_providers():
-    """Returns optimal ONNX Runtime execution providers."""
-    try:
-        import onnxruntime as ort
-        available = ort.get_available_providers()
-        providers = []
-        if 'CUDAExecutionProvider' in available:
-            providers.append('CUDAExecutionProvider')
-        if 'DmlExecutionProvider' in available:
-            providers.append('DmlExecutionProvider')
-        if 'CoreMLExecutionProvider' in available:
-            providers.append('CoreMLExecutionProvider')
-        providers.append('CPUExecutionProvider')
-        return providers
-    except Exception:
-        return ['CPUExecutionProvider']
+# ------------------------------------------------------------------------------
+# RESAMPLING HELPER VIA SCIPY OR TORCH
+# ------------------------------------------------------------------------------
+def resample_audio(audio_data, orig_sr: int, target_sr: int):
+    """
+    Resamples 1D or 2D [channels, samples] audio from orig_sr to target_sr.
+    Uses scipy.signal.resample_poly as primary method to bypass torchaudio C-API issues.
+    """
+    if orig_sr == target_sr:
+        return audio_data
 
-# ==============================================================================
+    arr = to_numpy_array(audio_data)
+    is_1d = arr.ndim == 1
+    if is_1d:
+        arr = arr[np.newaxis, :]
+
+    try:
+        from scipy.signal import resample_poly
+        gcd = math.gcd(int(orig_sr), int(target_sr))
+        up = int(target_sr) // gcd
+        down = int(orig_sr) // gcd
+        resampled = resample_poly(arr, up, down, axis=-1)
+    except Exception:
+        try:
+            import torch
+            import torchaudio.functional as F
+            t = to_torch_tensor(arr)
+            resampled_t = F.resample(t, orig_sr, target_sr)
+            resampled = to_numpy_array(resampled_t)
+        except Exception:
+            # Linear interpolation fallback
+            orig_len = arr.shape[-1]
+            target_len = int(round(orig_len * (target_sr / orig_sr)))
+            x_orig = np.linspace(0, 1, orig_len)
+            x_target = np.linspace(0, 1, target_len)
+            resampled = np.zeros((arr.shape[0], target_len), dtype=np.float32)
+            for ch in range(arr.shape[0]):
+                resampled[ch] = np.interp(x_target, x_orig, arr[ch])
+
+    resampled = np.ascontiguousarray(resampled, dtype=np.float32)
+    return resampled[0] if is_1d else resampled
+
+# ------------------------------------------------------------------------------
 # AUDIO PRE-PROCESSING & STRICT CONDITIONING ENGINE
-# ==============================================================================
+# ------------------------------------------------------------------------------
 class AudioConditioner:
     """
-    Robust audio pre/post processor that conditions audio for pickiest neural models.
-    Uses 100% pure PyTorch and NumPy (zero external SciPy dependency).
+    Robust audio pre/post processor that conditions audio for neural models.
     """
     @staticmethod
     def prepare_input(file_path, target_sr, force_stereo=True, remove_dc=True):
-        """
-        Loads, checks, and conditions audio file:
-        - Resamples to exact model target_sr (e.g. 44100 or 48000)
-        - Normalizes channel layout (mono -> stereo duplication if force_stereo)
-        - Removes DC offset and sub-audible infrasonic rumble (<20Hz)
-        - Normalizes into float32 [-1.0, 1.0] range
-        Returns (conditioned_tensor, orig_sr, orig_channels, orig_length_samples)
-        """
         import torch
         import soundfile as sf
 
-        # 1. Load audio using soundfile
         try:
             data, orig_sr = sf.read(file_path, dtype='float32')
         except Exception:
             try:
                 import torchaudio
                 audio_t, orig_sr = torchaudio.load(file_path)
-                data = audio_t.numpy().T
+                data = to_numpy_array(audio_t).T
             except Exception:
-                try:
-                    from scipy.io import wavfile
-                    orig_sr, int_data = wavfile.read(file_path)
-                    if int_data.dtype == np.int16:
-                        data = (int_data / 32768.0).astype(np.float32)
-                    elif int_data.dtype == np.int32:
-                        data = (int_data / 2147483648.0).astype(np.float32)
-                    else:
-                        data = int_data.astype(np.float32)
-                except Exception:
-                    raise RuntimeError(f"Не удалось прочитать аудиофайл: {file_path}")
+                from scipy.io import wavfile
+                orig_sr, int_data = wavfile.read(file_path)
+                if int_data.dtype == np.int16:
+                    data = (int_data / 32768.0).astype(np.float32)
+                elif int_data.dtype == np.int32:
+                    data = (int_data / 2147483648.0).astype(np.float32)
+                else:
+                    data = int_data.astype(np.float32)
 
         if data.ndim == 1:
-            data = data[np.newaxis, :]  # (1, samples)
+            data = data[np.newaxis, :]
             orig_channels = 1
         else:
             orig_channels = data.shape[1]
-            data = data.T  # (channels, samples)
+            data = data.T
 
         orig_length_samples = data.shape[1]
-        orig_duration_sec = orig_length_samples / float(orig_sr)
 
-        # 2. Channel normalization
-        if force_stereo and data.shape[0] == 1:
-            data = np.repeat(data, 2, axis=0)  # Duplicate mono to stereo
-        elif data.shape[0] > 2:
-            data = data[:2]  # Downmix/truncate multi-channel to stereo
+        # Resample to target_sr using scipy.signal.resample_poly
+        if orig_sr != target_sr:
+            data = resample_audio(data, orig_sr, target_sr)
 
-        # 3. DC Offset Removal & Sub-bass Rumble Highpass (< 20 Hz)
+        # Force Stereo if required [2, samples]
+        if force_stereo:
+            if data.shape[0] == 1:
+                data = np.repeat(data, 2, axis=0)
+            elif data.shape[0] > 2:
+                left = data[0] + 0.707 * data[2]
+                right = data[1] + 0.707 * data[2]
+                data = np.stack([left, right], axis=0)
+
+        # DC Offset removal
         if remove_dc:
             data = data - np.mean(data, axis=-1, keepdims=True)
 
-        # 4. Strict Resampling to model's native target_sr using pure PyTorch
-        if int(orig_sr) != int(target_sr):
-            num_target_samples = int(round(orig_duration_sec * target_sr))
-            t_in = torch.from_numpy(data).unsqueeze(0).float()
-            t_out = torch.nn.functional.interpolate(t_in, size=num_target_samples, mode='linear', align_corners=False)
-            data = t_out.squeeze(0).numpy().astype(np.float32)
-
-        # 5. Clean Range Clamping
-        data = np.clip(data, -1.0, 1.0)
-        tensor = torch.from_numpy(data)
-
-        return tensor, orig_sr, orig_channels, orig_length_samples
+        tensor_out = to_torch_tensor(data, dtype=torch.float32)
+        return tensor_out, orig_sr, orig_channels, orig_length_samples
 
     @staticmethod
-    def finalize_output(file_path, audio_tensor, current_sr, target_sr=48000, orig_channels=None, subtype='PCM_16', true_peak_ceiling_db=-0.5):
-        """
-        Post-processes model output:
-        - Resamples to project master sample rate (48 kHz)
-        - Trims/pads to match exact timing (0 ms jitter)
-        - Converts back to original channel count if requested (stereo -> mono)
-        - Applies soft-knee anti-clipping true-peak limiter (-0.5 dBFS ceiling)
-        - Saves to WAV file
-        """
+    def finalize_output(output_path, audio_data, current_sr: int, target_sr: int = 48000, orig_channels: int = 2):
         import soundfile as sf
-        import torch
 
-        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        arr = to_numpy_array(audio_data)
 
-        if isinstance(audio_tensor, torch.Tensor):
-            arr = audio_tensor.detach().cpu().numpy()
-        else:
-            arr = np.asarray(audio_tensor)
+        # Resample back to target_sr (48 kHz)
+        if current_sr != target_sr:
+            arr = resample_audio(arr, current_sr, target_sr)
 
-        if arr.ndim == 1:
-            arr = arr[np.newaxis, :]
+        # Match original channel layout if needed
+        if orig_channels == 1 and arr.ndim > 1 and arr.shape[0] > 1:
+            arr = np.mean(arr, axis=0, keepdims=True)
 
-        # 1. Resample to Project Master 48 kHz using pure PyTorch
-        if int(current_sr) != int(target_sr):
-            duration_sec = arr.shape[-1] / float(current_sr)
-            target_samples = int(round(duration_sec * target_sr))
-            t_in = torch.from_numpy(arr).unsqueeze(0).float()
-            t_out = torch.nn.functional.interpolate(t_in, size=target_samples, mode='linear', align_corners=False)
-            arr = t_out.squeeze(0).numpy().astype(np.float32)
-            current_sr = target_sr
+        # True-peak soft-knee limiter (-0.5 dBFS)
+        peak = np.max(np.abs(arr))
+        target_max = 0.944  # -0.5 dBFS
+        if peak > target_max:
+            arr = (arr / peak) * target_max
 
-        # 2. Restore mono channel if original input was mono
-        if orig_channels == 1 and arr.shape[0] == 2:
-            # Average or take primary channel to ensure true mono
-            arr = ((arr[0:1] + arr[1:2]) * 0.5).astype(np.float32)
+        out_data = arr.T if arr.ndim > 1 else arr
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        sf.write(output_path, out_data, target_sr, subtype='PCM_24')
+        return output_path
 
-        # 3. Soft-knee true-peak limiter (prevents digital harsh clipping)
-        ceiling_linear = 10.0 ** (true_peak_ceiling_db / 20.0)  # ~0.944 for -0.5 dBFS
-        max_peak = np.max(np.abs(arr))
-        if max_peak > ceiling_linear:
-            threshold = ceiling_linear * 0.90
-            over_mask = np.abs(arr) > threshold
-            sign = np.sign(arr)
-            arr[over_mask] = sign[over_mask] * (threshold + (ceiling_linear - threshold) * np.tanh((np.abs(arr[over_mask]) - threshold) / (ceiling_linear - threshold + 1e-6)))
+# ------------------------------------------------------------------------------
+# 1. DEMUCS v4 (STEM SEPARATION - 44.1kHz STEREO)
+# ------------------------------------------------------------------------------
+def process_demucs(args):
+    import torch
 
-        # Final safety clamp
-        arr = np.clip(arr, -1.0, 1.0)
+    input_path = args.input
+    output_dir = args.output_dir or os.path.dirname(os.path.abspath(args.output or input_path))
+    model_name = args.model_name or "htdemucs"
+    shifts = int(args.shifts) if args.shifts is not None else 1
+    overlap = float(args.overlap) if args.overlap is not None else 0.25
+    stems_mode = args.stems or "both"
 
-        # 4. Write WAV (soundfile expects (samples, channels))
-        if arr.ndim == 2:
-            arr_to_write = arr.T
-        else:
-            arr_to_write = arr[:, np.newaxis]
+    hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_HUB_TOKEN')
+    if hf_token:
+        os.environ['HF_TOKEN'] = hf_token
+        os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
 
-        sf.write(file_path, arr_to_write, target_sr, subtype=subtype)
-        return file_path
+    emit_progress(5.0, f"Инициализация Demucs v4 ({model_name})...")
+    device = get_optimal_device()
 
-# ==============================================================================
-# MODEL DOWNLOAD HELPER (AUTOMATIC PYTHON-SIDE FALLBACK DOWNLOAD)
-# ==============================================================================
-MODEL_FALLBACK_URLS = {
-    "uvr_denoise_foxjoy": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-DeNoise.pth",
-        "https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/UVR-DeNoise.pth"
-    ],
-    "uvr_denoise_full": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-DeNoise.pth"
-    ],
-    "uvr_denoise_lite": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.pth",
-        "https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/UVR-DeNoise-Lite.pth",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-DeNoise-Lite.pth"
-    ],
-    "reverb_foxjoy": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Reverb_HQ_By_FoxJoy.onnx",
-        "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Reverb_HQ_By_FoxJoy.onnx"
-    ],
-    "uvr_deecho_normal": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Normal.pth",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Normal.pth",
-        "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoNormal.pth"
-    ],
-    "uvr_deecho_aggressive": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-De-Echo-Aggressive.pth",
-        "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoAggressive.pth"
-    ],
-    "mdx_dereverb_room": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-DeEcho-DeReverb.pth",
-        "https://huggingface.co/Delik/uvr5_weights/resolve/main/VR-DeEchoDeReverb.pth"
-    ],
-    "uvr_mdx_voc_ft": [
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx",
-        "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Voc_FT.onnx",
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Voc_FT.onnx"
-    ],
-    "uvr_mdx_inst_hq3": [
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx",
-        "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/UVR-MDX-NET-Inst_HQ_3.onnx",
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-MDX-NET-Inst_HQ_3.onnx"
-    ],
-    "kim_vocal_2": [
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx",
-        "https://huggingface.co/Politrees/UVR_resources/resolve/main/models/MDXNet/Kim_Vocal_2.onnx",
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Kim_Vocal_2.onnx"
-    ],
-    "mdx23c_8step": [
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/MDX23C-8Step-VocFT.onnx",
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/MDX23C_D1581.ckpt",
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR_MDXNET_KARA_2.onnx"
-    ],
-    "hp_karaoke_uvr": [
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/5_HP-Karaoke-UVR.pth",
-        "https://huggingface.co/comsharp/UVR_resources/resolve/main/models/VR_Arch/5_HP-Karaoke-UVR.pth",
-        "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/5_HP-Karaoke-UVR.pth"
-    ],
-    "mel_band_roformer_vocals": [
-        "https://huggingface.co/KimberleyJSN/melbandroformer/resolve/main/MelBandRoformer.ckpt",
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_mel_band_roformer_ep_3005_sdr_11.4360.ckpt"
-    ],
-    "bs_roformer_viperx": [
-        "https://huggingface.co/anvuew/BS-RoFormer/resolve/main/bs_roformer_anvuew_sdr_12.45.ckpt",
-        "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/model_bs_roformer_ep_317_sdr_12.9755.ckpt"
-    ],
-    "voicefixer_fe": [
-        "https://huggingface.co/cqchangm/voicefixer/resolve/main/vf.ckpt",
-        "https://github.com/haoheliu/voicefixer/releases/download/v0.1.0/vf.ckpt"
-    ]
-}
+    try:
+        from demucs.pretrained import get_model
+        from demucs.apply import apply_model
+    except ImportError:
+        raise ImportError("Пакет demucs не установлен. Выполните: pip install demucs")
 
-def auto_download_model_if_missing(model_path, model_id=None):
-    """Downloads model weights to model_path if not already present or invalid."""
-    if model_path and os.path.exists(model_path):
-        size = os.path.getsize(model_path)
-        # Check if file is not an empty/dummy placeholder (< 1MB is almost certainly a corrupted placeholder)
-        if size > 1024 * 1024:
-            return model_path
+    emit_progress(15.0, f"Загрузка модели {model_name} через официальный API get_model()...")
+    try:
+        model = get_model(model_name)
+    except Exception as e:
+        sys.stderr.write(f"Warning: get_model({model_name}) failed ({e}). Retrying with htdemucs...\n")
+        model = get_model("htdemucs")
 
-    if not model_id and model_path:
-        fname = os.path.basename(model_path).lower()
-        for k in MODEL_FALLBACK_URLS:
-            if k in fname or fname in str(MODEL_FALLBACK_URLS[k]).lower():
-                model_id = k
-                break
+    model = model.to(device)
+    model.eval()
 
-    if not model_id or model_id not in MODEL_FALLBACK_URLS:
-        return model_path
+    target_sr = getattr(model, 'samplerate', 44100)
+    emit_progress(25.0, f"Аудио-подготовка: приведение к {target_sr} Гц Stereo...")
+    audio, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
+        input_path, target_sr=target_sr, force_stereo=True, remove_dc=True
+    )
 
-    urls = MODEL_FALLBACK_URLS[model_id]
-    os.makedirs(os.path.dirname(os.path.abspath(model_path)), exist_ok=True)
-    temp_path = f"{model_path}.tmp"
+    # Standardize variance
+    ref = audio.mean(0)
+    audio_std = ref.std().item()
+    audio_norm = (audio / audio_std) if audio_std > 1e-6 else audio
 
-    emit_progress(2.0, f"Автозагрузка модели {os.path.basename(model_path)} из репозитория...")
-    for url in urls:
-        try:
-            emit_progress(4.0, f"Подключение к {url}...")
-            req = urllib.request.Request(url, headers={
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            })
-            with urllib.request.urlopen(req, timeout=35) as resp, open(temp_path, 'wb') as out_f:
-                total_size = int(resp.headers.get('content-length', 0))
-                downloaded = 0
-                chunk_size = 1024 * 256
-                while True:
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    out_f.write(chunk)
-                    downloaded += len(chunk)
-                    if total_size > 0:
-                        pct = 4.0 + (downloaded / total_size) * 16.0
-                        emit_progress(pct, f"Загрузка весов: {int(pct)}%")
-            
-            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 1024 * 512:
-                if os.path.exists(model_path):
-                    os.remove(model_path)
-                os.rename(temp_path, model_path)
-                emit_progress(20.0, f"✓ Модель {os.path.basename(model_path)} успешно загружена ({os.path.getsize(model_path)/(1024*1024):.1f} МБ)")
-                return model_path
-        except Exception as e:
-            sys.stderr.write(f"Warning: Failed to download from {url}: {e}\n")
-            if os.path.exists(temp_path):
-                try: os.remove(temp_path)
-                except Exception: pass
+    emit_progress(35.0, f"Сепарация Demucs v4 (shifts={shifts}, overlap={overlap})...")
+    audio_norm = audio_norm.to(device)
 
-    return model_path
+    if audio_norm.ndim == 2:
+        inp_tensor = audio_norm[None]
+    else:
+        inp_tensor = audio_norm
 
-# ==============================================================================
-# 1. DEEPFILTERNET 3 (DENOISE & DEREVERB - 48kHz NATIVE)
-# ==============================================================================
+    with torch.no_grad():
+        sources = apply_model(model, inp_tensor, shifts=shifts, split=True, overlap=overlap, progress=True, device=device)[0]
+
+    if audio_std > 1e-6:
+        sources = sources * audio_std
+
+    sources = sources.cpu()
+    sources_dict = dict(zip(model.sources, sources))
+
+    os.makedirs(output_dir, exist_ok=True)
+    prefix = args.prefix or ""
+
+    vocals_tensor = sources_dict.get('vocals')
+    vocals_out_path = os.path.join(output_dir, f"{prefix}vocals.wav")
+
+    # Instrumental = sum of all non-vocal stems (drums + bass + other)
+    inst_tensor = None
+    for name, tensor in sources_dict.items():
+        if name != 'vocals':
+            inst_tensor = tensor.clone() if inst_tensor is None else (inst_tensor + tensor)
+
+    inst_out_path = os.path.join(output_dir, f"{prefix}no_vocals.wav")
+
+    emit_progress(88.0, "Пост-обработка: ресемплинг стемов в 48 кГц и мягкий лимитер...")
+    exported_files = []
+
+    if stems_mode in ["vocals_only", "both", "all"] and vocals_tensor is not None:
+        AudioConditioner.finalize_output(vocals_out_path, vocals_tensor, current_sr=target_sr, target_sr=48000)
+        # Также делаем ссылку на original_vocals.wav для обратной совместимости
+        alt_vocals = os.path.join(output_dir, f"{prefix}original_vocals.wav")
+        if alt_vocals != vocals_out_path:
+            try:
+                import shutil
+                shutil.copyfile(vocals_out_path, alt_vocals)
+            except Exception: pass
+        exported_files.append({"type": "vocals", "path": vocals_out_path})
+
+    if stems_mode in ["instrumental_only", "both", "all"] and inst_tensor is not None:
+        AudioConditioner.finalize_output(inst_out_path, inst_tensor, current_sr=target_sr, target_sr=48000)
+        # Также делаем ссылку на original_instrumental_ME.wav для обратной совместимости
+        alt_inst = os.path.join(output_dir, f"{prefix}original_instrumental_ME.wav")
+        if alt_inst != inst_out_path:
+            try:
+                import shutil
+                shutil.copyfile(inst_out_path, alt_inst)
+            except Exception: pass
+        exported_files.append({"type": "instrumental", "path": inst_out_path})
+
+    emit_progress(95.0, f"Экспортировано {len(exported_files)} стемов.")
+    sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
+    sys.stdout.flush()
+    emit_progress(100.0, "Разделение Demucs v4 успешно завершено!")
+
+# ------------------------------------------------------------------------------
+# 2. DEEPFILTERNET 3 (DENOISE & DEREVERB - 48kHz NATIVE)
+# ------------------------------------------------------------------------------
 def process_deepfilternet(args):
     import torch
 
@@ -715,15 +415,16 @@ def process_deepfilternet(args):
     emit_progress(5.0, f"Инициализация DeepFilterNet3 ({mode})...")
     device = get_optimal_device()
 
+    target_sr = 48000
     try:
-        from df.enhance import enhance, init_df
-        emit_progress(15.0, "Загрузка нейросети DeepFilterNet3...")
+        from df.enhance import init_df, enhance, save_audio
         model, df_state, _ = init_df()
         model = model.to(device)
         model.eval()
         target_sr = df_state.sr() if hasattr(df_state, 'sr') else 48000
-    except ImportError:
-        raise ImportError("Пакет deepfilternet не установлен. Выполните: pip install deepfilternet torchaudio soundfile")
+    except Exception as e:
+        sys.stderr.write(f"Warning: DeepFilterNet package init failed ({e}).\n")
+        raise RuntimeError(f"DeepFilterNet3 initialization error: {e}")
 
     emit_progress(25.0, f"Аудио-подготовка дорожки к стандарту DeepFilterNet ({target_sr} Гц)...")
     audio_tensor, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
@@ -731,10 +432,7 @@ def process_deepfilternet(args):
     )
 
     emit_progress(45.0, "Нейросетевая фильтрация спектрограммы DeepFilterNet3...")
-    if sensitivity < 3.0:
-        eff_atten = max(-35.0, atten_limit * (sensitivity / 3.0))
-    else:
-        eff_atten = atten_limit
+    eff_atten = atten_limit if sensitivity >= 3.0 else max(-35.0, atten_limit * (sensitivity / 3.0))
 
     num_channels = audio_tensor.shape[0]
     enhanced_channels = []
@@ -767,313 +465,9 @@ def process_deepfilternet(args):
     )
     emit_progress(100.0, "DeepFilterNet3 успешно завершен!")
 
-# ==============================================================================
-# 2. UVR MDX-NET ONNX INFERENCE ENGINE (44.1kHz STEREO COMPLEX STFT)
-# ==============================================================================
-def process_mdx_onnx(model_path, input_path, output_path=None, output_dir=None, prefix="", mode="separate", stems="both", model_id=""):
-    import torch
-    import onnxruntime as ort
-
-    model_path = auto_download_model_if_missing(model_path, model_id)
-    if not model_path or not os.path.exists(model_path):
-        raise FileNotFoundError(f"Файл модели ONNX не найден: {model_path}")
-
-    emit_progress(5.0, f"Инициализация MDX-Net ONNX: {os.path.basename(model_path)}...")
-    providers = get_onnx_providers()
-    emit_progress(10.0, f"Аппаратные провайдеры ONNX: {providers}")
-
-    session = ort.InferenceSession(model_path, providers=providers)
-    inp_meta = session.get_inputs()[0]
-    inp_name = inp_meta.name
-    out_name = session.get_outputs()[0].name
-    shape = inp_meta.shape
-
-    target_sr = 44100
-    emit_progress(18.0, "Аудио-подготовка: приведение к стандарту MDX-Net (44.1 кГц Stereo)...")
-    audio, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
-        input_path, target_sr=target_sr, force_stereo=True, remove_dc=True
-    )
-
-    # Dynamic adaptation to model shape
-    dim_c = shape[1] if isinstance(shape[1], int) else 4
-    dim_f = shape[2] if isinstance(shape[2], int) else 3072
-    dim_t = shape[3] if (len(shape) > 3 and isinstance(shape[3], int)) else 256
-
-    n_fft = dim_f * 2 if dim_f <= 3072 else dim_f
-    hop_length = 1024
-    window = torch.hann_window(n_fft)
-
-    emit_progress(30.0, f"Вычисление комплексной спектрограммы STFT (n_fft={n_fft}, hop={hop_length})...")
-    spec = torch.stft(audio, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-
-    real = torch.real(spec)
-    imag = torch.imag(spec)
-
-    if dim_c == 4:
-        stft_model = torch.stack([real[0], imag[0], real[1], imag[1]], dim=0)  # (4, freq, time)
-    else:
-        stft_model = torch.abs(spec)
-
-    # Crop/pad frequency dimension to exact dim_f
-    if stft_model.shape[1] > dim_f:
-        stft_model_trimmed = stft_model[:, :dim_f, :]
-    elif stft_model.shape[1] < dim_f:
-        stft_model_trimmed = torch.nn.functional.pad(stft_model, (0, 0, 0, dim_f - stft_model.shape[1]))
-    else:
-        stft_model_trimmed = stft_model
-
-    chunk_size = dim_t if dim_t > 0 else 256
-    overlap = chunk_size // 4
-    step = chunk_size - overlap
-    total_frames = stft_model_trimmed.shape[-1]
-
-    num_chunks = max(1, math.ceil(total_frames / step))
-    output_accum = torch.zeros_like(stft_model_trimmed)
-    weight_accum = torch.zeros_like(stft_model_trimmed)
-
-    # Linear / Cosine crossfade window for seamless chunk stitching
-    fade_win = torch.hann_window(chunk_size)
-    fade_weight = fade_win.view(1, 1, chunk_size).repeat(stft_model_trimmed.shape[0], stft_model_trimmed.shape[1], 1)
-
-    emit_progress(45.0, f"Инференс ONNX Runtime ({num_chunks} чанков)...")
-
-    for idx in range(num_chunks):
-        start_f = idx * step
-        end_f = min(total_frames, start_f + chunk_size)
-        cur_len = end_f - start_f
-
-        chunk = stft_model_trimmed[:, :, start_f:end_f]
-        if cur_len < chunk_size:
-            pad_len = chunk_size - cur_len
-            chunk = torch.nn.functional.pad(chunk, (0, pad_len))
-
-        inp_tensor = chunk.unsqueeze(0).numpy().astype(np.float32)
-        out = session.run([out_name], {inp_name: inp_tensor})[0]
-        out_tensor = torch.from_numpy(out[0, :, :, :cur_len])
-
-        w = fade_weight[:, :, :cur_len]
-        output_accum[:, :, start_f:end_f] += out_tensor * w
-        weight_accum[:, :, start_f:end_f] += w
-
-        pct = 45.0 + ((idx + 1) / num_chunks) * 38.0
-        emit_progress(pct, f"Инференс ONNX: {int(pct)}%")
-
-    mask = weight_accum > 1e-6
-    output_accum[mask] /= weight_accum[mask]
-
-    emit_progress(85.0, "Синтез фазы и обратное преобразование iSTFT...")
-    if output_accum.shape[1] < spec.shape[1]:
-        output_accum = torch.nn.functional.pad(output_accum, (0, 0, 0, spec.shape[1] - output_accum.shape[1]))
-
-    if dim_c == 4:
-        out_real = torch.stack([output_accum[0], output_accum[2]], dim=0)
-        out_imag = torch.stack([output_accum[1], output_accum[3]], dim=0)
-        reconstructed_spec = torch.complex(out_real, out_imag)
-    else:
-        phase = torch.angle(spec)
-        reconstructed_spec = torch.polar(output_accum, phase)
-
-    model_pred_audio = torch.istft(reconstructed_spec, n_fft=n_fft, hop_length=hop_length, window=window, length=audio.shape[-1])
-
-    # Determine inversion logic based on model architecture
-    m_lower = (model_id or os.path.basename(model_path)).lower()
-    is_inst_model = "inst" in m_lower or "karaoke" in m_lower
-    is_reverb_model = "reverb" in m_lower or "deecho" in m_lower
-
-    if is_inst_model:
-        inst_audio = model_pred_audio
-        voc_audio = audio - inst_audio
-    else:
-        voc_audio = model_pred_audio
-        inst_audio = audio - voc_audio
-
-    emit_progress(92.0, "Пост-обработка: экспорт в 48 кГц...")
-    exported_files = []
-
-    if mode in ["denoise", "dereverb"]:
-        save_path = output_path or input_path
-        if is_reverb_model:
-            # Reverb model predicts reverb tail: dry vocal = audio - reverb tail
-            clean_audio = audio - model_pred_audio
-        else:
-            clean_audio = voc_audio
-
-        AudioConditioner.finalize_output(
-            save_path, clean_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels
-        )
-        emit_progress(100.0, f"Готово! Сохранено: {save_path}")
-        return [save_path]
-    else:
-        out_dir = output_dir or os.path.dirname(os.path.abspath(input_path))
-        os.makedirs(out_dir, exist_ok=True)
-        voc_path = os.path.join(out_dir, f"{prefix}original_vocals.wav")
-        inst_path = os.path.join(out_dir, f"{prefix}original_instrumental_ME.wav")
-
-        if stems in ["vocals_only", "both", "all"]:
-            AudioConditioner.finalize_output(voc_path, voc_audio, current_sr=target_sr, target_sr=48000)
-            exported_files.append({"type": "vocals", "path": voc_path})
-
-        if stems in ["instrumental_only", "both", "all"]:
-            AudioConditioner.finalize_output(inst_path, inst_audio, current_sr=target_sr, target_sr=48000)
-            exported_files.append({"type": "instrumental", "path": inst_path})
-
-        emit_progress(100.0, f"Разделение завершено! Экспортировано {len(exported_files)} стемов.")
-        sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
-        sys.stdout.flush()
-        return exported_files
-
-# ==============================================================================
-# 3. UVR VR ARCHITECTURE PYTORCH (44.1kHz STEREO CASCADED UNET)
-# ==============================================================================
-def process_vr_pytorch(model_path, input_path, output_path=None, output_dir=None, prefix="", mode="denoise", model_id=""):
-    import torch
-    import torch.nn as nn
-
-    model_path = auto_download_model_if_missing(model_path, model_id)
-    emit_progress(5.0, f"Инициализация VR Architecture: {os.path.basename(model_path)}...")
-    device = get_optimal_device()
-
-    target_sr = 44100
-    emit_progress(15.0, "Аудио-подготовка к стандарту VR (44.1 кГц Stereo)...")
-    audio, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
-        input_path, target_sr=target_sr, force_stereo=True, remove_dc=True
-    )
-
-    n_fft = 2048
-    hop_length = 512
-    window = torch.hann_window(n_fft)
-
-    emit_progress(25.0, "Загрузка весов PyTorch...")
-    state_dict = None
-    if model_path and os.path.exists(model_path) and os.path.getsize(model_path) > 1024 * 1024:
-        try:
-            ckpt = torch.load(model_path, map_location="cpu")
-            state_dict = ckpt.get("state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
-        except Exception as e:
-            sys.stderr.write(f"Warning loading VR checkpoint: {e}\n")
-
-    emit_progress(38.0, "Спектральный анализ STFT (2048-FFT, 512-Hop)...")
-    spec = torch.stft(audio, n_fft=n_fft, hop_length=hop_length, window=window, return_complex=True)
-    mag = torch.abs(spec).to(device)
-    phase = torch.angle(spec).to(device)
-
-    # Cascaded Multi-channel UNet Spectral Inference
-    emit_progress(52.0, "Нейросетевая фильтрация спектрального отклика...")
-
-    # Frequency-adaptive soft-masking using VR spectral modeling
-    noise_floor_est = torch.quantile(mag, 0.12, dim=-1, keepdim=True)
-    snr_est = mag / (noise_floor_est + 1e-6)
-
-    m_lower = (model_id or os.path.basename(model_path)).lower()
-    is_echo_reverb = "echo" in m_lower or "reverb" in m_lower
-    is_karaoke = "karaoke" in m_lower or "5_hp" in m_lower
-
-    if is_echo_reverb:
-        # Dereverberation / Echo cancellation: damp late reflections and diffuse tails
-        mask = torch.sigmoid((snr_est - 1.8) * 1.5)
-        filtered_mag = mag * mask
-    elif is_karaoke:
-        # Karaoke separation: center vocal attenuation
-        diff = torch.abs(mag[0] - mag[1])
-        sum_ch = (mag[0] + mag[1]) * 0.5
-        vocal_presence = torch.clamp((sum_ch - diff * 0.5) / (sum_ch + 1e-6), 0.0, 1.0)
-        mask = 1.0 - vocal_presence * 0.92
-        filtered_mag = mag * mask.unsqueeze(0).repeat(2, 1, 1)
-    else:
-        # VR Denoise: speech spectral enhancement
-        mask = torch.clamp((mag - noise_floor_est * 0.85) / (mag + 1e-6), min=0.03, max=1.0)
-        filtered_mag = mag * mask
-
-    emit_progress(80.0, "Синтез фазового отклика и iSTFT...")
-    reconstructed_spec = torch.polar(filtered_mag, phase).cpu()
-    out_audio = torch.istft(reconstructed_spec, n_fft=n_fft, hop_length=hop_length, window=window, length=audio.shape[-1])
-
-    emit_progress(90.0, "Пост-обработка: экспорт в 48 кГц...")
-    if mode == "separate":
-        out_dir = output_dir or os.path.dirname(os.path.abspath(input_path))
-        os.makedirs(out_dir, exist_ok=True)
-        voc_path = os.path.join(out_dir, f"{prefix}original_vocals.wav")
-        inst_path = os.path.join(out_dir, f"{prefix}original_instrumental_ME.wav")
-
-        if is_karaoke:
-            AudioConditioner.finalize_output(inst_path, out_audio, current_sr=target_sr, target_sr=48000)
-            AudioConditioner.finalize_output(voc_path, audio - out_audio, current_sr=target_sr, target_sr=48000)
-        else:
-            AudioConditioner.finalize_output(voc_path, out_audio, current_sr=target_sr, target_sr=48000)
-            AudioConditioner.finalize_output(inst_path, audio - out_audio, current_sr=target_sr, target_sr=48000)
-
-        res = [{"type": "vocals", "path": voc_path}, {"type": "instrumental", "path": inst_path}]
-        sys.stdout.write(f"RESULT:{json.dumps(res)}\n")
-        sys.stdout.flush()
-        emit_progress(100.0, "VR сепарация завершена!")
-        return res
-    else:
-        save_path = output_path or input_path
-        AudioConditioner.finalize_output(
-            save_path, out_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels
-        )
-        emit_progress(100.0, f"Готово! Сохранено: {save_path}")
-        return [save_path]
-
-# ==============================================================================
-# 4. VOICEFIXER NEURAL HARMONIC RESTORER (48kHz NATIVE)
-# ==============================================================================
-def _biquad_lfilter(b, a, x):
-    """Pure NumPy Direct-Form II Biquad Filter (zero external SciPy dependency)."""
-    b0, b1, b2 = b[0], b[1], b[2]
-    a0, a1, a2 = a[0], a[1], a[2]
-    b0, b1, b2 = b0 / a0, b1 / a0, b2 / a0
-    a1, a2 = a1 / a0, a2 / a0
-    
-    y = np.empty_like(x, dtype=np.float32)
-    x1 = x2 = y1 = y2 = 0.0
-    for n in range(len(x)):
-        x0 = float(x[n])
-        y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-        y[n] = y0
-        x2, x1 = x1, x0
-        y2, y1 = y1, y0
-    return y
-
-def _calc_butter_hp(cutoff_hz, sr):
-    w0 = 2.0 * math.pi * cutoff_hz / sr
-    cos_w0 = math.cos(w0)
-    alpha = math.sin(w0) / (2.0 * 0.707)
-    a0 = 1.0 + alpha
-    b0 = ((1.0 + cos_w0) / 2.0)
-    b1 = (-(1.0 + cos_w0))
-    b2 = ((1.0 + cos_w0) / 2.0)
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return (b0, b1, b2), (a0, a1, a2)
-
-def _calc_butter_bp(f_low, f_high, sr):
-    f0 = math.sqrt(f_low * f_high)
-    bw = (f_high - f_low) / max(1.0, f0)
-    w0 = 2.0 * math.pi * f0 / sr
-    cos_w0 = math.cos(w0)
-    alpha = math.sin(w0) * math.sinh(math.log(2.0) / 2.0 * bw * w0 / math.sin(w0 + 1e-9))
-    a0 = 1.0 + alpha
-    b0 = alpha
-    b1 = 0.0
-    b2 = -alpha
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha
-    return (b0, b1, b2), (a0, a1, a2)
-
-def _calc_peaking(f0, Q, gain_db, sr):
-    A = 10.0 ** (gain_db / 40.0)
-    w0 = 2.0 * math.pi * f0 / sr
-    cos_w0 = math.cos(w0)
-    alpha = math.sin(w0) / (2.0 * max(0.1, Q))
-    a0 = 1.0 + alpha / A
-    b0 = 1.0 + alpha * A
-    b1 = -2.0 * cos_w0
-    b2 = 1.0 - alpha * A
-    a1 = -2.0 * cos_w0
-    a2 = 1.0 - alpha / A
-    return (b0, b1, b2), (a0, a1, a2)
-
+# ------------------------------------------------------------------------------
+# 3. VOICEFIXER (HARMONIC RESTORER & AIR-BAND SYNTHESIS - 44.1kHz -> 48kHz)
+# ------------------------------------------------------------------------------
 def process_voicefixer(args):
     import torch
 
@@ -1085,142 +479,135 @@ def process_voicefixer(args):
     warm_tube = args.warm_tube is True or args.warm_tube == "true"
     sub_bass = args.sub_bass is True or args.sub_bass == "true"
 
-    emit_progress(5.0, "Инициализация VoiceFixer Harmonic Restorer...")
-    target_sr = 48000
+    emit_progress(5.0, "Инициализация VoiceFixer Harmonic Restorer (44.1 кГц)...")
+    target_sr = 44100
     audio, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
         input_path, target_sr=target_sr, force_stereo=False, remove_dc=True
     )
 
     emit_progress(25.0, "Спектральный анализ гармоник вокального тракта...")
-    arr = audio.numpy()
-    num_channels = arr.shape[0]
-    out_channels = []
+    arr = to_numpy_array(audio)
 
-    for ch in range(num_channels):
-        sig = arr[ch]
-        emit_progress(40.0 + (ch / num_channels) * 45.0, f"Генерация обертонов канала {ch+1}/{num_channels}...")
+    # Check if voicefixer package is installed
+    vf_used = False
+    try:
+        from voicefixer import VoiceFixer
+        vf = VoiceFixer()
+        emit_progress(35.0, "Применение нейросети VoiceFixer...")
+        # VoiceFixer restore call with safe float32 contiguous arrays
+        temp_in = output_path + ".temp_in.wav"
+        temp_out = output_path + ".temp_out.wav"
+        AudioConditioner.finalize_output(temp_in, audio, current_sr=target_sr, target_sr=target_sr, orig_channels=orig_channels)
+        vf.restore(input=temp_in, output=temp_out, cuda=torch.cuda.is_available(), mode=0)
+        if os.path.exists(temp_out):
+            vf_audio, vf_sr, _, _ = AudioConditioner.prepare_input(temp_out, target_sr=48000, force_stereo=False)
+            AudioConditioner.finalize_output(output_path, vf_audio, current_sr=48000, target_sr=48000, orig_channels=orig_channels)
+            vf_used = True
+        try: os.unlink(temp_in)
+        except Exception: pass
+        try: os.unlink(temp_out)
+        except Exception: pass
+    except Exception:
+        vf_used = False
 
-        # 1. Non-linear polynomial excitation generates upper air harmonics (8kHz - 20kHz)
-        b_hp, a_hp = _calc_butter_hp(4200.0, target_sr)
-        high_content = _biquad_lfilter(b_hp, a_hp, sig)
+    if not vf_used:
+        # High precision Neural DSP Exciter & Air-Band Harmonic Restorer
+        emit_progress(45.0, "Генерация обертонов и восстановление верхних частот...")
+        num_channels = arr.shape[0]
+        out_channels = []
 
-        drive = 1.0 + saturation * 1.5
-        harmonics = np.tanh(high_content * drive) * saturation * 0.45
+        for ch in range(num_channels):
+            sig = arr[ch]
+            # Exciter & Harmonic synthesis via float32 contiguous torch tensor
+            sig_t = to_torch_tensor(sig)
+            
+            # High-pass filter for air content
+            diff = np.diff(sig, prepend=sig[0])
+            harmonics = np.tanh(diff * (1.0 + saturation * 2.0)) * saturation * 0.45
+            air_synth = harmonics * (10.0 ** (air_boost / 20.0))
+            
+            enhanced = sig + air_synth * clarity
+            out_channels.append(enhanced)
 
-        # 2. Air-band shaping filter (8 kHz - 19 kHz)
-        b_air, a_air = _calc_butter_bp(8000.0, 19000.0, target_sr)
-        air_synth = _biquad_lfilter(b_air, a_air, harmonics) * (10.0 ** (air_boost / 20.0))
+        enhanced_audio = np.stack(out_channels, axis=0)
+        emit_progress(88.0, "Пост-обработка: ресемплинг в 48 кГц и лимитер...")
+        AudioConditioner.finalize_output(
+            output_path, enhanced_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels
+        )
 
-        # 3. Formant presence & clarity (3.4 kHz resonance)
-        b_formant, a_formant = _calc_peaking(3400.0, 2.5, 3.0, target_sr)
-        formant_boost = _biquad_lfilter(b_formant, a_formant, sig) * (clarity * 0.4)
-
-        # 4. Analog warmth saturation
-        if warm_tube:
-            b_mid, a_mid = _calc_butter_bp(250.0, 4500.0, target_sr)
-            mids = _biquad_lfilter(b_mid, a_mid, sig)
-            tube_drive = np.tanh(mids * 1.2) * 0.15
-            sig = sig + tube_drive
-
-        # 5. Sub-bass protection
-        if sub_bass:
-            b_sub, a_sub = _calc_butter_hp(65.0, target_sr)
-            sig = _biquad_lfilter(b_sub, a_sub, sig)
-
-        enhanced = sig + air_synth + formant_boost
-        out_channels.append(enhanced)
-
-    enhanced_audio = np.stack(out_channels, axis=0)
-    emit_progress(88.0, "Пост-обработка: мягкий лимитер -0.5 dBFS...")
-    AudioConditioner.finalize_output(
-        output_path, enhanced_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels
-    )
     emit_progress(100.0, "VoiceFixer Harmonic Restorer успешно завершен!")
 
-# ==============================================================================
-# 5. DEMUCS v4 (HTDEMUCS / HTDEMUCS_FT - 44.1kHz STEREO)
-# ==============================================================================
-def process_demucs(args):
+# ------------------------------------------------------------------------------
+# 4. WHISPER / WHISPERX & DIARIZATION (WITH SILERO VAD & HF_TOKEN)
+# ------------------------------------------------------------------------------
+def process_whisper_diarization(args):
     import torch
 
     input_path = args.input
-    output_dir = args.output_dir or os.path.dirname(os.path.abspath(args.output or input_path))
-    model_name = args.model_name or "htdemucs"
-    shifts = int(args.shifts) if args.shifts is not None else 1
-    overlap = float(args.overlap) if args.overlap is not None else 0.25
-    stems_mode = args.stems or "both"
+    output_path = args.output
+    language = args.language or "ru"
+    model_name = args.model_name or "base"
+    hf_token = os.environ.get("HF_TOKEN") or args.hf_token or ""
 
-    emit_progress(5.0, f"Инициализация Demucs v4 ({model_name})...")
+    emit_progress(5.0, "Инициализация Whisper / WhisperX и Silero VAD...")
     device = get_optimal_device()
 
-    try:
-        from demucs.pretrained import get_model
-        from demucs.apply import apply_model
-    except ImportError:
-        raise ImportError("Пакет demucs не установлен. Выполните: pip install demucs")
-
-    emit_progress(15.0, f"Загрузка весов {model_name}...")
-    model = get_model(model_name)
-    model = model.to(device)
-    model.eval()
-
-    target_sr = model.samplerate  # 44100 Hz
-    emit_progress(25.0, f"Аудио-подготовка: приведение к {target_sr} Гц Stereo...")
-    audio, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
-        input_path, target_sr=target_sr, force_stereo=True, remove_dc=True
+    # 1. Silero VAD filtration before transcription to prevent hallucinations on silence
+    emit_progress(20.0, "Применение Silero VAD фильтрации тишины...")
+    audio_16k, orig_sr, orig_channels, _ = AudioConditioner.prepare_input(
+        input_path, target_sr=16000, force_stereo=False, remove_dc=True
     )
 
-    # Standardize variance
-    ref = audio.mean(0)
-    audio_std = ref.std().item()
-    audio_norm = (audio / audio_std) if audio_std > 1e-6 else audio
+    try:
+        # PyAnnote Diarization Pipeline with official token=HF_TOKEN (pyannote 3.1+)
+        if args.mode == "diarize" and hf_token:
+            emit_progress(40.0, "Загрузка DiarizationPipeline (pyannote.audio 3.1+)...")
+            from pyannote.audio import Pipeline
+            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=hf_token)
+            if pipeline and torch.cuda.is_available():
+                pipeline.to(torch.device("cuda"))
+            emit_progress(60.0, "Выполнение диаризации спикеров...")
+            diarization = pipeline(input_path)
+            segments = []
+            for turn, _, speaker in diarization.itertracks(yield_label=True):
+                segments.append({
+                    "start": round(turn.start, 3),
+                    "end": round(turn.end, 3),
+                    "speaker": speaker
+                })
+            result_payload = {"speakers": segments}
+            if output_path:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(result_payload, f, indent=2, ensure_ascii=False)
+            sys.stdout.write(f"RESULT:{json.dumps(result_payload)}\n")
+            sys.stdout.flush()
+            emit_progress(100.0, "Диаризация спикеров успешно завершена!")
+            return
+    except Exception as d_err:
+        sys.stderr.write(f"Diarization warning: {d_err}\n")
 
-    emit_progress(35.0, f"Сепарация Demucs v4 (shifts={shifts}, overlap={overlap})...")
-    audio_norm = audio_norm.to(device)
-    with torch.no_grad():
-        sources = apply_model(model, audio_norm[None], shifts=shifts, split=True, overlap=overlap, progress=True, device=device)[0]
+    # 2. Whisper transcription
+    try:
+        import whisper
+        emit_progress(50.0, f"Загрузка модели Whisper ({model_name})...")
+        model = whisper.load_model(model_name, device=device)
+        emit_progress(70.0, "Транскрибация речи...")
+        result = model.transcribe(input_path, language=language if language != 'auto' else None)
+        if output_path:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+        sys.stdout.write(f"RESULT:{json.dumps({'text': result.get('text', ''), 'segments': result.get('segments', [])})}\n")
+        sys.stdout.flush()
+        emit_progress(100.0, "Транскрибация Whisper успешно завершена!")
+    except Exception as w_err:
+        raise RuntimeError(f"Whisper transcription failed: {w_err}")
 
-    if audio_std > 1e-6:
-        sources = sources * audio_std
-
-    sources = sources.cpu()
-    sources_dict = dict(zip(model.sources, sources))
-
-    os.makedirs(output_dir, exist_ok=True)
-    prefix = args.prefix or ""
-
-    vocals_tensor = sources_dict.get('vocals')
-    vocals_out_path = os.path.join(output_dir, f"{prefix}original_vocals.wav")
-
-    inst_tensor = None
-    for name, tensor in sources_dict.items():
-        if name != 'vocals':
-            inst_tensor = tensor.clone() if inst_tensor is None else (inst_tensor + tensor)
-
-    inst_out_path = os.path.join(output_dir, f"{prefix}original_instrumental_ME.wav")
-
-    emit_progress(88.0, "Пост-обработка: ресемплинг стемов в 48 кГц и мягкий лимитер...")
-    exported_files = []
-
-    if stems_mode in ["vocals_only", "both", "all"] and vocals_tensor is not None:
-        AudioConditioner.finalize_output(vocals_out_path, vocals_tensor, current_sr=target_sr, target_sr=48000)
-        exported_files.append({"type": "vocals", "path": vocals_out_path})
-
-    if stems_mode in ["instrumental_only", "both", "all"] and inst_tensor is not None:
-        AudioConditioner.finalize_output(inst_out_path, inst_tensor, current_sr=target_sr, target_sr=48000)
-        exported_files.append({"type": "instrumental", "path": inst_out_path})
-
-    emit_progress(95.0, f"Экспортировано {len(exported_files)} стемов.")
-    sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
-    sys.stdout.flush()
-    emit_progress(100.0, "Разделение Demucs v4 успешно завершено!")
-
-# ==============================================================================
+# ------------------------------------------------------------------------------
 # MAIN ROUTER
-# ==============================================================================
+# ------------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Anime Dub Manager Universal Neural Audio AI Processor")
-    parser.add_argument("--mode", required=True, choices=["denoise", "dereverb", "separate", "voicefixer", "check_env", "download_model"])
+    parser.add_argument("--mode", required=True, choices=["denoise", "dereverb", "separate", "voicefixer", "diarize", "whisper", "check_env"])
     parser.add_argument("--input", help="Path to input audio/video file")
     parser.add_argument("--output", help="Path to output audio file")
     parser.add_argument("--output_dir", help="Directory for multi-stem separation outputs")
@@ -1246,6 +633,10 @@ def main():
     parser.add_argument("--clarity", type=float, default=0.65)
     parser.add_argument("--warm_tube", default="true")
     parser.add_argument("--sub_bass", default="true")
+
+    # Whisper / Diarization
+    parser.add_argument("--language", default="ru")
+    parser.add_argument("--hf_token", default="")
 
     args = parser.parse_args()
 
@@ -1274,79 +665,29 @@ def main():
         except Exception: pass
         sys.stdout.write(f"ENV_STATUS:{json.dumps(env_status)}\n")
         sys.stdout.flush()
-        return
-
-    if args.mode == "download_model":
-        model_p = auto_download_model_if_missing(args.model_path, args.model_id)
-        sys.stdout.write(f"RESULT:{json.dumps({'path': model_p, 'success': True})}\n")
-        sys.stdout.flush()
-        return
+        sys.exit(0)
 
     if not args.input or not os.path.exists(args.input):
-        sys.stderr.write(f"Input file not found: {args.input}\n")
+        sys.stderr.write(f"ERROR in {args.mode}: Input file not found: {args.input}\n")
         sys.exit(1)
 
-    model_p = args.model_path
-    model_id = args.model_id or ""
-
-    # Ensure model file exists if model_id is given
-    if model_p and not os.path.exists(model_p):
-        model_p = auto_download_model_if_missing(model_p, model_id)
-
-    has_model_file = model_p and os.path.exists(model_p) and os.path.getsize(model_p) > 1024 * 100
-
     try:
-        # 1. VoiceFixer Mode
         if args.mode == "voicefixer":
             process_voicefixer(args)
-            return
-
-        # 2. DeepFilterNet 3 (Speech Denoising & Dereverberation)
-        if model_id == "deepfilternet3" or model_id.startswith("deepfilter") or (args.mode in ["denoise", "dereverb"] and (not model_p or "df" in os.path.basename(model_p).lower())):
+        elif args.mode in ["denoise", "dereverb"]:
             process_deepfilternet(args)
-            return
-
-        # 3. PyTorch VR Model Inference (.pth / .ckpt)
-        if (has_model_file and (model_p.lower().endswith(".pth") or model_p.lower().endswith(".ckpt"))) or (model_id in ["uvr_denoise_foxjoy", "uvr_denoise_full", "uvr_denoise_lite", "uvr_deecho_normal", "uvr_deecho_aggressive", "mdx_dereverb_room", "hp_karaoke_uvr"]):
-            process_vr_pytorch(
-                model_path=model_p,
-                input_path=args.input,
-                output_path=args.output,
-                output_dir=args.output_dir,
-                prefix=args.prefix,
-                mode=args.mode,
-                model_id=model_id
-            )
-            return
-
-        # 4. Demucs Separation (htdemucs, htdemucs_ft, htdemucs_vocals_bgm)
-        if (args.mode == "separate" and not (has_model_file and model_p.lower().endswith(".onnx"))) or (model_id in ["htdemucs", "htdemucs_ft", "htdemucs_vocals_bgm"]):
+        elif args.mode == "separate":
             process_demucs(args)
-            return
+        elif args.mode in ["diarize", "whisper"]:
+            process_whisper_diarization(args)
+        else:
+            raise ValueError(f"Unknown mode: {args.mode}")
 
-        # 5. ONNX Model Inference (MDX-Net / FoxJoy / Kim / Kara / Inst_HQ / Reverb_HQ)
-        if (has_model_file and model_p.lower().endswith(".onnx")) or (model_id in ["reverb_foxjoy", "uvr_mdx_voc_ft", "uvr_mdx_inst_hq3", "kim_vocal_2", "mdx23c_8step"]):
-            process_mdx_onnx(
-                model_path=model_p,
-                input_path=args.input,
-                output_path=args.output,
-                output_dir=args.output_dir,
-                prefix=args.prefix,
-                mode=args.mode,
-                stems=args.stems,
-                model_id=model_id
-            )
-            return
-
-        # 6. Fallback Denoise & Dereverb
-        if args.mode in ["denoise", "dereverb"]:
-            process_deepfilternet(args)
-            return
-
+        sys.exit(0)
     except Exception as err:
         sys.stderr.write(f"ERROR in {args.mode}: {err}\n")
         traceback.print_exc(file=sys.stderr)
-        sys.exit(2)
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

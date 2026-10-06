@@ -1,5 +1,6 @@
 const { ipcMain } = require('electron');
 const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
+const AudioAnalysisService = require('../services/AudioAnalysisService.cjs');
 
 function registerEpisodeHandlers(getData, saveData) {
   ipcMain.handle('save-episode', wrapIpcHandler(async (event, item) => {
@@ -18,6 +19,12 @@ function registerEpisodeHandlers(getData, saveData) {
     if (dataToSave.uploads) {
       dataToSave.uploads = dataToSave.uploads.map(u => {
         const { uploadedBy, ...rest } = u;
+        if (rest.path && (rest.type === 'DUBBER_FILE' || rest.type === 'FIXES')) {
+          AudioAnalysisService.getOrRunAnalysis(rest.path, false, {
+            subPath: dataToSave.subPath,
+            isFix: rest.type === 'FIXES'
+          }).catch(() => {});
+        }
         return rest;
       });
     }

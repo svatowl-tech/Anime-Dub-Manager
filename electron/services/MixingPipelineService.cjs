@@ -8,6 +8,7 @@ const ExportService = require('./ExportService.cjs');
 const ffmpegService = require('./ffmpegService.cjs');
 const AutoTimingService = require('./AutoTimingService.cjs');
 const AudioNeuralService = require('./AudioNeuralService.cjs');
+const AudioAnalysisService = require('./AudioAnalysisService.cjs');
 
 /**
  * MODULE DATABASE (Реестр всех доступных модулей обработки с подробнейшими настройками и пресетами)
@@ -1756,6 +1757,12 @@ class MixingPipelineService {
           continue;
         }
 
+        const lowerF = f.toLowerCase();
+        // STRICT: Never include phrase slice micro-files or temporary files in mixing manifest
+        if (lowerF.includes('slice') || lowerF.includes('whisper_slice') || lowerF.startsWith('temp_') || lowerF.startsWith('snippet_')) {
+          continue;
+        }
+
         const baseNoExt = f.replace(audioExts, '');
         // Skip files without letters (e.g. pure numbers, timestamps, step indices)
         if (!/[a-zA-Zа-яА-ЯёЁ]/.test(baseNoExt) || /^[\d\s._-]+$/.test(baseNoExt)) {
@@ -1766,26 +1773,28 @@ class MixingPipelineService {
         const st = fsSync.statSync(fullP);
         
         let dubberNick = f;
-        const match = f.match(/\[(.*?)\]/);
-        if (match && match[1]) {
-          dubberNick = match[1];
+        if (f.startsWith('00_timed_')) {
+          dubberNick = f.replace(/^00_timed_/, '').replace(audioExts, '');
         } else {
-          dubberNick = baseNoExt.replace(/^.*?_/, '');
+          const match = f.match(/\[(.*?)\]/);
+          if (match && match[1]) {
+            dubberNick = match[1];
+          } else {
+            dubberNick = baseNoExt.replace(/^.*?_/, '');
+          }
         }
 
-        // Clean out track/layer/fix suffixes from nickname: e.g. "Коля [Дорожка 1]" -> "Коля", "Коля_дорожка2" -> "Коля"
+        // Clean out track/layer/fix suffixes from nickname
         dubberNick = dubberNick
           .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
           .replace(/_дорожка\d+/gi, '')
           .replace(/[_\s-]+$/, '')
           .trim();
 
-        // Skip numeric artifacts like "034", "03_4", "0 3 4", or names without letters
         if (!dubberNick || !/[a-zA-Zа-яА-ЯёЁ]/.test(dubberNick) || /^[\d\s._-]+$/.test(dubberNick)) {
           continue;
         }
 
-        // Prevent duplicate paths or same dubber track already found from a higher priority directory (e.g. 00_исходные)
         if (foundDubberTracks.some(t => t.path === fullP || (t.name === f && t.size === st.size))) {
           continue;
         }
@@ -1796,14 +1805,21 @@ class MixingPipelineService {
           dubberNick: dubberNick.trim(),
           path: fullP,
           size: st.size,
-          exists: true
+          exists: true,
+          isTimedMaster: f.startsWith('00_timed_')
         });
       }
     }
 
-    // Fallback: If no files found on disk yet, but episode has QA uploads, use episode uploads
+    // Fallback: If no files found on disk yet, but episode has QA uploads, use episode uploads (excluding slice files)
     if (foundDubberTracks.length === 0 && Array.isArray(episode?.uploads)) {
-      const qaUploads = episode.uploads.filter(u => (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && u.path && fsSync.existsSync(u.path));
+      const qaUploads = episode.uploads.filter(u => 
+        (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && 
+        u.path && 
+        fsSync.existsSync(u.path) &&
+        !u.path.toLowerCase().includes('slice') &&
+        !(u.fileName || '').toLowerCase().includes('slice')
+      );
       for (const u of qaUploads) {
         const f = path.basename(u.path);
         const st = fsSync.statSync(u.path);
@@ -1814,13 +1830,39 @@ class MixingPipelineService {
           dubberNick: dubberNick || 'Даббер',
           path: u.path,
           size: st.size,
-          exists: true
+          exists: true,
+          isTimedMaster: f.startsWith('00_timed_')
         });
       }
     }
 
-    if (foundDubberTracks.length > 0) {
-      manifest.sourceFiles.dubberTracks = foundDubberTracks;
+    // If 00_timed_ master tracks are present, strictly prefer ONLY 00_timed_ master tracks!
+    let filteredDubberTracks = foundDubberTracks;
+    const timedMasters = foundDubberTracks.filter(t => t.isTimedMaster);
+    if (timedMasters.length > 0) {
+      filteredDubberTracks = timedMasters;
+    }
+
+    // Deduplicate so each unique actor/dubber appears EXACTLY ONCE
+    const uniqueNickMap = new Map();
+    for (const tr of filteredDubberTracks) {
+      const normNick = tr.dubberNick.toLowerCase();
+      if (!uniqueNickMap.has(normNick)) {
+        uniqueNickMap.set(normNick, tr);
+      }
+    }
+
+    const finalDubberTracks = Array.from(uniqueNickMap.values()).map(tr => ({
+      id: tr.id,
+      name: tr.name,
+      dubberNick: tr.dubberNick,
+      path: tr.path,
+      size: tr.size,
+      exists: true
+    }));
+
+    if (finalDubberTracks.length > 0) {
+      manifest.sourceFiles.dubberTracks = finalDubberTracks;
       manifest.isImported = true;
     }
 
@@ -3987,7 +4029,16 @@ class MixingPipelineService {
    * Helper to load timing metadata & phrase volume map from working directory
    */
   async getTimingMetadata(workingDir) {
+    if (!workingDir) return null;
+
+    try {
+      const passport = await AudioAnalysisService.getTimingAnalysis(workingDir);
+      if (passport) return passport;
+    } catch (err) {}
+
     const candidates = [
+      path.join(workingDir, 'timing_project.analysis.json'),
+      path.join(workingDir, 'project_timing.analysis.json'),
       path.join(workingDir, 'timing_metadata.json'),
       path.join(workingDir, 'phrase_volume_map.json'),
       path.join(workingDir, '00_исходные', 'timing_metadata.json'),

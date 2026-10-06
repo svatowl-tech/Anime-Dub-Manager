@@ -45,6 +45,7 @@ import { ExportModal } from './ExportModal';
 import { TimingSettingsModal, TimingSettings, DEFAULT_TIMING_SETTINGS } from './TimingSettingsModal';
 import { normalizeSpeechText } from '../lib/qa/whisperTextChecker';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
+import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
 
 /**
  * Calculates text similarity for Whisper speech vs. Subtitle text
@@ -1168,6 +1169,9 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       const cleanManifestTracks = manifestDubberTracks.filter((dt: any) => {
         const p = dt.path || '';
         const base = p.split(/[/\\]/).pop() || '';
+        if (base.toLowerCase().includes('slice') || base.toLowerCase().includes('temp_') || base.toLowerCase().includes('snippet')) {
+          return false;
+        }
         if (/^(0[1-9]|1[0-9])_(denoise|deepfilter|glue|compress|master|video_mux|eq|limiter|reverb|delay|mix)/i.test(base) || /^[\d\s._-]+$/.test(base.replace(/\.[^.]+$/, ''))) {
           return false;
         }
@@ -1209,248 +1213,15 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         return base.includes(normActor);
       };
 
-      // Group actors and their associated characters & assignment IDs
-      // STRICT: Actors are ONLY registered from assignments and real uploads, NEVER from file artifacts!
-      const actorMap: Map<string, {
-        normKey: string;
-        dubberNick: string;
-        dubberId?: string;
-        assignmentIds: Set<string>;
-        characters: Set<string>;
-      }> = new Map();
-
-      const registerActor = (rawNick: string, dubberId?: string, charName?: string, assignmentId?: string) => {
-        const cleanNick = cleanDubberNick(rawNick) || rawNick.trim();
-        if (!isValidDubberName(cleanNick)) return null;
-        const normKey = normalizeName(cleanNick);
-        if (!normKey) return null;
-
-        if (!actorMap.has(normKey)) {
-          actorMap.set(normKey, {
-            normKey,
-            dubberNick: cleanNick,
-            dubberId,
-            assignmentIds: new Set<string>(),
-            characters: new Set<string>()
-          });
-        }
-        const entry = actorMap.get(normKey)!;
-        if (dubberId && !entry.dubberId) entry.dubberId = dubberId;
-        if (charName) {
-          const charParts = charName.split(/[,;\/]/).map(c => c.trim()).filter(Boolean);
-          charParts.forEach(c => entry.characters.add(c));
-        }
-        if (assignmentId) entry.assignmentIds.add(assignmentId);
-        return entry;
-      };
-
-      // 1. Collect all real actors from assignments
-      (currentEpisode.assignments || []).forEach(as => {
-        const dId = as.substituteId || as.dubberId;
-        const rawNick = as.substitute?.nickname || as.dubber?.nickname || '';
-        registerActor(rawNick, dId, as.characterName, as.id);
-      });
-
-      // 2. Also register any actors from uploads who might not have an explicit assignment record
-      (currentEpisode.uploads || []).forEach(u => {
-        if ((u.type === 'DUBBER_FILE' || u.type === 'FIXES') && u.path) {
-          const rawNick = u.uploadedBy?.nickname || '';
-          if (rawNick) {
-            registerActor(rawNick, u.uploadedById, undefined, u.assignmentId);
-          }
-        }
-      });
-
-      // Now for each distinct actor, load ALL distinct QA tracks (Take 1, Take 2, Fix 1, Fix 2)
-      // guaranteeing NO duplicate files are ever loaded!
-      const fetchedTracks: Track[] = [];
-      const globalUsedPaths = new Set<string>();
-
-      Array.from(actorMap.values()).forEach(actor => {
-        const { normKey, dubberNick, dubberId, assignmentIds } = actor;
-        const charStr = Array.from(actor.characters).filter(Boolean).join(', ') || dubberNick;
-
-        // A. Uploads from QA for this actor
-        const uploadsForActor = (currentEpisode.uploads || []).filter(u => {
-          if (!u.path || (u.type !== 'DUBBER_FILE' && u.type !== 'FIXES')) return false;
-          if (u.assignmentId && assignmentIds.has(u.assignmentId)) return true;
-          if (dubberId && (u.uploadedById === dubberId || (u as any).dubberId === dubberId)) return true;
-          const uNick = normalizeName(cleanDubberNick(u.uploadedBy?.nickname || ''));
-          return uNick && uNick === normKey;
-        }).sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
-
-        const uploadsMain = uploadsForActor.filter(u => !isFixFile(u));
-        const uploadsFixes = uploadsForActor.filter(u => isFixFile(u));
-
-        // B. Manifest files for this actor in 00_исходные
-        const manifestForActor = cleanManifestTracks.filter((mt: any) => isActorFileMatch(mt, dubberNick));
-        const manifestMain = manifestForActor
-          .filter((mt: any) => !isFixFile(mt))
-          .sort((a: any, b: any) => {
-            const aStr = a.name || a.path || '';
-            const bStr = b.name || b.path || '';
-            const aNum = (aStr.match(/дорожка(\d+)/i) || [])[1] || '1';
-            const bNum = (bStr.match(/дорожка(\d+)/i) || [])[1] || '1';
-            return parseInt(aNum, 10) - parseInt(bNum, 10);
-          });
-
-        const manifestFixes = manifestForActor
-          .filter((mt: any) => isFixFile(mt))
-          .sort((a: any, b: any) => {
-            const aStr = a.name || a.path || '';
-            const bStr = b.name || b.path || '';
-            const aNum = (aStr.match(/фикс(\d+)/i) || [])[1] || '1';
-            const bNum = (bStr.match(/фикс(\d+)/i) || [])[1] || '1';
-            return parseInt(aNum, 10) - parseInt(bNum, 10);
-          });
-
-        // C. Select distinct physical files:
-        // Main files:
-        const finalMainFiles: Array<{ id: string; name: string; path: string; isFix: boolean }> = [];
-        if (manifestMain.length > 0) {
-          manifestMain.forEach((m: any, idx: number) => {
-            if (!globalUsedPaths.has(m.path)) {
-              globalUsedPaths.add(m.path);
-              finalMainFiles.push({
-                id: m.id || m.path,
-                name: m.name || m.path.split(/[/\\]/).pop() || `Дорожка ${idx + 1}`,
-                path: m.path,
-                isFix: false
-              });
-            }
-          });
-          // If QA uploads has more main takes than manifest, append extra distinct takes
-          if (uploadsMain.length > manifestMain.length) {
-            for (let i = manifestMain.length; i < uploadsMain.length; i++) {
-              const u = uploadsMain[i];
-              if (!globalUsedPaths.has(u.path)) {
-                globalUsedPaths.add(u.path);
-                finalMainFiles.push({
-                  id: u.id,
-                  name: u.path.split(/[/\\]/).pop() || `Дорожка ${i + 1}`,
-                  path: u.path,
-                  isFix: false
-                });
-              }
-            }
-          }
-        } else {
-          uploadsMain.forEach((u, idx) => {
-            if (!globalUsedPaths.has(u.path)) {
-              globalUsedPaths.add(u.path);
-              finalMainFiles.push({
-                id: u.id,
-                name: u.path.split(/[/\\]/).pop() || `Дорожка ${idx + 1}`,
-                path: u.path,
-                isFix: false
-              });
-            }
-          });
-        }
-
-        // Fix files:
-        const finalFixFiles: Array<{ id: string; name: string; path: string; isFix: boolean }> = [];
-        if (manifestFixes.length > 0) {
-          manifestFixes.forEach((m: any, idx: number) => {
-            if (!globalUsedPaths.has(m.path)) {
-              globalUsedPaths.add(m.path);
-              finalFixFiles.push({
-                id: m.id || m.path,
-                name: m.name || m.path.split(/[/\\]/).pop() || `Фикс ${idx + 1}`,
-                path: m.path,
-                isFix: true
-              });
-            }
-          });
-          if (uploadsFixes.length > manifestFixes.length) {
-            for (let i = manifestFixes.length; i < uploadsFixes.length; i++) {
-              const u = uploadsFixes[i];
-              if (!globalUsedPaths.has(u.path)) {
-                globalUsedPaths.add(u.path);
-                finalFixFiles.push({
-                  id: u.id,
-                  name: u.path.split(/[/\\]/).pop() || `Фикс ${i + 1}`,
-                  path: u.path,
-                  isFix: true
-                });
-              }
-            }
-          }
-        } else {
-          uploadsFixes.forEach((u, idx) => {
-            if (!globalUsedPaths.has(u.path)) {
-              globalUsedPaths.add(u.path);
-              finalFixFiles.push({
-                id: u.id,
-                name: u.path.split(/[/\\]/).pop() || `Фикс ${idx + 1}`,
-                path: u.path,
-                isFix: true
-              });
-            }
-          });
-        }
-
-        // D. Build tracks for this actor: Each distinct take/fix gets its own timeline lane!
-        const totalActorTracks = finalMainFiles.length + finalFixFiles.length;
-        if (totalActorTracks === 0) return;
-
-        // If actor has NO main files, but has fix files, promote the primary fix file to be their main file!
-        if (finalMainFiles.length === 0 && finalFixFiles.length > 0) {
-          const promoted = finalFixFiles.shift()!;
-          promoted.isFix = false;
-          finalMainFiles.push(promoted);
-        }
-
-        // Main takes:
-        finalMainFiles.forEach((fileObj, mIdx) => {
-          let label = dubberNick;
-          if (finalMainFiles.length > 1) {
-            label = `${dubberNick} [Дорожка ${mIdx + 1}]`;
-          } else if (finalFixFiles.length > 0) {
-            label = `${dubberNick} [Дорожка 1]`;
-          }
-
-          fetchedTracks.push({
-            id: `track_${normKey}_main_${mIdx + 1}`,
-            projectId: currentEpisode.projectId,
-            episodeId: currentEpisode.id,
-            participant: label,
-            character: charStr,
-            dubberName: dubberNick,
-            characterName: charStr,
-            filePath: fileObj.path,
-            role: 'dubber',
-            status: 'recorded' as Track['status'],
-            files: [fileObj] as any,
-            selectedFileId: fileObj.id
-          });
-        });
-
-        // Fix takes:
-        finalFixFiles.forEach((fixObj, fIdx) => {
-          const fixLabel = finalFixFiles.length > 1
-            ? `${dubberNick} [Фикс ${fIdx + 1}]`
-            : `${dubberNick} [Фикс]`;
-
-          fetchedTracks.push({
-            id: `track_${normKey}_fix_${fIdx + 1}`,
-            projectId: currentEpisode.projectId,
-            episodeId: currentEpisode.id,
-            participant: fixLabel,
-            character: charStr,
-            dubberName: dubberNick,
-            characterName: charStr,
-            filePath: fixObj.path,
-            role: 'dubber',
-            status: 'fixes_needed' as Track['status'],
-            files: [fixObj] as any,
-            selectedFileId: fixObj.id
-          });
-        });
-      });
+      // Use prepareQATracksForTiming for strict deduplication & version priority:
+      // - Groups files by actor/role.
+      // - If a full FIXES file exists (>= 70% duration/size), draft DUBBER_FILE is COMPLETELY EXCLUDED.
+      // - If multiple takes of same type exist, strictly selects the newest by createdAt.
+      // - Returns EXACTLY ONE master track per unique actor/role.
+      const fetchedTracks = prepareQATracksForTiming(currentEpisode, cleanManifestTracks);
 
       setTracks(fetchedTracks);
-      addLog(`Загружено ${fetchedTracks.length} дорожек дабберов (все слои и фиксы из QA под своими актерами, без дублей файлов).`, fetchedTracks.length > 0 ? 'success' : 'warn');
+      addLog(`Загружено ${fetchedTracks.length} уникальных мастер-дорожек дабберов (без дублирования и с приоритетом чистовых фиксов).`, fetchedTracks.length > 0 ? 'success' : 'warn');
 
       // 3. Decode Real AudioBuffers for Every Track with Progress Bar updates
       const sharedAudioCtx = getSharedAudioContext();
