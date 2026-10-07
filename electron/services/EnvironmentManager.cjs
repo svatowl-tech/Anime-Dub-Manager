@@ -432,6 +432,57 @@ def highest_precision_float(device=None):
         if (!fs.existsSync(siteDir)) continue;
         const torchDir = path.join(siteDir, 'torch');
         if (fs.existsSync(torchDir)) {
+          // Проверяем наличие подмодуля torch/cuda
+          const cudaDir = path.join(torchDir, 'cuda');
+          const cudaInit = path.join(cudaDir, '__init__.py');
+          if (!fs.existsSync(cudaInit)) {
+            try {
+              if (!fs.existsSync(cudaDir)) {
+                fs.mkdirSync(cudaDir, { recursive: true });
+              }
+              const cudaStub = `# Auto-healed torch.cuda stub for CPU/fallback runtime
+import sys
+import contextlib
+
+def is_available(): return False
+def is_initialized(): return False
+def device_count(): return 0
+def current_device(): return 0
+def get_device_name(*args, **kwargs): return ""
+def init(): pass
+def empty_cache(): pass
+def synchronize(*args, **kwargs): pass
+def set_device(*args, **kwargs): pass
+
+class device:
+    def __init__(self, idx=0): self.idx = idx
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+
+class Stream:
+    def __init__(self, *args, **kwargs): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def synchronize(self): pass
+
+class Event:
+    def __init__(self, *args, **kwargs): pass
+    def record(self, *args, **kwargs): pass
+    def wait(self, *args, **kwargs): pass
+    def synchronize(self): pass
+    def elapsed_time(self, *args, **kwargs): return 0.0
+
+class _Amp:
+    autocast = contextlib.nullcontext
+amp = _Amp()
+`;
+              fs.writeFileSync(cudaInit, cudaStub, 'utf8');
+              log.info(`[EnvironmentManager] Восстановлен stub torch.cuda: ${cudaInit}`);
+            } catch (cudaErr) {
+              log.warn('[EnvironmentManager] Не удалось восстановить torch.cuda stub:', cudaErr);
+            }
+          }
+
           const testingDir = path.join(torchDir, 'testing');
           const internalDir = path.join(testingDir, '_internal');
           if (!fs.existsSync(internalDir)) {

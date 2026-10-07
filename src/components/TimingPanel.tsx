@@ -299,9 +299,19 @@ export function analyzeTrackAudioNoiseFloor(
   rmsDbValues.sort((a, b) => a - b);
   const n = rmsDbValues.length;
 
-  const noiseFloorDb = rmsDbValues[Math.floor(n * 0.15)]; // Room noise floor
-  const speechFloorDb = rmsDbValues[Math.floor(n * 0.75)]; // Speech median
-  const speechPeakDb = rmsDbValues[Math.floor(n * 0.98)];  // Speech peaks
+  // Real noise floor from lowest percentiles (excluding digital absolute nulls if non-null noise exists)
+  const nonNullWindows = rmsDbValues.filter(v => v > -90);
+  const effectiveNoiseWindows = nonNullWindows.length > 50 ? nonNullWindows : rmsDbValues;
+  const noiseFloorDb = effectiveNoiseWindows[Math.floor(effectiveNoiseWindows.length * 0.15)];
+
+  // Active speech windows: windows noticeably above the noise floor
+  const activeSpeechWindows = rmsDbValues.filter(v => v > Math.max(-80, noiseFloorDb + 2.5));
+  const speechFloorDb = activeSpeechWindows.length > 0
+    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.40)]
+    : (nonNullWindows.length > 0 ? nonNullWindows[Math.floor(nonNullWindows.length * 0.75)] : -28.0);
+  const speechPeakDb = activeSpeechWindows.length > 0
+    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.95)]
+    : (nonNullWindows.length > 0 ? nonNullWindows[Math.floor(nonNullWindows.length * 0.98)] : -6.0);
 
   let calculatedThresholdDb: number;
   if (manualThresholdDb !== undefined && manualThresholdDb !== null && !isNaN(manualThresholdDb)) {
@@ -1539,6 +1549,60 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         const characterName = track.character || track.characterName || 'Персонаж';
         const trSubs = trackSubLinesMap[track.id] || [];
 
+        // Check if pre-calculated sidecar analysis passport exists (.analysis.json)
+        let passport: any = null;
+        if (track.filePath) {
+          try {
+            passport = await ipcSafe.invoke('audio-get-track-analysis', { audioPath: track.filePath });
+          } catch (e) {}
+        }
+
+        if (passport && Array.isArray(passport.phrases) && passport.phrases.length > 0) {
+          if (passport.energyProfile) {
+            const ep = passport.energyProfile;
+            const calib: NoiseCalibration = {
+              noiseFloorDb: ep.noiseFloorDb ?? -52,
+              speechFloorDb: ep.speechRmsDb ?? -24,
+              speechPeakDb: ep.peakDb ?? -3,
+              calculatedThresholdDb: ep.suggestedGateThresholdDb ?? -44,
+              thresholdAmp: Math.pow(10, (ep.suggestedGateThresholdDb ?? -44) / 20),
+              dynamicRangeDb: Number(((ep.peakDb ?? -3) - (ep.noiseFloorDb ?? -52)).toFixed(1)),
+              snrDb: Number(((ep.speechRmsDb ?? -24) - (ep.noiseFloorDb ?? -52)).toFixed(1))
+            };
+            newCalibrations[track.id] = calib;
+            addLog(`⚡ Мгновенно загружен паспорт дорожки «${dubberName}» (кэш sidecar): Шум: ${calib.noiseFloorDb} dB, Речь: ${calib.speechFloorDb} dB, Порог: ${calib.calculatedThresholdDb} dB`, 'info');
+          }
+
+          addLog(`⚡ Паспорт «${dubberName}»: ${passport.phrases.length} готовых речевых фраз подтянуто без повторного сканирования!`, 'info');
+
+          updatedClips[track.id] = passport.phrases.map((phrase: any, idx: number) => {
+            let matchingSub = trSubs[idx];
+            if (!matchingSub) {
+              matchingSub = trSubs.find(s => (s.startSec >= phrase.startSec - 2.5 && s.startSec <= phrase.endSec + 2.5));
+            }
+
+            totalClips++;
+            return {
+              id: phrase.id || `clip_${track.id}_${idx}`,
+              trackId: track.id,
+              dubberName,
+              characterName,
+              clipStartSec: phrase.startSec,
+              durationSec: phrase.durationSec,
+              sourceStartSec: phrase.startSec,
+              sourceEndSec: phrase.endSec,
+              rawSourceStartSec: phrase.startSec,
+              rawSourceEndSec: phrase.endSec,
+              text: phrase.text || matchingSub?.text || `${characterName}: Фраза #${idx + 1}`,
+              volumePercent: 100,
+              isFix: phrase.isFix ?? ((track as any).type === 'FIXES' || track.id.includes('_fix_')),
+              hasCollision: false,
+              offsetSec: 0
+            };
+          });
+          continue;
+        }
+
         // If audio buffer not yet decoded in memory, decode it right now
         if (!audioBuf && track.filePath) {
           try {
@@ -2286,6 +2350,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           episode: currentEpisode,
           timingMetadata
         });
+        const epDir = (currentEpisode as any)?.folderPath || targetDir;
+        if (epDir) {
+          await ipcSafe.invoke('audio-save-timing-analysis', {
+            episodeDir: epDir,
+            data: timingMetadata
+          });
+        }
       } catch (e) {}
 
       const res: any = await ipcSafe.invoke('timing-export-to-mixing', {

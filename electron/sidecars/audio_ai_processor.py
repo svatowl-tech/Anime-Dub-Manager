@@ -95,6 +95,104 @@ def _bootstrap_site_packages():
                             except Exception:
                                 pass
 
+    # Auto-heal missing torch.cuda if pruned by packaging
+    _heal_torch_cuda()
+
+def _heal_torch_cuda():
+    import types
+    import contextlib
+
+    # 1. Restore physical directory and __init__.py on disk if missing in any site-packages
+    for p in list(sys.path):
+        if not os.path.isdir(p):
+            continue
+        torch_dir = os.path.join(p, "torch")
+        if os.path.isdir(torch_dir):
+            cuda_dir = os.path.join(torch_dir, "cuda")
+            cuda_init = os.path.join(cuda_dir, "__init__.py")
+            if not os.path.isfile(cuda_init):
+                try:
+                    os.makedirs(cuda_dir, exist_ok=True)
+                    with open(cuda_init, "w", encoding="utf-8") as f:
+                        f.write('''# Auto-healed torch.cuda stub for CPU/fallback runtime
+import sys
+import contextlib
+
+def is_available(): return False
+def is_initialized(): return False
+def device_count(): return 0
+def current_device(): return 0
+def get_device_name(*args, **kwargs): return ""
+def init(): pass
+def empty_cache(): pass
+def synchronize(*args, **kwargs): pass
+def set_device(*args, **kwargs): pass
+
+class device:
+    def __init__(self, idx=0): self.idx = idx
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+
+class Stream:
+    def __init__(self, *args, **kwargs): pass
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def synchronize(self): pass
+
+class Event:
+    def __init__(self, *args, **kwargs): pass
+    def record(self, *args, **kwargs): pass
+    def wait(self, *args, **kwargs): pass
+    def synchronize(self): pass
+    def elapsed_time(self, *args, **kwargs): return 0.0
+
+class _Amp:
+    autocast = contextlib.nullcontext
+amp = _Amp()
+''')
+                except Exception:
+                    pass
+
+    # 2. Register stub module in sys.modules so C-extensions find it immediately
+    if "torch.cuda" not in sys.modules:
+        cuda_mod = types.ModuleType("torch.cuda")
+        cuda_mod.is_available = lambda: False
+        cuda_mod.is_initialized = lambda: False
+        cuda_mod.device_count = lambda: 0
+        cuda_mod.current_device = lambda: 0
+        cuda_mod.get_device_name = lambda *a, **k: ""
+        cuda_mod.init = lambda: None
+        cuda_mod.empty_cache = lambda: None
+        cuda_mod.synchronize = lambda *a, **k: None
+        cuda_mod.set_device = lambda *a, **k: None
+
+        class _Dev:
+            def __init__(self, idx=0): self.idx = idx
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+        cuda_mod.device = _Dev
+
+        class _Stream:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+            def synchronize(self): pass
+        cuda_mod.Stream = _Stream
+
+        class _Event:
+            def __init__(self, *a, **k): pass
+            def record(self, *a, **k): pass
+            def wait(self, *a, **k): pass
+            def synchronize(self): pass
+            def elapsed_time(self, *a, **k): return 0.0
+        cuda_mod.Event = _Event
+
+        class _Amp:
+            autocast = contextlib.nullcontext
+        cuda_mod.amp = _Amp()
+
+        sys.modules["torch.cuda"] = cuda_mod
+
 _bootstrap_site_packages()
 
 import numpy as np

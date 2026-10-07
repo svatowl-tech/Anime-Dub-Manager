@@ -945,6 +945,8 @@ class AutoTimingService {
     for (const dir of searchDirs) {
       if (!dir) continue;
       const candidates = [
+        path.join(dir, 'timing_project.analysis.json'),
+        path.join(dir, 'Тайминг', 'timing_project.analysis.json'),
         path.join(dir, 'phrase_volume_map.json'),
         path.join(dir, 'timing_metadata.json'),
         path.join(dir, '00_исходные', 'phrase_volume_map.json'),
@@ -1504,9 +1506,11 @@ class AutoTimingService {
 
       const timingJsonPath = path.join(targetDir, 'timing_metadata.json');
       const volumeJsonPath = path.join(targetDir, 'phrase_volume_map.json');
+      const analysisJsonPath = path.join(targetDir, 'timing_project.analysis.json');
       await fs.promises.writeFile(timingJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
       await fs.promises.writeFile(volumeJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
-      log.info(`[AutoTiming] Сохранены timing_metadata.json и phrase_volume_map.json в: ${timingJsonPath}`);
+      await fs.promises.writeFile(analysisJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
+      log.info(`[AutoTiming] Сохранены timing_metadata.json, phrase_volume_map.json и timing_project.analysis.json в: ${targetDir}`);
       if (onLog) onLog(`Карта громкостей фраз сохранена в сведение: timing_metadata.json`);
     } catch (metaErr) {
       log.warn(`[AutoTiming] Предупреждение при сохранении timing_metadata.json:`, metaErr);

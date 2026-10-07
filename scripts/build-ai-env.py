@@ -80,12 +80,24 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
                     pass
         for name in dirs:
             dir_lower = name.lower()
-            # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
             norm_root = root.replace("\\", "/").lower()
+
+            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy'
+            # Subpackages such as 'torch/cuda', 'torch/testing', 'torchaudio/compliance' are required at runtime!
+            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy']):
+                continue
+
+            # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
             if dir_lower in ['tests', 'test', 'testing'] and ('torch' in norm_root or 'site-packages' in norm_root):
                 continue
 
-            if dir_lower in unneeded_dir_names or (strip_cuda and (dir_lower.startswith('nvidia') or dir_lower.startswith('triton') or dir_lower.startswith('cuda'))):
+            # Standalone heavy CUDA packages should only be stripped if they are top-level directories in site-packages
+            is_top_level_site_package = norm_root.endswith(('site-packages', 'dist-packages'))
+            is_standalone_cuda = is_top_level_site_package and (
+                dir_lower.startswith(('nvidia_', 'nvidia', 'triton', 'cuda_'))
+            )
+
+            if dir_lower in unneeded_dir_names or (strip_cuda and is_standalone_cuda):
                 try:
                     shutil.rmtree(os.path.join(root, name), ignore_errors=True)
                     removed_count += 1
@@ -429,6 +441,34 @@ except Exception as e:
 
     # 10. Prune bloat
     prune_unneeded_files(build_temp_dir, strip_cuda=(use_cpu_wheels and (is_win or is_linux)))
+
+    # 10.1 Post-pruning verification: Ensure PyTorch, CUDA module stub, DeepFilterNet and Demucs are fully intact!
+    print("\n[STEP 8.5] Post-pruning integrity verification inside runtime...")
+    post_verify_code = """
+import sys
+import traceback
+try:
+    import numpy as np
+    assert np.__version__.startswith("1.26"), f"NumPy version mismatch: {np.__version__}"
+    import torch
+    # Verify torch.cuda submodule is present and callable
+    import torch.cuda
+    _ = torch.cuda.is_available()
+    import torchaudio
+    import df
+    import demucs
+    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}")
+except Exception as e:
+    sys.stderr.write(f"  [POST-PRUNE ERROR] Crucial AI package was damaged by cleanup: {e}\\n")
+    traceback.print_exc()
+    sys.exit(1)
+"""
+    post_py_file = build_temp_dir / "post_verify.py"
+    post_py_file.write_text(post_verify_code, encoding="utf-8")
+    run_cmd([str(venv_python), str(post_py_file)], check=True)
+    if post_py_file.exists():
+        try: os.remove(post_py_file)
+        except Exception: pass
 
     # 11. Package zip archives
     print("\n[STEP 9] Archiving AI_env bundle with maximum compression...")
