@@ -1,5 +1,7 @@
 const { ipcMain, app, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const log = require('electron-log');
 const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
 const MixingPipelineService = require('../services/MixingPipelineService.cjs');
@@ -354,6 +356,38 @@ function registerMixingHandlers(getData, mainWindow) {
       overlap,
       stems,
       prefix,
+      onProgress,
+      onLog
+    });
+  }));
+
+  ipcMain.handle('neural-process-pedalboard', wrapIpcHandler(async (event, params) => {
+    const { inputPath, outputPath, moduleId, params: dspParams } = params;
+    const onProgress = (p) => sendProgress('mixing-progress', p);
+    const onLog = createLogSender('pedalboard_dsp');
+    return await AudioNeuralService.processPedalboardDsp({
+      inputPath,
+      outputPath,
+      moduleId: moduleId || 'voice_master_strip',
+      params: dspParams || params,
+      onProgress,
+      onLog
+    });
+  }));
+
+  ipcMain.handle('neural-process-voicefixer', wrapIpcHandler(async (event, params) => {
+    const { inputPath, outputPath, modelPath, airBandBoostDb, harmonicSaturation, formantClarity, warmTubeEmulation, subBassProtect } = params;
+    const onProgress = (p) => sendProgress('mixing-progress', p);
+    const onLog = createLogSender('voicefixer');
+    return await AudioNeuralService.voiceFixer({
+      inputPath,
+      outputPath,
+      modelPath,
+      airBandBoostDb,
+      harmonicSaturation,
+      formantClarity,
+      warmTubeEmulation,
+      subBassProtect,
       onProgress,
       onLog
     });

@@ -2,19 +2,18 @@
 # -*- coding: utf-8 -*-
 """
 Audio AI Neural Processor (Sidecar CLI) for Anime Dub Manager.
-Universal Neural Audio Processing Engine with Strict Audio Conditioning:
-1. DeepFilterNet 3 (Speech Denoising & Dereverberation) [Native 48kHz]
-2. UVR MDX-Net ONNX & PyTorch VR Architecture [Native 44.1kHz Stereo]
-3. Demucs v4 (htdemucs, htdemucs_ft, htdemucs_vocals_bgm) [Native 44.1kHz Stereo]
-4. VoiceFixer Neural Harmonic Restorer [Native 44.1kHz -> 48kHz]
-5. Whisper / WhisperX & PyAnnote Diarization with Silero VAD [Native 16kHz]
+Production-Grade Audio DSP & Deep Learning Inference Engine:
+1. DeepFilterNet 3 (Real-time Speech Denoising & Dereverberation) [Official `df` package, Native 48kHz]
+2. Demucs v4 (Hybrid Transformer Music & Speech Stem Separation) [Official `demucs` package, Native 44.1kHz Stereo -> 48kHz]
+3. Spotify Pedalboard (Studio-grade Vocal Post-Processing DSP) [Official `pedalboard` C++ engine: EQ, Compressor, De-Esser, Reverb, Limiter]
+4. VoiceFixer (Neural Harmonic Restorer & Speech Super-Resolution) [Official `voicefixer` package]
+5. Whisper & PyAnnote Diarization (Speech-to-Text & Speaker Segmentation)
 
-Strict Audio Conditioning:
-- Automatic sample rate conversion (Polyphase sinc/Kaiser resampling to exact model SR, and back to 48kHz)
-- Channel layout adaptation (Mono -> Stereo replication [2, N] for 2-channel models, channel-independent for DeepFilterNet)
-- DC offset removal & 20Hz infrasonic rumble filtration (<20Hz)
-- Sample-accurate length preservation
-- Soft-knee true-peak headroom protection (-0.5 dBFS)
+Audio Conditioning & Memory Management:
+- Polyphase resampling via scipy.signal.resample_poly to exact model sample rates
+- 100% C-contiguous float32 arrays (np.ascontiguousarray) to protect PyTorch / C++ API bindings
+- True-peak headroom management (-0.5 dBFS soft protection)
+- Sample-accurate length preservation & 24-bit PCM broadcast WAV output
 """
 
 import sys
@@ -31,6 +30,7 @@ import urllib.parse
 # 0. SITE PACKAGES & NATIVE LIBS BOOTSTRAP
 # ------------------------------------------------------------------------------
 def _bootstrap_site_packages():
+    """Locates and registers all local/bundled site-packages and native DLL paths."""
     import site
     cur_dir = os.path.dirname(os.path.abspath(__file__))
     py_dir = os.path.dirname(os.path.abspath(sys.executable))
@@ -84,7 +84,7 @@ def _bootstrap_site_packages():
     if sys.platform == 'win32':
         for p in list(sys.path):
             if os.path.isdir(p):
-                for dll_sub in ['', 'torch/lib', 'torch', 'torchaudio/lib', 'torchaudio', 'onnxruntime/capi', 'scipy.libs', 'numpy.libs']:
+                for dll_sub in ['', 'torch/lib', 'torch', 'torchaudio/lib', 'torchaudio', 'pedalboard', 'onnxruntime/capi', 'scipy.libs', 'numpy.libs']:
                     dll_dir = os.path.join(p, dll_sub) if dll_sub else p
                     if os.path.isdir(dll_dir):
                         if dll_dir not in os.environ.get("PATH", ""):
@@ -95,14 +95,13 @@ def _bootstrap_site_packages():
                             except Exception:
                                 pass
 
-    # Auto-heal missing torch.cuda if pruned by packaging
+    # Auto-heal missing torch.cuda if pruned by minimal environment packager
     _heal_torch_cuda()
 
 def _heal_torch_cuda():
     import types
     import contextlib
 
-    # 1. Restore physical directory and __init__.py on disk if missing in any site-packages
     for p in list(sys.path):
         if not os.path.isdir(p):
             continue
@@ -153,7 +152,6 @@ amp = _Amp()
                 except Exception:
                     pass
 
-    # 2. Register stub module in sys.modules so C-extensions find it immediately
     if "torch.cuda" not in sys.modules:
         cuda_mod = types.ModuleType("torch.cuda")
         cuda_mod.is_available = lambda: False
@@ -197,8 +195,11 @@ _bootstrap_site_packages()
 
 import numpy as np
 
-# Safe conversion helpers to eliminate NumPy 2.x C-API type errors in PyTorch
+# ------------------------------------------------------------------------------
+# 1. CORE UTILS, TENSOR CONVERSIONS & IPC PROTOCOL
+# ------------------------------------------------------------------------------
 def to_torch_tensor(data, dtype=None):
+    """Converts numpy array or raw audio buffer to a C-contiguous float32 torch Tensor."""
     import torch
     if dtype is None:
         dtype = torch.float32
@@ -216,6 +217,7 @@ def to_torch_tensor(data, dtype=None):
         return torch.tensor(data.tolist(), dtype=dtype)
 
 def to_numpy_array(tensor):
+    """Converts torch Tensor or array to a C-contiguous float32 numpy ndarray."""
     if isinstance(tensor, np.ndarray):
         return np.ascontiguousarray(tensor, dtype=np.float32)
     if hasattr(tensor, "detach"):
@@ -262,15 +264,15 @@ def get_optimal_device():
         return "cpu"
 
 # ------------------------------------------------------------------------------
-# RESAMPLING HELPER VIA SCIPY OR TORCH
+# 2. AUDIO RESAMPLING VIA SCIPY RESAMPLE_POLY
 # ------------------------------------------------------------------------------
 def resample_audio(audio_data, orig_sr: int, target_sr: int):
     """
-    Resamples 1D or 2D [channels, samples] audio from orig_sr to target_sr.
-    Uses scipy.signal.resample_poly as primary method to bypass torchaudio C-API issues.
+    High-precision Polyphase Sinc/Kaiser resampling for 1D or 2D [channels, samples] audio.
+    Uses scipy.signal.resample_poly for exact length and phase preservation.
     """
-    if orig_sr == target_sr:
-        return audio_data
+    if int(orig_sr) == int(target_sr):
+        return np.ascontiguousarray(audio_data, dtype=np.float32)
 
     arr = to_numpy_array(audio_data)
     is_1d = arr.ndim == 1
@@ -283,7 +285,7 @@ def resample_audio(audio_data, orig_sr: int, target_sr: int):
         up = int(target_sr) // gcd
         down = int(orig_sr) // gcd
         resampled = resample_poly(arr, up, down, axis=-1)
-    except Exception:
+    except Exception as e:
         try:
             import torch
             import torchaudio.functional as F
@@ -291,7 +293,6 @@ def resample_audio(audio_data, orig_sr: int, target_sr: int):
             resampled_t = F.resample(t, orig_sr, target_sr)
             resampled = to_numpy_array(resampled_t)
         except Exception:
-            # Linear interpolation fallback
             orig_len = arr.shape[-1]
             target_len = int(round(orig_len * (target_sr / orig_sr)))
             x_orig = np.linspace(0, 1, orig_len)
@@ -304,48 +305,63 @@ def resample_audio(audio_data, orig_sr: int, target_sr: int):
     return resampled[0] if is_1d else resampled
 
 # ------------------------------------------------------------------------------
-# AUDIO PRE-PROCESSING & STRICT CONDITIONING ENGINE
+# 3. AUDIO CONDITIONER & FILE IO
 # ------------------------------------------------------------------------------
 class AudioConditioner:
     """
-    Robust audio pre/post processor that conditions audio for neural models.
+    Loads, conditions (mono/stereo conversion, DC offset removal, resampling),
+    and saves audio files with 24-bit PCM broadcast standard.
     """
     @staticmethod
-    def prepare_input(file_path, target_sr, force_stereo=True, remove_dc=True):
-        import torch
-        import soundfile as sf
+    def load_audio(file_path, target_sr=None, force_stereo=False, remove_dc=True):
+        """
+        Loads audio file into float32 array shaped (channels, samples).
+        """
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"Аудиофайл не найден: {file_path}")
+
+        data = None
+        orig_sr = 48000
 
         try:
+            import soundfile as sf
             data, orig_sr = sf.read(file_path, dtype='float32')
-        except Exception:
+        except Exception as sf_err:
             try:
                 import torchaudio
-                audio_t, orig_sr = torchaudio.load(file_path)
-                data = to_numpy_array(audio_t).T
+                waveform, orig_sr = torchaudio.load(file_path)
+                data = waveform.numpy().T
             except Exception:
                 from scipy.io import wavfile
-                orig_sr, int_data = wavfile.read(file_path)
-                if int_data.dtype == np.int16:
-                    data = (int_data / 32768.0).astype(np.float32)
-                elif int_data.dtype == np.int32:
-                    data = (int_data / 2147483648.0).astype(np.float32)
+                orig_sr, raw = wavfile.read(file_path)
+                if raw.dtype == np.int16:
+                    data = (raw / 32768.0).astype(np.float32)
+                elif raw.dtype == np.int32:
+                    data = (raw / 2147483648.0).astype(np.float32)
                 else:
-                    data = int_data.astype(np.float32)
+                    data = raw.astype(np.float32)
 
+        if data is None:
+            raise RuntimeError(f"Не удалось декодировать аудиофайл: {file_path}")
+
+        # Shape formatting: to (channels, samples)
         if data.ndim == 1:
-            data = data[np.newaxis, :]
+            data = data[np.newaxis, :]  # (1, samples)
             orig_channels = 1
         else:
             orig_channels = data.shape[1]
-            data = data.T
+            data = data.T  # (channels, samples)
 
         orig_length_samples = data.shape[1]
 
-        # Resample to target_sr using scipy.signal.resample_poly
-        if orig_sr != target_sr:
+        # Resample if target_sr is specified
+        if target_sr is not None and int(orig_sr) != int(target_sr):
             data = resample_audio(data, orig_sr, target_sr)
+            current_sr = target_sr
+        else:
+            current_sr = orig_sr
 
-        # Force Stereo if required [2, samples]
+        # Channel mapping
         if force_stereo:
             if data.shape[0] == 1:
                 data = np.repeat(data, 2, axis=0)
@@ -358,46 +374,155 @@ class AudioConditioner:
         if remove_dc:
             data = data - np.mean(data, axis=-1, keepdims=True)
 
-        tensor_out = to_torch_tensor(data, dtype=torch.float32)
-        return tensor_out, orig_sr, orig_channels, orig_length_samples
+        data = np.ascontiguousarray(data, dtype=np.float32)
+        return data, current_sr, orig_channels, orig_length_samples
 
     @staticmethod
-    def finalize_output(output_path, audio_data, current_sr: int, target_sr: int = 48000, orig_channels: int = 2):
-        import soundfile as sf
-
+    def save_audio(output_path, audio_data, current_sr: int, target_sr: int = 48000, orig_channels: int = None, bit_depth: str = 'PCM_24'):
+        """
+        Resamples back to target_sr (48 kHz default) and writes to disk.
+        """
         arr = to_numpy_array(audio_data)
 
-        # Resample back to target_sr (48 kHz)
-        if current_sr != target_sr:
+        # Resample if needed
+        if int(current_sr) != int(target_sr):
             arr = resample_audio(arr, current_sr, target_sr)
 
-        # Match original channel layout if needed
+        # Match original channel layout if requested
         if orig_channels == 1 and arr.ndim > 1 and arr.shape[0] > 1:
             arr = np.mean(arr, axis=0, keepdims=True)
 
-        # True-peak soft-knee limiter (-0.5 dBFS)
+        # Soft true-peak limiter (-0.5 dBFS)
         peak = np.max(np.abs(arr))
         target_max = 0.944  # -0.5 dBFS
         if peak > target_max:
             arr = (arr / peak) * target_max
 
+        # Format to (samples, channels) for soundfile
         out_data = arr.T if arr.ndim > 1 else arr
+        out_data = np.ascontiguousarray(out_data, dtype=np.float32)
+        np.nan_to_num(out_data, copy=False, nan=0.0, posinf=0.999, neginf=-0.999)
+
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        sf.write(output_path, out_data, target_sr, subtype='PCM_24')
+
+        try:
+            import soundfile as sf
+            sf.write(output_path, out_data, target_sr, subtype=bit_depth)
+        except Exception:
+            from scipy.io import wavfile
+            int_data = np.clip(out_data * 32767.0, -32768.0, 32767.0).astype(np.int16)
+            wavfile.write(output_path, target_sr, int_data)
+
         return output_path
 
 # ------------------------------------------------------------------------------
-# 1. DEMUCS v4 (STEM SEPARATION - 44.1kHz STEREO)
+# 4. DEEPFILTERNET 3 (DENOISE & DEREVERB - 48kHz NATIVE)
+# ------------------------------------------------------------------------------
+def process_deepfilternet(args):
+    """
+    Speech Denoising and Dereverberation using the official DeepFilterNet 3 library (`df`).
+    Native sample rate: 48000 Hz.
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_denoised.wav"
+
+    mode = args.mode
+    atten_limit = float(args.attenuation_limit_db) if args.attenuation_limit_db is not None else -100.0
+    reverb_reduction = float(args.reverb_reduction) if args.reverb_reduction is not None else (0.8 if mode == 'dereverb' else 0.0)
+    sensitivity = float(args.sensitivity) if args.sensitivity is not None else 1.0
+    wet_dry_blend = float(args.wet_dry_blend) if args.wet_dry_blend is not None else 100.0
+
+    emit_progress(5.0, "Инициализация DeepFilterNet 3...")
+    device = get_optimal_device()
+
+    try:
+        from df.enhance import init_df, enhance
+        model, df_state, _ = init_df()
+        model = model.to(device)
+        model.eval()
+    except ImportError as e:
+        raise ImportError(
+            "Библиотека DeepFilterNet (df) не найдена в окружении Python. "
+            "Установите её через: pip install deepfilternet==0.5.6 или обновите AI-окружение в настройках."
+        ) from e
+    except Exception as e:
+        raise RuntimeError(f"Ошибка инициализации модели DeepFilterNet3: {e}") from e
+
+    target_sr = 48000
+    if hasattr(df_state, 'sr'):
+        try:
+            target_sr = int(df_state.sr())
+        except Exception:
+            target_sr = 48000
+
+    emit_progress(20.0, f"Загрузка и приведение аудио к {target_sr} Гц...")
+    audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=target_sr, force_stereo=False, remove_dc=True
+    )
+
+    emit_progress(40.0, f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, atten_limit={atten_limit} dB)...")
+    
+    eff_atten = atten_limit if sensitivity >= 3.0 else max(-40.0, atten_limit * (sensitivity / 3.0))
+
+    import torch
+    num_channels = audio_data.shape[0]
+    enhanced_channels = []
+
+    for ch in range(num_channels):
+        # Guarantee C-contiguous float32 torch tensor for native C-API safety
+        ch_arr = np.ascontiguousarray(audio_data[ch:ch+1], dtype=np.float32)
+        ch_tensor = torch.from_numpy(ch_arr).to(device=device, dtype=torch.float32)
+
+        with torch.no_grad():
+            enhanced_ch = enhance(model, df_state, ch_tensor, atten_lim_db=eff_atten)
+
+        enhanced_np = enhanced_ch.cpu().numpy()
+        enhanced_channels.append(enhanced_np)
+        
+        progress = 40.0 + ((ch + 1) / num_channels) * 45.0
+        emit_progress(progress, f"Обработан канал {ch + 1}/{num_channels}...")
+
+    enhanced_audio = np.concatenate(enhanced_channels, axis=0)
+
+    # Reverb suppression if requested
+    if reverb_reduction > 0.0 or mode == 'dereverb':
+        emit_progress(88.0, "Подавление хвостов комнатного эха...")
+        decay = max(0.1, min(1.0, reverb_reduction * (0.5 + sensitivity * 0.05)))
+        enhanced_audio = enhanced_audio * decay + audio_data * (1.0 - decay) * 0.10
+
+    # Dry / Wet blend
+    if wet_dry_blend < 100.0:
+        wet_w = max(0.0, min(1.0, wet_dry_blend / 100.0))
+        dry_w = 1.0 - wet_w
+        enhanced_audio = (enhanced_audio * wet_w) + (audio_data * dry_w)
+
+    emit_progress(94.0, f"Экспорт в студийный 24-бит WAV: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, enhanced_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    emit_progress(100.0, "Шумоподавление DeepFilterNet3 успешно завершено!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'deepfilternet3'})}\n")
+    sys.stdout.flush()
+
+# ------------------------------------------------------------------------------
+# 5. DEMUCS v4 (STEM SEPARATION - OFFICIAL DEMUCS API)
 # ------------------------------------------------------------------------------
 def process_demucs(args):
-    import torch
-
+    """
+    Stem separation (Vocals / Instrumental / Drums / Bass / Other) using the official Demucs v4 library.
+    Input conditioned to 44100 Hz Stereo, output exported as 48000 Hz 24-bit WAV.
+    """
     input_path = args.input
     output_dir = args.output_dir or os.path.dirname(os.path.abspath(args.output or input_path))
     model_name = args.model_name or "htdemucs"
     shifts = int(args.shifts) if args.shifts is not None else 1
     overlap = float(args.overlap) if args.overlap is not None else 0.25
     stems_mode = args.stems or "both"
+    prefix = args.prefix or ""
 
     hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_HUB_TOKEN')
     if hf_token:
@@ -408,39 +533,41 @@ def process_demucs(args):
     device = get_optimal_device()
 
     try:
-        from demucs.pretrained import get_model
+        import demucs.pretrained
         from demucs.apply import apply_model
-    except ImportError:
-        raise ImportError("Пакет demucs не установлен. Выполните: pip install demucs")
+    except ImportError as e:
+        raise ImportError(
+            "Библиотека Demucs (demucs) не найдена в окружении Python. "
+            "Установите её через: pip install demucs или обновите AI-окружение в настройках."
+        ) from e
 
-    emit_progress(15.0, f"Загрузка модели {model_name} через официальный API get_model()...")
+    emit_progress(15.0, f"Загрузка весов модели {model_name} через официальный API get_model()...")
     try:
-        model = get_model(model_name)
+        model = demucs.pretrained.get_model(model_name)
     except Exception as e:
-        sys.stderr.write(f"Warning: get_model({model_name}) failed ({e}). Retrying with htdemucs...\n")
-        model = get_model("htdemucs")
+        sys.stderr.write(f"Warning: get_model({model_name}) failed ({e}). Retrying with 'htdemucs'...\n")
+        model = demucs.pretrained.get_model("htdemucs")
 
     model = model.to(device)
     model.eval()
 
     target_sr = getattr(model, 'samplerate', 44100)
-    emit_progress(25.0, f"Аудио-подготовка: приведение к {target_sr} Гц Stereo...")
-    audio, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
+    emit_progress(25.0, f"Аудио-подготовка дорожки к стандарту Demucs ({target_sr} Гц Stereo)...")
+    
+    audio_data, current_sr, orig_channels, orig_len = AudioConditioner.load_audio(
         input_path, target_sr=target_sr, force_stereo=True, remove_dc=True
     )
 
-    # Standardize variance
-    ref = audio.mean(0)
+    import torch
+    audio_tensor = torch.from_numpy(np.ascontiguousarray(audio_data, dtype=np.float32))
+
+    # Variance standardization
+    ref = audio_tensor.mean(0)
     audio_std = ref.std().item()
-    audio_norm = (audio / audio_std) if audio_std > 1e-6 else audio
+    audio_norm = (audio_tensor / audio_std) if audio_std > 1e-6 else audio_tensor
 
-    emit_progress(35.0, f"Сепарация Demucs v4 (shifts={shifts}, overlap={overlap})...")
-    audio_norm = audio_norm.to(device)
-
-    if audio_norm.ndim == 2:
-        inp_tensor = audio_norm[None]
-    else:
-        inp_tensor = audio_norm
+    emit_progress(35.0, f"Выполнение нейросетевого разделения Demucs v4 (shifts={shifts}, overlap={overlap})...")
+    inp_tensor = audio_norm[None].to(device)
 
     with torch.no_grad():
         sources = apply_model(model, inp_tensor, shifts=shifts, split=True, overlap=overlap, progress=True, device=device)[0]
@@ -448,29 +575,25 @@ def process_demucs(args):
     if audio_std > 1e-6:
         sources = sources * audio_std
 
-    sources = sources.cpu()
-    sources_dict = dict(zip(model.sources, sources))
+    sources_dict = dict(zip(model.sources, sources.cpu().numpy()))
 
     os.makedirs(output_dir, exist_ok=True)
-    prefix = args.prefix or ""
-
-    vocals_tensor = sources_dict.get('vocals')
-    vocals_out_path = os.path.join(output_dir, f"{prefix}vocals.wav")
+    vocals_data = sources_dict.get('vocals')
 
     # Instrumental = sum of all non-vocal stems (drums + bass + other)
-    inst_tensor = None
-    for name, tensor in sources_dict.items():
+    inst_data = None
+    for name, s_data in sources_dict.items():
         if name != 'vocals':
-            inst_tensor = tensor.clone() if inst_tensor is None else (inst_tensor + tensor)
+            inst_data = s_data.copy() if inst_data is None else (inst_data + s_data)
 
-    inst_out_path = os.path.join(output_dir, f"{prefix}no_vocals.wav")
-
-    emit_progress(88.0, "Пост-обработка: ресемплинг стемов в 48 кГц и мягкий лимитер...")
+    emit_progress(85.0, "Пост-обработка стемов: ресемплинг в 48 кГц и сохранение 24-бит WAV...")
     exported_files = []
 
-    if stems_mode in ["vocals_only", "both", "all"] and vocals_tensor is not None:
-        AudioConditioner.finalize_output(vocals_out_path, vocals_tensor, current_sr=target_sr, target_sr=48000)
-        # Также делаем ссылку на original_vocals.wav для обратной совместимости
+    vocals_out_path = os.path.join(output_dir, f"{prefix}vocals.wav")
+    inst_out_path = os.path.join(output_dir, f"{prefix}no_vocals.wav")
+
+    if stems_mode in ["vocals_only", "both", "all"] and vocals_data is not None:
+        AudioConditioner.save_audio(vocals_out_path, vocals_data, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
         alt_vocals = os.path.join(output_dir, f"{prefix}original_vocals.wav")
         if alt_vocals != vocals_out_path:
             try:
@@ -479,9 +602,8 @@ def process_demucs(args):
             except Exception: pass
         exported_files.append({"type": "vocals", "path": vocals_out_path})
 
-    if stems_mode in ["instrumental_only", "both", "all"] and inst_tensor is not None:
-        AudioConditioner.finalize_output(inst_out_path, inst_tensor, current_sr=target_sr, target_sr=48000)
-        # Также делаем ссылку на original_instrumental_ME.wav для обратной совместимости
+    if stems_mode in ["instrumental_only", "both", "all"] and inst_data is not None:
+        AudioConditioner.save_audio(inst_out_path, inst_data, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
         alt_inst = os.path.join(output_dir, f"{prefix}original_instrumental_ME.wav")
         if alt_inst != inst_out_path:
             try:
@@ -490,240 +612,24 @@ def process_demucs(args):
             except Exception: pass
         exported_files.append({"type": "instrumental", "path": inst_out_path})
 
-    emit_progress(95.0, f"Экспортировано {len(exported_files)} стемов.")
+    emit_progress(100.0, f"Разделение Demucs v4 завершено ({len(exported_files)} стемов создано)!")
     sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
     sys.stdout.flush()
-    emit_progress(100.0, "Разделение Demucs v4 успешно завершено!")
-
-# ------------------------------------------------------------------------------
-# 2. DEEPFILTERNET 3 (DENOISE & DEREVERB - 48kHz NATIVE)
-# ------------------------------------------------------------------------------
-def process_deepfilternet(args):
-    import torch
-
-    input_path = args.input
-    output_path = args.output
-    mode = args.mode
-    model_id = getattr(args, 'model_id', '') or 'deepfilternet3'
-    model_path = getattr(args, 'model_path', '') or ''
-
-    atten_limit = float(args.attenuation_limit_db) if args.attenuation_limit_db is not None else -100.0
-    reverb_reduction = float(args.reverb_reduction) if args.reverb_reduction is not None else (0.8 if mode == 'dereverb' else 0.0)
-    sensitivity = float(args.sensitivity) if args.sensitivity is not None else 1.0
-    wet_dry_blend = float(args.wet_dry_blend) if args.wet_dry_blend is not None else 100.0
-
-    if model_id == 'deepfilternet3':
-        emit_progress(5.0, f"Инициализация DeepFilterNet3 ({mode})...")
-    else:
-        emit_progress(5.0, f"Инициализация перцептивного нейросетевого процессора для «{model_id}» ({mode})...")
-    device = get_optimal_device()
-
-    target_sr = 48000
-    try:
-        from df.enhance import init_df, enhance, save_audio
-        model, df_state, _ = init_df()
-        model = model.to(device)
-        model.eval()
-        target_sr = df_state.sr() if hasattr(df_state, 'sr') else 48000
-    except Exception as e:
-        sys.stderr.write(f"Warning: DeepFilterNet package init failed ({e}).\n")
-        raise RuntimeError(f"DeepFilterNet3 initialization error: {e}")
-
-    emit_progress(25.0, f"Аудио-подготовка дорожки к стандарту DeepFilterNet ({target_sr} Гц)...")
-    audio_tensor, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
-        input_path, target_sr=target_sr, force_stereo=False, remove_dc=True
-    )
-
-    emit_progress(45.0, "Нейросетевая фильтрация спектрограммы DeepFilterNet3...")
-    eff_atten = atten_limit if sensitivity >= 3.0 else max(-35.0, atten_limit * (sensitivity / 3.0))
-
-    num_channels = audio_tensor.shape[0]
-    enhanced_channels = []
-
-    for ch in range(num_channels):
-        ch_tensor = audio_tensor[ch:ch+1].to(device)
-        with torch.no_grad():
-            enhanced_ch = enhance(model, df_state, ch_tensor, atten_lim_db=eff_atten)
-        enhanced_channels.append(enhanced_ch.cpu())
-        progress_val = 45.0 + ((ch + 1) / num_channels) * 35.0
-        emit_progress(progress_val, f"Канал {ch + 1}/{num_channels} обработан...")
-
-    enhanced_audio = torch.cat(enhanced_channels, dim=0)
-
-    # Post-dereverberation if requested
-    if reverb_reduction > 0.0 or mode == 'dereverb':
-        emit_progress(82.0, "Подавление хвостов комнатного эха...")
-        decay_factor = max(0.1, min(1.0, reverb_reduction * (0.5 + sensitivity * 0.05)))
-        enhanced_audio = enhanced_audio * decay_factor + audio_tensor * (1.0 - decay_factor) * 0.10
-
-    # Dry/Wet blend
-    if wet_dry_blend < 100.0:
-        wet_w = wet_dry_blend / 100.0
-        dry_w = 1.0 - wet_w
-        enhanced_audio = (enhanced_audio * wet_w) + (audio_tensor * dry_w)
-
-    emit_progress(92.0, "Пост-обработка: мягкий лимитер и экспорт 48 кГц...")
-    AudioConditioner.finalize_output(
-        output_path, enhanced_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels
-    )
-    emit_progress(100.0, "DeepFilterNet3 успешно завершен!")
-
-# ------------------------------------------------------------------------------
-# 3. VOICEFIXER (HARMONIC RESTORER & AIR-BAND SYNTHESIS - 44.1kHz -> 48kHz)
-# ------------------------------------------------------------------------------
-def process_voicefixer(args):
-    import torch
-
-    input_path = args.input
-    output_path = args.output
-    air_boost = float(args.air_boost or 3.5)
-    saturation = float(args.saturation or 0.45)
-    clarity = float(args.clarity or 0.65)
-    warm_tube = args.warm_tube is True or args.warm_tube == "true"
-    sub_bass = args.sub_bass is True or args.sub_bass == "true"
-
-    emit_progress(5.0, "Инициализация VoiceFixer Harmonic Restorer (44.1 кГц)...")
-    target_sr = 44100
-    audio, orig_sr, orig_channels, orig_len = AudioConditioner.prepare_input(
-        input_path, target_sr=target_sr, force_stereo=False, remove_dc=True
-    )
-
-    emit_progress(25.0, "Спектральный анализ гармоник вокального тракта...")
-    arr = to_numpy_array(audio)
-
-    # Check if voicefixer package is installed
-    vf_used = False
-    try:
-        from voicefixer import VoiceFixer
-        vf = VoiceFixer()
-        emit_progress(35.0, "Применение официальной нейросети VoiceFixer (vf.ckpt)...")
-        # VoiceFixer restore call with safe float32 contiguous arrays
-        temp_in = output_path + ".temp_in.wav"
-        temp_out = output_path + ".temp_out.wav"
-        AudioConditioner.finalize_output(temp_in, audio, current_sr=target_sr, target_sr=target_sr, orig_channels=orig_channels)
-        vf.restore(input=temp_in, output=temp_out, cuda=torch.cuda.is_available(), mode=0)
-        if os.path.exists(temp_out):
-            vf_audio, vf_sr, _, _ = AudioConditioner.prepare_input(temp_out, target_sr=48000, force_stereo=False)
-            AudioConditioner.finalize_output(output_path, vf_audio, current_sr=48000, target_sr=48000, orig_channels=orig_channels)
-            vf_used = True
-        try: os.unlink(temp_in)
-        except Exception: pass
-        try: os.unlink(temp_out)
-        except Exception: pass
-    except Exception as e:
-        sys.stderr.write(f"[VoiceFixer Notice] Neural package not available in env ({e}). Running High-Precision Harmonic DSP Exciter fallback.\n")
-        emit_progress(35.0, "Нейро-пакет VoiceFixer не установлен. Запуск аппаратного гармонического DSP-эксайтера...")
-        vf_used = False
-
-    if not vf_used:
-        # High precision Neural DSP Exciter & Air-Band Harmonic Restorer
-        emit_progress(45.0, "Генерация обертонов через гармонический DSP-эксайтер (Air-Band Exciter 12-16 кГц)...")
-        num_channels = arr.shape[0]
-        out_channels = []
-
-        for ch in range(num_channels):
-            sig = arr[ch]
-            # Exciter & Harmonic synthesis via float32 contiguous torch tensor
-            sig_t = to_torch_tensor(sig)
-            
-            # High-pass filter for air content
-            diff = np.diff(sig, prepend=sig[0])
-            harmonics = np.tanh(diff * (1.0 + saturation * 2.0)) * saturation * 0.45
-            air_synth = harmonics * (10.0 ** (air_boost / 20.0))
-            
-            enhanced = sig + air_synth * clarity
-            out_channels.append(enhanced)
-
-        enhanced_audio = np.stack(out_channels, axis=0)
-        emit_progress(88.0, "Пост-обработка: ресемплинг в 48 кГц и лимитер...")
-        AudioConditioner.finalize_output(
-            output_path, enhanced_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels
-        )
-
-    if vf_used:
-        emit_progress(100.0, "Нейросеть VoiceFixer успешно завершена!")
-    else:
-        emit_progress(100.0, "VoiceFixer Harmonic Restorer (DSP Exciter) успешно завершен!")
-
-# ------------------------------------------------------------------------------
-# 4. WHISPER / WHISPERX & DIARIZATION (WITH SILERO VAD & HF_TOKEN)
-# ------------------------------------------------------------------------------
-def process_whisper_diarization(args):
-    import torch
-
-    input_path = args.input
-    output_path = args.output
-    language = args.language or "ru"
-    model_name = args.model_name or "base"
-    hf_token = os.environ.get("HF_TOKEN") or args.hf_token or ""
-
-    emit_progress(5.0, "Инициализация Whisper / WhisperX и Silero VAD...")
-    device = get_optimal_device()
-
-    # 1. Silero VAD filtration before transcription to prevent hallucinations on silence
-    emit_progress(20.0, "Применение Silero VAD фильтрации тишины...")
-    audio_16k, orig_sr, orig_channels, _ = AudioConditioner.prepare_input(
-        input_path, target_sr=16000, force_stereo=False, remove_dc=True
-    )
-
-    try:
-        # PyAnnote Diarization Pipeline with official token=HF_TOKEN (pyannote 3.1+)
-        if args.mode == "diarize" and hf_token:
-            emit_progress(40.0, "Загрузка DiarizationPipeline (pyannote.audio 3.1+)...")
-            from pyannote.audio import Pipeline
-            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=hf_token)
-            if pipeline and torch.cuda.is_available():
-                pipeline.to(torch.device("cuda"))
-            emit_progress(60.0, "Выполнение диаризации спикеров...")
-            diarization = pipeline(input_path)
-            segments = []
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                segments.append({
-                    "start": round(turn.start, 3),
-                    "end": round(turn.end, 3),
-                    "speaker": speaker
-                })
-            result_payload = {"speakers": segments}
-            if output_path:
-                with open(output_path, "w", encoding="utf-8") as f:
-                    json.dump(result_payload, f, indent=2, ensure_ascii=False)
-            sys.stdout.write(f"RESULT:{json.dumps(result_payload)}\n")
-            sys.stdout.flush()
-            emit_progress(100.0, "Диаризация спикеров успешно завершена!")
-            return
-    except Exception as d_err:
-        sys.stderr.write(f"Diarization warning: {d_err}\n")
-
-    # 2. Whisper transcription
-    try:
-        import whisper
-        emit_progress(50.0, f"Загрузка модели Whisper ({model_name})...")
-        model = whisper.load_model(model_name, device=device)
-        emit_progress(70.0, "Транскрибация речи...")
-        result = model.transcribe(input_path, language=language if language != 'auto' else None)
-        if output_path:
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
-        sys.stdout.write(f"RESULT:{json.dumps({'text': result.get('text', ''), 'segments': result.get('segments', [])})}\n")
-        sys.stdout.flush()
-        emit_progress(100.0, "Транскрибация Whisper успешно завершена!")
-    except Exception as w_err:
-        raise RuntimeError(f"Whisper transcription failed: {w_err}")
 
 # ------------------------------------------------------------------------------
 # 6. SPOTIFY PEDALBOARD STUDIO VOICE DSP ENGINE
 # ------------------------------------------------------------------------------
 def process_pedalboard_dsp(args):
     """
-    Studio Voice Post-Processing DSP Engine powered by Spotify Pedalboard.
-    Supports discrete voice processing (EQ, Compressor, De-Esser, Reverb, Limiter)
-    or complete mastering vocal strip with studio-grade presets.
+    Studio Voice Post-Processing DSP Engine strictly powered by Spotify Pedalboard C++ plugins.
+    Supports both individual discrete modules (voice_eq, voice_compressor, voice_deesser, voice_reverb, voice_limiter)
+    and full mastering channel strip (pedalboard_channel_strip / voice_master_strip).
     """
     input_path = args.input
     output_path = args.output
     if not output_path:
         base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_dsp.wav"
+        output_path = f"{base}_mastered.wav"
 
     params = {}
     if getattr(args, 'params_json', None):
@@ -732,7 +638,9 @@ def process_pedalboard_dsp(args):
         except Exception as e:
             sys.stderr.write(f"Warning parsing params_json: {e}\n")
 
-    # Merge CLI argument fallbacks
+    module_type = getattr(args, 'model_id', '') or params.get('moduleId', '') or args.mode or 'voice_master_strip'
+
+    # Extract DSP parameters
     eq_highpass = float(params.get('eqHighpass', params.get('eq_highpass', getattr(args, 'eq_highpass', 80.0))))
     eq_presence_freq = float(params.get('eqPresenceFreq', params.get('eq_presence_freq', getattr(args, 'eq_presence_freq', 3200.0))))
     eq_presence_gain = float(params.get('eqPresenceGain', params.get('eq_presence_gain', getattr(args, 'eq_presence_gain', 2.5))))
@@ -754,47 +662,7 @@ def process_pedalboard_dsp(args):
     limiter_threshold = float(params.get('limiterThresholdDb', params.get('limiter_threshold', getattr(args, 'limiter_threshold', -0.5))))
     limiter_release = float(params.get('limiterReleaseMs', params.get('limiter_release', getattr(args, 'limiter_release', 40.0))))
 
-    module_type = getattr(args, 'model_id', '') or params.get('moduleId', '') or 'voice_master_strip'
-
-    emit_progress(10.0, f"Загрузка аудиофайла: {os.path.basename(input_path)}...")
-
-    # Load audio file via soundfile or torchaudio/scipy fallback
-    audio_data = None
-    sample_rate = 48000
-    try:
-        import soundfile as sf
-        audio_data, sample_rate = sf.read(input_path, dtype='float32')
-    except Exception as sf_err:
-        try:
-            import torchaudio
-            waveform, sr = torchaudio.load(input_path)
-            sample_rate = sr
-            audio_data = waveform.numpy().T
-        except Exception:
-            from scipy.io import wavfile
-            sr, raw = wavfile.read(input_path)
-            sample_rate = sr
-            if raw.dtype == np.int16:
-                audio_data = (raw / 32768.0).astype(np.float32)
-            else:
-                audio_data = raw.astype(np.float32)
-
-    if audio_data is None:
-        raise RuntimeError(f"Could not load audio file: {input_path}")
-
-    # Transpose to (channels, samples) for Pedalboard
-    if audio_data.ndim == 1:
-        audio_channels = audio_data[np.newaxis, :]  # (1, N)
-    else:
-        audio_channels = audio_data.T  # (channels, N)
-
-    # Ensure memory contiguous float32 for robust C-extension compatibility
-    audio_channels = np.ascontiguousarray(audio_channels, dtype=np.float32)
-
-    emit_progress(35.0, f"Конфигурирование студийной цепочки Pedalboard ({module_type})...")
-
-    processed = None
-    used_pedalboard = False
+    emit_progress(10.0, f"Инициализация Spotify Pedalboard для модуля «{module_type}»...")
 
     try:
         import pedalboard
@@ -802,160 +670,349 @@ def process_pedalboard_dsp(args):
             Pedalboard, HighpassFilter, LowpassFilter, PeakFilter,
             Compressor, Limiter, Reverb, HighShelfFilter
         )
+    except ImportError as e:
+        raise ImportError(
+            "Библиотека Spotify Pedalboard (pedalboard) не найдена в окружении Python. "
+            "Установите её через: pip install pedalboard==0.9.25 или обновите AI-окружение в настройках приложения."
+        ) from e
 
-        effects = []
+    emit_progress(25.0, f"Загрузка аудиофайла: {os.path.basename(input_path)}...")
+    audio_data, sample_rate, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=None, force_stereo=False, remove_dc=True
+    )
 
-        # Mode filters: check if discrete module or combined strip
-        is_all = module_type in ['voice_master_strip', 'pedalboard_dsp', '']
-        apply_eq = is_all or module_type == 'voice_eq'
-        apply_comp = is_all or module_type == 'voice_compressor'
-        apply_deess = is_all or module_type == 'voice_deesser'
-        apply_reverb = is_all or module_type == 'voice_reverb'
-        apply_limiter = is_all or module_type == 'voice_limiter'
+    # Shape for Pedalboard: (channels, samples) as contiguous float32
+    audio_channels = np.ascontiguousarray(audio_data, dtype=np.float32)
 
-        # 1. Highpass Filter (Plosive / Mic Rumble Cut)
-        if apply_eq and eq_highpass > 20:
-            effects.append(HighpassFilter(cutoff_frequency_hz=float(eq_highpass)))
+    emit_progress(45.0, f"Сборка DSP-графа Spotify Pedalboard v{pedalboard.__version__}...")
+    effects = []
 
-        # 2. Presence Peak Filter (2.5 - 4.5 kHz Voice Intelligibility)
-        if apply_eq and abs(eq_presence_gain) > 0.05:
-            effects.append(PeakFilter(
-                cutoff_frequency_hz=float(eq_presence_freq),
-                gain_db=float(eq_presence_gain),
-                q=1.1
-            ))
+    is_all = module_type in ['voice_master_strip', 'pedalboard_dsp', 'pedalboard_channel_strip', '']
+    apply_eq = is_all or module_type == 'voice_eq'
+    apply_comp = is_all or module_type == 'voice_compressor'
+    apply_deess = is_all or module_type == 'voice_deesser'
+    apply_reverb = is_all or module_type == 'voice_reverb'
+    apply_limiter = is_all or module_type == 'voice_limiter'
 
-        # 3. Lowpass Filter (Air / Hiss Guard)
-        if apply_eq and eq_lowpass < 22000:
-            effects.append(LowpassFilter(cutoff_frequency_hz=float(eq_lowpass)))
+    # 1. Highpass Filter (Plosive / Mic Rumble Cut)
+    if apply_eq and eq_highpass > 20:
+        effects.append(HighpassFilter(cutoff_frequency_hz=float(eq_highpass)))
 
-        # 4. De-Esser (Sibilant High-Shelf & Peak Dynamic Taming)
-        if apply_deess and deesser_amount > 0.05:
-            deess_cut_db = -float(deesser_amount) * 7.5
-            effects.append(PeakFilter(
-                cutoff_frequency_hz=float(deesser_freq),
-                gain_db=deess_cut_db,
-                q=2.2
-            ))
+    # 2. Presence Peak Filter (2.5 - 4.5 kHz Voice Intelligibility)
+    if apply_eq and abs(eq_presence_gain) > 0.05:
+        effects.append(PeakFilter(
+            cutoff_frequency_hz=float(eq_presence_freq),
+            gain_db=float(eq_presence_gain),
+            q=1.0
+        ))
 
-        # 5. Vocal Compressor
-        if apply_comp and comp_ratio > 1.05 and comp_threshold < 0:
-            effects.append(Compressor(
-                threshold_db=float(comp_threshold),
-                ratio=float(comp_ratio),
-                attack_ms=float(comp_attack),
-                release_ms=float(comp_release)
-            ))
+    # 3. Lowpass Filter (Air / Hiss Guard)
+    if apply_eq and eq_lowpass < 22000:
+        effects.append(LowpassFilter(cutoff_frequency_hz=float(eq_lowpass)))
 
-        # 6. Spatial Studio Reverb
-        if apply_reverb and reverb_wet > 0.005:
-            effects.append(Reverb(
-                room_size=float(reverb_room_size),
-                damping=float(reverb_damping),
-                wet_level=float(reverb_wet),
-                dry_level=float(reverb_dry),
-                width=1.0
-            ))
+    # 4. Vocal Compressor
+    if apply_comp and comp_ratio > 1.0:
+        effects.append(Compressor(
+            threshold_db=float(comp_threshold),
+            ratio=float(comp_ratio),
+            attack_ms=float(comp_attack),
+            release_ms=float(comp_release)
+        ))
 
-        # 7. Brickwall True-Peak Limiter
-        if apply_limiter and limiter_threshold <= 0:
-            effects.append(Limiter(
-                threshold_db=float(limiter_threshold),
-                release_ms=float(limiter_release)
-            ))
+    # 5. De-Esser (Sibilant Peak Taming)
+    if apply_deess and deesser_amount > 0.05:
+        deess_cut_db = -float(deesser_amount) * 7.5
+        effects.append(PeakFilter(
+            cutoff_frequency_hz=float(deesser_freq),
+            gain_db=deess_cut_db,
+            q=2.2
+        ))
 
-        if len(effects) == 0:
-            # Neutral pass-through with limiter
-            effects.append(Limiter(threshold_db=-0.5, release_ms=40.0))
+    # 6. Spatial Studio Reverb
+    if apply_reverb and reverb_wet > 0.005:
+        effects.append(Reverb(
+            room_size=float(reverb_room_size),
+            damping=float(reverb_damping),
+            wet_level=float(reverb_wet),
+            dry_level=float(reverb_dry),
+            width=1.0
+        ))
 
-        board = Pedalboard(effects)
-        emit_progress(55.0, f"Обработка через Spotify Pedalboard v{pedalboard.__version__} ({len(effects)} плагинов в графе)...")
+    # 7. Brickwall True-Peak Limiter
+    if apply_limiter:
+        effects.append(Limiter(
+            threshold_db=float(limiter_threshold),
+            release_ms=float(limiter_release)
+        ))
 
-        processed = board(audio_channels, sample_rate)
-        used_pedalboard = True
-        sys.stdout.write(f"LOG:Pedalboard DSP: Успешно применен граф из {len(effects)} звеньев\n")
-        sys.stdout.flush()
+    if len(effects) == 0:
+        effects.append(Limiter(threshold_db=-0.5, release_ms=40.0))
 
-    except ImportError:
-        # High-Precision Scipy DSP Fallback
-        emit_progress(55.0, "Применение студийного DSP процессора высокой точности (Scipy Audio Engine)...")
-        from scipy import signal
+    board = Pedalboard(effects)
+    emit_progress(65.0, f"Выполнение DSP-обработки Spotify Pedalboard ({len(effects)} плагинов в цепочке)...")
 
-        processed = np.copy(audio_channels)
-
-        # Highpass Butterworth Filter
-        if (module_type in ['voice_master_strip', 'voice_eq']) and eq_highpass > 20:
-            nyq = 0.5 * sample_rate
-            norm_cutoff = min(0.99, max(0.001, eq_highpass / nyq))
-            b, a = signal.butter(3, norm_cutoff, btype='highpass')
-            for ch in range(processed.shape[0]):
-                processed[ch] = signal.filtfilt(b, a, processed[ch])
-
-        # Presence EQ Peak Filter
-        if (module_type in ['voice_master_strip', 'voice_eq']) and abs(eq_presence_gain) > 0.05:
-            nyq = 0.5 * sample_rate
-            w0 = min(0.99, max(0.001, eq_presence_freq / nyq))
-            q = 1.1
-            gain_lin = 10.0 ** (eq_presence_gain / 20.0)
-            alpha = math.sin(w0 * math.pi) / (2.0 * q)
-            # Peaking EQ biquad coefficients
-            b0 = 1.0 + alpha * gain_lin
-            b1 = -2.0 * math.cos(w0 * math.pi)
-            b2 = 1.0 - alpha * gain_lin
-            a0 = 1.0 + alpha / gain_lin
-            a1 = -2.0 * math.cos(w0 * math.pi)
-            a2 = 1.0 - alpha / gain_lin
-            b = np.array([b0 / a0, b1 / a0, b2 / a0])
-            a = np.array([1.0, a1 / a0, a2 / a0])
-            for ch in range(processed.shape[0]):
-                processed[ch] = signal.lfilter(b, a, processed[ch])
-
-        # Compressor Curve
-        if (module_type in ['voice_master_strip', 'voice_compressor']) and comp_ratio > 1.05:
-            thresh_lin = 10.0 ** (comp_threshold / 20.0)
-            for ch in range(processed.shape[0]):
-                sig = processed[ch]
-                abs_sig = np.abs(sig)
-                mask = abs_sig > thresh_lin
-                if np.any(mask):
-                    excess = abs_sig[mask] - thresh_lin
-                    comp_excess = excess / comp_ratio
-                    scale = (thresh_lin + comp_excess) / (abs_sig[mask] + 1e-9)
-                    processed[ch][mask] = sig[mask] * scale
-
-        # True Peak Soft Limiter
-        lim_lin = 10.0 ** (limiter_threshold / 20.0)
-        for ch in range(processed.shape[0]):
-            processed[ch] = np.clip(processed[ch], -lim_lin, lim_lin)
-
-    # Post-process array formatting
+    processed = board(audio_channels, sample_rate)
     processed = np.ascontiguousarray(processed, dtype=np.float32)
-    np.nan_to_num(processed, copy=False, nan=0.0, posinf=0.999, neginf=-0.999)
 
-    emit_progress(85.0, f"Сохранение обработанного файла: {os.path.basename(output_path)}...")
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    emit_progress(90.0, f"Сохранение результата: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, processed, current_sr=sample_rate, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
 
-    # Transpose back to (samples, channels) for file writer
-    out_audio_data = processed.T if processed.ndim > 1 else processed
-
-    try:
-        import soundfile as sf
-        sf.write(output_path, out_audio_data, sample_rate, subtype='PCM_16')
-    except Exception:
-        from scipy.io import wavfile
-        int16_data = np.clip(out_audio_data * 32767.0, -32768.0, 32767.0).astype(np.int16)
-        wavfile.write(output_path, sample_rate, int16_data)
-
-    emit_progress(100.0, f"Студийная обработка Pedalboard завершена ({os.path.basename(output_path)})!")
-    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'pedalboard' if used_pedalboard else 'scipy_dsp'})}\n")
+    emit_progress(100.0, f"Студийная обработка Pedalboard завершена успешно ({os.path.basename(output_path)})!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'pedalboard', 'plugins_count': len(effects)})}\n")
     sys.stdout.flush()
 
 # ------------------------------------------------------------------------------
-# MAIN ROUTER
+# 7. VOICEFIXER (HARMONIC RESTORER)
+# ------------------------------------------------------------------------------
+def process_voicefixer(args):
+    """
+    Neural harmonic restoration using the official VoiceFixer library.
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_restored.wav"
+
+    emit_progress(5.0, "Инициализация VoiceFixer...")
+    try:
+        from voicefixer import VoiceFixer
+        vf = VoiceFixer()
+    except ImportError as e:
+        raise ImportError(
+            "Библиотека voicefixer не найдена в окружении Python. "
+            "Установите её через: pip install voicefixer или обновите AI-окружение в настройках."
+        ) from e
+
+    import torch
+    cuda_available = torch.cuda.is_available()
+
+    emit_progress(30.0, f"Применение нейросети VoiceFixer (cuda={cuda_available})...")
+    temp_in = output_path + ".temp_in.wav"
+    temp_out = output_path + ".temp_out.wav"
+
+    audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=44100, force_stereo=False, remove_dc=True
+    )
+    AudioConditioner.save_audio(temp_in, audio_data, current_sr=44100, target_sr=44100, orig_channels=orig_channels)
+
+    try:
+        vf.restore(input=temp_in, output=temp_out, cuda=cuda_available, mode=0)
+        if os.path.exists(temp_out):
+            vf_audio, vf_sr, _, _ = AudioConditioner.load_audio(temp_out, target_sr=48000, force_stereo=False)
+            AudioConditioner.save_audio(output_path, vf_audio, current_sr=48000, target_sr=48000, orig_channels=orig_channels)
+    finally:
+        try: os.unlink(temp_in)
+        except Exception: pass
+        try: os.unlink(temp_out)
+        except Exception: pass
+
+    emit_progress(100.0, "Восстановление гармоник VoiceFixer успешно завершено!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'voicefixer'})}\n")
+    sys.stdout.flush()
+
+# ------------------------------------------------------------------------------
+# 8. WHISPER & DIARIZATION
+# ------------------------------------------------------------------------------
+def process_whisper_diarization(args):
+    """
+    Speech recognition via Whisper and Diarization via PyAnnote.
+    """
+    import torch
+
+    input_path = args.input
+    output_path = args.output
+    language = args.language or "ru"
+    model_name = args.model_name or "base"
+    hf_token = os.environ.get("HF_TOKEN") or args.hf_token or ""
+
+    emit_progress(5.0, "Инициализация модели распознавания речи...")
+    device = get_optimal_device()
+
+    # PyAnnote Diarization Pipeline
+    if args.mode == "diarize":
+        if not hf_token:
+            raise ValueError("Для диаризации через PyAnnote требуется передать HF_TOKEN (--hf_token).")
+        emit_progress(25.0, "Загрузка пайплайна диаризации PyAnnote...")
+        try:
+            from pyannote.audio import Pipeline
+            pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", token=hf_token)
+            if pipeline and torch.cuda.is_available():
+                pipeline.to(torch.device("cuda"))
+            emit_progress(50.0, "Выполнение сегментации спикеров...")
+            diarization = pipeline(input_path)
+            segments = []
+            for turn, _, speaker in diarization.itertracks(yield_label=True):
+                segments.append({
+                    "start": round(turn.start, 3),
+                    "end": round(turn.end, 3),
+                    "speaker": speaker
+                })
+            result_payload = {"speakers": segments}
+            if output_path:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    json.dump(result_payload, f, indent=2, ensure_ascii=False)
+            sys.stdout.write(f"RESULT:{json.dumps(result_payload)}\n")
+            sys.stdout.flush()
+            emit_progress(100.0, "Диаризация спикеров успешно завершена!")
+            return
+        except Exception as d_err:
+            raise RuntimeError(f"Сбой диаризации PyAnnote: {d_err}") from d_err
+
+    # Whisper transcription
+    try:
+        import whisper
+        emit_progress(30.0, f"Загрузка модели Whisper ({model_name})...")
+        model = whisper.load_model(model_name, device=device)
+        emit_progress(60.0, "Транскрибация речи...")
+        result = model.transcribe(input_path, language=language if language != 'auto' else None)
+        if output_path:
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+        sys.stdout.write(f"RESULT:{json.dumps({'text': result.get('text', ''), 'segments': result.get('segments', [])})}\n")
+        sys.stdout.flush()
+        emit_progress(100.0, "Транскрибация Whisper успешно завершена!")
+    except Exception as w_err:
+        raise RuntimeError(f"Сбой Whisper: {w_err}") from w_err
+
+# ------------------------------------------------------------------------------
+# 9. ENVIRONMENT DIAGNOSTIC CHECK
+# ------------------------------------------------------------------------------
+def check_env():
+    """Returns JSON dictionary of installed AI/DSP libraries."""
+    env_status = {
+        "torch": False,
+        "cuda": False,
+        "mps": False,
+        "deepfilternet": False,
+        "demucs": False,
+        "pedalboard": False,
+        "voicefixer": False,
+        "onnxruntime": False,
+        "soundfile": False,
+        "scipy": False
+    }
+    try:
+        import torch
+        env_status["torch"] = True
+        env_status["cuda"] = torch.cuda.is_available()
+        env_status["mps"] = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+    except Exception: pass
+    try:
+        import df
+        env_status["deepfilternet"] = True
+    except Exception: pass
+    try:
+        import demucs
+        env_status["demucs"] = True
+    except Exception: pass
+    try:
+        import pedalboard
+        env_status["pedalboard"] = True
+    except Exception: pass
+    try:
+        import voicefixer
+        env_status["voicefixer"] = True
+    except Exception: pass
+    try:
+        import onnxruntime
+        env_status["onnxruntime"] = True
+    except Exception: pass
+    try:
+        import soundfile
+        env_status["soundfile"] = True
+    except Exception: pass
+    try:
+        import scipy
+        env_status["scipy"] = True
+    except Exception: pass
+
+    sys.stdout.write(f"ENV_STATUS:{json.dumps(env_status)}\n")
+    sys.stdout.flush()
+    sys.exit(0)
+
+def download_model_cli(args):
+    """
+    Downloads model weights with real-time streaming progress.
+    """
+    import urllib.request
+    target_path = args.model_path
+    if not target_path:
+        raise ValueError("Target --model_path is required for download_model mode")
+    
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    temp_target = target_path + ".download"
+    
+    # Model URLs mapping
+    url_map = {
+        "uvr_denoise_foxjoy": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth",
+        "deepfilternet3": "https://huggingface.co/bitsydarel/deepfilternet3-onnx/resolve/main/df_dec.onnx",
+        "uvr_denoise_lite": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise-Lite.pth",
+        "uvr_denoise_full": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeNoise.pth",
+        "reverb_foxjoy": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/Reverb_HQ_By_FoxJoy.onnx",
+        "uvr_deecho_normal": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Normal.pth",
+        "uvr_deecho_aggressive": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-De-Echo-Aggressive.pth",
+        "mdx_dereverb_room": "https://huggingface.co/Blane187/all_public_uvr_models/resolve/main/UVR-DeEcho-DeReverb.pth",
+        "uvr_mdx_voc_ft": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Voc_FT.onnx",
+        "uvr_mdx_inst_hq3": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx",
+        "kim_vocal_2": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx",
+        "voicefixer_fe": "https://huggingface.co/cqchangm/voicefixer/resolve/main/vf.ckpt"
+    }
+
+    url = url_map.get(args.model_id or "") or url_map.get(os.path.basename(target_path), "")
+    if not url:
+        raise ValueError(f"No known download URL for model_id: {args.model_id} / file: {os.path.basename(target_path)}")
+
+    sys.stdout.write(f"LOG:Connecting to model download URL: {url}\n")
+    sys.stdout.flush()
+
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    with urllib.request.urlopen(req, timeout=60) as response, open(temp_target, "wb") as out_file:
+        total_size = int(response.headers.get("Content-Length", 0))
+        downloaded = 0
+        block_size = 1024 * 64
+        while True:
+            buffer = response.read(block_size)
+            if not buffer:
+                break
+            downloaded += len(buffer)
+            out_file.write(buffer)
+            if total_size > 0:
+                pct = (downloaded / total_size) * 100.0
+                sys.stdout.write(f"PROGRESS:{pct:.1f}\n")
+                sys.stdout.flush()
+
+    if os.path.exists(temp_target) and os.path.getsize(temp_target) > 1024:
+        if os.path.exists(target_path):
+            os.remove(target_path)
+        os.rename(temp_target, target_path)
+        sys.stdout.write(f"PROGRESS:100\n")
+        sys.stdout.write(f"LOG:Model successfully downloaded to {target_path} ({os.path.getsize(target_path)} bytes)\n")
+        sys.stdout.flush()
+    else:
+        raise RuntimeError("Downloaded model file is corrupted or empty")
+
+# ------------------------------------------------------------------------------
+# 10. CLI ROUTER
 # ------------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Anime Dub Manager Universal Neural Audio AI Processor")
-    parser.add_argument("--mode", required=True, choices=["denoise", "dereverb", "separate", "voicefixer", "diarize", "whisper", "pedalboard_dsp", "check_env"])
+    parser = argparse.ArgumentParser(description="Anime Dub Manager Universal Neural Audio AI & DSP Processor")
+    
+    # Mode selector with full aliases
+    parser.add_argument(
+        "--mode",
+        required=True,
+        choices=[
+            "denoise", "dereverb", "deepfilternet",
+            "separate", "separate_stems", "demucs",
+            "pedalboard_channel_strip", "pedalboard_dsp",
+            "voice_eq", "voice_compressor", "voice_deesser", "voice_reverb", "voice_limiter", "voice_master_strip",
+            "voicefixer", "diarize", "whisper", "check_env", "download_model"
+        ],
+        help="Processing mode"
+    )
     parser.add_argument("--input", help="Path to input audio/video file")
     parser.add_argument("--output", help="Path to output audio file")
     parser.add_argument("--output_dir", help="Directory for multi-stem separation outputs")
@@ -1008,49 +1065,33 @@ def main():
     args = parser.parse_args()
 
     if args.mode == "check_env":
-        env_status = {
-            "torch": False, "cuda": False, "mps": False,
-            "deepfilternet": False, "demucs": False, "onnxruntime": False
-        }
-        try:
-            import torch
-            env_status["torch"] = True
-            env_status["cuda"] = torch.cuda.is_available()
-            env_status["mps"] = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-        except Exception: pass
-        try:
-            import df
-            env_status["deepfilternet"] = True
-        except Exception: pass
-        try:
-            import demucs
-            env_status["demucs"] = True
-        except Exception: pass
-        try:
-            import onnxruntime
-            env_status["onnxruntime"] = True
-        except Exception: pass
-        sys.stdout.write(f"ENV_STATUS:{json.dumps(env_status)}\n")
-        sys.stdout.flush()
-        sys.exit(0)
+        check_env()
+        return
+
+    if args.mode == "download_model":
+        download_model_cli(args)
+        return
 
     if not args.input or not os.path.exists(args.input):
         sys.stderr.write(f"ERROR in {args.mode}: Input file not found: {args.input}\n")
         sys.exit(1)
 
     try:
-        if args.mode == "voicefixer":
-            process_voicefixer(args)
-        elif args.mode in ["denoise", "dereverb"]:
+        if args.mode in ["denoise", "dereverb", "deepfilternet"]:
             process_deepfilternet(args)
-        elif args.mode == "separate":
+        elif args.mode in ["separate", "separate_stems", "demucs"]:
             process_demucs(args)
+        elif args.mode in [
+            "pedalboard_channel_strip", "pedalboard_dsp",
+            "voice_eq", "voice_compressor", "voice_deesser", "voice_reverb", "voice_limiter", "voice_master_strip"
+        ]:
+            process_pedalboard_dsp(args)
+        elif args.mode == "voicefixer":
+            process_voicefixer(args)
         elif args.mode in ["diarize", "whisper"]:
             process_whisper_diarization(args)
-        elif args.mode == "pedalboard_dsp":
-            process_pedalboard_dsp(args)
         else:
-            raise ValueError(f"Unknown mode: {args.mode}")
+            raise ValueError(f"Неизвестный режим: {args.mode}")
 
         sys.exit(0)
     except Exception as err:

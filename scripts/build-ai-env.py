@@ -82,9 +82,9 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
             dir_lower = name.lower()
             norm_root = root.replace("\\", "/").lower()
 
-            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa'
+            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard'
             # Subpackages such as 'torch/cuda', 'torch/testing', 'torchaudio/compliance' are required at runtime!
-            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa']):
+            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard']):
                 continue
 
             # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
@@ -186,6 +186,18 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "--no-cache-dir"
     ])
 
+    # Create constraints file to prevent transitive upgrades of numpy and packaging
+    constraints_file = build_temp_dir / "constraints.txt"
+    constraints_file.write_text(
+        "numpy==1.26.4\n"
+        "packaging>=23.0,<24.0\n"
+        "setuptools<70.0.0\n"
+        "wheel<0.45.0\n"
+        "llvmlite==0.42.0\n"
+        "numba==0.59.1\n",
+        encoding="utf-8"
+    )
+
     # 4. Install PyTorch & TorchAudio (Strictly version-matched 2.2.2)
     print("\n[STEP 3] Installing strictly matched PyTorch and TorchAudio (2.2.2)...")
     if use_cpu_wheels and (is_win or is_linux):
@@ -193,7 +205,8 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         run_cmd([
             str(venv_python), "-m", "pip", "install", 
             "--no-cache-dir",
-            "--index-url", "https://download.pytorch.org/whl/cpu",
+            "--extra-index-url", "https://download.pytorch.org/whl/cpu",
+            "-c", str(constraints_file),
             "torch==2.2.2", 
             "torchaudio==2.2.2"
         ])
@@ -202,6 +215,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         run_cmd([
             str(venv_python), "-m", "pip", "install", 
             "--no-cache-dir",
+            "-c", str(constraints_file),
             "torch==2.2.2", 
             "torchaudio==2.2.2"
         ])
@@ -216,16 +230,13 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         str(venv_python), "-m", "pip", "install",
         "--no-cache-dir",
         "--prefer-binary",
+        "-c", str(constraints_file),
         "llvmlite==0.42.0",
         "numba==0.59.1"
     ])
 
     pinned_stack = [
-        "torch==2.2.2",
-        "torchaudio==2.2.2",
         "numpy==1.26.4",
-        "llvmlite==0.42.0",
-        "numba==0.59.1",
         "pedalboard==0.9.25",
         "deepfilternet>=0.5.6,<0.6.0",
         "demucs>=4.0.0,<4.1.0",
@@ -239,23 +250,24 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "rotary-embedding-torch>=0.5.0",
         "requests>=2.31.0"
     ]
-    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--prefer-binary"] + extra_index_args + pinned_stack)
+    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--prefer-binary", "-c", str(constraints_file)] + extra_index_args + pinned_stack)
 
     # Re-enforce numpy 1.26.4, torch 2.2.2 and torchaudio 2.2.2 strictly to prevent any transitive override
     print("  [STRICT] Re-enforcing NumPy 1.26.4 and TorchAudio 2.2.2 pinning...")
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "numpy==1.26.4"])
     if use_cpu_wheels and (is_win or is_linux):
-        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "--index-url", "https://download.pytorch.org/whl/cpu", "torch==2.2.2", "torchaudio==2.2.2"])
+        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/cpu", "torch==2.2.2", "torchaudio==2.2.2"])
     else:
-        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "torch==2.2.2", "torchaudio==2.2.2"])
+        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "torch==2.2.2", "torchaudio==2.2.2"])
 
     # Verify PyTorch / TorchAudio / NumPy integrity inside venv
     print("\n[STEP 5] Verifying environment integrity and imports inside venv...")
-    verify_script = """
-import sys
+    verify_script_path = build_temp_dir / "verify_env.py"
+    verify_script_content = """import sys
 import traceback
 
-print(f"  [VERIFY] Python: {sys.version}")
+print(f"  [VERIFY] Python executable: {sys.executable}")
+print(f"  [VERIFY] Python version: {sys.version}")
 
 try:
     import numpy as np
@@ -269,6 +281,9 @@ except Exception as e:
 try:
     import torch
     print(f"  [VERIFY OK] PyTorch: {torch.__version__}")
+    import torch.cuda
+    _ = torch.cuda.is_available()
+    print(f"  [VERIFY OK] torch.cuda is available check: {_}")
 except Exception as e:
     print(f"  [VERIFY FAILED] PyTorch: {e}")
     traceback.print_exc()
@@ -302,17 +317,41 @@ except Exception as e:
     sys.exit(1)
 
 try:
+    import soundfile
+    print(f"  [VERIFY OK] SoundFile: {soundfile.__version__}")
+except Exception as e:
+    print(f"  [VERIFY FAILED] SoundFile: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    import pedalboard
+    print(f"  [VERIFY OK] Pedalboard: {pedalboard.__version__}")
+except Exception as e:
+    print(f"  [VERIFY FAILED] Pedalboard: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
     import numba
     import librosa
-    import pedalboard
-    import soundfile
-    print(f"  [VERIFY OK] Pedalboard ({pedalboard.__version__}), SoundFile ({soundfile.__version__}), Numba ({numba.__version__}) & Librosa ({librosa.__version__}) imports succeeded.")
+    import scipy
+    import onnxruntime
+    print(f"  [VERIFY OK] Numba ({numba.__version__}), Librosa ({librosa.__version__}), SciPy ({scipy.__version__}), ONNXRuntime ({onnxruntime.__version__})")
 except Exception as e:
     print(f"  [VERIFY FAILED] DSP / Audio Stack: {e}")
     traceback.print_exc()
     sys.exit(1)
+
+print("  [VERIFY COMPLETE] All required neural audio processing modules verified successfully!")
 """
-    run_cmd([str(venv_python), "-c", verify_script])
+    verify_script_path.write_text(verify_script_content, encoding="utf-8")
+    run_cmd([str(venv_python), str(verify_script_path)])
+    if verify_script_path.exists():
+        try:
+            os.remove(verify_script_path)
+        except Exception:
+            pass
 
     # 6. Preload base models for offline operation
     print("\n[STEP 6] Preloading AI base models for offline operation (DeepFilterNet3, Demucs htdemucs)...")
@@ -483,7 +522,11 @@ try:
     import demucs
     import numba
     import librosa
-    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Numba {numba.__version__}")
+    import pedalboard
+    import soundfile
+    import scipy
+    import onnxruntime
+    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Pedalboard {pedalboard.__version__}, Numba {numba.__version__}")
 except Exception as e:
     sys.stderr.write(f"  [POST-PRUNE ERROR] Crucial AI package was damaged by cleanup: {e}\\n")
     traceback.print_exc()
