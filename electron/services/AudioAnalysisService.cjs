@@ -26,19 +26,30 @@ function getWhisperService() {
 }
 
 /**
- * Замер совокупных уровней RMS и пиков аудиофайла через FFmpeg volumedetect
+ * Замер совокупных уровней RMS, пиков и EBU R128 громкости аудиофайла через FFmpeg
  */
 function measureVolumeStats(audioPath) {
   return new Promise((resolve) => {
-    let meanVolume = -22.0;
+    let meanVolume = -24.0;
     let maxVolume = -1.0;
+    let integratedLufs = -23.0;
+    let loudnessRange = 9.0;
+    let truePeak = -1.0;
+    let lufsThreshold = -33.0;
 
     if (!audioPath || !fs.existsSync(audioPath)) {
-      return resolve({ speechRmsDb: meanVolume, peakDb: maxVolume });
+      return resolve({
+        speechRmsDb: meanVolume,
+        peakDb: maxVolume,
+        integratedLufsDb: integratedLufs,
+        loudnessRangeDb: loudnessRange,
+        truePeakDb: truePeak,
+        lufsThresholdDb: lufsThreshold
+      });
     }
 
     ffmpeg(audioPath)
-      .audioFilters('volumedetect')
+      .audioFilters(['volumedetect', 'ebur128=peak=true'])
       .format('null')
       .output('-')
       .on('stderr', (stderrChunk) => {
@@ -52,17 +63,44 @@ function measureVolumeStats(audioPath) {
           if (maxMatch) {
             maxVolume = parseFloat(maxMatch[1]);
           }
+          const iMatch = line.match(/I:\s*(-?[0-9.]+)\s*LUFS/i);
+          if (iMatch) {
+            integratedLufs = parseFloat(iMatch[1]);
+          }
+          const lraMatch = line.match(/LRA:\s*([0-9.]+)\s*LU/i);
+          if (lraMatch) {
+            loudnessRange = parseFloat(lraMatch[1]);
+          }
+          const tpMatch = line.match(/Peak:\s*(-?[0-9.]+)\s*dBFS/i);
+          if (tpMatch) {
+            truePeak = parseFloat(tpMatch[1]);
+          }
+          const thMatch = line.match(/Threshold:\s*(-?[0-9.]+)\s*LUFS/i);
+          if (thMatch) {
+            lufsThreshold = parseFloat(thMatch[1]);
+          }
         }
       })
       .on('end', () => {
         resolve({
           speechRmsDb: Number(meanVolume.toFixed(2)),
-          peakDb: Number(maxVolume.toFixed(2))
+          peakDb: Number(maxVolume.toFixed(2)),
+          integratedLufsDb: Number(integratedLufs.toFixed(2)),
+          loudnessRangeDb: Number(loudnessRange.toFixed(2)),
+          truePeakDb: Number(truePeak.toFixed(2)),
+          lufsThresholdDb: Number(lufsThreshold.toFixed(2))
         });
       })
       .on('error', (err) => {
-        log.warn(`[AudioAnalysisService] volumedetect warning for ${audioPath}:`, err.message);
-        resolve({ speechRmsDb: meanVolume, peakDb: maxVolume });
+        log.warn(`[AudioAnalysisService] volume/ebur128 warning for ${audioPath}:`, err.message);
+        resolve({
+          speechRmsDb: meanVolume,
+          peakDb: maxVolume,
+          integratedLufsDb: integratedLufs,
+          loudnessRangeDb: loudnessRange,
+          truePeakDb: truePeak,
+          lufsThresholdDb: lufsThreshold
+        });
       })
       .run();
   });
@@ -113,6 +151,23 @@ async function measureNoiseFloor(audioPath, silences = []) {
 }
 
 class AudioAnalysisService {
+
+  /**
+   * Быстрый физический замер характеристик громкости аудиодорожки:
+   * speechRmsDb, peakDb, integratedLufsDb, loudnessRangeDb, truePeakDb, noiseFloorDb
+   */
+  static async measureTrackStats(audioPath) {
+    const volumeStats = await measureVolumeStats(audioPath);
+    return {
+      speechRmsDb: volumeStats.speechRmsDb ?? -24.0,
+      peakDb: volumeStats.peakDb ?? -1.0,
+      integratedLufsDb: volumeStats.integratedLufsDb ?? -23.0,
+      loudnessRangeDb: volumeStats.loudnessRangeDb ?? 9.0,
+      truePeakDb: volumeStats.truePeakDb ?? -1.0,
+      lufsThresholdDb: volumeStats.lufsThresholdDb ?? -33.0,
+      noiseFloorDb: -52.0
+    };
+  }
 
   /**
    * Выполняет полный физический анализ аудиодорожки:

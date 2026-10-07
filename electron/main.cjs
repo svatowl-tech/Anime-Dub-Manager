@@ -1,6 +1,21 @@
 const { killAllTrackedProcesses, killAllTrackedProcessesSync } = require('./lib/ProcessTracker.cjs');
-const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, session, clipboard, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, globalShortcut, shell, session, clipboard, nativeImage, protocol, net } = require('electron');
 const path = require('path');
+
+// Register custom-media scheme as standard, secure, stream-supporting protocol for full-range media playback
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'custom-media',
+    privileges: {
+      standard: true,
+      secure: true,
+      bypassCSP: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true
+    }
+  }
+]);
 const fs = require('fs/promises');
 const fsSync = require('fs');
 const { exec } = require('child_process');
@@ -348,6 +363,30 @@ safeHandle('install-update', () => {
 // Main App Initialization
 app.whenReady().then(async () => {
   log.info('app.whenReady resolved. Initializing Anime Dub Manager...');
+
+  // Register custom-media streaming protocol handler (handles Windows paths with drive letters, cyrillic, byte ranges)
+  try {
+    protocol.handle('custom-media', (request) => {
+      try {
+        let uri = request.url.replace(/^custom-media:\/\//, '');
+        // Strip out host dummy if any (e.g. custom-media://localhost/...)
+        uri = uri.replace(/^localhost\//, '');
+        let decodedPath = decodeURIComponent(uri);
+        // Fix leading slash on Windows drives (e.g. /I:/... -> I:/...)
+        if (/^\/[a-zA-Z]:/.test(decodedPath)) {
+          decodedPath = decodedPath.slice(1);
+        }
+        decodedPath = decodedPath.replace(/\//g, path.sep);
+        return net.fetch(require('url').pathToFileURL(decodedPath).toString());
+      } catch (err) {
+        log.error('[custom-media] protocol error:', err);
+        return new Response('Media file not found or invalid', { status: 404 });
+      }
+    });
+    log.info('[custom-media] protocol registered successfully.');
+  } catch (protoErr) {
+    log.error('Failed to register custom-media protocol:', protoErr);
+  }
 
   // 1. Create main application window immediately so UI starts up without delay
   try {

@@ -475,6 +475,35 @@ class AudioNeuralService {
 
     return outputPath;
   }
+
+  /**
+   * Spotify Pedalboard Studio Voice DSP Engine
+   * (Voice EQ, Vocal Compressor, De-Esser, Reverb, Limiter, Master Strip)
+   */
+  async processPedalboardDsp({ inputPath, outputPath, moduleId = 'voice_master_strip', params = {}, onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'pedalboard_dsp',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--model_id', moduleId,
+      '--params_json', JSON.stringify({ ...params, moduleId })
+    ];
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Pedalboard DSP [${moduleId}]`
+    });
+
+    return outputPath;
+  }
 }
 
 module.exports = new AudioNeuralService();

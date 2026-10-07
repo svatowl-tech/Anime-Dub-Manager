@@ -289,7 +289,7 @@ export interface MixingModulePreset {
 export interface MixingModuleDef {
   id: string;
   name?: string;
-  category: 'cleaning' | 'denoise' | 'dereverb' | 'vocal_match' | 'loudness' | 'dynamics' | 'equalization' | 'balance' | 'mastering' | 'export';
+  category: 'timing' | 'cleaning' | 'denoise' | 'dereverb' | 'separation' | 'vocal_match' | 'loudness' | 'dynamics' | 'equalization' | 'effects' | 'balance' | 'mastering' | 'export';
   defaultPrefix: string;
   title: string;
   description: string;

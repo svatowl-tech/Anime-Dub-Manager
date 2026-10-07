@@ -197,6 +197,48 @@ function registerMixingHandlers(getData, mainWindow) {
     return await MixingPipelineService.deletePipelinePreset({ baseDir, presetId });
   }));
 
+  // Export / Import entire pipeline configuration to / from external JSON file
+  ipcMain.handle('mixing-export-pipeline-file', wrapIpcHandler(async (event, { pipeline, defaultName }) => {
+    const win = getWin();
+    const res = await dialog.showSaveDialog(win, {
+      title: 'Сохранить конвейер модулей в файл',
+      defaultPath: defaultName || 'mixing_pipeline.json',
+      filters: [{ name: 'JSON конфигурация конвейера', extensions: ['json'] }]
+    });
+    if (res.canceled || !res.filePath) return { canceled: true };
+    await fs.writeFile(res.filePath, JSON.stringify(pipeline, null, 2), 'utf8');
+    return { canceled: false, filePath: res.filePath };
+  }));
+
+  ipcMain.handle('mixing-import-pipeline-file', wrapIpcHandler(async (event, { episode, targetDir }) => {
+    const win = getWin();
+    const res = await dialog.showOpenDialog(win, {
+      title: 'Загрузить конвейер модулей из файла',
+      filters: [{ name: 'JSON конфигурация конвейера', extensions: ['json'] }],
+      properties: ['openFile']
+    });
+    if (res.canceled || !res.filePaths || res.filePaths.length === 0) return { canceled: true };
+    const filePath = res.filePaths[0];
+    const raw = await fs.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    const pipeline = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.pipeline) ? parsed.pipeline : null);
+    if (!pipeline || pipeline.length === 0) {
+      throw new Error('В выбранном файле не найдена валидная цепочка модулей сведения');
+    }
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    const saved = await MixingPipelineService.savePipelineConfig({ episode, targetDir, baseDir, pipeline });
+    return { canceled: false, filePath, manifest: saved.manifest, pipeline };
+  }));
+
+  ipcMain.handle('mixing-reset-pipeline-default', wrapIpcHandler(async (event, { episode, targetDir }) => {
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    const defaultPipeline = MixingPipelineService.createFactoryPipeline();
+    const saved = await MixingPipelineService.savePipelineConfig({ episode, targetDir, baseDir, pipeline: defaultPipeline });
+    return { success: true, manifest: saved.manifest, pipeline: defaultPipeline };
+  }));
+
   // External Standalone File Import
   ipcMain.handle('mixing-select-external-files', wrapIpcHandler(async (event, { type }) => {
     const win = getWin();

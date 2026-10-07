@@ -711,17 +711,276 @@ def process_whisper_diarization(args):
         raise RuntimeError(f"Whisper transcription failed: {w_err}")
 
 # ------------------------------------------------------------------------------
+# 6. SPOTIFY PEDALBOARD STUDIO VOICE DSP ENGINE
+# ------------------------------------------------------------------------------
+def process_pedalboard_dsp(args):
+    """
+    Studio Voice Post-Processing DSP Engine powered by Spotify Pedalboard.
+    Supports discrete voice processing (EQ, Compressor, De-Esser, Reverb, Limiter)
+    or complete mastering vocal strip with studio-grade presets.
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_dsp.wav"
+
+    params = {}
+    if getattr(args, 'params_json', None):
+        try:
+            params = json.loads(args.params_json)
+        except Exception as e:
+            sys.stderr.write(f"Warning parsing params_json: {e}\n")
+
+    # Merge CLI argument fallbacks
+    eq_highpass = float(params.get('eqHighpass', params.get('eq_highpass', getattr(args, 'eq_highpass', 80.0))))
+    eq_presence_freq = float(params.get('eqPresenceFreq', params.get('eq_presence_freq', getattr(args, 'eq_presence_freq', 3200.0))))
+    eq_presence_gain = float(params.get('eqPresenceGain', params.get('eq_presence_gain', getattr(args, 'eq_presence_gain', 2.5))))
+    eq_lowpass = float(params.get('eqLowpass', params.get('eq_lowpass', getattr(args, 'eq_lowpass', 18000.0))))
+
+    comp_threshold = float(params.get('compThresholdDb', params.get('comp_threshold', getattr(args, 'comp_threshold', -18.0))))
+    comp_ratio = float(params.get('compRatio', params.get('comp_ratio', getattr(args, 'comp_ratio', 3.5))))
+    comp_attack = float(params.get('compAttackMs', params.get('comp_attack', getattr(args, 'comp_attack', 15.0))))
+    comp_release = float(params.get('compReleaseMs', params.get('comp_release', getattr(args, 'comp_release', 120.0))))
+
+    deesser_freq = float(params.get('deesserFreqHz', params.get('deesser_freq', getattr(args, 'deesser_freq', 6500.0))))
+    deesser_amount = float(params.get('deesserAmount', params.get('deesser_amount', getattr(args, 'deesser_amount', 0.60))))
+
+    reverb_room_size = float(params.get('reverbRoomSize', params.get('reverb_room_size', getattr(args, 'reverb_room_size', 0.12))))
+    reverb_damping = float(params.get('reverbDamping', params.get('reverb_damping', getattr(args, 'reverb_damping', 0.5))))
+    reverb_wet = float(params.get('reverbWet', params.get('reverb_wet', getattr(args, 'reverb_wet', 0.06))))
+    reverb_dry = float(params.get('reverbDry', params.get('reverb_dry', getattr(args, 'reverb_dry', 0.94))))
+
+    limiter_threshold = float(params.get('limiterThresholdDb', params.get('limiter_threshold', getattr(args, 'limiter_threshold', -0.5))))
+    limiter_release = float(params.get('limiterReleaseMs', params.get('limiter_release', getattr(args, 'limiter_release', 40.0))))
+
+    module_type = getattr(args, 'model_id', '') or params.get('moduleId', '') or 'voice_master_strip'
+
+    emit_progress(10.0, f"Загрузка аудиофайла: {os.path.basename(input_path)}...")
+
+    # Load audio file via soundfile or torchaudio/scipy fallback
+    audio_data = None
+    sample_rate = 48000
+    try:
+        import soundfile as sf
+        audio_data, sample_rate = sf.read(input_path, dtype='float32')
+    except Exception as sf_err:
+        try:
+            import torchaudio
+            waveform, sr = torchaudio.load(input_path)
+            sample_rate = sr
+            audio_data = waveform.numpy().T
+        except Exception:
+            from scipy.io import wavfile
+            sr, raw = wavfile.read(input_path)
+            sample_rate = sr
+            if raw.dtype == np.int16:
+                audio_data = (raw / 32768.0).astype(np.float32)
+            else:
+                audio_data = raw.astype(np.float32)
+
+    if audio_data is None:
+        raise RuntimeError(f"Could not load audio file: {input_path}")
+
+    # Transpose to (channels, samples) for Pedalboard
+    if audio_data.ndim == 1:
+        audio_channels = audio_data[np.newaxis, :]  # (1, N)
+    else:
+        audio_channels = audio_data.T  # (channels, N)
+
+    # Ensure memory contiguous float32 for robust C-extension compatibility
+    audio_channels = np.ascontiguousarray(audio_channels, dtype=np.float32)
+
+    emit_progress(35.0, f"Конфигурирование студийной цепочки Pedalboard ({module_type})...")
+
+    processed = None
+    used_pedalboard = False
+
+    try:
+        import pedalboard
+        from pedalboard import (
+            Pedalboard, HighpassFilter, LowpassFilter, PeakFilter,
+            Compressor, Limiter, Reverb, HighShelfFilter
+        )
+
+        effects = []
+
+        # Mode filters: check if discrete module or combined strip
+        is_all = module_type in ['voice_master_strip', 'pedalboard_dsp', '']
+        apply_eq = is_all or module_type == 'voice_eq'
+        apply_comp = is_all or module_type == 'voice_compressor'
+        apply_deess = is_all or module_type == 'voice_deesser'
+        apply_reverb = is_all or module_type == 'voice_reverb'
+        apply_limiter = is_all or module_type == 'voice_limiter'
+
+        # 1. Highpass Filter (Plosive / Mic Rumble Cut)
+        if apply_eq and eq_highpass > 20:
+            effects.append(HighpassFilter(cutoff_frequency_hz=float(eq_highpass)))
+
+        # 2. Presence Peak Filter (2.5 - 4.5 kHz Voice Intelligibility)
+        if apply_eq and abs(eq_presence_gain) > 0.05:
+            effects.append(PeakFilter(
+                cutoff_frequency_hz=float(eq_presence_freq),
+                gain_db=float(eq_presence_gain),
+                q=1.1
+            ))
+
+        # 3. Lowpass Filter (Air / Hiss Guard)
+        if apply_eq and eq_lowpass < 22000:
+            effects.append(LowpassFilter(cutoff_frequency_hz=float(eq_lowpass)))
+
+        # 4. De-Esser (Sibilant High-Shelf & Peak Dynamic Taming)
+        if apply_deess and deesser_amount > 0.05:
+            deess_cut_db = -float(deesser_amount) * 7.5
+            effects.append(PeakFilter(
+                cutoff_frequency_hz=float(deesser_freq),
+                gain_db=deess_cut_db,
+                q=2.2
+            ))
+
+        # 5. Vocal Compressor
+        if apply_comp and comp_ratio > 1.05 and comp_threshold < 0:
+            effects.append(Compressor(
+                threshold_db=float(comp_threshold),
+                ratio=float(comp_ratio),
+                attack_ms=float(comp_attack),
+                release_ms=float(comp_release)
+            ))
+
+        # 6. Spatial Studio Reverb
+        if apply_reverb and reverb_wet > 0.005:
+            effects.append(Reverb(
+                room_size=float(reverb_room_size),
+                damping=float(reverb_damping),
+                wet_level=float(reverb_wet),
+                dry_level=float(reverb_dry),
+                width=1.0
+            ))
+
+        # 7. Brickwall True-Peak Limiter
+        if apply_limiter and limiter_threshold <= 0:
+            effects.append(Limiter(
+                threshold_db=float(limiter_threshold),
+                release_ms=float(limiter_release)
+            ))
+
+        if len(effects) == 0:
+            # Neutral pass-through with limiter
+            effects.append(Limiter(threshold_db=-0.5, release_ms=40.0))
+
+        board = Pedalboard(effects)
+        emit_progress(55.0, f"Обработка через Spotify Pedalboard v{pedalboard.__version__} ({len(effects)} плагинов в графе)...")
+
+        processed = board(audio_channels, sample_rate)
+        used_pedalboard = True
+        sys.stdout.write(f"LOG:Pedalboard DSP: Успешно применен граф из {len(effects)} звеньев\n")
+        sys.stdout.flush()
+
+    except ImportError:
+        # High-Precision Scipy DSP Fallback
+        emit_progress(55.0, "Применение студийного DSP процессора высокой точности (Scipy Audio Engine)...")
+        from scipy import signal
+
+        processed = np.copy(audio_channels)
+
+        # Highpass Butterworth Filter
+        if (module_type in ['voice_master_strip', 'voice_eq']) and eq_highpass > 20:
+            nyq = 0.5 * sample_rate
+            norm_cutoff = min(0.99, max(0.001, eq_highpass / nyq))
+            b, a = signal.butter(3, norm_cutoff, btype='highpass')
+            for ch in range(processed.shape[0]):
+                processed[ch] = signal.filtfilt(b, a, processed[ch])
+
+        # Presence EQ Peak Filter
+        if (module_type in ['voice_master_strip', 'voice_eq']) and abs(eq_presence_gain) > 0.05:
+            nyq = 0.5 * sample_rate
+            w0 = min(0.99, max(0.001, eq_presence_freq / nyq))
+            q = 1.1
+            gain_lin = 10.0 ** (eq_presence_gain / 20.0)
+            alpha = math.sin(w0 * math.pi) / (2.0 * q)
+            # Peaking EQ biquad coefficients
+            b0 = 1.0 + alpha * gain_lin
+            b1 = -2.0 * math.cos(w0 * math.pi)
+            b2 = 1.0 - alpha * gain_lin
+            a0 = 1.0 + alpha / gain_lin
+            a1 = -2.0 * math.cos(w0 * math.pi)
+            a2 = 1.0 - alpha / gain_lin
+            b = np.array([b0 / a0, b1 / a0, b2 / a0])
+            a = np.array([1.0, a1 / a0, a2 / a0])
+            for ch in range(processed.shape[0]):
+                processed[ch] = signal.lfilter(b, a, processed[ch])
+
+        # Compressor Curve
+        if (module_type in ['voice_master_strip', 'voice_compressor']) and comp_ratio > 1.05:
+            thresh_lin = 10.0 ** (comp_threshold / 20.0)
+            for ch in range(processed.shape[0]):
+                sig = processed[ch]
+                abs_sig = np.abs(sig)
+                mask = abs_sig > thresh_lin
+                if np.any(mask):
+                    excess = abs_sig[mask] - thresh_lin
+                    comp_excess = excess / comp_ratio
+                    scale = (thresh_lin + comp_excess) / (abs_sig[mask] + 1e-9)
+                    processed[ch][mask] = sig[mask] * scale
+
+        # True Peak Soft Limiter
+        lim_lin = 10.0 ** (limiter_threshold / 20.0)
+        for ch in range(processed.shape[0]):
+            processed[ch] = np.clip(processed[ch], -lim_lin, lim_lin)
+
+    # Post-process array formatting
+    processed = np.ascontiguousarray(processed, dtype=np.float32)
+    np.nan_to_num(processed, copy=False, nan=0.0, posinf=0.999, neginf=-0.999)
+
+    emit_progress(85.0, f"Сохранение обработанного файла: {os.path.basename(output_path)}...")
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    # Transpose back to (samples, channels) for file writer
+    out_audio_data = processed.T if processed.ndim > 1 else processed
+
+    try:
+        import soundfile as sf
+        sf.write(output_path, out_audio_data, sample_rate, subtype='PCM_16')
+    except Exception:
+        from scipy.io import wavfile
+        int16_data = np.clip(out_audio_data * 32767.0, -32768.0, 32767.0).astype(np.int16)
+        wavfile.write(output_path, sample_rate, int16_data)
+
+    emit_progress(100.0, f"Студийная обработка Pedalboard завершена ({os.path.basename(output_path)})!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'pedalboard' if used_pedalboard else 'scipy_dsp'})}\n")
+    sys.stdout.flush()
+
+# ------------------------------------------------------------------------------
 # MAIN ROUTER
 # ------------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Anime Dub Manager Universal Neural Audio AI Processor")
-    parser.add_argument("--mode", required=True, choices=["denoise", "dereverb", "separate", "voicefixer", "diarize", "whisper", "check_env"])
+    parser.add_argument("--mode", required=True, choices=["denoise", "dereverb", "separate", "voicefixer", "diarize", "whisper", "pedalboard_dsp", "check_env"])
     parser.add_argument("--input", help="Path to input audio/video file")
     parser.add_argument("--output", help="Path to output audio file")
     parser.add_argument("--output_dir", help="Directory for multi-stem separation outputs")
     parser.add_argument("--prefix", default="", help="Prefix for exported filenames")
     parser.add_argument("--model_path", help="Local model weights file path (.onnx, .pth, .ckpt)")
     parser.add_argument("--model_id", help="Module ID from MODULE_DATABASE")
+    parser.add_argument("--params_json", help="Serialized JSON dictionary of DSP / neural parameters")
+
+    # Spotify Pedalboard DSP Granular Parameters
+    parser.add_argument("--eq_highpass", type=float, default=80.0)
+    parser.add_argument("--eq_presence_freq", type=float, default=3200.0)
+    parser.add_argument("--eq_presence_gain", type=float, default=2.5)
+    parser.add_argument("--eq_lowpass", type=float, default=18000.0)
+    parser.add_argument("--comp_threshold", type=float, default=-18.0)
+    parser.add_argument("--comp_ratio", type=float, default=3.5)
+    parser.add_argument("--comp_attack", type=float, default=15.0)
+    parser.add_argument("--comp_release", type=float, default=120.0)
+    parser.add_argument("--deesser_freq", type=float, default=6500.0)
+    parser.add_argument("--deesser_amount", type=float, default=0.60)
+    parser.add_argument("--reverb_room_size", type=float, default=0.12)
+    parser.add_argument("--reverb_damping", type=float, default=0.5)
+    parser.add_argument("--reverb_wet", type=float, default=0.06)
+    parser.add_argument("--reverb_dry", type=float, default=0.94)
+    parser.add_argument("--limiter_threshold", type=float, default=-0.5)
+    parser.add_argument("--limiter_release", type=float, default=40.0)
 
     # DeepFilterNet & UVR Denoise/Dereverb
     parser.add_argument("--attenuation_limit_db", type=float, default=-100.0)
@@ -788,6 +1047,8 @@ def main():
             process_demucs(args)
         elif args.mode in ["diarize", "whisper"]:
             process_whisper_diarization(args)
+        elif args.mode == "pedalboard_dsp":
+            process_pedalboard_dsp(args)
         else:
             raise ValueError(f"Unknown mode: {args.mode}")
 

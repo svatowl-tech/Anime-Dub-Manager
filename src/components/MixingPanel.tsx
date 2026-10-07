@@ -122,7 +122,24 @@ const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = 
   fadeDurationMs: { min: 0, max: 100, step: 1 },
   safetyPaddingMs: { min: 0, max: 500, step: 5 },
   minSpeechDb: { min: -80, max: -20, step: 1 },
-  fadeEdgeMs: { min: 0, max: 100, step: 1 }
+  fadeEdgeMs: { min: 0, max: 100, step: 1 },
+  // Spotify Pedalboard DSP Granular Specs
+  eqHighpass: { min: 20, max: 300, step: 5 },
+  eqPresenceFreq: { min: 1000, max: 8000, step: 50 },
+  eqPresenceGain: { min: -12.0, max: 12.0, step: 0.5 },
+  eqLowpass: { min: 6000, max: 22000, step: 500 },
+  compThresholdDb: { min: -60, max: 0, step: 1 },
+  compRatio: { min: 1, max: 10, step: 0.1 },
+  compAttackMs: { min: 1, max: 50, step: 1 },
+  compReleaseMs: { min: 10, max: 300, step: 5 },
+  deesserFreqHz: { min: 4000, max: 10000, step: 100 },
+  deesserAmount: { min: 0.0, max: 1.0, step: 0.05 },
+  reverbRoomSize: { min: 0.0, max: 1.0, step: 0.01 },
+  reverbDamping: { min: 0.0, max: 1.0, step: 0.05 },
+  reverbWet: { min: 0.0, max: 1.0, step: 0.01 },
+  reverbDry: { min: 0.0, max: 1.0, step: 0.01 },
+  limiterThresholdDb: { min: -12.0, max: 0.0, step: 0.1 },
+  limiterReleaseMs: { min: 10, max: 300, step: 5 }
 };
 
 export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelProps) {
@@ -295,6 +312,29 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     mixAudioElementsRef.current = [];
   }, []);
 
+  // Release all audio elements to avoid Win32 / EACCES file lock errors when reprocessing
+  const releasePlayerAudioLocks = useCallback(() => {
+    try {
+      setIsPlaying(false);
+      if (videoRef.current) {
+        videoRef.current.pause();
+      }
+      if (trackAudioRef.current) {
+        trackAudioRef.current.pause();
+        trackAudioRef.current.src = '';
+        try { trackAudioRef.current.load(); } catch (e) {}
+      }
+      mixAudioElementsRef.current.forEach(audio => {
+        try {
+          audio.pause();
+          audio.src = '';
+          audio.load();
+        } catch (e) {}
+      });
+      mixAudioElementsRef.current = [];
+    } catch (e) {}
+  }, []);
+
   // Load mixing status for current episode
   const loadStatus = useCallback(async () => {
     if (!currentEpisode) return;
@@ -357,13 +397,14 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
       if (window.electronAPI) {
         let src = vPath;
-        if (!src.startsWith('http') && !src.startsWith('file://') && !src.startsWith('blob:')) {
-          src = `file://${src}`;
+        if (!src.startsWith('http') && !src.startsWith('custom-media://') && !src.startsWith('blob:')) {
+          const cleanP = src.replace(/^file:\/\//, '').replace(/\\/g, '/');
+          src = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
         }
         if (active) {
           setVideoSrc(src);
           const fileName = vPath.split(/[/\\]/).pop() || src;
-          mixLog('debug', 'Видео', `Видеопоток подключен: ${fileName}`);
+          mixLog('debug', 'Видео', `Видеопоток подключен: ${fileName} (${src.slice(0, 50)}...)`);
         }
       } else {
         try {
@@ -479,8 +520,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
     let resolvedSrc = origPath;
     if (window.electronAPI) {
-      if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('file://') && !resolvedSrc.startsWith('blob:')) {
-        resolvedSrc = `file://${resolvedSrc}`;
+      if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
+        const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
+        resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
       }
     } else {
       try {
@@ -585,8 +627,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
     let resolvedSrc = item.path;
     if (window.electronAPI) {
-      if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('file://') && !resolvedSrc.startsWith('blob:')) {
-        resolvedSrc = `file://${resolvedSrc}`;
+      if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
+        const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
+        resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
       }
     } else {
       try {
@@ -641,8 +684,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     for (const file of step.outputFiles) {
       let resolvedSrc = file.path;
       if (window.electronAPI) {
-        if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('file://') && !resolvedSrc.startsWith('blob:')) {
-          resolvedSrc = `file://${resolvedSrc}`;
+        if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
+          const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
+          resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
         }
       } else {
         try {
@@ -675,23 +719,56 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     toast.success(`В плеере включен совместный микс всех ${step.outputFiles.length} дорожек модуля!`, { duration: 3000 });
   };
 
+  // Pipeline save debounce ref & status indicator
+  const saveDebounceTimerRef = useRef<any>(null);
+  const [isPipelineSaving, setIsPipelineSaving] = useState<boolean>(false);
+  const [lastPipelineSavedAt, setLastPipelineSavedAt] = useState<string>('Синхронизировано');
+
   // Save modified pipeline
-  const savePipeline = async (newPipeline: PipelineStep[]) => {
+  const savePipeline = useCallback(async (newPipeline: PipelineStep[], immediate = false) => {
     if (!currentEpisode) return;
-    try {
-      const res: any = await ipcSafe.invoke('mixing-save-pipeline-config', {
-        episode: currentEpisode,
-        targetDir: workingDir || customTargetDir,
-        pipeline: newPipeline
-      });
-      if (res && res.manifest) {
-        setManifest(res.manifest);
+
+    // Optimistically update local UI state immediately
+    setManifest(prev => prev ? { ...prev, pipeline: newPipeline } : null);
+
+    const performSave = async () => {
+      try {
+        setIsPipelineSaving(true);
+        const res: any = await ipcSafe.invoke('mixing-save-pipeline-config', {
+          episode: currentEpisode,
+          targetDir: workingDir || customTargetDir,
+          pipeline: newPipeline
+        });
+        if (res && res.manifest) {
+          setManifest(res.manifest);
+        }
+        const now = new Date();
+        setLastPipelineSavedAt(now.toLocaleTimeString('ru-RU', { hour12: false }));
+        mixLog('debug', 'Конвейер', `Цепочка модулей записана в mixing_pipeline.json (${newPipeline.length} шт.)`);
+      } catch (e: any) {
+        toast.error(`Не удалось сохранить структуру конвейера: ${e.message || String(e)}`);
+      } finally {
+        setIsPipelineSaving(false);
       }
-      await loadStatus();
-    } catch (e: any) {
-      toast.error(`Не удалось сохранить структуру конвейера: ${e.message || String(e)}`);
+    };
+
+    if (immediate) {
+      if (saveDebounceTimerRef.current) clearTimeout(saveDebounceTimerRef.current);
+      await performSave();
+    } else {
+      if (saveDebounceTimerRef.current) clearTimeout(saveDebounceTimerRef.current);
+      saveDebounceTimerRef.current = setTimeout(() => {
+        performSave();
+      }, 250);
     }
-  };
+  }, [currentEpisode, workingDir, customTargetDir, mixLog]);
+
+  // Clean up debounce timer
+  useEffect(() => {
+    return () => {
+      if (saveDebounceTimerRef.current) clearTimeout(saveDebounceTimerRef.current);
+    };
+  }, []);
 
   // Pipeline manager: Move step Up
   const handleMoveStepUp = (index: number) => {
@@ -704,7 +781,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       const def = moduleDatabase.find(m => m.id === s.moduleId);
       s.prefix = `${String(idx + 1).padStart(2, '0')}_${def?.defaultPrefix || 'mod_'}`;
     });
-    savePipeline(newPipeline);
+    savePipeline(newPipeline, true);
   };
 
   // Pipeline manager: Move step Down
@@ -718,7 +795,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       const def = moduleDatabase.find(m => m.id === s.moduleId);
       s.prefix = `${String(idx + 1).padStart(2, '0')}_${def?.defaultPrefix || 'mod_'}`;
     });
-    savePipeline(newPipeline);
+    savePipeline(newPipeline, true);
   };
 
   // Pipeline manager: Delete step
@@ -730,7 +807,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       const def = moduleDatabase.find(m => m.id === s.moduleId);
       s.prefix = `${String(idx + 1).padStart(2, '0')}_${def?.defaultPrefix || 'mod_'}`;
     });
-    savePipeline(newPipeline);
+    savePipeline(newPipeline, true);
     toast.success(`Модуль «${stepToDelete.moduleId}» удален из конвейера`);
   };
 
@@ -739,10 +816,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     if (!manifest?.pipeline) return;
     const newPipeline = [...manifest.pipeline];
     newPipeline[index] = { ...newPipeline[index], enabled: !newPipeline[index].enabled };
-    savePipeline(newPipeline);
+    savePipeline(newPipeline, true);
   };
 
-  // Pipeline manager: Update parameters for a step
+  // Pipeline manager: Update parameters for a step (debounced for sliders/inputs)
   const handleUpdateStepParams = (stepId: string, paramKey: string, value: any) => {
     if (!manifest?.pipeline) return;
     const newPipeline = manifest.pipeline.map(s => {
@@ -751,7 +828,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       }
       return s;
     });
-    savePipeline(newPipeline);
+    savePipeline(newPipeline, false);
   };
 
   // Pipeline manager: Apply Preset to a step
@@ -763,8 +840,67 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       }
       return s;
     });
-    savePipeline(newPipeline);
+    savePipeline(newPipeline, true);
     toast.success(`Применен пресет: «${preset.title}»`);
+  };
+
+  // Export pipeline to external file
+  const handleExportPipelineToFile = async () => {
+    if (!manifest?.pipeline || manifest.pipeline.length === 0) {
+      toast.error('Конвейер пуст, нечего экспортировать');
+      return;
+    }
+    try {
+      const defaultName = currentEpisode?.project?.title
+        ? `mixing_pipeline_${currentEpisode.project.title.replace(/[\/:*?"<>|]/g, '_')}.json`
+        : 'mixing_pipeline.json';
+      const res: any = await ipcSafe.invoke('mixing-export-pipeline-file', {
+        pipeline: manifest.pipeline,
+        defaultName
+      });
+      if (res && !res.canceled && res.filePath) {
+        toast.success(`Конвейер успешно сохранен в файл: ${res.filePath.split(/[/\\]/).pop()}! 💾`);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка экспорта файла: ${e.message || String(e)}`);
+    }
+  };
+
+  // Import pipeline from external file
+  const handleImportPipelineFromFile = async () => {
+    if (!currentEpisode) return;
+    try {
+      const res: any = await ipcSafe.invoke('mixing-import-pipeline-file', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir
+      });
+      if (res && !res.canceled && res.pipeline) {
+        setManifest(res.manifest);
+        toast.success(`Конвейер (${res.pipeline.length} модулей) успешно загружен из файла! 📂`);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка импорта: ${e.message || String(e)}`);
+    }
+  };
+
+  // Reset pipeline to factory default
+  const handleResetPipelineToDefault = async () => {
+    if (!currentEpisode) return;
+    if (!window.confirm('Сбросить цепочку модулей к базовому заводскому конвейеру (6 модулей)? Все текущие настройки будут возвращены к исходным.')) {
+      return;
+    }
+    try {
+      const res: any = await ipcSafe.invoke('mixing-reset-pipeline-default', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir
+      });
+      if (res && res.manifest) {
+        setManifest(res.manifest);
+        toast.success('Конвейер сброшен к базовой заводской цепочке');
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка сброса: ${e.message || String(e)}`);
+    }
   };
 
   // Load Pipeline Presets
@@ -789,7 +925,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
   const handleApplyPipelinePreset = (preset: PipelinePreset) => {
     if (!preset || !Array.isArray(preset.pipeline)) return;
-    savePipeline(preset.pipeline);
+    savePipeline(preset.pipeline, true);
     setIsPipelinePresetsModalOpen(false);
     toast.success(`Применен пресет всей цепочки: «${preset.name}»! 🚀`);
   };
@@ -938,7 +1074,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     };
     const newPipeline = [...manifest.pipeline, newStep];
     mixLog('info', 'Конвейер', `Добавлен модуль «${modDef.title}» (префикс: ${newPrefix}) в позицию #${newIndex + 1}`);
-    savePipeline(newPipeline);
+    savePipeline(newPipeline, true);
     setIsAddModuleModalOpen(false);
     toast.success(`Модуль «${modDef.title}» добавлен в конвейер!`);
   };
@@ -946,6 +1082,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   // Execute single step
   const handleRunStep = async (stepId: string) => {
     if (!currentEpisode) return;
+    releasePlayerAudioLocks();
     const targetStep = manifest?.pipeline?.find(s => s.stepId === stepId);
     const stepMeta = targetStep ? getModuleMeta(targetStep.moduleId) : undefined;
     const stepTitle = stepMeta?.title || targetStep?.moduleId || stepId;
@@ -989,6 +1126,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   // Execute all enabled steps
   const handleRunAllSteps = async () => {
     if (!currentEpisode) return;
+    releasePlayerAudioLocks();
     const enabledCount = manifest?.pipeline?.filter(s => s.enabled)?.length || 0;
     try {
       setActiveProcessingStepId('all');
@@ -1240,7 +1378,23 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     adjustLongerCollisions: { label: 'Разводить удлиненные дубли фиксов' },
     safetyPaddingMs: { label: 'Защитный интервал зачистки', unit: 'мс' },
     minSpeechDb: { label: 'Порог детекции речи', unit: 'dB' },
-    fadeEdgeMs: { label: 'Сглаживание краев фраз', unit: 'мс' }
+    fadeEdgeMs: { label: 'Сглаживание краев фраз', unit: 'мс' },
+    // Spotify Pedalboard DSP
+    eqHighpass: { label: 'Highpass срез низа (гул/задувы)', unit: 'Гц' },
+    eqPresenceFreq: { label: 'Частота презенса речи (Presence)', unit: 'Гц' },
+    eqPresenceGain: { label: 'Усиление презенса (Presence Gain)', unit: 'dB' },
+    eqLowpass: { label: 'Lowpass срез верха (Air Guard)', unit: 'Гц' },
+    compThresholdDb: { label: 'Порог компрессора (Threshold)', unit: 'dB' },
+    compRatio: { label: 'Степень сжатия (Ratio)', unit: ':1' },
+    compAttackMs: { label: 'Атака компрессора (Attack)', unit: 'мс' },
+    compReleaseMs: { label: 'Релиз компрессора (Release)', unit: 'мс' },
+    deesserFreqHz: { label: 'Частота сибилянтов (De-Esser)', unit: 'Гц' },
+    deesserAmount: { label: 'Интенсивность де-эссера', unit: 'x' },
+    reverbRoomSize: { label: 'Размер помещения (Room Size)', unit: 'x' },
+    reverbDamping: { label: 'Демпфирование реверберации', unit: 'x' },
+    reverbWet: { label: 'Уровень реверберации (Wet)', unit: 'x' },
+    reverbDry: { label: 'Прямой сигнал (Dry)', unit: 'x' },
+    limiterThresholdDb: { label: 'Потолок лимитера (True-Peak)', unit: 'dBFS' }
   };
 
   const formatFileSize = (bytes?: number) => {
@@ -1568,24 +1722,69 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
           {/* Section 2: Configurable Modular Pipeline */}
           <div className="p-4 space-y-3 flex-1">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wider text-neutral-400 flex items-center gap-1.5">
-                <Layers className="w-3.5 h-3.5 text-purple-400" />
-                Конвейер модулей ({manifest?.pipeline?.length || 0})
-              </span>
-              <div className="flex items-center gap-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-neutral-800/70">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-semibold uppercase tracking-wider text-neutral-200 flex items-center gap-1.5">
+                  <Layers className="w-3.5 h-3.5 text-purple-400" />
+                  Конвейер модулей ({manifest?.pipeline?.length || 0})
+                </span>
+                <span 
+                  className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950/70 text-emerald-400 border border-emerald-800/50 flex items-center gap-1 font-mono" 
+                  title="Все модули и параметры моментально сохраняются в файл mixing_pipeline.json папки серии и проекта"
+                >
+                  <span className={`w-1.5 h-1.5 rounded-full ${isPipelineSaving ? 'bg-amber-400 animate-ping' : 'bg-emerald-400'}`} />
+                  {isPipelineSaving ? 'Запись в файл...' : `Файл: mixing_pipeline.json (${lastPipelineSavedAt})`}
+                </span>
+              </div>
+
+              <div className="flex items-center flex-wrap gap-1.5">
+                <button
+                  onClick={handleExportPipelineToFile}
+                  className="px-2 py-1 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white rounded-lg border border-neutral-800 text-[11px] font-medium flex items-center gap-1 transition shadow-sm"
+                  title="Экспортировать текущую цепочку в отдельный .json файл"
+                >
+                  <FileDown className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>В файл</span>
+                </button>
+
+                <button
+                  onClick={handleImportPipelineFromFile}
+                  className="px-2 py-1 bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white rounded-lg border border-neutral-800 text-[11px] font-medium flex items-center gap-1 transition shadow-sm"
+                  title="Загрузить сохраненную цепочку модулей из файла .json"
+                >
+                  <Upload className="w-3.5 h-3.5 text-blue-400" />
+                  <span>Из файла</span>
+                </button>
+
+                <button
+                  onClick={handleOpenPresetsModal}
+                  className="px-2 py-1 bg-neutral-900 hover:bg-neutral-800 text-purple-300 hover:text-purple-200 rounded-lg border border-purple-900/40 text-[11px] font-medium flex items-center gap-1 transition shadow-sm"
+                  title="Открыть галерею встроенных и сохраненных пресетов конвейера"
+                >
+                  <Wand2 className="w-3.5 h-3.5 text-purple-400" />
+                  <span>Пресеты</span>
+                </button>
+
                 <button
                   onClick={() => setIsSavePresetModalOpen(true)}
-                  className="text-xs text-amber-400 hover:text-amber-300 flex items-center gap-1 font-medium transition"
+                  className="px-2 py-1 bg-neutral-900 hover:bg-neutral-800 text-amber-300 hover:text-amber-200 rounded-lg border border-amber-900/40 text-[11px] font-medium flex items-center gap-1 transition shadow-sm"
                   title="Сохранить текущую цепочку со всеми настройками как готовый пресет"
                 >
-                  <Bookmark className="w-3.5 h-3.5" />
-                  <span>Сохранить в пресет</span>
+                  <Bookmark className="w-3.5 h-3.5 text-amber-400" />
+                  <span>В пресет</span>
                 </button>
-                <span className="text-neutral-700">|</span>
+
+                <button
+                  onClick={handleResetPipelineToDefault}
+                  className="p-1 bg-neutral-900 hover:bg-neutral-800 text-neutral-500 hover:text-neutral-300 rounded-lg border border-neutral-800 transition"
+                  title="Сбросить цепочку к заводскому базовому конвейеру"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+
                 <button
                   onClick={() => setIsAddModuleModalOpen(true)}
-                  className="text-xs text-purple-400 hover:text-purple-300 flex items-center gap-1 font-medium transition"
+                  className="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-[11px] font-medium flex items-center gap-1 transition shadow-sm"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Добавить модуль</span>

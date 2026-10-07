@@ -226,6 +226,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "numpy==1.26.4",
         "llvmlite==0.42.0",
         "numba==0.59.1",
+        "pedalboard==0.9.25",
         "deepfilternet>=0.5.6,<0.6.0",
         "demucs>=4.0.0,<4.1.0",
         "soundfile>=0.12.1",
@@ -303,9 +304,11 @@ except Exception as e:
 try:
     import numba
     import librosa
-    print(f"  [VERIFY OK] Numba ({numba.__version__}) & Librosa ({librosa.__version__}) imports succeeded.")
+    import pedalboard
+    import soundfile
+    print(f"  [VERIFY OK] Pedalboard ({pedalboard.__version__}), SoundFile ({soundfile.__version__}), Numba ({numba.__version__}) & Librosa ({librosa.__version__}) imports succeeded.")
 except Exception as e:
-    print(f"  [VERIFY FAILED] Numba / Librosa: {e}")
+    print(f"  [VERIFY FAILED] DSP / Audio Stack: {e}")
     traceback.print_exc()
     sys.exit(1)
 """
