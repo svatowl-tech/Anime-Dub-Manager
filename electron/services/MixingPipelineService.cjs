@@ -1697,26 +1697,164 @@ class MixingPipelineService {
     };
   }
 
+  async rescanAndExtractSources({ episode, targetDir, baseDir }) {
+    if (!episode) throw new Error('Episode parameter is required');
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+    await this.ensureDirectory(workingDir);
+    const rawDir = path.join(workingDir, '00_исходные');
+    await this.ensureDirectory(rawDir);
+
+    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
+    const manifest = statusData.manifest;
+
+    // Force extraction if audio was not yet ready
+    const epDir = this.getEpisodeDir(episode);
+    const parentDir = path.dirname(workingDir);
+    let vPath = manifest.sourceFiles?.video?.path || episode?.rawPath;
+    if (!vPath || !fsSync.existsSync(vPath)) {
+      const videoExtRegex = /\.(mp4|mkv|mov|avi|webm)$/i;
+      const searchDirs = [workingDir, rawDir, parentDir, epDir].filter(d => d && fsSync.existsSync(d));
+      for (const dir of searchDirs) {
+        try {
+          const files = fsSync.readdirSync(dir);
+          const vid = files.find(f => videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
+          if (vid) {
+            vPath = path.join(dir, vid);
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (vPath && fsSync.existsSync(vPath)) {
+      const origAudioOut = path.join(rawDir, '00_original_audio.wav');
+      if (!fsSync.existsSync(origAudioOut) || fsSync.statSync(origAudioOut).size < 1000) {
+        await this._extractAudioFromVideo(vPath, origAudioOut);
+      }
+      if (fsSync.existsSync(origAudioOut)) {
+        manifest.sourceFiles.originalAudio = {
+          name: '00_original_audio.wav',
+          path: origAudioOut,
+          size: fsSync.statSync(origAudioOut).size,
+          exists: true
+        };
+        // Also copy to root of workingDir
+        try {
+          const rootTarget = path.join(workingDir, '00_original_audio.wav');
+          if (path.resolve(rootTarget) !== path.resolve(origAudioOut)) {
+            await fs.copyFile(origAudioOut, rootTarget);
+          }
+        } catch (e) {}
+      }
+      manifest.sourceFiles.video = {
+        name: path.basename(vPath),
+        path: vPath,
+        size: fsSync.statSync(vPath).size,
+        exists: true
+      };
+    }
+
+    await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    return {
+      success: true,
+      workingDir,
+      manifest
+    };
+  }
+
   async _refreshManifestFiles(manifest, workingDir, episode) {
     if (!fsSync.existsSync(workingDir)) return;
 
     const entries = await fs.readdir(workingDir, { withFileTypes: true }).catch(() => []);
     const fileNames = entries.filter(e => e.isFile()).map(e => e.name);
 
-    let videoFile = fileNames.find(f => /\.(mp4|mkv|mov|avi|webm)$/i.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
-    if (videoFile) {
-      const vPath = path.join(workingDir, videoFile);
-      const st = fsSync.statSync(vPath);
-      manifest.sourceFiles.video = { name: videoFile, path: vPath, size: st.size, exists: true };
-    } else if (episode?.rawPath && fsSync.existsSync(episode.rawPath)) {
-      const st = fsSync.statSync(episode.rawPath);
-      manifest.sourceFiles.video = { name: path.basename(episode.rawPath), path: episode.rawPath, size: st.size, exists: true };
+    const rawDir = path.join(workingDir, '00_исходные');
+    const parentDir = path.dirname(workingDir);
+
+    // 1. Поиск видеофайла (в workingDir, 00_исходные, parentDir, epDir, episode.rawPath, episode.folderPath)
+    const epDir = this.getEpisodeDir(episode);
+    const searchVideoDirs = [workingDir, rawDir, parentDir, epDir, episode?.folderPath].filter(d => d && typeof d === 'string' && fsSync.existsSync(d));
+    const videoExtRegex = /\.(mp4|mkv|mov|avi|webm)$/i;
+
+    let videoFile = null;
+    let videoPath = null;
+
+    // Check direct candidate: episode.rawPath (absolute or relative)
+    if (episode?.rawPath) {
+      const candidates = [
+        episode.rawPath,
+        path.resolve(workingDir, episode.rawPath),
+        path.resolve(parentDir, episode.rawPath),
+        path.resolve(epDir, episode.rawPath),
+        path.resolve(process.cwd(), episode.rawPath)
+      ];
+      for (const cand of candidates) {
+        if (cand && fsSync.existsSync(cand) && videoExtRegex.test(cand) && !cand.includes('[СВЕДЕНО]') && !cand.includes('video_mux')) {
+          videoPath = cand;
+          videoFile = path.basename(cand);
+          break;
+        }
+      }
     }
 
-    const origAudioPath = path.join(workingDir, '00_исходные', '00_original_audio.wav');
-    if (fsSync.existsSync(origAudioPath)) {
-      const st = fsSync.statSync(origAudioPath);
-      manifest.sourceFiles.originalAudio = { name: '00_original_audio.wav', path: origAudioPath, size: st.size, exists: true };
+    // If not found yet, scan directories
+    if (!videoPath) {
+      for (const dir of searchVideoDirs) {
+        try {
+          const dirFiles = fsSync.readdirSync(dir);
+          const found = dirFiles.find(f => videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
+          if (found) {
+            videoPath = path.join(dir, found);
+            videoFile = found;
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (videoPath && fsSync.existsSync(videoPath)) {
+      const st = fsSync.statSync(videoPath);
+      manifest.sourceFiles.video = { name: videoFile || path.basename(videoPath), path: videoPath, size: st.size, exists: true };
+    }
+
+    // 2. Поиск оригинального аудио
+    const origAudioCandidates = [
+      path.join(rawDir, '00_original_audio.wav'),
+      path.join(workingDir, '00_original_audio.wav'),
+      path.join(workingDir, 'original_audio.wav'),
+      path.join(parentDir, '00_original_audio.wav'),
+      path.join(parentDir, 'original_audio.wav'),
+      path.join(rawDir, 'original_audio.wav'),
+      path.join(epDir, '00_original_audio.wav'),
+      path.join(epDir, 'original_audio.wav')
+    ];
+    let foundOrigAudio = origAudioCandidates.find(p => p && fsSync.existsSync(p));
+
+    // Если аудио нет, но есть видео — извлекаем автоматически в 00_исходные и workingDir!
+    if (!foundOrigAudio && videoPath && fsSync.existsSync(videoPath)) {
+      const targetAudio = path.join(rawDir, '00_original_audio.wav');
+      try {
+        if (!fsSync.existsSync(rawDir)) fsSync.mkdirSync(rawDir, { recursive: true });
+        await this._extractAudioFromVideo(videoPath, targetAudio);
+        if (fsSync.existsSync(targetAudio)) {
+          foundOrigAudio = targetAudio;
+          // Также дублируем в корень workingDir для мгновенной доступности
+          try {
+            const copyTarget = path.join(workingDir, '00_original_audio.wav');
+            if (path.resolve(copyTarget) !== path.resolve(targetAudio)) {
+              await fs.copyFile(targetAudio, copyTarget);
+            }
+          } catch (e) {}
+          log.info(`[Mixing] Автоматически извлечена оригинальная аудиодорожка: ${targetAudio}`);
+        }
+      } catch (extractErr) {
+        log.warn(`[Mixing] Ошибка автоматического извлечения звука из ${videoPath}:`, extractErr.message);
+      }
+    }
+
+    if (foundOrigAudio && fsSync.existsSync(foundOrigAudio)) {
+      const st = fsSync.statSync(foundOrigAudio);
+      manifest.sourceFiles.originalAudio = { name: path.basename(foundOrigAudio), path: foundOrigAudio, size: st.size, exists: true };
     }
 
     const subFile = fileNames.find(f => /\.(ass|srt|vtt)$/i.test(f));
@@ -1730,7 +1868,6 @@ class MixingPipelineService {
     }
 
     const audioExts = /\.(wav|mp3|flac|ogg|m4a|aac)$/i;
-    const rawDir = path.join(workingDir, '00_исходные');
     const backupDir = path.join(workingDir, 'бэкап', 'исходные_дорожки_до_автотайминга');
     const backupRoot = path.join(workingDir, 'бэкап');
 
@@ -2164,10 +2301,10 @@ class MixingPipelineService {
           resultFiles = await this._execGlueCompress({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'ducking':
-          resultFiles = await this._execDucking({ workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
+          resultFiles = await this._execDucking({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'master_audio_mix':
-          resultFiles = await this._execMasterMix({ workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
+          resultFiles = await this._execMasterMix({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'video_mux':
           resultFiles = await this._execVideoMux({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
@@ -3719,24 +3856,65 @@ class MixingPipelineService {
   /**
    * EXEC: Sidechain Ducking (STANDALONE MODULE)
    */
-  async _execDucking({ workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
+  async _execDucking({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
     const duckingAmountDb = Number(params.duckingAmountDb ?? -14.0);
     const attackMs = Number(params.attackMs ?? 40);
     const releaseMs = Number(params.releaseMs ?? 320);
     const threshold = Number(params.threshold ?? 0.08);
 
-    let origAudioPath = manifest.sourceFiles.originalAudio?.path;
+    const epDir = this.getEpisodeDir(episode);
+    const parentDir = path.dirname(workingDir);
+    const rawDir = path.join(workingDir, '00_исходные');
+
+    let origAudioPath = manifest.sourceFiles?.originalAudio?.path;
     if (!origAudioPath || !fsSync.existsSync(origAudioPath)) {
-      const vPath = manifest.sourceFiles.video?.path;
-      if (!vPath || !fsSync.existsSync(vPath)) {
-        throw new Error('Оригинальное видео или аудио не найдено для даккинга.');
-      }
-      origAudioPath = path.join(workingDir, '00_исходные', '00_original_audio.wav');
-      await fs.mkdir(path.dirname(origAudioPath), { recursive: true });
-      await this._extractAudioFromVideo(vPath, origAudioPath, logFn);
+      const candidates = [
+        path.join(rawDir, '00_original_audio.wav'),
+        path.join(workingDir, '00_original_audio.wav'),
+        path.join(workingDir, 'original_audio.wav'),
+        path.join(parentDir, '00_original_audio.wav'),
+        path.join(parentDir, 'original_audio.wav'),
+        path.join(epDir, '00_original_audio.wav'),
+        path.join(epDir, 'original_audio.wav')
+      ];
+      origAudioPath = candidates.find(c => c && fsSync.existsSync(c)) || null;
     }
 
-    let voicePath = inputFiles.find(f => f.name.includes('voices_master'))?.path;
+    if (!origAudioPath || !fsSync.existsSync(origAudioPath)) {
+      let vPath = manifest.sourceFiles?.video?.path || episode?.rawPath;
+      if (!vPath || !fsSync.existsSync(vPath)) {
+        const videoExtRegex = /\.(mp4|mkv|mov|avi|webm)$/i;
+        const searchDirs = [workingDir, rawDir, parentDir, epDir].filter(d => d && fsSync.existsSync(d));
+        for (const dir of searchDirs) {
+          try {
+            const files = fsSync.readdirSync(dir);
+            const vid = files.find(f => videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
+            if (vid) {
+              vPath = path.join(dir, vid);
+              break;
+            }
+          } catch (e) {}
+        }
+      }
+
+      if (!vPath || !fsSync.existsSync(vPath)) {
+        throw new Error('Оригинальное видео или аудио не найдено для даккинга (проверьте наличие видеофайла серии).');
+      }
+
+      origAudioPath = path.join(rawDir, '00_original_audio.wav');
+      await fs.mkdir(path.dirname(origAudioPath), { recursive: true });
+      logFn(`Извлечение аудиодорожки оригинала из видео «${path.basename(vPath)}» для даккинга...`);
+      await this._extractAudioFromVideo(vPath, origAudioPath, logFn);
+      manifest.sourceFiles.originalAudio = { name: '00_original_audio.wav', path: origAudioPath, size: fsSync.statSync(origAudioPath).size, exists: true };
+    }
+
+    let voicePath = inputFiles.find(f => f.name.includes('voices_master') || f.path.includes('voices_master'))?.path;
+    if (!voicePath) {
+      const glueStep = manifest.pipeline.find(s => s.moduleId === 'glue_compress' && s.outputFiles?.length > 0);
+      if (glueStep && glueStep.outputFiles[0] && fsSync.existsSync(glueStep.outputFiles[0].path)) {
+        voicePath = glueStep.outputFiles[0].path;
+      }
+    }
     if (!voicePath && inputFiles.length > 0) voicePath = inputFiles[0].path;
     if (!voicePath) {
       throw new Error('Голосовая дорожка отсутствует. Сначала выполните склейку или нормализацию.');
@@ -3775,43 +3953,174 @@ class MixingPipelineService {
   /**
    * EXEC: Master Audio Mix (STANDALONE MODULE)
    */
-  async _execMasterMix({ workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
+  async _execMasterMix({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
     const voiceVolume = Number(params.voiceVolume ?? 1.0);
     const bgVolume = Number(params.bgVolume ?? 0.85);
     const stereoWidth = Number(params.stereoWidth ?? 1.15);
     const ceilingDb = Number(params.limiterCeilingDb ?? -0.5);
     const limiterReleaseMs = Number(params.limiterReleaseMs ?? 40);
 
+    const epDir = this.getEpisodeDir(episode);
+    const parentDir = path.dirname(workingDir);
+    const rawDir = path.join(workingDir, '00_исходные');
+
+    // 1. Поиск фоновой / оригинальной дорожки (Background / Instrumental)
     let duckedAudioPath = null;
     const duckingStep = manifest.pipeline.find(s => s.moduleId === 'ducking' && s.outputFiles?.length > 0);
-    if (duckingStep && duckingStep.outputFiles[0]) {
+    if (duckingStep && duckingStep.outputFiles[0] && fsSync.existsSync(duckingStep.outputFiles[0].path)) {
       duckedAudioPath = duckingStep.outputFiles[0].path;
-    } else {
-      duckedAudioPath = manifest.sourceFiles.originalAudio?.path;
+      logFn(`Использован результат даккинга как фон: ${path.basename(duckedAudioPath)}`);
+    } else if (manifest.sourceFiles?.originalAudio?.path && fsSync.existsSync(manifest.sourceFiles.originalAudio.path)) {
+      duckedAudioPath = manifest.sourceFiles.originalAudio.path;
+      logFn(`Использована оригинальная аудиодорожка из манифеста: ${path.basename(duckedAudioPath)}`);
+    }
+
+    // 2. Проверяем готовый инструментал из разделения стемов (Demucs / UVR / MDX)
+    if (!duckedAudioPath || !fsSync.existsSync(duckedAudioPath)) {
+      const stemSteps = (manifest.pipeline || []).filter(s => ['htdemucs', 'htdemucs_ft', 'uvr_mdx_inst_hq3', 'separate', 'uvr_mdx_voc_ft'].includes(s.moduleId) && s.outputFiles?.length > 0);
+      for (const stStep of stemSteps) {
+        const instFile = (stStep.outputFiles || []).find(f => f.type === 'instrumental' || f.name?.includes('no_vocals') || f.name?.includes('instrumental'));
+        if (instFile && fsSync.existsSync(instFile.path)) {
+          duckedAudioPath = instFile.path;
+          logFn(`Использован инструментальный стем этапа «${stStep.moduleId}» в качестве фона: ${instFile.name}`);
+          break;
+        }
+      }
+    }
+
+    // 3. Проверяем наличие аудиофайлов на диске
+    if (!duckedAudioPath || !fsSync.existsSync(duckedAudioPath)) {
+      const candidates = [
+        path.join(rawDir, '00_original_audio.wav'),
+        path.join(workingDir, '00_original_audio.wav'),
+        path.join(workingDir, 'original_audio.wav'),
+        path.join(parentDir, '00_original_audio.wav'),
+        path.join(parentDir, 'original_audio.wav'),
+        path.join(rawDir, 'original_audio.wav'),
+        path.join(epDir, '00_original_audio.wav'),
+        path.join(epDir, 'original_audio.wav')
+      ];
+      duckedAudioPath = candidates.find(c => c && fsSync.existsSync(c)) || null;
+      if (duckedAudioPath) {
+        logFn(`Найдена фоновая аудиодорожка: ${path.basename(duckedAudioPath)}`);
+      }
+    }
+
+    // 4. Если аудио нет, но есть видео — извлекаем на лету!
+    if (!duckedAudioPath || !fsSync.existsSync(duckedAudioPath)) {
+      let vPath = manifest.sourceFiles?.video?.path || episode?.rawPath;
+      if (!vPath || !fsSync.existsSync(vPath)) {
+        const videoExtRegex = /\.(mp4|mkv|mov|avi|webm)$/i;
+        const searchDirs = [workingDir, rawDir, parentDir, epDir].filter(d => d && fsSync.existsSync(d));
+        for (const dir of searchDirs) {
+          try {
+            const files = fsSync.readdirSync(dir);
+            const vid = files.find(f => videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
+            if (vid) {
+              vPath = path.join(dir, vid);
+              break;
+            }
+          } catch (e) {}
+        }
+      }
+
+      if (vPath && fsSync.existsSync(vPath)) {
+        logFn(`Извлечение фонового аудио из видеоряда «${path.basename(vPath)}» для мастер-микса...`);
+        const outAudio = path.join(rawDir, '00_original_audio.wav');
+        try {
+          if (!fsSync.existsSync(path.dirname(outAudio))) {
+            fsSync.mkdirSync(path.dirname(outAudio), { recursive: true });
+          }
+          await this._extractAudioFromVideo(vPath, outAudio, logFn);
+          if (fsSync.existsSync(outAudio)) {
+            duckedAudioPath = outAudio;
+            const st = fsSync.statSync(outAudio);
+            manifest.sourceFiles.originalAudio = { name: '00_original_audio.wav', path: outAudio, size: st.size, exists: true };
+            manifest.sourceFiles.video = { name: path.basename(vPath), path: vPath, size: fsSync.statSync(vPath).size, exists: true };
+            logFn('✓ Оригинальное аудио успешно извлечено и подключено как фон.');
+          }
+        } catch (extractErr) {
+          log.warn('[Mixing] Could not extract background audio from video:', extractErr.message);
+        }
+      }
     }
 
     if (!duckedAudioPath || !fsSync.existsSync(duckedAudioPath)) {
-      throw new Error('Фоновое аудио не найдено для сведения.');
+      throw new Error('Фоновое аудио не найдено для сведения (проверьте наличие видеофайла серии или аудио оригинала в 00_исходные).');
     }
 
+    // 5. Поиск мастер-дорожки голосов (Vocals Master)
+    // ВАЖНО: Ни в коем случае не путать голос с даккнутым фоном (duckedAudioPath)!
     let voicePath = null;
+
+    // Сначала ищем склеенный голосовой мастер из glue_compress
     const glueStep = manifest.pipeline.find(s => s.moduleId === 'glue_compress' && s.outputFiles?.length > 0);
-    if (glueStep && glueStep.outputFiles[0]) {
+    if (glueStep && glueStep.outputFiles[0] && fsSync.existsSync(glueStep.outputFiles[0].path)) {
       voicePath = glueStep.outputFiles[0].path;
-    } else if (inputFiles.length > 0) {
-      voicePath = inputFiles[0].path;
+      logFn(`Использован мастер склейки голосов: ${path.basename(voicePath)}`);
+    }
+
+    // Если нет, ищем в предшествующих этапах голосовой обработки
+    if (!voicePath) {
+      const vocalSteps = (manifest.pipeline || []).filter(s => 
+        ['vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm', 'auto_norm_phrases', 'silence_gate', 'apply_fixes'].includes(s.moduleId) && 
+        s.outputFiles?.length > 0
+      );
+      for (let i = vocalSteps.length - 1; i >= 0; i--) {
+        const vStep = vocalSteps[i];
+        const vFile = (vStep.outputFiles || []).find(f => f.path && fsSync.existsSync(f.path) && f.path !== duckedAudioPath && !f.name.includes('ducked'));
+        if (vFile) {
+          voicePath = vFile.path;
+          logFn(`Использован результат этапа «${vStep.moduleId}» как голосовой мастер: ${path.basename(voicePath)}`);
+          break;
+        }
+      }
+    }
+
+    // Если всё ещё нет, проверяем inputFiles (исключая фоновый файл даккинга)
+    if (!voicePath && inputFiles.length > 0) {
+      const validVoiceInput = inputFiles.find(f => f.path && fsSync.existsSync(f.path) && f.path !== duckedAudioPath && !f.name.includes('ducked'));
+      if (validVoiceInput) {
+        voicePath = validVoiceInput.path;
+      }
+    }
+
+    // Если на входе несколько отдельных дорожек дабберов, склеиваем их в лету
+    if (!voicePath && inputFiles.length > 0) {
+      const dubberInputs = inputFiles.filter(f => f.path && fsSync.existsSync(f.path) && f.path !== duckedAudioPath && !f.name.includes('ducked'));
+      if (dubberInputs.length > 0) {
+        logFn(`Склейка ${dubberInputs.length} дорожек дабберов для мастер-микса...`);
+        const tempVoicePath = path.join(stepFolder, 'temp_combined_voices.wav');
+        let joinCmd = ffmpeg();
+        dubberInputs.forEach(t => { joinCmd = joinCmd.input(t.path); });
+        const mixFilter = dubberInputs.length > 1 ? `amix=inputs=${dubberInputs.length}:dropout_transition=0:normalize=0` : 'anull';
+        joinCmd
+          .complexFilter([mixFilter])
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(tempVoicePath);
+        await this._execFfmpeg(joinCmd, { logFn, outPath: tempVoicePath, description: 'Склейка голосов для мастера' });
+        if (fsSync.existsSync(tempVoicePath)) {
+          voicePath = tempVoicePath;
+        }
+      }
     }
 
     if (!voicePath || !fsSync.existsSync(voicePath)) {
-      throw new Error('Голосовой мастер-файл не найден.');
+      throw new Error('Голосовой мастер-файл не найден для сведения.');
+    }
+
+    if (path.resolve(voicePath) === path.resolve(duckedAudioPath)) {
+      throw new Error('Конфликт сведения: дорожка голоса совпадает с фоновой дорожкой.');
     }
 
     const outName = `${prefix}master_audio.wav`;
     const outPath = path.join(stepFolder, outName);
 
-    logFn(`Сведение мастер-аудио: голос (${voiceVolume}x), фон (${bgVolume}x, стереобаза: ${stereoWidth}x, потолок: ${ceilingDb}dB)...`);
+    logFn(`Сведение мастер-аудио: голос «${path.basename(voicePath)}» (${voiceVolume}x), фон «${path.basename(duckedAudioPath)}» (${bgVolume}x, стереобаза: ${stereoWidth}x, потолок: ${ceilingDb}dB)...`);
 
-    const filter = `[0:a]volume=${bgVolume},extrastereo=m=${stereoWidth}[bg];[1:a]volume=${voiceVolume}[voc];[bg][voc]amix=inputs=2:dropout_transition=0:normalize=0,alimiter=limit=${ceilingDb}dB:attack=5:release=${limiterReleaseMs}[mixout]`;
+    const filter = `[0:a]volume=${bgVolume},extrastereo=m=${stereoWidth}[bg];[1:a]volume=${voiceVolume}[voc];[bg][voc]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=${ceilingDb}dB:attack=5:release=${limiterReleaseMs}[mixout]`;
 
     const masterCmd = ffmpeg()
       .input(duckedAudioPath)

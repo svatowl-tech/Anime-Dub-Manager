@@ -82,9 +82,9 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
             dir_lower = name.lower()
             norm_root = root.replace("\\", "/").lower()
 
-            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy'
+            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa'
             # Subpackages such as 'torch/cuda', 'torch/testing', 'torchaudio/compliance' are required at runtime!
-            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy']):
+            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa']):
                 continue
 
             # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
@@ -209,11 +209,23 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     # 5. Install DeepFilterNet, Demucs, and audio processing stack with LOCKED NumPy 1.26.4 & Torch 2.2.2
     print("\n[STEP 4] Installing DeepFilterNet3, Demucs v4 & audio packages (Locking NumPy 1.26.4 and Torch 2.2.2)...")
     extra_index_args = ["--extra-index-url", "https://download.pytorch.org/whl/cpu"] if (use_cpu_wheels and (is_win or is_linux)) else []
-    
+
+    # Pre-install llvmlite and numba binary wheels to prevent compiling LLVM from source on macOS Intel (x86_64)
+    print("  [PREFER-BINARY] Pre-installing binary wheels for llvmlite 0.42.0 and numba 0.59.1...")
+    run_cmd([
+        str(venv_python), "-m", "pip", "install",
+        "--no-cache-dir",
+        "--prefer-binary",
+        "llvmlite==0.42.0",
+        "numba==0.59.1"
+    ])
+
     pinned_stack = [
         "torch==2.2.2",
         "torchaudio==2.2.2",
         "numpy==1.26.4",
+        "llvmlite==0.42.0",
+        "numba==0.59.1",
         "deepfilternet>=0.5.6,<0.6.0",
         "demucs>=4.0.0,<4.1.0",
         "soundfile>=0.12.1",
@@ -226,7 +238,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "rotary-embedding-torch>=0.5.0",
         "requests>=2.31.0"
     ]
-    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir"] + extra_index_args + pinned_stack)
+    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--prefer-binary"] + extra_index_args + pinned_stack)
 
     # Re-enforce numpy 1.26.4, torch 2.2.2 and torchaudio 2.2.2 strictly to prevent any transitive override
     print("  [STRICT] Re-enforcing NumPy 1.26.4 and TorchAudio 2.2.2 pinning...")
@@ -285,6 +297,15 @@ try:
     print("  [VERIFY OK] Demucs import succeeded.")
 except Exception as e:
     print(f"  [VERIFY FAILED] Demucs: {e}")
+    traceback.print_exc()
+    sys.exit(1)
+
+try:
+    import numba
+    import librosa
+    print(f"  [VERIFY OK] Numba ({numba.__version__}) & Librosa ({librosa.__version__}) imports succeeded.")
+except Exception as e:
+    print(f"  [VERIFY FAILED] Numba / Librosa: {e}")
     traceback.print_exc()
     sys.exit(1)
 """
@@ -457,7 +478,9 @@ try:
     import torchaudio
     import df
     import demucs
-    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}")
+    import numba
+    import librosa
+    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Numba {numba.__version__}")
 except Exception as e:
     sys.stderr.write(f"  [POST-PRUNE ERROR] Crucial AI package was damaged by cleanup: {e}\\n")
     traceback.print_exc()

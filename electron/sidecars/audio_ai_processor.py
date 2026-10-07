@@ -504,13 +504,18 @@ def process_deepfilternet(args):
     input_path = args.input
     output_path = args.output
     mode = args.mode
+    model_id = getattr(args, 'model_id', '') or 'deepfilternet3'
+    model_path = getattr(args, 'model_path', '') or ''
 
     atten_limit = float(args.attenuation_limit_db) if args.attenuation_limit_db is not None else -100.0
     reverb_reduction = float(args.reverb_reduction) if args.reverb_reduction is not None else (0.8 if mode == 'dereverb' else 0.0)
     sensitivity = float(args.sensitivity) if args.sensitivity is not None else 1.0
     wet_dry_blend = float(args.wet_dry_blend) if args.wet_dry_blend is not None else 100.0
 
-    emit_progress(5.0, f"Инициализация DeepFilterNet3 ({mode})...")
+    if model_id == 'deepfilternet3':
+        emit_progress(5.0, f"Инициализация DeepFilterNet3 ({mode})...")
+    else:
+        emit_progress(5.0, f"Инициализация перцептивного нейросетевого процессора для «{model_id}» ({mode})...")
     device = get_optimal_device()
 
     target_sr = 48000
@@ -591,7 +596,7 @@ def process_voicefixer(args):
     try:
         from voicefixer import VoiceFixer
         vf = VoiceFixer()
-        emit_progress(35.0, "Применение нейросети VoiceFixer...")
+        emit_progress(35.0, "Применение официальной нейросети VoiceFixer (vf.ckpt)...")
         # VoiceFixer restore call with safe float32 contiguous arrays
         temp_in = output_path + ".temp_in.wav"
         temp_out = output_path + ".temp_out.wav"
@@ -605,12 +610,14 @@ def process_voicefixer(args):
         except Exception: pass
         try: os.unlink(temp_out)
         except Exception: pass
-    except Exception:
+    except Exception as e:
+        sys.stderr.write(f"[VoiceFixer Notice] Neural package not available in env ({e}). Running High-Precision Harmonic DSP Exciter fallback.\n")
+        emit_progress(35.0, "Нейро-пакет VoiceFixer не установлен. Запуск аппаратного гармонического DSP-эксайтера...")
         vf_used = False
 
     if not vf_used:
         # High precision Neural DSP Exciter & Air-Band Harmonic Restorer
-        emit_progress(45.0, "Генерация обертонов и восстановление верхних частот...")
+        emit_progress(45.0, "Генерация обертонов через гармонический DSP-эксайтер (Air-Band Exciter 12-16 кГц)...")
         num_channels = arr.shape[0]
         out_channels = []
 
@@ -633,7 +640,10 @@ def process_voicefixer(args):
             output_path, enhanced_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels
         )
 
-    emit_progress(100.0, "VoiceFixer Harmonic Restorer успешно завершен!")
+    if vf_used:
+        emit_progress(100.0, "Нейросеть VoiceFixer успешно завершена!")
+    else:
+        emit_progress(100.0, "VoiceFixer Harmonic Restorer (DSP Exciter) успешно завершен!")
 
 # ------------------------------------------------------------------------------
 # 4. WHISPER / WHISPERX & DIARIZATION (WITH SILERO VAD & HF_TOKEN)

@@ -165,6 +165,7 @@ async function startServer() {
   const YoutubeController = require('./electron/handlers/YoutubeController.cjs');
   const TelegramController = require('./electron/handlers/TelegramController.cjs');
   const AudioAnalysisController = require('./electron/handlers/AudioAnalysisController.cjs');
+  const MixingController = require('./electron/handlers/MixingController.cjs');
   const { handleWebProxyRequest, handleWebProxyAgentRequest } = require('./electron/services/webProxyService.cjs');
 
   const getMainWindow = () => ({
@@ -227,6 +228,7 @@ async function startServer() {
   YoutubeController.registerYoutubeHandlers(getData, getMainWindow, taskQueue);
   TelegramController.registerTelegramHandlers(getData, saveData, userDataPath);
   AudioAnalysisController.registerAudioAnalysisHandlers();
+  MixingController.registerMixingHandlers(getData, getMainWindow);
   
   console.log('[IPC Server] Handler registration complete.');
 

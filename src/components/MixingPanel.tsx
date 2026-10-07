@@ -433,13 +433,13 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     };
   }, [loadStatus, mixLog]);
 
-  // Ensure video element is ALWAYS muted so video audio never conflicts or duplicates audio tracks
+  // Connect video volume and mute state
   useEffect(() => {
     if (videoRef.current) {
-      videoRef.current.muted = true;
-      videoRef.current.volume = 0;
+      videoRef.current.muted = isVideoMuted;
+      videoRef.current.volume = isVideoMuted ? 0 : Math.min(1, Math.max(0, videoVolume));
     }
-  }, [videoSrc]);
+  }, [videoVolume, isVideoMuted, videoSrc]);
 
   useEffect(() => {
     const vol = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
@@ -453,9 +453,27 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
   // Select original audio source for playback
   const selectOriginalAudioTrack = useCallback(async () => {
-    const origPath = manifest?.sourceFiles?.originalAudio?.path;
+    let origPath = manifest?.sourceFiles?.originalAudio?.path;
     if (!origPath) {
-      toast.error('Оригинальный аудиофайл серии ещё не загружен или отсутствует');
+      try {
+        const res: any = await ipcSafe.invoke('mixing-refresh-sources', {
+          episode: currentEpisode,
+          targetDir: workingDir || customTargetDir || undefined
+        });
+        if (res && res.manifest?.sourceFiles?.originalAudio?.path) {
+          setManifest(res.manifest);
+          origPath = res.manifest.sourceFiles.originalAudio.path;
+        }
+      } catch (e) {}
+    }
+
+    if (!origPath) {
+      // Fallback: unmute video audio element directly so user can hear original sound!
+      setIsVideoMuted(false);
+      if (videoVolume < 0.2) setVideoVolume(0.8);
+      stopAndClearModuleMix();
+      setSelectedAudioTrack(null);
+      toast.info('Звук оригинала воспроизводится напрямую из видеофайла 🎬');
       return;
     }
 
@@ -489,7 +507,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     });
 
     toast.info('Включена оригинальная звуковая дорожка серии', { duration: 2500 });
-  }, [manifest?.sourceFiles?.originalAudio?.path, currentTime, isPlaying, stopAndClearModuleMix]);
+  }, [manifest?.sourceFiles?.originalAudio?.path, currentEpisode, workingDir, customTargetDir, currentTime, isPlaying, stopAndClearModuleMix, videoVolume]);
 
   // Handle Play / Pause synchronization
   const togglePlay = useCallback(() => {
@@ -500,8 +518,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       setIsPlaying(false);
     } else {
       if (videoRef.current) {
-        videoRef.current.muted = true;
-        videoRef.current.volume = 0;
+        videoRef.current.muted = isVideoMuted;
+        videoRef.current.volume = isVideoMuted ? 0 : Math.min(1, Math.max(0, videoVolume));
         videoRef.current.play().catch(e => console.warn('Video play warning:', e));
       }
 
@@ -514,7 +532,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       }
       setIsPlaying(true);
     }
-  }, [isPlaying, selectedAudioTrack, manifest?.sourceFiles?.originalAudio?.path, selectOriginalAudioTrack]);
+  }, [isPlaying, isVideoMuted, videoVolume, selectedAudioTrack, manifest?.sourceFiles?.originalAudio?.path, selectOriginalAudioTrack]);
 
   // Sync seek position
   const handleSeek = (time: number) => {
@@ -878,6 +896,29 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       toast.error(`Ошибка импорта внешних файлов: ${e.message || String(e)}`);
     } finally {
       setIsSubmittingExternal(false);
+    }
+  };
+
+  // Re-scan episode directory and extract 00_original_audio.wav on-the-fly
+  const handleRescanSources = async () => {
+    if (!currentEpisode) return;
+    try {
+      toast.info('Поиск видеофайла серии и извлечение звука оригинала...');
+      mixLog('info', 'Сканирование', 'Запуск пересканирования папки серии и извлечения аудиодорожки оригинала...');
+      const res: any = await ipcSafe.invoke('mixing-refresh-sources', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir || undefined
+      });
+      if (res && res.manifest) {
+        setManifest(res.manifest);
+        if (res.workingDir) setWorkingDir(res.workingDir);
+        toast.success('Исходные файлы и звук оригинала обновлены! 🎵');
+        mixLog('success', 'Сканирование', `Синхронизировано: видео=${res.manifest?.sourceFiles?.video?.name || 'нет'}, оригинал=${res.manifest?.sourceFiles?.originalAudio?.name || 'нет'}`);
+        await loadStatus();
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка пересканирования: ${e.message}`);
+      mixLog('error', 'Сканирование', `Ошибка: ${e.message}`);
     }
   };
 
@@ -1369,7 +1410,17 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                   <Film className="w-3.5 h-3.5 text-blue-400" />
                   Дорожки проекта
                 </span>
-                <span className="text-[11px] text-neutral-500">Видео, звук, субтитры</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleRescanSources}
+                    className="text-[11px] text-purple-400 hover:text-purple-300 flex items-center gap-1 font-medium bg-purple-950/40 hover:bg-purple-900/50 px-2 py-0.5 rounded border border-purple-800/40 transition"
+                    title="Пересканировать папку серии и извлечь звук оригинального видео"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Пересканировать папку</span>
+                  </button>
+                  <span className="text-[11px] text-neutral-500">Видео, звук, субтитры</span>
+                </div>
               </div>
 
               <div className="grid grid-cols-3 gap-2">
@@ -2010,7 +2061,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 ref={videoRef}
                 src={videoSrc}
                 className="w-full h-full object-contain"
-                muted={true}
+                muted={isVideoMuted}
                 onTimeUpdate={handleVideoTimeUpdate}
                 onLoadedMetadata={handleVideoLoadedMetadata}
                 onEnded={() => setIsPlaying(false)}
@@ -2123,38 +2174,73 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 </button>
               </div>
 
-              <div className="text-[11px] text-neutral-400 bg-neutral-950 px-2.5 py-1 rounded-lg border border-neutral-800 flex items-center gap-1.5">
-                <VolumeX className="w-3.5 h-3.5 text-amber-400" />
-                <span>Звук видео заглушен (100% изоляция файла)</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setIsVideoMuted(!isVideoMuted)}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg border flex items-center gap-1.5 transition ${
+                    isVideoMuted 
+                      ? 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200' 
+                      : 'bg-blue-950/60 border-blue-600/40 text-blue-300 font-semibold'
+                  }`}
+                  title={isVideoMuted ? "Включить оригинальный звук из видеофайла" : "Заглушить оригинальный звук из видеофайла"}
+                >
+                  {isVideoMuted ? <VolumeX className="w-3.5 h-3.5 text-neutral-500" /> : <Volume2 className="w-3.5 h-3.5 text-blue-400" />}
+                  <span>{isVideoMuted ? 'Звук видео: Выкл' : `Звук видео: ${Math.round(videoVolume * 100)}%`}</span>
+                </button>
               </div>
             </div>
 
-            {/* Master Volume Control */}
-            <div className="pt-2 border-t border-neutral-800 space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-neutral-400 flex items-center gap-1.5">
-                  <Music className="w-3.5 h-3.5 text-purple-400" />
-                  Громкость воспроизведения плеера:
-                </span>
-                <button
-                  onClick={() => setIsTrackMuted(!isTrackMuted)}
-                  className="text-neutral-400 hover:text-neutral-200 flex items-center gap-1 text-[11px]"
-                  title={isTrackMuted ? "Включить звук" : "Заглушить звук"}
-                >
-                  {isTrackMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-purple-400" />}
-                  <span>{isTrackMuted ? 'Выкл' : `${Math.round(trackVolume * 100)}%`}</span>
-                </button>
+            {/* Audio Volume Controls (Video Audio & Processed Track) */}
+            <div className="pt-2 border-t border-neutral-800 space-y-3">
+              {/* Processed Track / Dubber Voices Volume */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-neutral-400 flex items-center gap-1.5">
+                    <Music className="w-3.5 h-3.5 text-purple-400" />
+                    Громкость дорожки модуля (голоса):
+                  </span>
+                  <button
+                    onClick={() => setIsTrackMuted(!isTrackMuted)}
+                    className="text-neutral-400 hover:text-neutral-200 flex items-center gap-1 text-[11px]"
+                    title={isTrackMuted ? "Включить звук" : "Заглушить звук"}
+                  >
+                    {isTrackMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-purple-400" />}
+                    <span>{isTrackMuted ? 'Выкл' : `${Math.round(trackVolume * 100)}%`}</span>
+                  </button>
+                </div>
+                <input 
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  disabled={isTrackMuted}
+                  value={isTrackMuted ? 0 : trackVolume}
+                  onChange={(e) => setTrackVolume(parseFloat(e.target.value))}
+                  className="w-full accent-purple-500 cursor-pointer"
+                />
               </div>
-              <input 
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                disabled={isTrackMuted}
-                value={isTrackMuted ? 0 : trackVolume}
-                onChange={(e) => setTrackVolume(parseFloat(e.target.value))}
-                className="w-full accent-purple-500 cursor-pointer"
-              />
+
+              {/* Video Audio Volume Slider (when unmuted) */}
+              {!isVideoMuted && (
+                <div className="space-y-1.5 bg-neutral-900/40 p-2 rounded-lg border border-neutral-800/60">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-neutral-400 flex items-center gap-1.5">
+                      <Film className="w-3.5 h-3.5 text-blue-400" />
+                      Громкость оригинального видеоряда:
+                    </span>
+                    <span className="text-[11px] text-blue-300 font-mono">{Math.round(videoVolume * 100)}%</span>
+                  </div>
+                  <input 
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    value={videoVolume}
+                    onChange={(e) => setVideoVolume(parseFloat(e.target.value))}
+                    className="w-full accent-blue-500 cursor-pointer"
+                  />
+                </div>
+              )}
             </div>
           </div>
 

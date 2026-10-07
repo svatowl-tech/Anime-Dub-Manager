@@ -62,6 +62,14 @@ function registerMixingHandlers(getData, mainWindow) {
     return await MixingPipelineService.saveTimingMetadata({ episode, targetDir, baseDir, timingMetadata });
   }));
 
+  ipcMain.handle('mixing-refresh-sources', wrapIpcHandler(async (event, { episode, targetDir }) => {
+    if (!episode) throw new Error('Параметр серии обязателен');
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    console.log(`[MixingController] refresh-sources: пересканирование исходных файлов серии`);
+    return await MixingPipelineService.rescanAndExtractSources({ episode, targetDir, baseDir });
+  }));
+
   ipcMain.handle('mixing-import-sound-engineer-files', wrapIpcHandler(async (event, params) => {
     const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming } = params;
     if (!episode) throw new Error('Параметр серии обязателен');

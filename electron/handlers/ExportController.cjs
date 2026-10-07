@@ -247,13 +247,62 @@ function registerExportHandlers(getData, mainWindow) {
       if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-progress', p.percent);
     };
 
-    // 1. Copy raw video to 00_исходные
-    if (episode.rawPath && require('fs').existsSync(episode.rawPath)) {
-      const vidExt = path.extname(episode.rawPath);
-      const targetVidPath = path.join(rawDir, `raw_video${vidExt}`);
-      if (path.resolve(targetVidPath) !== path.resolve(episode.rawPath)) {
+    // 1. Copy raw video to 00_исходные and extract original audio
+    const epDir = MixingPipelineService.getEpisodeDir(episode, baseDir);
+    const parentDir = path.dirname(exportDir);
+    const videoExtRegex = /\.(mp4|mkv|mov|avi|webm)$/i;
+    let effectiveVideoPath = episode.rawPath && require('fs').existsSync(episode.rawPath) ? episode.rawPath : null;
+
+    if (!effectiveVideoPath) {
+      const searchDirs = [epDir, parentDir, exportDir, episode.folderPath].filter(d => d && typeof d === 'string' && require('fs').existsSync(d));
+      for (const dir of searchDirs) {
         try {
-          await fs.copyFile(episode.rawPath, targetVidPath);
+          const files = require('fs').readdirSync(dir);
+          const found = files.find(f => videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
+          if (found) {
+            effectiveVideoPath = path.join(dir, found);
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (effectiveVideoPath && require('fs').existsSync(effectiveVideoPath)) {
+      const vidExt = path.extname(effectiveVideoPath);
+      const targetVidPath = path.join(rawDir, `raw_video${vidExt}`);
+      if (path.resolve(targetVidPath) !== path.resolve(effectiveVideoPath)) {
+        try {
+          await fs.copyFile(effectiveVideoPath, targetVidPath);
+        } catch (e) {}
+      }
+
+      const origAudioPath = path.join(rawDir, '00_original_audio.wav');
+      const origAudioExportPath = path.join(exportDir, '00_original_audio.wav');
+      if (!require('fs').existsSync(origAudioPath) || require('fs').statSync(origAudioPath).size < 1000) {
+        try {
+          const ffmpeg = require('fluent-ffmpeg');
+          await new Promise((resolve, reject) => {
+            ffmpeg(effectiveVideoPath)
+              .noVideo()
+              .audioCodec('pcm_s16le')
+              .audioChannels(2)
+              .audioFrequency(48000)
+              .output(origAudioPath)
+              .on('end', () => resolve())
+              .on('error', (err) => reject(err))
+              .run();
+          });
+          log.info(`[ExportController] Извлечена оригинальная аудиодорожка из видео: ${origAudioPath}`);
+        } catch (audioErr) {
+          log.warn('[ExportController] Could not extract 00_original_audio.wav from video:', audioErr.message);
+        }
+      }
+
+      if (require('fs').existsSync(origAudioPath)) {
+        try {
+          if (path.resolve(origAudioExportPath) !== path.resolve(origAudioPath)) {
+            await fs.copyFile(origAudioPath, origAudioExportPath);
+          }
         } catch (e) {}
       }
     }
