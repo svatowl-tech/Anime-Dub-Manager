@@ -1,0 +1,18 @@
+{
+  "id": "1791483604479",
+  "projectId": "proj_123",
+  "number": 3,
+  "title": "",
+  "status": "UPLOAD",
+  "deadline": "2026-10-08T18:20:04.479Z",
+  "assignments": [],
+  "uploads": [],
+  "createdAt": "2026-10-08T18:20:04.479Z",
+  "updatedAt": "2026-10-08T18:20:04.495Z",
+  "statusHistory": [
+    {
+      "status": "UPLOAD",
+      "timestamp": "2026-10-08T18:20:04.479Z"
+    }
+  ]
+}

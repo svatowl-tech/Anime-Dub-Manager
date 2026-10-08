@@ -1,0 +1,18 @@
+{
+  "id": "test_ep_1791484063690",
+  "projectId": "proj_123",
+  "number": 2,
+  "title": "Вторая серия",
+  "status": "UPLOAD",
+  "deadline": "2026-10-08T18:27:43.690Z",
+  "assignments": [],
+  "uploads": [],
+  "createdAt": "2026-10-08T18:27:43.690Z",
+  "updatedAt": "2026-10-08T18:27:43.692Z",
+  "statusHistory": [
+    {
+      "status": "UPLOAD",
+      "timestamp": "2026-10-08T18:27:43.690Z"
+    }
+  ]
+}

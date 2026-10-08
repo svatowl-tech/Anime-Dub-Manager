@@ -1680,41 +1680,71 @@ export default function Dashboard({
     });
   };
 
-  const handleCreateEpisode = async (episodeNumber: number) => {
+  const handleCreateEpisode = async (episodeNumber: number, customTitle?: string) => {
     if (!selectedProjectId || !selectedProject) return;
     
-    let episodeTitle = '';
-    try {
-      const fetchedTitle = await ipcSafe.invoke('get-episode-title', {
-        title: selectedProject.title,
-        originalTitle: selectedProject.originalTitle,
-        episodeNumber,
-        anime365Id: selectedProject.anime365Id
-      });
-      if (fetchedTitle) {
-        episodeTitle = fetchedTitle;
-      }
-    } catch (e) {
-      console.warn('Failed to fetch episode title on creation:', e);
+    // Check if episode with this number already exists
+    const alreadyExists = selectedProject.episodes?.some(e => e.number === episodeNumber);
+    if (alreadyExists) {
+      toast.error(`Серия ${episodeNumber} уже добавлена в этот проект!`);
+      return;
     }
 
-    const newEpisode = {
-      id: Date.now().toString(),
-      projectId: selectedProjectId,
-      number: episodeNumber,
-      title: episodeTitle,
-      status: 'UPLOAD',
-      deadline: calculateDeadline(selectedProject),
-      assignments: [],
-      uploads: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    
-    await ipcSafe.invoke('save-episode', newEpisode);
-    
-    onRefresh();
-    setIsNewEpisodeModalOpen(false);
+    try {
+      let episodeTitle = customTitle?.trim() || '';
+
+      // Quick non-blocking attempt to fetch title if not provided by user
+      if (!episodeTitle) {
+        try {
+          const timeoutPromise = new Promise<string>((_, reject) =>
+            setTimeout(() => reject(new Error('timeout')), 1500)
+          );
+          const fetchPromise = ipcSafe.invoke('get-episode-title', {
+            title: selectedProject.title,
+            originalTitle: selectedProject.originalTitle,
+            episodeNumber,
+            anime365Id: selectedProject.anime365Id
+          });
+          const fetchedTitle = await Promise.race([fetchPromise, timeoutPromise]);
+          if (fetchedTitle && typeof fetchedTitle === 'string') {
+            episodeTitle = fetchedTitle;
+          }
+        } catch {
+          // Graceful non-blocking fallback
+        }
+      }
+
+      const newEpisode: Episode = {
+        id: Date.now().toString(),
+        projectId: selectedProjectId,
+        number: episodeNumber,
+        title: episodeTitle,
+        status: 'UPLOAD',
+        deadline: calculateDeadline(selectedProject),
+        assignments: [],
+        uploads: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      await ipcSafe.invoke('save-episode', newEpisode);
+
+      // Keep project's lastActiveEpisode updated to the new episode
+      await ipcSafe.invoke('save-project', {
+        ...selectedProject,
+        lastActiveEpisode: episodeNumber
+      });
+      
+      await onRefresh();
+      if (onEpisodeSelect) {
+        onEpisodeSelect(episodeNumber);
+      }
+      setIsNewEpisodeModalOpen(false);
+      toast.success(`Серия ${episodeNumber} успешно добавлена!`);
+    } catch (e: any) {
+      console.error('Failed to create episode:', e);
+      toast.error(`Ошибка при создании серии: ${e?.message || 'Неизвестная ошибка'}`);
+    }
   };
 
   useEffect(() => {
@@ -2157,6 +2187,28 @@ export default function Dashboard({
               </button>
             ))}
           </div>
+
+          {(!selectedProject?.episodes || selectedProject.episodes.length === 0) && (
+            <div className="bg-neutral-900/60 border border-neutral-800 border-dashed rounded-2xl p-10 text-center flex flex-col items-center justify-center space-y-4 shadow-inner">
+              <div className="w-14 h-14 rounded-2xl bg-blue-600/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
+                <Plus className="w-7 h-7" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-white">В проекте пока нет ни одной серии</h3>
+                <p className="text-xs text-neutral-400 max-w-sm">
+                  Добавьте серию, чтобы прикрепить видео, субтитры, распределить роли и начать озвучку.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsNewEpisodeModalOpen(true)}
+                className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition-all shadow-lg shadow-blue-600/25 flex items-center gap-2 cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                Добавить первую серию
+              </button>
+            </div>
+          )}
 
           {currentEpisode && (
             <div className="space-y-8">

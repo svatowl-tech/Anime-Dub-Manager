@@ -422,6 +422,28 @@ async function startServer() {
       });
     }
 
+    if (channel === 'get-episode-title') {
+      const input = args[0] || {};
+      let titleRes = '';
+      if (handler) {
+        try {
+          const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
+          const res = await Promise.race([handler({ sender: { send: () => {} } }, ...args), timeoutPromise]);
+          if (res && typeof res === 'object' && res.data) {
+            titleRes = res.data;
+          } else if (typeof res === 'string') {
+            titleRes = res;
+          }
+        } catch (e: any) {
+          console.warn('[IPC Server] get-episode-title timed out or failed:', e?.message || e);
+        }
+      }
+      return res.json({
+        success: true,
+        data: titleRes || ''
+      });
+    }
+
     if (channel === 'get-whisper-system-status') {
       const requestedModel = (args[0] && args[0].model) || 'small';
       console.log(`[IPC Server] Whisper system status check requested (model: ${requestedModel})`);

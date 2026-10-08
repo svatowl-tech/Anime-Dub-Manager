@@ -1,0 +1,17 @@
+[
+  {
+    "id": "test_ep_1",
+    "projectId": "proj1",
+    "number": 1,
+    "title": "Тест",
+    "status": "UPLOAD",
+    "statusHistory": [
+      {
+        "status": "UPLOAD",
+        "timestamp": "2026-10-08T18:12:16.421Z"
+      }
+    ],
+    "updatedAt": "2026-10-08T18:12:16.421Z",
+    "createdAt": "2026-10-08T18:12:16.421Z"
+  }
+]

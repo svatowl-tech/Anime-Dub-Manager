@@ -7,6 +7,7 @@ and packages it into lightweight cross-platform zip archives for GitHub Releases
 
 import os
 import sys
+import re
 import shutil
 import zipfile
 import platform
@@ -303,18 +304,34 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
                 elif "AudioMetaData" in code and "NamedTuple" not in code:
                     code = new_audio_meta + "\n" + code
 
-                old_resample = "from torchaudio.compliance.kaldi import resample_waveform as ta_resample"
-                new_resample = (
+                # Replace the entire resample try-except block cleanly so indentation is 100% valid
+                safe_resample_block = (
                     "try:\n"
-                    "    from torchaudio.compliance.kaldi import resample_waveform as ta_resample\n"
-                    "except (ImportError, AttributeError, ModuleNotFoundError):\n"
-                    "    def ta_resample(waveform, orig_sr, new_sr, **kwargs):\n"
-                    "        import torchaudio.functional as taf\n"
-                    "        return taf.resample(waveform, orig_sr, new_sr)\n"
+                    "    from torchaudio.functional import resample as ta_resample\n"
+                    "except Exception:\n"
+                    "    try:\n"
+                    "        from torchaudio.compliance.kaldi import resample_waveform as ta_resample\n"
+                    "    except Exception:\n"
+                    "        def ta_resample(waveform, orig_sr, new_sr, **kwargs):\n"
+                    "            import torchaudio.functional as taf\n"
+                    "            return taf.resample(waveform, orig_sr, new_sr)"
                 )
-                if old_resample in code and "taf.resample" not in code:
-                    code = code.replace(old_resample, new_resample)
+                # First match standard or partially broken resample blocks
+                resample_block_pattern = re.compile(
+                    r"try:\s*\r?\n(?:[ \t]*from torchaudio\.functional import resample as ta_resample\s*\r?\n\s*except[^\r\n]*:\s*\r?\n)?[ \t]*from torchaudio\.compliance\.kaldi import resample_waveform as ta_resample[^\r\n]*",
+                    re.MULTILINE
+                )
+                if resample_block_pattern.search(code):
+                    code = resample_block_pattern.sub(safe_resample_block, code)
+                elif "resample_waveform as ta_resample" in code:
+                    code = re.sub(
+                        r"(?:try:\s*\r?\n)?[ \t]*from torchaudio\.compliance\.kaldi import resample_waveform as ta_resample[^\r\n]*",
+                        safe_resample_block,
+                        code
+                    )
 
+                # Validate syntax with compile before writing to disk
+                compile(code, str(df_io_path), "exec")
                 df_io_path.write_text(code, encoding="utf-8")
                 print(f"  [PATCH] {df_io_path} patched for torchaudio AudioMetaData compatibility.")
             except Exception as patch_e:

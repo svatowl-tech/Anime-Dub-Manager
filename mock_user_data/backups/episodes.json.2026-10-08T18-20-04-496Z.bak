@@ -1,0 +1,43 @@
+[
+  {
+    "id": "test_ep_1",
+    "projectId": "proj1",
+    "number": 1,
+    "title": "Тест",
+    "status": "UPLOAD",
+    "statusHistory": [
+      {
+        "status": "UPLOAD",
+        "timestamp": "2026-10-08T18:12:16.421Z"
+      }
+    ],
+    "updatedAt": "2026-10-08T18:12:16.421Z",
+    "createdAt": "2026-10-08T18:12:16.421Z"
+  },
+  {
+    "id": "ep_123_1",
+    "projectId": "proj_123",
+    "number": 1,
+    "status": "UPLOAD",
+    "statusHistory": [
+      {
+        "status": "UPLOAD",
+        "timestamp": "2026-10-08T18:12:33.737Z"
+      }
+    ],
+    "updatedAt": "2026-10-08T18:12:33.737Z",
+    "createdAt": "2026-10-08T18:12:33.737Z"
+  },
+  {
+    "id": "1791483447957",
+    "projectId": "proj_123",
+    "number": 2,
+    "title": "",
+    "status": "UPLOAD",
+    "deadline": "2026-10-08T18:17:27.957Z",
+    "assignments": [],
+    "uploads": [],
+    "createdAt": "2026-10-08T18:17:27.957Z",
+    "updatedAt": "2026-10-08T18:17:27.957Z"
+  }
+]

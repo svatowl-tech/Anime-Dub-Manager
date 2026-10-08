@@ -429,6 +429,10 @@ function handleIpcMock(channel: string, args: any[]): any {
     };
   }
 
+  if (channel === 'get-episode-title') {
+    return '';
+  }
+
   if (channel === 'get-config') {
     return (async () => {
       const config = localStorage.getItem('config');

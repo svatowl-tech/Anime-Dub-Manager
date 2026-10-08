@@ -6,7 +6,8 @@ const JIKAN_BASE = 'https://api.jikan.moe/v4';
 const axiosInstance = axios.create({
   headers: {
     'User-Agent': 'AnimeDubManager'
-  }
+  },
+  timeout: 4000
 });
 
 // Configure retry for 429 Too Many Requests
@@ -198,74 +199,85 @@ async function getNextEpisodeDate(title) {
 }
 
 async function getEpisodeTitle(title, originalTitle, episodeNumber, anime365Id) {
-  let matchedTitle = null;
-
-  // 1. Try Anime365 first if ID is present
-  if (anime365Id) {
-    try {
-      const Anime365Service = require('./Anime365Service.cjs');
-      const seriesDetails = await Anime365Service.getSeriesByID(anime365Id);
-      if (seriesDetails && seriesDetails.episodes && Array.isArray(seriesDetails.episodes)) {
-        const targetEp = seriesDetails.episodes.find(ep => 
-          String(ep.episode) === String(episodeNumber) || 
-          ep.episodeInt === episodeNumber
-        );
-        if (targetEp) {
-          matchedTitle = targetEp.title || targetEp.episodeTitle || targetEp.titleRussian || targetEp.titleRomaji;
-          if (matchedTitle) {
-            console.log(`[Episode Title] Found on Anime365 for ep ${episodeNumber}: ${matchedTitle}`);
-            return matchedTitle;
-          }
-        }
-      }
-    } catch (e) {
-      console.error(`[Episode Title] Error getting from Anime365 (id: ${anime365Id}):`, e.message);
-    }
-  }
-
-  // 2. Try Jikan (MyAnimeList) fallback
   try {
-    const q = originalTitle || title;
-    if (q) {
-      const jikanRes = await axiosInstance.get(`${JIKAN_BASE}/anime`, {
-        params: { q, limit: 1 }
-      });
-      if (jikanRes.data && jikanRes.data.data && jikanRes.data.data.length > 0) {
-        const malId = jikanRes.data.data[0].mal_id;
-        if (malId) {
-          // Fetch specific episode exactly
-          try {
-            const epRes = await axiosInstance.get(`${JIKAN_BASE}/anime/${malId}/episodes/${episodeNumber}`);
-            if (epRes.data && epRes.data.data) {
-              const epData = epRes.data.data;
-              matchedTitle = epData.title || epData.title_romanji || epData.title_japanese;
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('getEpisodeTitle timeout')), 3500)
+    );
+    const fetchPromise = (async () => {
+      let matchedTitle = null;
+
+      // 1. Try Anime365 first if ID is present
+      if (anime365Id) {
+        try {
+          const Anime365Service = require('./Anime365Service.cjs');
+          const seriesDetails = await Anime365Service.getSeriesByID(anime365Id);
+          if (seriesDetails && seriesDetails.episodes && Array.isArray(seriesDetails.episodes)) {
+            const targetEp = seriesDetails.episodes.find(ep => 
+              String(ep.episode) === String(episodeNumber) || 
+              ep.episodeInt === episodeNumber
+            );
+            if (targetEp) {
+              matchedTitle = targetEp.title || targetEp.episodeTitle || targetEp.titleRussian || targetEp.titleRomaji;
               if (matchedTitle) {
-                console.log(`[Episode Title] Found on Jikan for ep ${episodeNumber}: ${matchedTitle}`);
+                console.log(`[Episode Title] Found on Anime365 for ep ${episodeNumber}: ${matchedTitle}`);
                 return matchedTitle;
               }
             }
-          } catch (e) {
-            // Direct fetch sometimes fails if Jikan hasn't mapped the direct endpoint, fallback silently
-            const episodesRes = await axiosInstance.get(`${JIKAN_BASE}/anime/${malId}/episodes`);
-            if (episodesRes.data && episodesRes.data.data && Array.isArray(episodesRes.data.data)) {
-              const epData = episodesRes.data.data.find(ep => ep.mal_id === episodeNumber || ep.episode_id === episodeNumber);
-              if (epData) {
-                matchedTitle = epData.title || epData.title_romanji || epData.title_japanese;
-                if (matchedTitle) {
-                  console.log(`[Episode Title] Found on Jikan (from list) for ep ${episodeNumber}: ${matchedTitle}`);
-                  return matchedTitle;
+          }
+        } catch (e) {
+          console.error(`[Episode Title] Error getting from Anime365 (id: ${anime365Id}):`, e.message);
+        }
+      }
+
+      // 2. Try Jikan (MyAnimeList) fallback
+      try {
+        const q = originalTitle || title;
+        if (q) {
+          const jikanRes = await axiosInstance.get(`${JIKAN_BASE}/anime`, {
+            params: { q, limit: 1 }
+          });
+          if (jikanRes.data && jikanRes.data.data && jikanRes.data.data.length > 0) {
+            const malId = jikanRes.data.data[0].mal_id;
+            if (malId) {
+              // Fetch specific episode exactly
+              try {
+                const epRes = await axiosInstance.get(`${JIKAN_BASE}/anime/${malId}/episodes/${episodeNumber}`);
+                if (epRes.data && epRes.data.data) {
+                  const epData = epRes.data.data;
+                  matchedTitle = epData.title || epData.title_romanji || epData.title_japanese;
+                  if (matchedTitle) {
+                    console.log(`[Episode Title] Found on Jikan for ep ${episodeNumber}: ${matchedTitle}`);
+                    return matchedTitle;
+                  }
+                }
+              } catch (e) {
+                // Direct fetch sometimes fails if Jikan hasn't mapped the direct endpoint, fallback silently
+                const episodesRes = await axiosInstance.get(`${JIKAN_BASE}/anime/${malId}/episodes`);
+                if (episodesRes.data && episodesRes.data.data && Array.isArray(episodesRes.data.data)) {
+                  const epData = episodesRes.data.data.find(ep => ep.mal_id === episodeNumber || ep.episode_id === episodeNumber);
+                  if (epData) {
+                    matchedTitle = epData.title || epData.title_romanji || epData.title_japanese;
+                    if (matchedTitle) {
+                      console.log(`[Episode Title] Found on Jikan (from list) for ep ${episodeNumber}: ${matchedTitle}`);
+                      return matchedTitle;
+                    }
+                  }
                 }
               }
             }
           }
         }
+      } catch (err) {
+        console.error(`[Episode Title] Error fetching from Jikan for ${title}:`, err.message);
       }
-    }
-  } catch (err) {
-    console.error(`[Episode Title] Error fetching from Jikan for ${title}:`, err.message);
-  }
 
-  return null;
+      return null;
+    })();
+
+    return await Promise.race([fetchPromise, timeoutPromise]);
+  } catch (err) {
+    return null;
+  }
 }
 
 async function getEpisodesMetadata(title, originalTitle, anime365Id) {

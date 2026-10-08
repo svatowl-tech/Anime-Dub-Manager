@@ -1,0 +1,14 @@
+{
+  "id": "ep_123_1",
+  "projectId": "proj_123",
+  "number": 1,
+  "status": "UPLOAD",
+  "statusHistory": [
+    {
+      "status": "UPLOAD",
+      "timestamp": "2026-10-08T18:12:33.737Z"
+    }
+  ],
+  "updatedAt": "2026-10-08T18:12:33.737Z",
+  "createdAt": "2026-10-08T18:12:33.737Z"
+}
