@@ -29,6 +29,7 @@ jobs:
   prepare_release:
     name: Prepare GitHub Release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.get_version.outputs.version }}
       tag_name: ${{ steps.get_version.outputs.tag_name }}
@@ -89,6 +90,7 @@ jobs:
     name: Build AI Environment (${{ matrix.platform.name }})
     needs: prepare_release
     runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -155,6 +157,7 @@ jobs:
     name: Build (${{ matrix.platform.name }})
     needs: prepare_release
     runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -193,8 +196,8 @@ jobs:
       - name: Install Linux Build Dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libarchive-tools dpkg fakeroot rpm graphicsmagick icnsutils
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::ForceIPv4=true || true
+          sudo apt-get install -y -o Acquire::Retries=3 -o Acquire::http::Timeout=15 --no-install-recommends libarchive-tools dpkg fakeroot rpm graphicsmagick icnsutils || true
 
       - name: Install npm dependencies
         run: npm ci

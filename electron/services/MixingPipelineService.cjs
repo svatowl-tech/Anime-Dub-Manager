@@ -929,6 +929,23 @@ const MODULE_DATABASE = [
     ]
   },
   {
+    id: 'voicefixer_vocoder',
+    name: 'VoiceFixer TFGAN Neural Vocoder',
+    title: 'VoiceFixer TFGAN Neural Vocoder',
+    filename: 'model.ckpt-1490000_trimed.pt',
+    category: 'vocal_match',
+    description: 'Нейросетевой вокодер TFGAN для синтеза 44.1kHz формы волны модели VoiceFixer.',
+    size_mb: 130.0,
+    urls: [
+      'https://huggingface.co/cqchangm/voicefixer/resolve/main/model.ckpt-1490000_trimed.pt'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'pt',
+    engineArchitecture: 'TFGAN Vocoder'
+  },
+  {
     id: 'silence_gate',
     category: 'cleaning',
     defaultPrefix: 'gate_',
@@ -3739,6 +3756,7 @@ class MixingPipelineService {
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
     await fs.mkdir(uvrModelsDir, { recursive: true });
     const localModelFile = path.join(uvrModelsDir, 'vf.ckpt');
+    const localVocoderFile = path.join(uvrModelsDir, 'model.ckpt-1490000_trimed.pt');
 
     let modelInstalled = fsSync.existsSync(localModelFile);
     if (!modelInstalled && autoDownload) {
@@ -3756,6 +3774,22 @@ class MixingPipelineService {
         modelInstalled = fsSync.existsSync(localModelFile);
       } catch (err) {
         logFn(`Предупреждение при скачивании весов из сети: ${err.message}. Переход на встроенный локальный модуль Neural Harmonic Synthesizer.`, 'warn');
+      }
+    }
+
+    if (autoDownload && !fsSync.existsSync(localVocoderFile)) {
+      try {
+        await this.downloadUvrModel({
+          modelId: 'voicefixer_vocoder',
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              onProgress({ percent: Math.round(p.percent * 0.1), message: `Загрузка вокодера VoiceFixer: ${p.percent}%` });
+            }
+          },
+          onLog: logFn
+        });
+      } catch (vocErr) {
+        logFn(`Загрузка вокодера TFGAN пропущена (${vocErr.message}). Движок задействует адаптивный синтез.`, 'warn');
       }
     }
 

@@ -128,6 +128,9 @@ const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = 
   eqPresenceFreq: { min: 1000, max: 8000, step: 50 },
   eqPresenceGain: { min: -12.0, max: 12.0, step: 0.5 },
   eqLowpass: { min: 6000, max: 22000, step: 500 },
+  bodyGainDb: { min: -12.0, max: 12.0, step: 0.5 },
+  boxCutGainDb: { min: -12.0, max: 0.0, step: 0.5 },
+  airGainDb: { min: 0.0, max: 12.0, step: 0.5 },
   compThresholdDb: { min: -60, max: 0, step: 1 },
   compRatio: { min: 1, max: 10, step: 0.1 },
   compAttackMs: { min: 1, max: 50, step: 1 },
@@ -139,7 +142,8 @@ const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = 
   reverbWet: { min: 0.0, max: 1.0, step: 0.01 },
   reverbDry: { min: 0.0, max: 1.0, step: 0.01 },
   limiterThresholdDb: { min: -12.0, max: 0.0, step: 0.1 },
-  limiterReleaseMs: { min: 10, max: 300, step: 5 }
+  limiterReleaseMs: { min: 10, max: 300, step: 5 },
+  levelingSpeedMs: { min: 50, max: 1000, step: 25 }
 };
 
 export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelProps) {
@@ -1384,6 +1388,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     eqPresenceFreq: { label: 'Частота презенса речи (Presence)', unit: 'Гц' },
     eqPresenceGain: { label: 'Усиление презенса (Presence Gain)', unit: 'dB' },
     eqLowpass: { label: 'Lowpass срез верха (Air Guard)', unit: 'Гц' },
+    bodyGainDb: { label: 'Тело голоса (Body Warmth 250Hz)', unit: 'dB' },
+    boxCutGainDb: { label: 'Срез коробочного гула 500Hz', unit: 'dB' },
+    airGainDb: { label: 'Воздушный шелк (Air 12kHz)', unit: 'dB' },
     compThresholdDb: { label: 'Порог компрессора (Threshold)', unit: 'dB' },
     compRatio: { label: 'Степень сжатия (Ratio)', unit: ':1' },
     compAttackMs: { label: 'Атака компрессора (Attack)', unit: 'мс' },
@@ -1394,7 +1401,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     reverbDamping: { label: 'Демпфирование реверберации', unit: 'x' },
     reverbWet: { label: 'Уровень реверберации (Wet)', unit: 'x' },
     reverbDry: { label: 'Прямой сигнал (Dry)', unit: 'x' },
-    limiterThresholdDb: { label: 'Потолок лимитера (True-Peak)', unit: 'dBFS' }
+    limiterThresholdDb: { label: 'Потолок лимитера (True-Peak)', unit: 'dBFS' },
+    levelingSpeedMs: { label: 'Скорость реакции левелера', unit: 'мс' },
+    modelId: { label: 'Выбор модели / Алгоритма' },
+    modelName: { label: 'Выбор нейросетевой модели' }
   };
 
   const formatFileSize = (bytes?: number) => {
@@ -2053,17 +2063,129 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                             // String mode select
                             if (paramKey === 'mode') {
                               return (
-                                <div key={paramKey}>
+                                <div key={paramKey} className="col-span-2">
                                   <label className="text-[11px] text-neutral-400 block mb-1">
-                                    Режим (Mode):
+                                    Алгоритм нормализации / Режим:
                                   </label>
                                   <select
                                     value={val}
                                     onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
                                     className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
                                   >
-                                    <option value="loudnorm">EBU R128 (Loudnorm)</option>
-                                    <option value="dynaudnorm">Динамический (DynAudNorm)</option>
+                                    <option value="loudnorm">EBU R128 (-16 LUFS Стриминг)</option>
+                                    <option value="dynaudnorm">Динамический левелер (DynAudNorm)</option>
+                                    <option value="leveler_pro">Двухступенчатый левелер речи (Speech Leveler Pro)</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'modelId') {
+                              const isDenoise = step.moduleId === 'ultimate_denoiser' || step.moduleId.includes('denoise');
+                              return (
+                                <div key={paramKey} className="col-span-2">
+                                  <label className="text-[11px] text-purple-300 font-semibold block mb-1">
+                                    {isDenoise ? '⚡ Выбор движка / нейросети шумоподавления:' : '🎛 Выбор алгоритма De-Reverb / De-Echo:'}
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1.5 bg-neutral-900 border border-purple-800/60 rounded text-xs text-purple-200 font-medium"
+                                  >
+                                    {isDenoise ? (
+                                      <>
+                                        <option value="deepfilternet3">DeepFilterNet 3 ONNX (Перцептивный нейросетевой AI)</option>
+                                        <option value="uvr_denoise_foxjoy">VR-DeNoise FoxJoy (Вокальный спектральный)</option>
+                                        <option value="uvr_denoise_full">UVR-DeNoise Full (Глубокое подавление гула и шипения)</option>
+                                        <option value="uvr_denoise_lite">VR-DeNoise Lite (Легкая быстрая очистка)</option>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <option value="reverb_foxjoy">Reverb HQ FoxJoy (MDX-Net Spatial Inversion)</option>
+                                        <option value="uvr_deecho_normal">UVR De-Echo Normal (Мягкое снятие отражений)</option>
+                                        <option value="uvr_deecho_aggressive">UVR De-Echo Aggressive (Пустая комната / плитка)</option>
+                                        <option value="mdx_dereverb_room">MDX Room DeReverb (Устранение коробочного гула)</option>
+                                        <option value="vst-spectral-dereverb">Spectral De-Reverb (Native C++ DSP, 0ms лаг)</option>
+                                      </>
+                                    )}
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'modelName') {
+                              return (
+                                <div key={paramKey} className="col-span-2">
+                                  <label className="text-[11px] text-purple-300 font-semibold block mb-1">
+                                    👑 Нейросетевая модель сепарации:
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1.5 bg-neutral-900 border border-purple-800/60 rounded text-xs text-purple-200 font-medium"
+                                  >
+                                    <option value="mel_band_roformer_vocals">Mel-Band Roformer Vocals (SOTA Pure Vocals)</option>
+                                    <option value="bs_roformer_viperx">BS-Roformer Viperx (Кинематографический)</option>
+                                    <option value="htdemucs_ft">HTDemucs v4 Fine-Tuned (4 Изолированных стема)</option>
+                                    <option value="htdemucs_vocals_bgm">HTDemucs 2-Стема (Вокал + Фонограмма)</option>
+                                    <option value="uvr_mdx_voc_ft">UVR-MDX-NET Voc_FT (Золотой стандарт вокала)</option>
+                                    <option value="uvr_mdx_inst_hq3">UVR-MDX-NET Inst_HQ_3 (Чистый минус M&E)</option>
+                                    <option value="kim_vocal_2">Kim Vocal 2 (Для плотных миксов)</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'roomSizeEstimate') {
+                              return (
+                                <div key={paramKey}>
+                                  <label className="text-[11px] text-neutral-400 block mb-1">
+                                    Размер помещения:
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
+                                  >
+                                    <option value="small">Малая комната / кабина</option>
+                                    <option value="medium">Стандартная жилая комната</option>
+                                    <option value="large">Большой зал / просторное помещение</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'lowCutSlope') {
+                              return (
+                                <div key={paramKey}>
+                                  <label className="text-[11px] text-neutral-400 block mb-1">
+                                    Крутизна среза (Slope):
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
+                                  >
+                                    <option value="12dB/oct">12 dB/окт (Мягкий естественный спад)</option>
+                                    <option value="24dB/oct">24 dB/окт (Крутой срез Butterworth)</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'detectionMode') {
+                              return (
+                                <div key={paramKey}>
+                                  <label className="text-[11px] text-neutral-400 block mb-1">
+                                    Детектор уровня:
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
+                                  >
+                                    <option value="rms">RMS (Энергетический сглаженный)</option>
+                                    <option value="peak">Peak (Мгновенный пиковый)</option>
                                   </select>
                                 </div>
                               );
@@ -2923,48 +3045,65 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             </div>
 
             <div className="space-y-2.5 max-h-[60vh] overflow-y-auto pr-1">
-              {moduleDatabase.map((modDef) => (
-                <div
-                  key={modDef.id}
-                  className="p-3.5 bg-neutral-950/60 hover:bg-neutral-800/60 border border-neutral-800 rounded-xl flex items-center justify-between gap-3 transition"
-                >
-                  <div className="space-y-1 truncate">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-neutral-100">{modDef.name || modDef.title}</span>
-                      <span className="text-[10px] px-1.5 py-0.2 bg-neutral-800 text-purple-300 font-mono rounded border border-neutral-700">
-                        {modDef.defaultPrefix}
-                      </span>
-                      <span className="text-[10px] text-neutral-500 uppercase">{modDef.category}</span>
-                      {modDef.filename && (
-                        <span className="text-[10px] px-1.5 py-0.2 bg-purple-950/60 text-purple-300 font-mono rounded border border-purple-800/40">
-                          {modDef.filename} ({modDef.size_mb || 28.5} МБ)
+              {moduleDatabase.map((modDef) => {
+                const isUltimate = modDef.isUltimate || ['voice_master_strip', 'ultimate_denoiser', 'ultimate_dereverb', 'ultimate_separation', 'ultimate_loudness'].includes(modDef.id);
+                return (
+                  <div
+                    key={modDef.id}
+                    className={`p-3.5 border rounded-xl flex items-center justify-between gap-3 transition ${
+                      isUltimate 
+                        ? 'bg-purple-950/30 hover:bg-purple-900/40 border-purple-800/70 shadow-md'
+                        : 'bg-neutral-950/60 hover:bg-neutral-800/60 border-neutral-800'
+                    }`}
+                  >
+                    <div className="space-y-1 truncate">
+                      <div className="flex items-center gap-2">
+                        {isUltimate && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-500/20 text-amber-300 rounded border border-amber-500/40 tracking-wider uppercase flex items-center gap-1">
+                            <Sparkles className="w-2.5 h-2.5" />
+                            <span>All-In-One</span>
+                          </span>
+                        )}
+                        <span className={`text-xs font-semibold ${isUltimate ? 'text-purple-200' : 'text-neutral-100'}`}>
+                          {modDef.name || modDef.title}
                         </span>
-                      )}
-                      {modDef.presets && (
-                        <span className="text-[10px] px-1.5 py-0.2 bg-purple-950/60 text-purple-300 rounded border border-purple-800/50">
-                          {modDef.presets.length} пресета
+                        <span className="text-[10px] px-1.5 py-0.2 bg-neutral-800 text-purple-300 font-mono rounded border border-neutral-700">
+                          {modDef.defaultPrefix}
                         </span>
+                        <span className="text-[10px] text-neutral-500 uppercase">{modDef.category}</span>
+                        {modDef.filename && (
+                          <span className="text-[10px] px-1.5 py-0.2 bg-purple-950/60 text-purple-300 font-mono rounded border border-purple-800/40">
+                            {modDef.filename} ({modDef.size_mb || 28.5} МБ)
+                          </span>
+                        )}
+                        {modDef.presets && (
+                          <span className="text-[10px] px-1.5 py-0.2 bg-purple-950/60 text-purple-300 rounded border border-purple-800/50">
+                            {modDef.presets.length} пресета
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-neutral-400 leading-relaxed">
+                        {modDef.description}
+                      </p>
+                      {modDef.recommended_for && (
+                        <p className="text-[10px] text-amber-400/90 pt-0.5">
+                          💡 {modDef.recommended_for}
+                        </p>
                       )}
                     </div>
-                    <p className="text-[11px] text-neutral-400 leading-relaxed">
-                      {modDef.description}
-                    </p>
-                    {modDef.recommended_for && (
-                      <p className="text-[10px] text-amber-400/90 pt-0.5">
-                        💡 {modDef.recommended_for}
-                      </p>
-                    )}
-                  </div>
 
-                  <button
-                    onClick={() => handleAddModuleFromDatabase(modDef)}
-                    className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shrink-0 transition"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>Добавить</span>
-                  </button>
-                </div>
-              ))}
+                    <button
+                      onClick={() => handleAddModuleFromDatabase(modDef)}
+                      className={`px-3 py-1.5 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shrink-0 transition ${
+                        isUltimate ? 'bg-purple-600 hover:bg-purple-500 font-bold shadow-sm' : 'bg-neutral-800 hover:bg-neutral-700'
+                      }`}
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Добавить</span>
+                    </button>
+                  </div>
+                );
+              })}
             </div>
 
             <div className="flex justify-end pt-2 border-t border-neutral-800">

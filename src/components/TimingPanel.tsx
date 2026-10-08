@@ -35,7 +35,16 @@ import {
   Settings,
   Loader2,
   ShieldCheck,
-  Radio
+  Radio,
+  Search,
+  Wand2,
+  Crosshair,
+  Zap,
+  AlertCircle,
+  CheckCheck,
+  Copy,
+  HelpCircle,
+  Cpu
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Episode, Track, SubtitleLine, RoleAssignment } from '../types';
@@ -550,7 +559,51 @@ export interface AudioClip {
   rawSourceStartSec?: number; // Detected start before any manual trim/expansion
   rawSourceEndSec?: number;   // Detected end before any manual trim/expansion
   isSelfOverlap?: boolean;    // Intentional parallel layer between 2 tracks of same dubber
+  isIntentionalOverlap?: boolean; // Intentional overlap specified in original subtitles
   sourceAudioTrackId?: string; // Track ID of audio buffer if spliced from fix track
+  sourceAudioPath?: string;    // Direct file path on disk for export / mixing
+  // Two-Stage Auto-Timing Problem Tracking
+  timingIssue?: 'overlap' | 'desync' | 'orphan' | null;
+  timingIssueText?: string;
+  targetSubStartSec?: number;
+  targetSubEndSec?: number;
+  timeDiffSec?: number;       // Difference in seconds from subtitle start (positive = late, negative = early)
+  overlappingClipId?: string;
+}
+
+export type TimingIssueType = 'overlap' | 'desync' | 'missing' | 'orphan';
+
+export interface TimingIssue {
+  id: string;
+  type: TimingIssueType;
+  trackId: string;
+  dubberName: string;
+  characterName: string;
+  clipId?: string;
+  timeSec: number;
+  durationSec?: number;
+  subText?: string;
+  subStartSec?: number;
+  subEndSec?: number;
+  timeDiffSec?: number;
+  overlapDurationSec?: number;
+  overlappingClipId?: string;
+  overlappingDubber?: string;
+  whisperText?: string;
+  whisperMatchScore?: number;
+  description: string;
+  isResolved?: boolean;
+}
+
+export interface MissingSubtitleMarker {
+  id: string;
+  subId: string;
+  trackId: string;
+  dubberName: string;
+  characterName: string;
+  startSec: number;
+  endSec: number;
+  text: string;
 }
 
 export interface StitchedFixMarker {
@@ -593,6 +646,12 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [isSilenceRemoved, setIsSilenceRemoved] = useState<boolean>(false);
   const [isFixesStitched, setIsFixesStitched] = useState<boolean>(false);
   const [isAutoTimingDone, setIsAutoTimingDone] = useState<boolean>(false);
+  const [timingIssues, setTimingIssues] = useState<TimingIssue[]>([]);
+  const [missingSubtitles, setMissingSubtitles] = useState<MissingSubtitleMarker[]>([]);
+  const [isTimingAnalyzed, setIsTimingAnalyzed] = useState<boolean>(false);
+  const [isIssuesDrawerOpen, setIsIssuesDrawerOpen] = useState<boolean>(false);
+  const [activeIssueFilter, setActiveIssueFilter] = useState<'all' | 'overlap' | 'desync' | 'missing' | 'orphan'>('all');
+  const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isImporting, setIsImporting] = useState<boolean>(false);
   const [importProgress, setImportProgress] = useState<number>(0);
@@ -639,6 +698,95 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   } | null>(null);
 
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+
+  // Audio upload helper for missing phrases
+  const missingFileInputRef = useRef<HTMLInputElement>(null);
+  const [activeMissingMarker, setActiveMissingMarker] = useState<MissingSubtitleMarker | null>(null);
+
+  const handleTriggerUploadMissing = (marker: MissingSubtitleMarker) => {
+    setActiveMissingMarker(marker);
+    if (missingFileInputRef.current) {
+      missingFileInputRef.current.value = '';
+      missingFileInputRef.current.click();
+    }
+  };
+
+  const handleMissingFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !activeMissingMarker) return;
+    const marker = activeMissingMarker;
+
+    try {
+      setIsLoading(true);
+      setStatusMessage(`Загрузка аудиофайла «${file.name}» для «${marker.characterName}»...`);
+      const arrayBuf = await file.arrayBuffer();
+      const sharedAudioCtx = getSharedAudioContext();
+      if (!sharedAudioCtx) throw new Error('AudioContext недоступен');
+
+      const audioBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
+      const audioKey = `${marker.trackId}_uploaded_${marker.id}`;
+      audioBuffersRef.current[audioKey] = audioBuf;
+
+      let savedPath = (file as any).path || '';
+      if (!savedPath) {
+        try {
+          const safeName = `uploaded_${marker.dubberName}_${Date.now()}_${file.name.replace(/[^\w.-]/g, '_')}`;
+          const targetDir = (currentEpisode as any)?.folderPath || 'temp_uploads';
+          const saveRes: any = await ipcSafe.invoke('save-file-buffer', {
+            buffer: Array.from(new Uint8Array(arrayBuf)),
+            targetDir,
+            fileName: safeName
+          });
+          if (saveRes?.path) {
+            savedPath = saveRes.path;
+          }
+        } catch (e) {}
+      }
+
+      const newClip: AudioClip = {
+        id: `clip_up_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        trackId: marker.trackId,
+        dubberName: marker.dubberName,
+        characterName: marker.characterName,
+        clipStartSec: marker.startSec,
+        durationSec: Number(audioBuf.duration.toFixed(3)),
+        sourceStartSec: 0,
+        sourceEndSec: Number(audioBuf.duration.toFixed(3)),
+        rawSourceStartSec: 0,
+        rawSourceEndSec: Number(audioBuf.duration.toFixed(3)),
+        sourceAudioTrackId: audioKey,
+        sourceAudioPath: savedPath || undefined,
+        text: marker.text,
+        volumePercent: 100,
+        offsetSec: 0,
+        timingIssue: null
+      };
+
+      setAudioClips(prev => ({
+        ...prev,
+        [marker.trackId]: [...(prev[marker.trackId] || []), newClip].sort((a, b) => a.clipStartSec - b.clipStartSec)
+      }));
+
+      setMissingSubtitles(prev => prev.filter(m => m.id !== marker.id));
+      setTimingIssues(prev => prev.filter(i => i.id !== `issue_missing_${marker.trackId}_${marker.subId}`));
+
+      addLog(`✓ Реплика «${marker.text.slice(0, 30)}» успешно загружена из «${file.name}» (${audioBuf.duration.toFixed(2)}с) на таймкод ${formatSeconds(marker.startSec)}`, 'success');
+      toast.success(`Реплика загружена и вставлена на ${formatSeconds(marker.startSec)}!`);
+    } catch (err: any) {
+      addLog(`❌ Ошибка загрузки реплики: ${err.message}`, 'error');
+      toast.error(`Ошибка загрузки аудио: ${err.message}`);
+    } finally {
+      setIsLoading(false);
+      setStatusMessage('');
+      setActiveMissingMarker(null);
+    }
+  };
+
+  const handleDismissMissing = (markerId: string) => {
+    setMissingSubtitles(prev => prev.filter(m => m.id !== markerId));
+    setTimingIssues(prev => prev.filter(i => !i.id.includes(markerId)));
+    toast.success('Пропущенная реплика скрыта с таймлайна');
+  };
 
   const addLog = useCallback((msg: string, level: 'info' | 'success' | 'warn' | 'error' = 'info') => {
     const time = new Date().toLocaleTimeString('ru-RU');
@@ -1890,28 +2038,37 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     }
   };
 
-  // PIPELINE STEP 5: "Автотайминг" — Whisper ASR phrase transcription and subtitle alignment
-  // - Прогоняет дорожки дабберов через Виспер
-  // - К каждой отдельной фразе на таймлайне прописывает, что говорится через Виспер
-  // - Сопоставляет распознанный текст Виспера с дорогой субтитров
-  // - Подтягивает фразы к значениям на дороге субтитров
-  const handleAutoTimingAndCollisions = async () => {
+  const jumpToTime = useCallback((timeSec: number) => {
+    if (timelineContainerRef.current) {
+      const targetPx = Math.max(0, timeSec * zoomLevel - 250);
+      timelineContainerRef.current.scrollTo({ left: targetPx, behavior: 'smooth' });
+    }
+    setCurrentTime(Math.max(0, timeSec));
+  }, [zoomLevel]);
+
+  // ---------------------------------------------------------------------------
+  // PIPELINE STEP 5 — TWO-STAGE AUTO-TIMING & TARGETED DIAGNOSTICS
+  // ---------------------------------------------------------------------------
+  // ЭТАП 1: АНАЛИЗ ПРОБЛЕМ
+  // Проверяет наезды (коллизии), рассинхроны (раньше/позже субтитра) и пропущенные фразы.
+  // Для висящих в воздухе фраз подключает Whisper, распознает текст и ищет в субтитрах.
+  const handleAnalyzeTiming = async () => {
     if (tracks.length === 0) return;
     try {
       setIsLoading(true);
-      setStatusMessage('Автотайминг: подготовка и распознавание Whisper...');
-      addLog('Запуск автотайминга: прогон дорожек дабберов через Whisper (модель tiny)...', 'info');
+      setStatusMessage('Этап 1: Анализ таймингов и поиск проблем...');
+      addLog('Запуск Этапа 1: глубокий анализ наездов, рассинхронов и пропущенных реплик...', 'info');
 
       let currentClips = { ...audioClips };
 
-      // Ensure silence is cut before auto-timing
+      // Ensure silence is cut into audio clips if not yet done
       const hasUncutTracks = tracks.some(t => {
         const c = currentClips[t.id];
         return !c || c.length <= 1;
       });
 
       if (!isSilenceRemoved || hasUncutTracks) {
-        setStatusMessage('Удаление тишины перед распознаванием Whisper...');
+        setStatusMessage('Удаление тишины и нарезка речевых интервалов...');
         for (const track of tracks) {
           let audioBuf = audioBuffersRef.current[track.id];
           if (!audioBuf && track.filePath) {
@@ -1962,30 +2119,46 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         setIsSilenceRemoved(true);
       }
 
-      const updatedClips = { ...currentClips };
+      const updatedClips: Record<string, AudioClip[]> = {};
+      const newIssues: TimingIssue[] = [];
+      const newMissingMarkers: MissingSubtitleMarker[] = [];
       const newCollisions: VoiceCollisionMarker[] = [];
-      let alignedCount = 0;
 
-      // Process each track with Whisper and match against track subtitles
+      // Pass 1: Identify orphan clips (> 3.5s away from unassigned subtitles) and run Whisper for them
+      const orphanClipsByTrack: Record<string, AudioClip[]> = {};
       for (const track of tracks) {
-        const dubberName = track.participant || track.dubberName || 'Даббер';
-        const clips = updatedClips[track.id] || [];
+        const clips = currentClips[track.id] || [];
         const trSubs = trackSubLinesMap[track.id] || [];
+        const orphans: AudioClip[] = [];
 
-        if (clips.length === 0) continue;
+        clips.forEach(clip => {
+          const cStart = clip.clipStartSec + (clip.offsetSec || 0);
+          const hasNearbySub = trSubs.some(s => Math.abs(cStart - s.startSec) <= 3.5);
+          if (!hasNearbySub && !clip.recognizedText) {
+            orphans.push(clip);
+          }
+        });
+        if (orphans.length > 0) {
+          orphanClipsByTrack[track.id] = orphans;
+        }
+      }
 
-        setStatusMessage(`Whisper: распознавание речи «${dubberName}» (${clips.length} фраз)...`);
-        addLog(`🎙 Whisper (модель: tiny, язык: ru): распознавание ${clips.length} фраз для «${dubberName}»...`, 'info');
+      // Run Whisper for orphan clips if any exist
+      const orphanTranscriptionMap: Record<string, string> = {};
+      for (const track of tracks) {
+        const orphans = orphanClipsByTrack[track.id];
+        if (!orphans || orphans.length === 0) continue;
 
-        // Prepare clips payload for Whisper
-        const whisperPayload = clips.map(c => ({
+        setStatusMessage(`Whisper: распознавание висящих в воздухе фраз «${track.participant || track.dubberName}» (${orphans.length} фраз)...`);
+        addLog(`🎙 Whisper: анализ ${orphans.length} висящих в воздухе фраз для «${track.participant || track.dubberName}»...`, 'info');
+
+        const whisperPayload = orphans.map(c => ({
           id: c.id,
           startSec: c.sourceStartSec,
           endSec: c.sourceEndSec,
           hint: c.text
         }));
 
-        const transcriptionMap: Record<string, string> = {};
         try {
           const resp: any = await ipcSafe.invoke('timing-whisper-transcribe-clips', {
             audioFilePath: track.filePath,
@@ -1996,85 +2169,244 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           if (resp && Array.isArray(resp.results)) {
             resp.results.forEach((r: any) => {
               if (r.id && r.text) {
-                transcriptionMap[r.id] = r.text.trim();
+                orphanTranscriptionMap[r.id] = r.text.trim();
               }
             });
           }
         } catch (wErr: any) {
-          console.warn('[Whisper AutoTiming] IPC error:', wErr);
+          console.warn('[Whisper AutoTiming Orphans] IPC error:', wErr);
         }
+      }
 
-        // Step 2 & 3: Assign Whisper recognized text, match against subtitle track, and pull/snap to subtitle start
+      // Pass 2: Match clips, identify Desync & Missing & Orphans
+      for (const track of tracks) {
+        const dubberName = track.participant || track.dubberName || 'Даббер';
+        const characterName = track.character || track.characterName || 'Персонаж';
+        const clips = currentClips[track.id] || [];
+        const trSubs = trackSubLinesMap[track.id] || [];
+
         const assignedSubIndices = new Set<number>();
+        const mappedClips: AudioClip[] = [];
 
-        updatedClips[track.id] = clips.map((clip, cIdx) => {
-          // Write what Whisper recognized into the clip
-          const recognized = transcriptionMap[clip.id] || clip.text || '';
-          clip.recognizedText = recognized;
+        for (let cIdx = 0; cIdx < clips.length; cIdx++) {
+          const clip = { ...clips[cIdx] };
+          const cStart = clip.clipStartSec + (clip.offsetSec || 0);
 
-          if (trSubs.length === 0) {
-            return clip;
+          // If Whisper transcribed this clip earlier
+          if (orphanTranscriptionMap[clip.id]) {
+            clip.recognizedText = orphanTranscriptionMap[clip.id];
           }
 
           let bestSub: SubtitleLine | null = null;
           let bestSubIdx = -1;
           let bestScore = -1;
+          let matchedByWhisper = false;
 
-          // Compare recognized speech against expected subtitles on the subtitle track
-          for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
-            if (assignedSubIndices.has(sIdx)) continue;
-            const sub = trSubs[sIdx];
-            const textSim = calculateTextSimilarity(recognized, sub.text);
-
-            // Time difference between original speech clip and subtitle line
-            const timeDiff = Math.abs(clip.clipStartSec - sub.startSec);
-            const timeProximity = Math.max(0, 1 - (timeDiff / 90)); // Soft bonus within 90s
-
-            // Combined scoring: text match is primary (75%), time proximity is secondary (25%)
-            const score = (textSim * 0.75) + (timeProximity * 0.25);
-
-            if (score > bestScore && (textSim >= 0.20 || timeDiff < 6.0)) {
-              bestScore = score;
-              bestSub = sub;
-              bestSubIdx = sIdx;
+          // 1. Text match with Whisper (if available) across all character subtitles
+          if (clip.recognizedText) {
+            for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
+              if (assignedSubIndices.has(sIdx)) continue;
+              const sub = trSubs[sIdx];
+              const sim = calculateTextSimilarity(clip.recognizedText, sub.text);
+              if (sim > bestScore && sim >= 0.35) {
+                bestScore = sim;
+                bestSub = sub;
+                bestSubIdx = sIdx;
+                matchedByWhisper = true;
+              }
             }
           }
 
-          // Fallback if no text match found: match nearest unassigned subtitle within 12s
+          // 2. If no text match found, search closest unassigned subtitle in time window
           if (!bestSub) {
             let minDiff = Infinity;
             for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
               if (assignedSubIndices.has(sIdx)) continue;
               const sub = trSubs[sIdx];
-              const diff = Math.abs(clip.clipStartSec - sub.startSec);
-              if (diff < minDiff && diff < 12.0) {
+              const diff = Math.abs(cStart - sub.startSec);
+              if (diff < minDiff && diff < 8.0) {
                 minDiff = diff;
                 bestSub = sub;
                 bestSubIdx = sIdx;
-                bestScore = 0.5;
               }
             }
           }
 
+          // Check if this clip was far away from subtitles (> 3.5s)
+          const isFarFromSub = !trSubs.some(s => Math.abs(cStart - s.startSec) <= 3.5);
+
           if (bestSub && bestSubIdx !== -1) {
             assignedSubIndices.add(bestSubIdx);
-            alignedCount++;
-            addLog(`🎯 Фраза #${cIdx + 1} «${recognized.slice(0, 25)}» пододвинута к субтитру [${formatSeconds(bestSub.startSec)}]: «${bestSub.text.slice(0, 30)}» (сходство: ${Math.round(bestScore * 100)}%)`, 'info');
-            return {
-              ...clip,
-              clipStartSec: bestSub.startSec,
-              offsetSec: 0,
-              text: bestSub.text,
-              recognizedText: recognized,
-              whisperMatchedScore: Math.round(bestScore * 100)
-            };
+            const timeDiff = cStart - bestSub.startSec; // Positive = late, negative = early
+            const absDiff = Math.abs(timeDiff);
+
+            clip.text = bestSub.text;
+            clip.targetSubStartSec = bestSub.startSec;
+            clip.targetSubEndSec = bestSub.endSec;
+            clip.timeDiffSec = Number(timeDiff.toFixed(2));
+            if (matchedByWhisper) {
+              clip.whisperMatchedScore = Math.round(bestScore * 100);
+            }
+
+            // Case A: Phrase was hanging in the air (orphan) and matched by Whisper
+            if (isFarFromSub && matchedByWhisper) {
+              clip.timingIssue = 'orphan';
+              clip.timingIssueText = `Висит в воздухе: Whisper «${clip.recognizedText?.slice(0, 20)}» ➔ найдена реплика [${formatSeconds(bestSub.startSec)}]`;
+
+              newIssues.push({
+                id: `issue_orphan_matched_${clip.id}`,
+                type: 'orphan',
+                trackId: track.id,
+                dubberName,
+                characterName,
+                clipId: clip.id,
+                timeSec: cStart,
+                durationSec: clip.durationSec,
+                subText: bestSub.text,
+                subStartSec: bestSub.startSec,
+                subEndSec: bestSub.endSec,
+                whisperText: clip.recognizedText,
+                whisperMatchScore: Math.round(bestScore * 100),
+                description: `Фраза висит в воздухе: Whisper «${clip.recognizedText}» ➔ привязана к субтитру «${bestSub.text.slice(0, 35)}» [${formatSeconds(bestSub.startSec)}] (сходство: ${Math.round(bestScore * 100)}%)`
+              });
+            }
+            // Case B: Phrase is in vicinity but has desync (|diff| >= 0.35s)
+            else if (absDiff >= 0.35) {
+              clip.timingIssue = 'desync';
+              clip.timingIssueText = timeDiff > 0 
+                ? `Опаздывает на +${absDiff.toFixed(2)}с относительно субтитра` 
+                : `Спешит на -${absDiff.toFixed(2)}с относительно субтитра`;
+
+              newIssues.push({
+                id: `issue_desync_${clip.id}`,
+                type: 'desync',
+                trackId: track.id,
+                dubberName,
+                characterName,
+                clipId: clip.id,
+                timeSec: cStart,
+                durationSec: clip.durationSec,
+                subText: bestSub.text,
+                subStartSec: bestSub.startSec,
+                subEndSec: bestSub.endSec,
+                timeDiffSec: Number(timeDiff.toFixed(2)),
+                description: timeDiff > 0
+                  ? `Фраза #${cIdx + 1} опаздывает на +${absDiff.toFixed(2)}с: «${bestSub.text.slice(0, 35)}»`
+                  : `Фраза #${cIdx + 1} спешит на -${absDiff.toFixed(2)}с: «${bestSub.text.slice(0, 35)}»`
+              });
+            } else {
+              // In perfect timing (< 0.35s diff) — untouched!
+              clip.timingIssue = null;
+              clip.timingIssueText = undefined;
+            }
+          } else {
+            // Case C: Orphan with no match in subtitles (extra sound/line)
+            clip.timingIssue = 'orphan';
+            clip.timingIssueText = clip.recognizedText 
+              ? `Висит в воздухе: Whisper «${clip.recognizedText.slice(0, 25)}»` 
+              : 'Висит в воздухе: вне субтитров';
+
+            newIssues.push({
+              id: `issue_orphan_${clip.id}`,
+              type: 'orphan',
+              trackId: track.id,
+              dubberName,
+              characterName,
+              clipId: clip.id,
+              timeSec: cStart,
+              durationSec: clip.durationSec,
+              whisperText: clip.recognizedText,
+              description: clip.recognizedText
+                ? `Фраза вне субтитров (Whisper: «${clip.recognizedText.slice(0, 30)}»)`
+                : `Фраза вне тайминга субтитров на ${formatSeconds(cStart)}`
+            });
           }
 
-          return clip;
-        });
+          mappedClips.push(clip);
+        }
+
+        // 3. Problem: Missing Subtitle Lines (есть в субтитрах, но нет на дорожке)
+        for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
+          if (!assignedSubIndices.has(sIdx)) {
+            const sub = trSubs[sIdx];
+            // Check if any clip covers this timeframe
+            const hasAudioCover = mappedClips.some(c => {
+              const cStart = c.clipStartSec + (c.offsetSec || 0);
+              const cEnd = cStart + c.durationSec;
+              return (cStart <= sub.endSec + 1.2 && cEnd >= sub.startSec - 1.2);
+            });
+
+            if (!hasAudioCover) {
+              newIssues.push({
+                id: `issue_missing_${track.id}_${sub.id || sIdx}`,
+                type: 'missing',
+                trackId: track.id,
+                dubberName,
+                characterName,
+                timeSec: sub.startSec,
+                durationSec: sub.endSec - sub.startSec,
+                subText: sub.text,
+                subStartSec: sub.startSec,
+                subEndSec: sub.endSec,
+                description: `Пропущена реплика «${characterName}»: «${sub.text.slice(0, 40)}» [${formatSeconds(sub.startSec)}]`
+              });
+
+              newMissingMarkers.push({
+                id: `missing_${track.id}_${sub.id ?? sIdx}`,
+                subId: String(sub.id ?? sIdx),
+                trackId: track.id,
+                dubberName,
+                characterName,
+                startSec: sub.startSec,
+                endSec: sub.endSec,
+                text: sub.text
+              });
+            }
+          }
+        }
+
+        updatedClips[track.id] = mappedClips;
       }
 
-      // 4. Detect voice collisions between different dubbers
+      // Pass 3: Problem: Overlaps / Collisions (Наезды фраз друг на друга)
+      // 3A. Intra-track overlaps (наезды фраз внутри одной дорожки)
+      for (const track of tracks) {
+        const clips = updatedClips[track.id] || [];
+        const sorted = [...clips].sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
+
+        for (let i = 0; i < sorted.length - 1; i++) {
+          const c1 = sorted[i];
+          const c2 = sorted[i + 1];
+          const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
+          const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
+
+          if (c1End > c2Start + 0.04) {
+            const overlapDur = c1End - c2Start;
+            c1.timingIssue = 'overlap';
+            c2.timingIssue = 'overlap';
+            c1.hasCollision = true;
+            c2.hasCollision = true;
+            c2.overlappingClipId = c1.id;
+            c1.overlappingClipId = c2.id;
+
+            newIssues.push({
+              id: `issue_overlap_intra_${c1.id}_${c2.id}`,
+              type: 'overlap',
+              trackId: track.id,
+              dubberName: c1.dubberName,
+              characterName: c1.characterName,
+              clipId: c2.id,
+              timeSec: c2Start,
+              durationSec: overlapDur,
+              overlapDurationSec: Number(overlapDur.toFixed(2)),
+              overlappingClipId: c1.id,
+              description: `Наезд внутри дорожки «${c1.dubberName}» (${overlapDur.toFixed(2)}с): «${c1.text.slice(0, 15)}» 💥 «${c2.text.slice(0, 15)}»`
+            });
+          }
+        }
+      }
+
+      // 3B. Inter-track collisions between different dubbers (ONLY when NOT specified in original subtitles!)
       const trackIds = Object.keys(updatedClips);
       for (let i = 0; i < trackIds.length; i++) {
         for (let j = i + 1; j < trackIds.length; j++) {
@@ -2093,7 +2425,31 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               const overlapEnd = Math.min(c1End, c2End);
               const overlapDur = overlapEnd - overlapStart;
 
-              if (overlapDur > 0.12) {
+              if (overlapDur > 0.08) {
+                // Check if original subtitles for these two phrases overlap in the script
+                const sub1 = trackSubLinesMap[trackIds[i]]?.find(s => 
+                  s.text === c1.text || (typeof c1.targetSubStartSec === 'number' && Math.abs(s.startSec - c1.targetSubStartSec) < 0.15)
+                );
+                const sub2 = trackSubLinesMap[trackIds[j]]?.find(s => 
+                  s.text === c2.text || (typeof c2.targetSubStartSec === 'number' && Math.abs(s.startSec - c2.targetSubStartSec) < 0.15)
+                );
+
+                let isSpecifiedInSubtitles = false;
+                if (sub1 && sub2) {
+                  const subOverlapStart = Math.max(sub1.startSec, sub2.startSec);
+                  const subOverlapEnd = Math.min(sub1.endSec, sub2.endSec);
+                  if (subOverlapEnd > subOverlapStart + 0.05) {
+                    isSpecifiedInSubtitles = true;
+                  }
+                }
+
+                // If specified in subtitles, this is intentional simultaneous dialogue! Not an issue!
+                if (isSpecifiedInSubtitles) {
+                  c1.isIntentionalOverlap = true;
+                  c2.isIntentionalOverlap = true;
+                  continue;
+                }
+
                 const normD1 = normalizeName(c1.dubberName).split(' ')[0];
                 const normD2 = normalizeName(c2.dubberName).split(' ')[0];
                 const isSameDubber = normD1 && normD1 === normD2;
@@ -2101,10 +2457,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 if (isSameDubber) {
                   c1.isSelfOverlap = true;
                   c2.isSelfOverlap = true;
-                  addLog(`🎙 Параллельный слой одного даббера «${c1.dubberName}» (${overlapDur.toFixed(2)}с): перекрытие сохранено`, 'info');
                 } else {
                   c1.hasCollision = true;
                   c2.hasCollision = true;
+                  c1.overlappingClipId = c2.id;
+                  c2.overlappingClipId = c1.id;
+                  if (!c1.timingIssue) c1.timingIssue = 'overlap';
+                  if (!c2.timingIssue) c2.timingIssue = 'overlap';
+
                   newCollisions.push({
                     id: `col_${c1.id}_${c2.id}`,
                     track1Id: trackIds[i],
@@ -2117,6 +2477,21 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                     endSec: overlapEnd,
                     overlapDurationSec: Number(overlapDur.toFixed(2))
                   });
+
+                  newIssues.push({
+                    id: `issue_overlap_inter_${c1.id}_${c2.id}`,
+                    type: 'overlap',
+                    trackId: trackIds[j],
+                    dubberName: c2.dubberName,
+                    characterName: c2.characterName,
+                    clipId: c2.id,
+                    timeSec: overlapStart,
+                    durationSec: overlapDur,
+                    overlapDurationSec: Number(overlapDur.toFixed(2)),
+                    overlappingClipId: c1.id,
+                    overlappingDubber: c1.dubberName,
+                    description: `Наезд голосов (не в субтитрах): «${c1.dubberName}» и «${c2.dubberName}» (${overlapDur.toFixed(2)}с) [${formatSeconds(overlapStart)}]`
+                  });
                 }
               }
             }
@@ -2125,22 +2500,299 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       }
 
       setAudioClips(updatedClips);
+      setTimingIssues(newIssues);
+      setMissingSubtitles(newMissingMarkers);
       setCollisions(newCollisions);
-      setIsAutoTimingDone(true);
+      setIsTimingAnalyzed(true);
+      setIsIssuesDrawerOpen(newIssues.length > 0);
 
-      addLog(`✓ Автотайминг по Висперу завершен! Пододвинуто ${alignedCount} фраз под субтитры. Наездов (коллизий): ${newCollisions.length}`, newCollisions.length > 0 ? 'warn' : 'success');
-      if (newCollisions.length > 0) {
-        toast.warning(`Автотайминг по Висперу выполнен! Фразы пододвинуты к субтитрам. Обнаружено ${newCollisions.length} наездов между дабберами для ручной доводки.`);
+      const overlapCount = newIssues.filter(i => i.type === 'overlap').length;
+      const desyncCount = newIssues.filter(i => i.type === 'desync').length;
+      const missingCount = newIssues.filter(i => i.type === 'missing').length;
+      const orphanCount = newIssues.filter(i => i.type === 'orphan').length;
+
+      addLog(`✓ Этап 1 (Анализ) завершен! Найдено проблем: наездов — ${overlapCount}, рассинхронов — ${desyncCount}, пропущенных — ${missingCount}, висящих в воздухе — ${orphanCount}.`, newIssues.length > 0 ? 'warn' : 'success');
+
+      if (newIssues.length === 0) {
+        toast.success('🎉 Анализ завершен! На дорожках нет ни одного наезда, рассинхрона или пропуска.');
       } else {
-        toast.success(`Автотайминг по Висперу выполнен! Все ${alignedCount} фраз точно пододвинуты к субтитрам.`);
+        toast.warning(`Найдено проблем: ${newIssues.length} (Наезды: ${overlapCount}, Рассинхрон: ${desyncCount}, Пропуски: ${missingCount}, Висящие: ${orphanCount}). Проверьте на таймлайне или примените «2. Точечный автотайминг».`, { duration: 6000 });
       }
     } catch (err: any) {
-      addLog(`❌ Ошибка автотайминга: ${err.message}`, 'error');
-      toast.error(`Ошибка автотайминга: ${err.message}`);
+      addLog(`❌ Ошибка этапа 1 (Анализ): ${err.message}`, 'error');
+      toast.error(`Ошибка анализа таймингов: ${err.message}`);
     } finally {
       setIsLoading(false);
       setStatusMessage('');
     }
+  };
+
+  // ---------------------------------------------------------------------------
+  // ЭТАП 2: ТОЧЕЧНЫЙ ХИРУРГИЧЕСКИЙ АВТОТАЙМИНГ
+  // Работает ТОЛЬКО с помеченными проблемами! Не трогает дорожки и фразы, которые уже в порядке.
+  // 1. Рассинхрон: пододвигает ТОЛЬКО смещенную фразу чисто механически к началу её субтитра.
+  // 2. Whisper Orphan: подставляет висевшую в воздухе фразу точно под найденный субтитр.
+  // 3. Наезды: точечно раздвигает только эти фразы (+0.04с буфер) ровно до прекращения пересечения.
+  // 4. Пропуски: остаются помеченными для отдельной записи/импорта через "+ Загрузить".
+  // ---------------------------------------------------------------------------
+  const handleApplyTargetedAutoTiming = async (typeFilter: 'all' | 'overlap' | 'desync' | 'orphan' = 'all') => {
+    if (tracks.length === 0) return;
+    try {
+      setIsLoading(true);
+      setStatusMessage('Этап 2: Точечное исправление помеченных проблем...');
+      addLog(`Запуск Этапа 2: точечный автотайминг (фильтр: ${typeFilter})...`, 'info');
+
+      const updatedClips = { ...audioClips };
+      let fixedDesyncCount = 0;
+      let fixedOverlapCount = 0;
+      let fixedOrphanCount = 0;
+
+      // 1. Точечное выравнивание рассинхрона (Desync) — чисто механически на начало субтитра
+      if (typeFilter === 'all' || typeFilter === 'desync') {
+        for (const trackId of Object.keys(updatedClips)) {
+          const clips = updatedClips[trackId] || [];
+          updatedClips[trackId] = clips.map(clip => {
+            if (clip.timingIssue === 'desync' && typeof clip.targetSubStartSec === 'number') {
+              fixedDesyncCount++;
+              addLog(`🎯 Точечно пододвинута фраза «${clip.text.slice(0, 25)}» с ${formatSeconds(clip.clipStartSec)} -> ${formatSeconds(clip.targetSubStartSec)} под субтитр`, 'info');
+              return {
+                ...clip,
+                clipStartSec: clip.targetSubStartSec,
+                offsetSec: 0,
+                timingIssue: null,
+                timingIssueText: undefined,
+                timeDiffSec: 0
+              };
+            }
+            return clip;
+          });
+        }
+      }
+
+      // 2. Точечное сопоставление висящих в воздухе фраз (Orphan с Whisper) — подставить на место по субтитрам
+      if (typeFilter === 'all' || typeFilter === 'orphan') {
+        for (const trackId of Object.keys(updatedClips)) {
+          const clips = updatedClips[trackId] || [];
+          updatedClips[trackId] = clips.map(clip => {
+            if (clip.timingIssue === 'orphan' && typeof clip.targetSubStartSec === 'number') {
+              fixedOrphanCount++;
+              addLog(`🎙 Whisper: точечно привязана фраза «${clip.recognizedText || clip.text}» к субтитру на [${formatSeconds(clip.targetSubStartSec)}]`, 'info');
+              return {
+                ...clip,
+                clipStartSec: clip.targetSubStartSec,
+                offsetSec: 0,
+                timingIssue: null,
+                timingIssueText: undefined,
+                timeDiffSec: 0
+              };
+            }
+            return clip;
+          });
+        }
+      }
+
+      // 3. Точечное разведение наездов (Overlap) — раздвигает ровно до прекращения пересечения
+      if (typeFilter === 'all' || typeFilter === 'overlap') {
+        // 3A. Intra-track overlaps
+        for (const trackId of Object.keys(updatedClips)) {
+          const clips = [...(updatedClips[trackId] || [])];
+          clips.sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
+
+          for (let i = 0; i < clips.length - 1; i++) {
+            const c1 = clips[i];
+            const c2 = clips[i + 1];
+            const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
+            const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
+
+            if (c1End > c2Start) {
+              // Попытаться слегка пододвинуть c1 назад к ее субтитру, если c1 затянулась
+              if (typeof c1.targetSubStartSec === 'number' && c1.clipStartSec > c1.targetSubStartSec) {
+                const prevLimit = i > 0 ? ((clips[i - 1].clipStartSec + (clips[i - 1].offsetSec || 0)) + clips[i - 1].durationSec + 0.04) : 0;
+                const canMoveBack = Math.max(0, c1.clipStartSec - Math.max(c1.targetSubStartSec, prevLimit));
+                if (canMoveBack > 0.01) {
+                  c1.clipStartSec = Number((c1.clipStartSec - canMoveBack).toFixed(3));
+                  c1.offsetSec = 0;
+                }
+              }
+              const newC1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
+              if (newC1End > (c2.clipStartSec + (c2.offsetSec || 0))) {
+                const shift = (newC1End - (c2.clipStartSec + (c2.offsetSec || 0))) + 0.04;
+                c2.clipStartSec = Number((c2.clipStartSec + shift).toFixed(3));
+                c2.offsetSec = 0;
+              }
+              c1.hasCollision = false;
+              c2.hasCollision = false;
+              c1.timingIssue = null;
+              c2.timingIssue = null;
+              c1.timingIssueText = undefined;
+              c2.timingIssueText = undefined;
+              fixedOverlapCount++;
+              addLog(`↔️ Точечно раздвинут наезд в «${c1.dubberName}»: фраза #${i + 2} сдвинута на безопасное расстояние (${formatSeconds(c2.clipStartSec)})`, 'info');
+            }
+          }
+          updatedClips[trackId] = clips;
+        }
+
+        // 3B. Inter-track collisions
+        for (const col of collisions) {
+          const tr1 = updatedClips[col.track1Id] || [];
+          const tr2 = updatedClips[col.track2Id] || [];
+          const c1 = tr1.find(c => {
+            const s = c.clipStartSec + (c.offsetSec || 0);
+            const e = s + c.durationSec;
+            return s < col.endSec && e > col.startSec;
+          });
+          const c2 = tr2.find(c => {
+            const s = c.clipStartSec + (c.offsetSec || 0);
+            const e = s + c.durationSec;
+            return s < col.endSec && e > col.startSec;
+          });
+
+          if (c1 && c2) {
+            const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
+            const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
+            if (c1End > c2Start) {
+              const shift = (c1End - c2Start) + 0.04;
+              c2.clipStartSec = Number((c2.clipStartSec + shift).toFixed(3));
+              c2.offsetSec = 0;
+              c1.hasCollision = false;
+              c2.hasCollision = false;
+              c1.timingIssue = null;
+              c2.timingIssue = null;
+              fixedOverlapCount++;
+              addLog(`↔️ Точечно раздвинут наезд между «${col.dubber1Name}» и «${col.dubber2Name}» (+${shift.toFixed(2)}с)`, 'info');
+            }
+          }
+        }
+      }
+
+      setAudioClips(updatedClips);
+      setIsAutoTimingDone(true);
+
+      // Re-filter remaining unresolved issues
+      const remainingIssues = timingIssues.filter(issue => {
+        if (issue.type === 'desync' && (typeFilter === 'all' || typeFilter === 'desync')) return false;
+        if (issue.type === 'overlap' && (typeFilter === 'all' || typeFilter === 'overlap')) return false;
+        if (issue.type === 'orphan' && (typeFilter === 'all' || typeFilter === 'orphan')) {
+          const targetClip = Object.values(updatedClips).flat().find(c => c.id === issue.clipId);
+          return targetClip?.timingIssue === 'orphan';
+        }
+        return true;
+      });
+      setTimingIssues(remainingIssues);
+      setCollisions([]);
+
+      const totalFixed = fixedDesyncCount + fixedOverlapCount + fixedOrphanCount;
+      addLog(`✓ Этап 2 (Точечный автотайминг) завершен! Исправлено проблем: ${totalFixed} (рассинхронов: ${fixedDesyncCount}, наездов: ${fixedOverlapCount}, сопоставлено Whisper: ${fixedOrphanCount}). Остальные фразы сохранены 1:1!`, 'success');
+      toast.success(`Точечный автотайминг применен! Исправлено: ${totalFixed} проблем. Непроблемные фразы сохранены 1:1.`);
+    } catch (err: any) {
+      addLog(`❌ Ошибка этапа 2 (Точечный автотайминг): ${err.message}`, 'error');
+      toast.error(`Ошибка применения автотайминга: ${err.message}`);
+    } finally {
+      setIsLoading(false);
+      setStatusMessage('');
+    }
+  };
+
+  // Quick surgical fixer for a single desynced clip or orphan clip
+  const handleFixSingleClip = (trackId: string, clipId: string) => {
+    setAudioClips(prev => {
+      const trClips = prev[trackId] || [];
+      const updated = trClips.map(c => {
+        if (c.id === clipId && typeof c.targetSubStartSec === 'number') {
+          addLog(`🎯 Фраза «${c.text.slice(0, 25)}» точечно пододвинута под субтитр на ${formatSeconds(c.targetSubStartSec)}`, 'success');
+          return {
+            ...c,
+            clipStartSec: c.targetSubStartSec,
+            offsetSec: 0,
+            timingIssue: null,
+            timingIssueText: undefined,
+            timeDiffSec: 0
+          };
+        }
+        return c;
+      });
+      return { ...prev, [trackId]: updated };
+    });
+    setTimingIssues(prev => prev.filter(i => i.clipId !== clipId));
+    toast.success('Фраза точечно пододвинута к субтитру!');
+  };
+
+  // Quick surgical fixer for an overlap collision (intra-track or inter-track)
+  const handleResolveSingleOverlap = (trackId: string, clipId: string) => {
+    setAudioClips(prev => {
+      const updated = { ...prev };
+      let targetClip: AudioClip | null = null;
+      let targetTrackId = trackId;
+
+      for (const [tId, clips] of Object.entries(updated)) {
+        const found = clips.find(c => c.id === clipId);
+        if (found) {
+          targetClip = found;
+          targetTrackId = tId;
+          break;
+        }
+      }
+      if (!targetClip) return prev;
+
+      // Find overlapping partner clip
+      let collidingClip: AudioClip | null = null;
+      if (targetClip.overlappingClipId) {
+        for (const clips of Object.values(updated)) {
+          const found = clips.find(c => c.id === targetClip!.overlappingClipId);
+          if (found) {
+            collidingClip = found;
+            break;
+          }
+        }
+      }
+
+      if (collidingClip) {
+        const colEnd = (collidingClip.clipStartSec + (collidingClip.offsetSec || 0)) + collidingClip.durationSec;
+        const curStart = targetClip.clipStartSec + (targetClip.offsetSec || 0);
+        if (colEnd > curStart) {
+          const shift = (colEnd - curStart) + 0.04;
+          targetClip.clipStartSec = Number((targetClip.clipStartSec + shift).toFixed(3));
+          targetClip.offsetSec = 0;
+          targetClip.hasCollision = false;
+          collidingClip.hasCollision = false;
+          targetClip.timingIssue = null;
+          collidingClip.timingIssue = null;
+          addLog(`↔️ Раздвинут наезд: «${targetClip.text}» сдвинута на +${shift.toFixed(2)}с`, 'success');
+        }
+      } else {
+        const trClips = [...(updated[targetTrackId] || [])];
+        trClips.sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
+        const idx = trClips.findIndex(c => c.id === clipId);
+        if (idx > 0) {
+          const prevClip = trClips[idx - 1];
+          const prevEnd = (prevClip.clipStartSec + (prevClip.offsetSec || 0)) + prevClip.durationSec;
+          const curStart = targetClip.clipStartSec + (targetClip.offsetSec || 0);
+          if (prevEnd > curStart) {
+            const shift = (prevEnd - curStart) + 0.04;
+            targetClip.clipStartSec = Number((targetClip.clipStartSec + shift).toFixed(3));
+            targetClip.offsetSec = 0;
+            targetClip.hasCollision = false;
+            prevClip.hasCollision = false;
+            targetClip.timingIssue = null;
+            prevClip.timingIssue = null;
+            addLog(`↔️ Раздвинут наезд внутри дорожки: «${targetClip.text}» сдвинута на +${shift.toFixed(2)}с`, 'success');
+          }
+        }
+        updated[targetTrackId] = trClips;
+      }
+
+      return updated;
+    });
+    setTimingIssues(prev => prev.filter(i => i.clipId !== clipId));
+    toast.success('Наезд точечно раздвинут!');
+  };
+
+  // Quick clipboard helper for missing phrases
+  const handleCopyMissingTimecode = (text: string, startSec: number, endSec: number) => {
+    const formatted = `[${formatSeconds(startSec)} - ${formatSeconds(endSec)}] ${text}`;
+    navigator.clipboard?.writeText(formatted);
+    toast.success(`Таймкод скопирован: ${formatted}`);
   };
 
   const handleSetRoleVolume = (trackId: string, volMultiplier: number) => {
@@ -2287,6 +2939,19 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     if (!currentEpisode) return;
     try {
       setIsExportingToMixing(true);
+      setStatusMessage('Рендеринг оттаймленных мастер-дорожек по дабберам для Сведения...');
+      addLog('🎬 Старт экспорта в Сведение: рендеринг всех готовых дорожек каждого даббера...', 'info');
+
+      // Ensure every clip has sourceAudioPath resolved from its track if not already set
+      const enrichedAudioClips: Record<string, AudioClip[]> = {};
+      for (const trId of Object.keys(audioClips)) {
+        const tr = tracks.find(t => t.id === trId);
+        const clips = audioClips[trId] || [];
+        enrichedAudioClips[trId] = clips.map(c => ({
+          ...c,
+          sourceAudioPath: c.sourceAudioPath || tr?.filePath
+        }));
+      }
 
       // Explicitly resolve canonical target directory for mixing (Episode folder -> Сведения)
       let targetDir = '';
@@ -2363,7 +3028,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         episode: currentEpisode,
         targetDir: targetDir || undefined,
         tracks,
-        audioClips,
+        audioClips: enrichedAudioClips,
         volumes,
         timingMetadata
       });
@@ -2497,6 +3162,15 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
   return (
     <div className="flex flex-col h-full bg-[#08090d] text-neutral-100 overflow-hidden font-sans">
+      {/* Hidden file picker for uploading missing audio lines */}
+      <input 
+        ref={missingFileInputRef} 
+        type="file" 
+        accept="audio/*,.wav,.mp3,.aac,.m4a,.flac,.ogg" 
+        className="hidden" 
+        onChange={handleMissingFileSelected} 
+      />
+
       {/* Top Header Bar */}
       <header className="bg-neutral-900 border-b border-neutral-800 p-3 px-4 shrink-0 flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -2572,15 +3246,62 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             <span>4. Применить фиксы</span>
           </button>
 
-          <button
-            onClick={handleAutoTimingAndCollisions}
-            disabled={isLoading || tracks.length === 0}
-            className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 shadow-lg shadow-indigo-600/20 transition"
-            title="5. Автотайминг: ASR Whisper распознавание речи каждой фразы и привязка к субтитрам"
-          >
-            <Activity className="w-4 h-4" />
-            <span>5. Автотайминг (Whisper)</span>
-          </button>
+          {/* Two-Stage Auto-Timing: 1. Анализ -> 2. Точечный автотайминг */}
+          <div className="flex items-center gap-1.5 bg-neutral-900/95 p-1 rounded-xl border border-neutral-700/80 shadow-md">
+            <button
+              onClick={handleAnalyzeTiming}
+              disabled={isLoading || tracks.length === 0}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+                isTimingAnalyzed
+                  ? 'bg-indigo-950/90 text-indigo-200 border border-indigo-700/70 shadow-inner'
+                  : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200'
+              }`}
+              title="Этап 1: Анализ проблем — находит наезды (не указанные в сабах), рассинхроны (раньше/позже сабов) и пропуски. Подключает Whisper для висящих в воздухе фраз."
+            >
+              {isLoading && statusMessage.includes('Этап 1') ? (
+                <Loader2 className="w-3.5 h-3.5 text-indigo-400 animate-spin" />
+              ) : (
+                <Search className="w-3.5 h-3.5 text-indigo-400" />
+              )}
+              <span>1. Анализ проблем (Whisper)</span>
+              {timingIssues.length > 0 && (
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                  {timingIssues.length}
+                </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => handleApplyTargetedAutoTiming('all')}
+              disabled={isLoading || tracks.length === 0 || timingIssues.filter(i => i.type !== 'missing').length === 0}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 shadow transition ${
+                timingIssues.filter(i => i.type !== 'missing').length > 0
+                  ? 'bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500 text-white shadow-amber-600/25 ring-1 ring-amber-400/30'
+                  : 'bg-neutral-800/60 text-neutral-500 cursor-not-allowed'
+              }`}
+              title="Этап 2: Точечный хирургический автотайминг — точечно раздвигает только наезды ровно до прекращения пересечения, пододвигает не попадающие фразы под субтитры, не затрагивая остальные дорожки"
+            >
+              {isLoading && statusMessage.includes('Этап 2') ? (
+                <Loader2 className="w-3.5 h-3.5 text-amber-300 animate-spin" />
+              ) : (
+                <Zap className="w-3.5 h-3.5 text-amber-300" />
+              )}
+              <span>2. Точечный автотайминг</span>
+            </button>
+          </div>
+
+          {timingIssues.length > 0 && (
+            <button
+              onClick={() => setIsIssuesDrawerOpen(!isIssuesDrawerOpen)}
+              className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition ${
+                isIssuesDrawerOpen ? 'bg-amber-950/90 text-amber-300 border-amber-600 shadow-lg shadow-amber-950/50' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border-neutral-700'
+              }`}
+              title="Панель найденных проблем тайминга"
+            >
+              <AlertTriangle className="w-4 h-4 text-amber-400 animate-pulse" />
+              <span>Проблемы ({timingIssues.length})</span>
+            </button>
+          )}
 
           <button
             onClick={() => setIsLogDrawerOpen(!isLogDrawerOpen)}
@@ -2611,6 +3332,197 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </button>
         </div>
       </header>
+
+      {/* Two-Stage Auto-Timing Diagnostic & Targeted Fixes Panel */}
+      {isIssuesDrawerOpen && timingIssues.length > 0 && (
+        <div className="bg-[#0b0e18] border-b border-indigo-900/60 px-4 py-2.5 shrink-0 shadow-2xl flex flex-col gap-2 animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <span className="font-bold text-xs text-neutral-100 flex items-center gap-1.5">
+                <Search className="w-4 h-4 text-amber-400" />
+                Диагностика таймингов: найдено проблем ({timingIssues.length})
+              </span>
+
+              {/* Filter tabs */}
+              <div className="flex items-center gap-1 bg-neutral-900/90 p-0.5 rounded-lg border border-neutral-800 text-[10px]">
+                <button
+                  onClick={() => setActiveIssueFilter('all')}
+                  className={`px-2 py-0.5 rounded ${activeIssueFilter === 'all' ? 'bg-indigo-600 text-white font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+                >
+                  Все ({timingIssues.length})
+                </button>
+                <button
+                  onClick={() => setActiveIssueFilter('overlap')}
+                  className={`px-2 py-0.5 rounded ${activeIssueFilter === 'overlap' ? 'bg-red-600 text-white font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+                >
+                  💥 Наезды ({timingIssues.filter(i => i.type === 'overlap').length})
+                </button>
+                <button
+                  onClick={() => setActiveIssueFilter('desync')}
+                  className={`px-2 py-0.5 rounded ${activeIssueFilter === 'desync' ? 'bg-amber-600 text-white font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+                >
+                  ⏳ Рассинхрон ({timingIssues.filter(i => i.type === 'desync').length})
+                </button>
+                <button
+                  onClick={() => setActiveIssueFilter('missing')}
+                  className={`px-2 py-0.5 rounded ${activeIssueFilter === 'missing' ? 'bg-amber-700 text-white font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+                >
+                  ⚠️ Пропуски ({timingIssues.filter(i => i.type === 'missing').length})
+                </button>
+                <button
+                  onClick={() => setActiveIssueFilter('orphan')}
+                  className={`px-2 py-0.5 rounded ${activeIssueFilter === 'orphan' ? 'bg-cyan-700 text-white font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+                >
+                  🎙️ Вне сабов ({timingIssues.filter(i => i.type === 'orphan').length})
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Bulk Actions */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleApplyTargetedAutoTiming('all')}
+                disabled={timingIssues.filter(i => i.type !== 'missing').length === 0}
+                className="px-2.5 py-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 text-white text-[11px] font-bold rounded-lg flex items-center gap-1 shadow transition"
+                title="Точечно раздвинуть все наезды и выровнять все рассинхроны под субтитры"
+              >
+                <Zap className="w-3 h-3" />
+                <span>Исправить все точечно</span>
+              </button>
+              <button
+                onClick={() => handleApplyTargetedAutoTiming('overlap')}
+                disabled={timingIssues.filter(i => i.type === 'overlap').length === 0}
+                className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[10px] font-semibold rounded-lg flex items-center gap-1 border border-neutral-700 transition"
+              >
+                <MoveHorizontal className="w-3 h-3 text-red-400" />
+                <span>Только наезды</span>
+              </button>
+              <button
+                onClick={() => handleApplyTargetedAutoTiming('desync')}
+                disabled={timingIssues.filter(i => i.type === 'desync').length === 0}
+                className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-[10px] font-semibold rounded-lg flex items-center gap-1 border border-neutral-700 transition"
+              >
+                <Crosshair className="w-3 h-3 text-amber-400" />
+                <span>Только рассинхрон</span>
+              </button>
+              <button
+                onClick={() => setIsIssuesDrawerOpen(false)}
+                className="p-1 text-neutral-400 hover:text-neutral-200 rounded"
+                title="Скрыть панель"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Issue Cards Carousel */}
+          <div className="flex items-center gap-2 overflow-x-auto py-1 max-h-36 scrollbar-thin">
+            {timingIssues
+              .filter(i => activeIssueFilter === 'all' || i.type === activeIssueFilter)
+              .map(issue => (
+                <div
+                  key={issue.id}
+                  onClick={() => jumpToTime(issue.timeSec)}
+                  className={`shrink-0 w-80 p-2 rounded-xl border text-xs flex flex-col justify-between cursor-pointer transition select-none ${
+                    issue.type === 'overlap'
+                      ? 'bg-red-950/40 border-red-800/60 hover:border-red-500'
+                      : issue.type === 'desync'
+                      ? 'bg-amber-950/40 border-amber-800/60 hover:border-amber-500'
+                      : issue.type === 'missing'
+                      ? 'bg-neutral-900 border-amber-600/60 hover:border-amber-400'
+                      : 'bg-cyan-950/40 border-cyan-800/60 hover:border-cyan-500'
+                  }`}
+                >
+                  <div className="flex items-center justify-between text-[10px] mb-1">
+                    <span className="font-bold flex items-center gap-1 truncate">
+                      {issue.type === 'overlap' && <span className="bg-red-600 text-white px-1 py-0.2 rounded font-black text-[8px]">НАЕЗД</span>}
+                      {issue.type === 'desync' && <span className="bg-amber-600 text-neutral-950 px-1 py-0.2 rounded font-black text-[8px]">РАССИНХРОН</span>}
+                      {issue.type === 'missing' && <span className="bg-amber-500 text-neutral-950 px-1 py-0.2 rounded font-black text-[8px]">ПРОПУСК</span>}
+                      {issue.type === 'orphan' && <span className="bg-cyan-600 text-white px-1 py-0.2 rounded font-black text-[8px]">ВНЕ САБОВ</span>}
+                      <span className="text-neutral-200 truncate">{issue.dubberName} ({issue.characterName})</span>
+                    </span>
+                    <span className="font-mono text-neutral-400 shrink-0">
+                      ⏱ {formatSeconds(issue.timeSec)}
+                    </span>
+                  </div>
+
+                  <p className="text-[11px] text-neutral-300 line-clamp-2 leading-tight mb-1.5" title={issue.description}>
+                    {issue.description}
+                  </p>
+
+                  <div className="flex items-center justify-between pt-1 border-t border-neutral-800/60">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); jumpToTime(issue.timeSec); }}
+                      className="text-[10px] text-indigo-400 hover:text-indigo-200 flex items-center gap-0.5"
+                    >
+                      <Crosshair className="w-2.5 h-2.5" />
+                      <span>Показать</span>
+                    </button>
+
+                    {issue.type === 'desync' && issue.clipId && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleFixSingleClip(issue.trackId, issue.clipId!); }}
+                        className="px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold rounded flex items-center gap-1 shadow"
+                        title="Поставить фразу точно под субтитр"
+                      >
+                        <Crosshair className="w-2.5 h-2.5" />
+                        <span>К субтитру</span>
+                      </button>
+                    )}
+
+                    {issue.type === 'orphan' && issue.clipId && issue.subStartSec !== undefined && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleFixSingleClip(issue.trackId, issue.clipId!); }}
+                        className="px-2 py-0.5 bg-cyan-600 hover:bg-cyan-500 text-white text-[10px] font-bold rounded flex items-center gap-1 shadow"
+                        title="Поставить фразу к найденному Whisper субтитру"
+                      >
+                        <Crosshair className="w-2.5 h-2.5" />
+                        <span>К субтитру</span>
+                      </button>
+                    )}
+
+                    {issue.type === 'overlap' && issue.clipId && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleResolveSingleOverlap(issue.trackId, issue.clipId!); }}
+                        className="px-2 py-0.5 bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold rounded flex items-center gap-1 shadow"
+                      >
+                        <MoveHorizontal className="w-2.5 h-2.5" />
+                        <span>Раздвинуть</span>
+                      </button>
+                    )}
+
+                    {issue.type === 'missing' && (
+                      <div className="flex items-center gap-1">
+                        {missingSubtitles.find(m => m.trackId === issue.trackId && Math.abs(m.startSec - issue.timeSec) < 0.2) && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              const marker = missingSubtitles.find(m => m.trackId === issue.trackId && Math.abs(m.startSec - issue.timeSec) < 0.2);
+                              if (marker) handleTriggerUploadMissing(marker);
+                            }}
+                            className="px-2 py-0.5 bg-amber-600 hover:bg-amber-500 text-white text-[10px] font-bold rounded flex items-center gap-1 shadow transition"
+                            title="Загрузить аудиофайл реплики"
+                          >
+                            <Download className="w-2.5 h-2.5" />
+                            <span>Загрузить</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleCopyMissingTimecode(issue.subText || '', issue.subStartSec || 0, issue.subEndSec || 0); }}
+                          className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 text-[10px] font-semibold rounded flex items-center gap-1 border border-neutral-700"
+                          title="Скопировать таймкод фразы"
+                        >
+                          <Copy className="w-2.5 h-2.5" />
+                          <span>Таймкод</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {/* Dynamic Calibration Info Banner */}
       {Object.keys(calibrationsByTrack).length > 0 && (
@@ -3156,9 +4068,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                             onMouseDown={(e) => handleClipMouseDown(e, track.id, clip)}
                             className={`absolute top-1 bottom-1 rounded-md border flex flex-col justify-between overflow-hidden shadow-lg transition-all cursor-grab active:cursor-grabbing select-none ${
                               clip.hasCollision
-                                ? 'bg-red-950/90 border-red-500 shadow-red-500/20'
+                                ? 'bg-red-950/90 border-red-500 shadow-red-500/20 ring-1 ring-red-500/50'
                                 : clip.isSelfOverlap
                                 ? 'bg-purple-950/90 border-purple-400 shadow-purple-500/20'
+                                : clip.timingIssue === 'desync'
+                                ? 'bg-amber-950/90 border-amber-400 ring-1 ring-amber-400/50 shadow-amber-500/25'
+                                : clip.timingIssue === 'orphan'
+                                ? 'bg-cyan-950/90 border-cyan-400 ring-1 ring-cyan-400/50 shadow-cyan-500/25'
                                 : clip.isFix
                                 ? 'bg-amber-950/90 border-amber-400 shadow-amber-500/20'
                                 : isSelected
@@ -3197,13 +4113,27 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                                 ? 'bg-amber-900/60 border-amber-500/40 text-amber-200' 
                                 : clip.hasCollision
                                 ? 'bg-red-900/60 border-red-500/40 text-red-200'
+                                : clip.timingIssue === 'desync'
+                                ? 'bg-amber-900/60 border-amber-500/40 text-amber-200'
+                                : clip.timingIssue === 'orphan'
+                                ? 'bg-cyan-900/60 border-cyan-500/40 text-cyan-200'
                                 : clip.isSelfOverlap
                                 ? 'bg-purple-900/60 border-purple-500/40 text-purple-200'
                                 : 'bg-indigo-950/80 border-indigo-800/50 text-indigo-200'
                             }`}>
                               <div className="flex items-center gap-1 truncate font-bold">
                                 {clip.isFix && <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black">ФИКС</span>}
-                                {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">КОЛЛИЗИЯ</span>}
+                                {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">НАЕЗД</span>}
+                                {clip.timingIssue === 'desync' && (
+                                  <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black shrink-0" title={clip.timingIssueText}>
+                                    {clip.timeDiffSec && clip.timeDiffSec > 0 ? `⏳ +${clip.timeDiffSec}с` : `⏳ ${clip.timeDiffSec || ''}с`}
+                                  </span>
+                                )}
+                                {clip.timingIssue === 'orphan' && (
+                                  <span className="bg-cyan-500 text-neutral-950 px-1 rounded text-[8px] font-black shrink-0" title={clip.timingIssueText}>
+                                    🎙 ВНЕ САБОВ
+                                  </span>
+                                )}
                                 {clip.isSelfOverlap && <span className="bg-purple-500 text-white px-1 rounded text-[8px] font-black">СЛОЙ</span>}
                                 {clip.recognizedText && (
                                   <span className="bg-emerald-600/90 text-white px-1 rounded text-[7.5px] font-mono font-bold" title={`Виспер: "${clip.recognizedText}"`}>
@@ -3240,7 +4170,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                                 sourceEndSec={clip.sourceEndSec}
                                 width={Math.round(clipWidthPx)}
                                 height={68}
-                                color={clip.hasCollision ? '#ef4444' : clip.isSelfOverlap ? '#c084fc' : clip.isFix ? '#fbbf24' : '#818cf8'}
+                                color={clip.hasCollision ? '#ef4444' : clip.timingIssue === 'desync' ? '#f59e0b' : clip.timingIssue === 'orphan' ? '#06b6d4' : clip.isSelfOverlap ? '#c084fc' : clip.isFix ? '#fbbf24' : '#818cf8'}
                                 volumePercent={clip.volumePercent}
                               />
                               {clip.recognizedText && clip.recognizedText !== clip.text && (
@@ -3250,9 +4180,36 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                               )}
                             </div>
 
-                            {/* Clip Bottom Action Tools (Split, Expand & Nudge) */}
+                            {/* Clip Bottom Action Tools (Split, Expand & Nudge, Surgical Fixes) */}
                             <div className="px-1 py-0.5 bg-black/50 flex items-center justify-between opacity-0 hover:opacity-100 transition text-[8px] z-20">
                               <div className="flex items-center gap-0.5">
+                                {clip.timingIssue === 'desync' && typeof clip.targetSubStartSec === 'number' && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleFixSingleClip(track.id, clip.id); }}
+                                    className="px-1.5 py-0.5 bg-amber-600 hover:bg-amber-500 text-white rounded font-bold transition shadow mr-0.5"
+                                    title={`Поставить фразу точно на субтитр (${formatSeconds(clip.targetSubStartSec)})`}
+                                  >
+                                    🎯 К субтитру
+                                  </button>
+                                )}
+                                {clip.hasCollision && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleResolveSingleOverlap(track.id, clip.id); }}
+                                    className="px-1.5 py-0.5 bg-red-600 hover:bg-red-500 text-white rounded font-bold transition shadow mr-0.5"
+                                    title="Раздвинуть наезд"
+                                  >
+                                    ↔️ Раздвинуть
+                                  </button>
+                                )}
+                                {clip.timingIssue === 'orphan' && typeof clip.targetSubStartSec === 'number' && (
+                                  <button
+                                    onClick={(e) => { e.stopPropagation(); handleFixSingleClip(track.id, clip.id); }}
+                                    className="px-1.5 py-0.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded font-bold transition shadow mr-0.5"
+                                    title={`Подставить к найденному субтитру (${formatSeconds(clip.targetSubStartSec)})`}
+                                  >
+                                    🎯 К сабу
+                                  </button>
+                                )}
                                 <button
                                   onClick={(e) => { e.stopPropagation(); handleSplitClip(track.id, clip.id); }}
                                   className="px-1 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded border border-neutral-700 font-bold"
@@ -3302,6 +4259,63 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                           </div>
                         );
                       })}
+
+                      {/* Interactive Missing Subtitle Placeholder Slots on this Track Lane */}
+                      {missingSubtitles
+                        .filter(m => m.trackId === track.id)
+                        .map(marker => {
+                          const markerLeftPx = marker.startSec * zoomLevel;
+                          const markerWidthPx = Math.max(72, (marker.endSec - marker.startSec) * zoomLevel);
+                          return (
+                            <div
+                              key={marker.id}
+                              onClick={(e) => { e.stopPropagation(); jumpToTime(marker.startSec); }}
+                              className="absolute top-1 bottom-1 rounded-md border-2 border-dashed border-amber-500/80 bg-amber-950/40 hover:bg-amber-900/50 z-20 flex flex-col justify-between p-1.5 shadow-lg shadow-amber-950/40 transition select-none cursor-pointer group backdrop-blur-[2px]"
+                              style={{
+                                left: `${markerLeftPx}px`,
+                                width: `${markerWidthPx}px`
+                              }}
+                              title={`Пропущена реплика «${marker.characterName}» [${formatSeconds(marker.startSec)} - ${formatSeconds(marker.endSec)}]:\n«${marker.text}»\nНажмите для загрузки реплики отдельно`}
+                            >
+                              <div className="flex items-center justify-between gap-1 text-[8.5px] font-mono leading-none">
+                                <span className="flex items-center gap-1 font-bold text-amber-300">
+                                  <AlertTriangle className="w-2.5 h-2.5 text-amber-400 shrink-0" />
+                                  <span className="bg-amber-500/20 text-amber-300 px-1 py-0.5 rounded border border-amber-500/40">ПРОПУСК</span>
+                                  <span>{formatSeconds(marker.startSec)}</span>
+                                </span>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleDismissMissing(marker.id); }}
+                                  className="p-0.5 text-neutral-400 hover:text-neutral-200 rounded opacity-0 group-hover:opacity-100 transition"
+                                  title="Скрыть этот пропуск"
+                                >
+                                  <X className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+
+                              <div className="text-[10px] text-amber-100 font-sans font-medium truncate my-auto px-0.5 opacity-90" title={marker.text}>
+                                💬 «{marker.text}»
+                              </div>
+
+                              <div className="flex items-center justify-between gap-1 pt-0.5 border-t border-amber-800/40 text-[8px]">
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleTriggerUploadMissing(marker); }}
+                                  className="px-1.5 py-0.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded flex items-center gap-1 shadow transition"
+                                  title="Загрузить аудиофайл реплики отдельно"
+                                >
+                                  <Download className="w-2.5 h-2.5" />
+                                  <span>+ Загрузить</span>
+                                </button>
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); handleCopyMissingTimecode(marker.text, marker.startSec, marker.endSec); }}
+                                  className="px-1 py-0.5 bg-neutral-900/80 hover:bg-neutral-800 text-amber-300 rounded border border-amber-700/60 font-mono transition"
+                                  title="Скопировать таймкод в буфер обмена"
+                                >
+                                  <Copy className="w-2.5 h-2.5" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
                     </div>
                   </div>
                 </div>

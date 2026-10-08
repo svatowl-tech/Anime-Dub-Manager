@@ -376,16 +376,37 @@ function registerExportHandlers(getData, mainWindow) {
 
         const clips = (clipsMap[tr.id] || []).filter(c => !c.isDeleted);
         for (const c of clips) {
+          const phraseSrc = (c.sourceAudioPath && require('fs').existsSync(c.sourceAudioPath))
+            ? c.sourceAudioPath
+            : (sourceFile || primarySourceFile);
+
+          if (phraseSrc && require('fs').existsSync(phraseSrc) && !primarySourceFile) {
+            primarySourceFile = phraseSrc;
+          }
+
+          const targetStartSec = Number((c.clipStartSec + (c.offsetSec || 0)).toFixed(3));
+          const phraseDuration = Number((c.durationSec || Math.max(0.1, (c.sourceEndSec - c.sourceStartSec))).toFixed(3));
+          const targetEndSec = Number((targetStartSec + phraseDuration).toFixed(3));
+
           phrases.push({
-            sourceAudioPath: c.sourceAudioPath || sourceFile || primarySourceFile,
-            sourceStartSec: c.sourceStartSec,
-            sourceEndSec: c.sourceEndSec,
-            targetStartSec: Number((c.clipStartSec + (c.offsetSec || 0)).toFixed(2)),
-            targetEndSec: Number((c.clipStartSec + (c.offsetSec || 0) + c.durationSec).toFixed(2)),
-            durationSec: Number(c.durationSec.toFixed(2)),
+            id: c.id,
+            sourceAudioPath: phraseSrc,
+            sourceStartSec: c.sourceStartSec ?? 0,
+            sourceEndSec: c.sourceEndSec ?? phraseDuration,
+            targetStartSec,
+            targetEndSec,
+            durationSec: phraseDuration,
             volumePercent: c.volumePercent ?? Math.round((volsMap[tr.id] ?? 1.0) * 100),
             isFix: c.isFix || tr.id.includes('_fix_')
           });
+        }
+      }
+
+      // If primarySourceFile was not found on tracks, check phrases
+      if (!primarySourceFile || !require('fs').existsSync(primarySourceFile)) {
+        const foundFromClip = phrases.find(p => p.sourceAudioPath && require('fs').existsSync(p.sourceAudioPath));
+        if (foundFromClip) {
+          primarySourceFile = foundFromClip.sourceAudioPath;
         }
       }
 
@@ -393,7 +414,13 @@ function registerExportHandlers(getData, mainWindow) {
       phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
 
       if (phrases.length > 0 && primarySourceFile && require('fs').existsSync(primarySourceFile)) {
-        await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, phrases, outFilePath, { targetDir: exportDir, timingMetadata });
+        log.info(`[ExportController] Рендеринг оттаймленной дорожки для даббера «${nick}» (${phrases.length} фраз)...`);
+        await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, phrases, outFilePath, { 
+          targetDir: exportDir, 
+          timingMetadata,
+          renderFromClips: true,
+          exactTimelineRender: true
+        });
       } else if (primarySourceFile && require('fs').existsSync(primarySourceFile)) {
         await fs.copyFile(primarySourceFile, outFilePath);
       }

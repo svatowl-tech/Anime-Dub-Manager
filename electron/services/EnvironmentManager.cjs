@@ -515,6 +515,38 @@ amp = _Amp()
   }
 
   /**
+   * Патчит устаревший импорт AudioMetaData в df/io.py для совместимости с TorchAudio 2.2+.
+   */
+  _ensureDeepFilterIntegrity(envDir) {
+    if (!envDir || !fs.existsSync(envDir)) return;
+    try {
+      const siteCandidates = [
+        path.join(envDir, 'Lib', 'site-packages'),
+        path.join(envDir, 'lib', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.10', 'site-packages'),
+        path.join(envDir, 'site-packages')
+      ];
+      for (const siteDir of siteCandidates) {
+        if (!fs.existsSync(siteDir)) continue;
+        const dfIo = path.join(siteDir, 'df', 'io.py');
+        if (fs.existsSync(dfIo)) {
+          const content = fs.readFileSync(dfIo, 'utf8');
+          if (content.includes('from torchaudio.backend.common import AudioMetaData')) {
+            const patched = content.replace(
+              'from torchaudio.backend.common import AudioMetaData',
+              'try:\n    from torchaudio import AudioMetaData\nexcept (ImportError, AttributeError):\n    from torchaudio.backend.common import AudioMetaData'
+            );
+            fs.writeFileSync(dfIo, patched, 'utf8');
+            log.info(`[EnvironmentManager] Патч df/io.py успешно применен: ${dfIo}`);
+          }
+        }
+      }
+    } catch (err) {
+      log.warn('[EnvironmentManager] Предупреждение при проверке df/io.py:', err);
+    }
+  }
+
+  /**
    * Возвращает папки site-packages внутри ai_env для проброса через PYTHONPATH.
    */
   getPythonSitePackagesDirs(customPythonPath = null) {

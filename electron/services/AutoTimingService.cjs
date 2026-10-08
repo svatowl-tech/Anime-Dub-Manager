@@ -1082,15 +1082,27 @@ class AutoTimingService {
       for (const p of phrases) {
         if (p.targetEndSec > maxSec) maxSec = p.targetEndSec;
       }
-      maxSec = Math.max(maxSec + 2.0, 10.0);
+      if (options.timingMetadata && Array.isArray(options.timingMetadata.phrases)) {
+        for (const p of options.timingMetadata.phrases) {
+          if (p.endSec > maxSec) maxSec = p.endSec;
+        }
+      }
+      if (options.totalDurationSec && options.totalDurationSec > maxSec) {
+        maxSec = options.totalDurationSec;
+      }
+      maxSec = Math.max(maxSec + 1.0, 5.0);
 
-      // Проверка на непрерывную таймлайн-запись
+      // Проверка на непрерывную таймлайн-запись:
+      // При экспорте из тайминга или явном рендеринге из оттаймленных клипов (renderFromClips / exactTimelineRender)
+      // ВСЕГДА рендерится чистый мастер-трек из готовых оттаймленных фраз (isTimelineTrack = false).
       let isTimelineTrack = false;
-      if (defaultDurationSec >= 45.0) {
-        isTimelineTrack = true;
-      } else if (phrases.length > 0) {
-        const span = Math.max(...phrases.map(p => p.sourceEndSec)) - Math.min(...phrases.map(p => p.sourceStartSec));
-        if (span > 40.0) isTimelineTrack = true;
+      if (!options.renderFromClips && !options.exactTimelineRender && options.preserveBackgroundAudio) {
+        if (defaultDurationSec >= 45.0) {
+          isTimelineTrack = true;
+        } else if (phrases.length > 0) {
+          const span = Math.max(...phrases.map(p => p.sourceEndSec)) - Math.min(...phrases.map(p => p.sourceStartSec));
+          if (span > 40.0) isTimelineTrack = true;
+        }
       }
 
       // 5. Инициализация временного выходного файла
@@ -1170,23 +1182,31 @@ class AutoTimingService {
             continue;
           }
 
-          const phraseTargetStart = p.targetStartSec - safetyPreSec;
-          const phraseDurationWithSafety = p.durationSec + safetyPreSec + safetyPostSec;
-          const phraseTargetEnd = phraseTargetStart + phraseDurationWithSafety;
+          const srcFdInfo = fdsMap.get(p.sourceAudioPath || defaultInputPath) || defaultFdInfo;
+          if (!srcFdInfo) continue;
+
+          // Расчет исходных границ считывания с учетом доступных пред- и пост-интервалов
+          const srcDurationSec = srcFdInfo.size / bytesPerSec;
+          const srcStart = typeof p.sourceStartSec === 'number' ? p.sourceStartSec : 0;
+          const srcEnd = typeof p.sourceEndSec === 'number' ? p.sourceEndSec : (srcStart + (p.durationSec || 1.0));
+          const trgStart = typeof p.targetStartSec === 'number' ? p.targetStartSec : 0;
+
+          const availablePreSec = Math.max(0, Math.min(safetyPreSec, srcStart, trgStart));
+          const availablePostSec = Math.max(0, Math.min(safetyPostSec, srcDurationSec - srcEnd));
+
+          const rawSrcStartSec = srcStart - availablePreSec;
+          const rawSrcEndSec = srcEnd + availablePostSec;
+          const totalPhraseDuration = Math.max(0, rawSrcEndSec - rawSrcStartSec);
+          const totalPhraseSamples = Math.floor(totalPhraseDuration * sampleRate);
+          if (totalPhraseSamples <= 0) continue;
+
+          const phraseTargetStart = trgStart - availablePreSec;
+          const phraseTargetEnd = phraseTargetStart + totalPhraseDuration;
 
           // Проверяем пересечение с текущим чанком
           if (phraseTargetEnd <= chunkStartSec || phraseTargetStart >= chunkEndSec) {
             continue;
           }
-
-          const srcFdInfo = fdsMap.get(p.sourceAudioPath || defaultInputPath) || defaultFdInfo;
-          if (!srcFdInfo) continue;
-
-          // Расчет исходных границ считывания
-          const rawSrcStartSec = Math.max(0, p.sourceStartSec - safetyPreSec);
-          const rawSrcEndSec = p.sourceEndSec + safetyPostSec;
-          const totalPhraseSamples = Math.floor((rawSrcEndSec - rawSrcStartSec) * sampleRate);
-          if (totalPhraseSamples <= 0) continue;
 
           // Расчет относительного смещения внутри чанка
           const overlapStartSec = Math.max(chunkStartSec, phraseTargetStart);

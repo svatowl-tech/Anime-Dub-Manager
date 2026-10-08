@@ -186,9 +186,16 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "--no-cache-dir"
     ])
 
-    # Create constraints file to prevent transitive upgrades of numpy and packaging
+    # Determine CPU wheel versioning
+    is_cpu_build = use_cpu_wheels and (is_win or is_linux)
+    torch_pkg = "torch==2.2.2+cpu" if is_cpu_build else "torch==2.2.2"
+    torchaudio_pkg = "torchaudio==2.2.2+cpu" if is_cpu_build else "torchaudio==2.2.2"
+
+    # Create constraints file to prevent transitive upgrades of numpy, packaging, torch, and torchaudio
     constraints_file = build_temp_dir / "constraints.txt"
     constraints_file.write_text(
+        "torch>=2.2.0,<2.3.0\n"
+        "torchaudio>=2.2.0,<2.3.0\n"
         "numpy==1.26.4\n"
         "packaging>=23.0,<24.0\n"
         "setuptools<70.0.0\n"
@@ -200,15 +207,16 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
 
     # 4. Install PyTorch & TorchAudio (Strictly version-matched 2.2.2)
     print("\n[STEP 3] Installing strictly matched PyTorch and TorchAudio (2.2.2)...")
-    if use_cpu_wheels and (is_win or is_linux):
+    if is_cpu_build:
         print("  [OPT] Installing CPU PyTorch wheels directly from PyTorch CPU index...")
         run_cmd([
             str(venv_python), "-m", "pip", "install", 
             "--no-cache-dir",
-            "--extra-index-url", "https://download.pytorch.org/whl/cpu",
+            "--index-url", "https://download.pytorch.org/whl/cpu",
+            "--extra-index-url", "https://pypi.org/simple",
             "-c", str(constraints_file),
-            "torch==2.2.2", 
-            "torchaudio==2.2.2"
+            torch_pkg, 
+            torchaudio_pkg
         ])
     else:
         print("  [OPT] Installing PyTorch & TorchAudio from PyPI...")
@@ -216,13 +224,13 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
             str(venv_python), "-m", "pip", "install", 
             "--no-cache-dir",
             "-c", str(constraints_file),
-            "torch==2.2.2", 
-            "torchaudio==2.2.2"
+            torch_pkg, 
+            torchaudio_pkg
         ])
 
     # 5. Install DeepFilterNet, Demucs, and audio processing stack with LOCKED NumPy 1.26.4 & Torch 2.2.2
     print("\n[STEP 4] Installing DeepFilterNet3, Demucs v4 & audio packages (Locking NumPy 1.26.4 and Torch 2.2.2)...")
-    extra_index_args = ["--extra-index-url", "https://download.pytorch.org/whl/cpu"] if (use_cpu_wheels and (is_win or is_linux)) else []
+    extra_index_args = ["--extra-index-url", "https://download.pytorch.org/whl/cpu"] if is_cpu_build else []
 
     # Pre-install llvmlite and numba binary wheels to prevent compiling LLVM from source on macOS Intel (x86_64)
     print("  [PREFER-BINARY] Pre-installing binary wheels for llvmlite 0.42.0 and numba 0.59.1...")
@@ -236,6 +244,8 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     ])
 
     pinned_stack = [
+        torch_pkg,
+        torchaudio_pkg,
         "numpy==1.26.4",
         "pedalboard==0.9.25",
         "deepfilternet>=0.5.6,<0.6.0",
@@ -248,87 +258,164 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "tqdm>=4.65.0",
         "einops>=0.7.0",
         "rotary-embedding-torch>=0.5.0",
-        "requests>=2.31.0"
+        "requests>=2.31.0",
+        "torchlibrosa>=0.1.0",
+        "matplotlib>=3.7.0",
+        "pyyaml>=6.0"
     ]
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--prefer-binary", "-c", str(constraints_file)] + extra_index_args + pinned_stack)
+
+    # Install VoiceFixer with --no-deps to prevent streamlit bloat
+    print("  [VOICEFIXER] Installing VoiceFixer package (--no-deps)...")
+    run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "voicefixer>=0.1.3"])
 
     # Re-enforce numpy 1.26.4, torch 2.2.2 and torchaudio 2.2.2 strictly to prevent any transitive override
     print("  [STRICT] Re-enforcing NumPy 1.26.4 and TorchAudio 2.2.2 pinning...")
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--force-reinstall", "--no-deps", "numpy==1.26.4"])
-    if use_cpu_wheels and (is_win or is_linux):
-        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/cpu", "torch==2.2.2", "torchaudio==2.2.2"])
+    if is_cpu_build:
+        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "--index-url", "https://download.pytorch.org/whl/cpu", torch_pkg, torchaudio_pkg])
     else:
-        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "torch==2.2.2", "torchaudio==2.2.2"])
+        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", torch_pkg, torchaudio_pkg])
+
+    # Robustly patch df/io.py and df/utils.py to prevent torchaudio deprecation and cache path issues
+    for df_io_path in env_dir.rglob("io.py"):
+        if df_io_path.parent.name == "df":
+            try:
+                code = df_io_path.read_text(encoding="utf-8")
+                old_audio_meta = "from torchaudio.backend.common import AudioMetaData"
+                new_audio_meta = (
+                    "try:\n"
+                    "    from torchaudio.backend.common import AudioMetaData\n"
+                    "except (ImportError, AttributeError, ModuleNotFoundError):\n"
+                    "    try:\n"
+                    "        from torchaudio import AudioMetaData\n"
+                    "    except (ImportError, AttributeError, ModuleNotFoundError):\n"
+                    "        from typing import NamedTuple\n"
+                    "        class AudioMetaData(NamedTuple):\n"
+                    "            sample_rate: int = 48000\n"
+                    "            num_frames: int = 0\n"
+                    "            num_channels: int = 1\n"
+                    "            bits_per_sample: int = 16\n"
+                    "            encoding: str = 'PCM_S'\n"
+                )
+                if old_audio_meta in code:
+                    code = code.replace(old_audio_meta, new_audio_meta)
+                elif "AudioMetaData" in code and "NamedTuple" not in code:
+                    code = new_audio_meta + "\n" + code
+
+                old_resample = "from torchaudio.compliance.kaldi import resample_waveform as ta_resample"
+                new_resample = (
+                    "try:\n"
+                    "    from torchaudio.compliance.kaldi import resample_waveform as ta_resample\n"
+                    "except (ImportError, AttributeError, ModuleNotFoundError):\n"
+                    "    def ta_resample(waveform, orig_sr, new_sr, **kwargs):\n"
+                    "        import torchaudio.functional as taf\n"
+                    "        return taf.resample(waveform, orig_sr, new_sr)\n"
+                )
+                if old_resample in code and "taf.resample" not in code:
+                    code = code.replace(old_resample, new_resample)
+
+                df_io_path.write_text(code, encoding="utf-8")
+                print(f"  [PATCH] {df_io_path} patched for torchaudio AudioMetaData compatibility.")
+            except Exception as patch_e:
+                print(f"  [WARN] Failed to patch {df_io_path}: {patch_e}")
+
+    for df_utils_path in env_dir.rglob("utils.py"):
+        if df_utils_path.parent.name == "df":
+            try:
+                code = df_utils_path.read_text(encoding="utf-8")
+                if 'def get_cache_dir():' in code and 'DEEPFILTERNET_CACHE' not in code:
+                    code = code.replace(
+                        'def get_cache_dir():',
+                        'def get_cache_dir():\n'
+                        '    if os.environ.get("DEEPFILTERNET_CACHE"):\n'
+                        '        return os.environ["DEEPFILTERNET_CACHE"]'
+                    )
+                    df_utils_path.write_text(code, encoding="utf-8")
+                    print(f"  [PATCH] {df_utils_path} patched for DEEPFILTERNET_CACHE support.")
+            except Exception as patch_e:
+                print(f"  [WARN] Failed to patch {df_utils_path}: {patch_e}")
 
     # Verify PyTorch / TorchAudio / NumPy integrity inside venv
     print("\n[STEP 5] Verifying environment integrity and imports inside venv...")
     verify_script_path = build_temp_dir / "verify_env.py"
     verify_script_content = """import sys
 import traceback
+import warnings
 
-print(f"  [VERIFY] Python executable: {sys.executable}")
-print(f"  [VERIFY] Python version: {sys.version}")
+# Ensure immediate line-buffered stdout/stderr output in CI
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+print(f"  [VERIFY] Python executable: {sys.executable}", flush=True)
+print(f"  [VERIFY] Python version: {sys.version}", flush=True)
 
 try:
     import numpy as np
-    print(f"  [VERIFY OK] NumPy: {np.__version__}")
+    print(f"  [VERIFY OK] NumPy: {np.__version__}", flush=True)
     assert np.__version__.startswith("1.26"), f"CRITICAL: Expected NumPy 1.26.x, got {np.__version__}"
 except Exception as e:
-    print(f"  [VERIFY FAILED] NumPy: {e}")
+    print(f"  [VERIFY FAILED] NumPy: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
 try:
     import torch
-    print(f"  [VERIFY OK] PyTorch: {torch.__version__}")
+    print(f"  [VERIFY OK] PyTorch: {torch.__version__}", flush=True)
     import torch.cuda
     _ = torch.cuda.is_available()
-    print(f"  [VERIFY OK] torch.cuda is available check: {_}")
+    print(f"  [VERIFY OK] torch.cuda is available check: {_}", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] PyTorch: {e}")
+    print(f"  [VERIFY FAILED] PyTorch: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
 try:
     import torchaudio
-    print(f"  [VERIFY OK] TorchAudio: {torchaudio.__version__}")
+    print(f"  [VERIFY OK] TorchAudio: {torchaudio.__version__}", flush=True)
     import torchaudio.functional
     import torchaudio.compliance
-    print("  [VERIFY OK] torchaudio.compliance & torchaudio.functional imports succeeded.")
+    print("  [VERIFY OK] torchaudio.compliance & torchaudio.functional imports succeeded.", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] TorchAudio: {e}")
+    print(f"  [VERIFY FAILED] TorchAudio: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
 try:
-    import df
-    print("  [VERIFY OK] DeepFilterNet (df) import succeeded.")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        import df
+    print("  [VERIFY OK] DeepFilterNet (df) import succeeded.", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] DeepFilterNet: {e}")
+    print(f"  [VERIFY FAILED] DeepFilterNet: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
 try:
     import demucs.pretrained
-    print("  [VERIFY OK] Demucs import succeeded.")
+    print("  [VERIFY OK] Demucs import succeeded.", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] Demucs: {e}")
+    print(f"  [VERIFY FAILED] Demucs: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
 try:
     import soundfile
-    print(f"  [VERIFY OK] SoundFile: {soundfile.__version__}")
+    print(f"  [VERIFY OK] SoundFile: {soundfile.__version__}", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] SoundFile: {e}")
+    print(f"  [VERIFY FAILED] SoundFile: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
 try:
     import pedalboard
-    print(f"  [VERIFY OK] Pedalboard: {pedalboard.__version__}")
+    print(f"  [VERIFY OK] Pedalboard: {pedalboard.__version__}", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] Pedalboard: {e}")
+    print(f"  [VERIFY FAILED] Pedalboard: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
@@ -337,13 +424,19 @@ try:
     import librosa
     import scipy
     import onnxruntime
-    print(f"  [VERIFY OK] Numba ({numba.__version__}), Librosa ({librosa.__version__}), SciPy ({scipy.__version__}), ONNXRuntime ({onnxruntime.__version__})")
+    print(f"  [VERIFY OK] Numba ({numba.__version__}), Librosa ({librosa.__version__}), SciPy ({scipy.__version__}), ONNXRuntime ({onnxruntime.__version__})", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] DSP / Audio Stack: {e}")
+    print(f"  [VERIFY FAILED] DSP / Audio Stack: {e}", flush=True)
     traceback.print_exc()
     sys.exit(1)
 
-print("  [VERIFY COMPLETE] All required neural audio processing modules verified successfully!")
+try:
+    import voicefixer
+    print("  [VERIFY OK] VoiceFixer import succeeded.", flush=True)
+except Exception as e:
+    print(f"  [VERIFY WARN] VoiceFixer check: {e}", flush=True)
+
+print("  [VERIFY COMPLETE] All required neural audio processing modules verified successfully!", flush=True)
 """
     verify_script_path.write_text(verify_script_content, encoding="utf-8")
     run_cmd([str(venv_python), str(verify_script_path)])
@@ -375,7 +468,8 @@ os.environ["DEEPFILTERNET_CACHE"] = r"{df_models_dir}"
 print("  -> Preloading DeepFilterNet3 weights...")
 try:
     import df
-    model, df_state, _ = df.init_df("DeepFilterNet3", log_level="none")
+    from df.enhance import init_df
+    model, df_state, _ = init_df("DeepFilterNet3", log_level="none")
     print("  [OK] DeepFilterNet3 model preloaded.")
 except Exception as e:
     print(f"  [WARN] DeepFilterNet3 preload warning: {{e}}")
@@ -418,16 +512,42 @@ except Exception as e:
                 except Exception:
                     pass
 
-    default_df_cache = user_home / ".cache" / "deepfilternet"
-    if default_df_cache.exists():
-        for f in default_df_cache.glob("*"):
-            try:
-                if f.is_dir():
-                    shutil.copytree(f, df_models_dir / f.name, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(f, df_models_dir / f.name)
-            except Exception:
-                pass
+    # Check all possible DeepFilterNet cache directories across platforms
+    possible_df_caches = [
+        user_home / ".cache" / "DeepFilterNet",
+        user_home / ".cache" / "deepfilternet",
+        user_home / "AppData" / "Local" / "DeepFilterNet",
+        user_home / "AppData" / "Local" / "deepfilternet"
+    ]
+    for df_cache in possible_df_caches:
+        if df_cache.exists():
+            for f in df_cache.glob("*"):
+                try:
+                    if f.is_dir():
+                        shutil.copytree(f, df_models_dir / f.name, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(f, df_models_dir / f.name)
+                    print(f"  [PORTABLE] Bundled preloaded DeepFilterNet model: {f.name}")
+                except Exception:
+                    pass
+
+    # Bundle VoiceFixer models if present in user cache or uvr directories
+    vf_models_dir = models_dir / "voicefixer"
+    vf_models_dir.mkdir(parents=True, exist_ok=True)
+    possible_vf_caches = [
+        user_home / ".cache" / "voicefixer",
+        user_home / "AppData" / "Roaming" / "anime-dub-manager" / "models" / "uvr",
+        user_home / ".config" / "anime-dub-manager" / "models" / "uvr"
+    ]
+    for vf_cache in possible_vf_caches:
+        if vf_cache.exists():
+            for f in vf_cache.rglob("*"):
+                if f.is_file() and f.name in ["vf.ckpt", "model.ckpt-1490000_trimed.pt"]:
+                    try:
+                        shutil.copy2(f, vf_models_dir / f.name)
+                        print(f"  [PORTABLE] Bundled preloaded VoiceFixer model: {f.name}")
+                    except Exception:
+                        pass
 
     # 7. Copy base Python binaries & stdlib for portable execution
     print("\n[STEP 7] Bundling portable Python base binaries and standard library...")
@@ -487,6 +607,23 @@ except Exception as e:
                     else:
                         shutil.copy2(item, dst_item)
             print(f"  [PORTABLE] Copied Unix standard library to {target_lib}")
+
+        # Ensure real python executables (replace broken symlinks created by venv)
+        bin_dir = env_dir / "bin"
+        base_bin = base_dir / "bin"
+        for py_name in ["python", "python3", f"python3.{sys.version_info.minor}"]:
+            venv_bin_file = bin_dir / py_name
+            base_bin_file = base_bin / py_name
+            if base_bin_file.exists():
+                try:
+                    if venv_bin_file.is_symlink() or not venv_bin_file.exists():
+                        if venv_bin_file.is_symlink() or venv_bin_file.exists():
+                            venv_bin_file.unlink()
+                        shutil.copy2(base_bin_file, venv_bin_file)
+                        os.chmod(venv_bin_file, 0o755)
+                        print(f"  [PORTABLE] Bundled standalone python binary: {venv_bin_file.name}")
+                except Exception as bin_e:
+                    print(f"  [WARN] Could not copy standalone binary {py_name}: {bin_e}")
 
     # 8. Copy sidecars into environment bundle for self-containment
     print("\n[STEP 8] Bundling audio_ai_processor sidecar script...")
