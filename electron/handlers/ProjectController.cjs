@@ -127,27 +127,54 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
     }));
   }
 
-  // Custom get-projects handler
+  // Optimized get-projects handler with O(1) indexing
   ipcMain.handle('get-projects', wrapIpcHandler(async () => {
-    const projects = await getData('projects.json');
-    const episodes = await getData('episodes.json');
-    const participants = await getData('participants.json');
+    const [projects, episodes, participants] = await Promise.all([
+      getData('projects.json'),
+      getData('episodes.json'),
+      getData('participants.json')
+    ]);
 
-    return projects.map(project => {
-      const projectEpisodes = episodes.filter(ep => ep.projectId === project.id).map(ep => {
+    const participantMap = new Map();
+    if (Array.isArray(participants)) {
+      for (const p of participants) {
+        if (p && p.id) participantMap.set(p.id, p);
+      }
+    }
+
+    const episodesByProject = new Map();
+    if (Array.isArray(episodes)) {
+      for (const ep of episodes) {
+        if (!ep || !ep.projectId) continue;
+        let list = episodesByProject.get(ep.projectId);
+        if (!list) {
+          list = [];
+          episodesByProject.set(ep.projectId, list);
+        }
+        list.push(ep);
+      }
+    }
+
+    return (projects || []).map(project => {
+      const rawEpisodes = episodesByProject.get(project.id) || [];
+      const projectEpisodes = rawEpisodes.map(ep => {
         const assignments = (ep.assignments || []).map(assignment => {
-          const dubber = participants.find(p => p.id === assignment.dubberId);
-          const substitute = assignment.substituteId ? participants.find(p => p.id === assignment.substituteId) : undefined;
+          const dubber = assignment.dubberId ? participantMap.get(assignment.dubberId) : undefined;
+          const substitute = assignment.substituteId ? participantMap.get(assignment.substituteId) : undefined;
           return { ...assignment, dubber, substitute };
         });
         const uploads = (ep.uploads || []).map(upload => {
-          const uploadedBy = participants.find(p => p.id === upload.uploadedById);
+          const uploadedBy = upload.uploadedById ? participantMap.get(upload.uploadedById) : undefined;
           return { ...upload, uploadedBy };
         });
         return { ...ep, assignments, uploads };
       });
-      const soundEngineer = project.soundEngineerId ? participants.find(p => p.id === project.soundEngineerId) : undefined;
-      const assignedDubbers = (project.assignedDubberIds || []).map(id => participants.find(p => p.id === id)).filter(Boolean);
+
+      const soundEngineer = project.soundEngineerId ? participantMap.get(project.soundEngineerId) : undefined;
+      const assignedDubbers = (project.assignedDubberIds || [])
+        .map(id => participantMap.get(id))
+        .filter(Boolean);
+
       return { ...project, episodes: projectEpisodes, soundEngineer, assignedDubbers };
     });
   }));
@@ -162,29 +189,44 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
     return true;
   }));
 
-  // Custom get-project handler by ID
+  // Custom get-project handler by ID with O(1) indexing
   ipcMain.handle('get-project', wrapIpcHandler(async (event, projectId) => {
-    const projects = await getData('projects.json');
-    const project = projects.find(p => p.id === projectId);
+    const [projects, episodes, participants] = await Promise.all([
+      getData('projects.json'),
+      getData('episodes.json'),
+      getData('participants.json')
+    ]);
+
+    const project = (projects || []).find(p => p.id === projectId);
     if (!project) throw new Error('Project not found');
 
-    const episodes = await getData('episodes.json');
-    const participants = await getData('participants.json');
+    const participantMap = new Map();
+    if (Array.isArray(participants)) {
+      for (const p of participants) {
+        if (p && p.id) participantMap.set(p.id, p);
+      }
+    }
 
-    const projectEpisodes = episodes.filter(ep => ep.projectId === project.id).map(ep => {
-      const assignments = (ep.assignments || []).map(assignment => {
-        const dubber = participants.find(p => p.id === assignment.dubberId);
-        const substitute = assignment.substituteId ? participants.find(p => p.id === assignment.substituteId) : undefined;
-        return { ...assignment, dubber, substitute };
+    const projectEpisodes = (episodes || [])
+      .filter(ep => ep.projectId === project.id)
+      .map(ep => {
+        const assignments = (ep.assignments || []).map(assignment => {
+          const dubber = assignment.dubberId ? participantMap.get(assignment.dubberId) : undefined;
+          const substitute = assignment.substituteId ? participantMap.get(assignment.substituteId) : undefined;
+          return { ...assignment, dubber, substitute };
+        });
+        const uploads = (ep.uploads || []).map(upload => {
+          const uploadedBy = upload.uploadedById ? participantMap.get(upload.uploadedById) : undefined;
+          return { ...upload, uploadedBy };
+        });
+        return { ...ep, assignments, uploads };
       });
-      const uploads = (ep.uploads || []).map(upload => {
-        const uploadedBy = participants.find(p => p.id === upload.uploadedById);
-        return { ...upload, uploadedBy };
-      });
-      return { ...ep, assignments, uploads };
-    });
-    const soundEngineer = project.soundEngineerId ? participants.find(p => p.id === project.soundEngineerId) : undefined;
-    const assignedDubbers = (project.assignedDubberIds || []).map(id => participants.find(p => p.id === id)).filter(Boolean);
+
+    const soundEngineer = project.soundEngineerId ? participantMap.get(project.soundEngineerId) : undefined;
+    const assignedDubbers = (project.assignedDubberIds || [])
+      .map(id => participantMap.get(id))
+      .filter(Boolean);
+
     return { ...project, episodes: projectEpisodes, soundEngineer, assignedDubbers };
   }));
 

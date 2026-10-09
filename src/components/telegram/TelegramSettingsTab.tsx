@@ -24,6 +24,7 @@ import {
   ChevronUp
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../../lib/clipboard';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { TelegramMTProtoSettings, TelegramMTProtoStatus } from '../../types';
 
@@ -88,12 +89,19 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
   const [connectionTestResult, setConnectionTestResult] = useState<any>(null);
   const [isLogsExpanded, setIsLogsExpanded] = useState<boolean>(true);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const lastLogsSignatureRef = useRef<string>('');
 
   const fetchLogs = async () => {
+    if (typeof document !== 'undefined' && document.hidden) return;
     try {
-      const res = await ipcSafe.invoke('telegram-mtproto-get-logs', { limit: 200 });
+      const res = await ipcSafe.invoke('telegram-mtproto-get-logs', { limit: 100 });
       if (Array.isArray(res)) {
-        setLogs(res);
+        const latestItem = res[res.length - 1];
+        const signature = `${res.length}_${latestItem?.time || ''}_${latestItem?.message || ''}`;
+        if (signature !== lastLogsSignatureRef.current) {
+          lastLogsSignatureRef.current = signature;
+          setLogs(res);
+        }
       }
     } catch (e) {
       console.warn('Could not fetch MTProto logs:', e);
@@ -107,7 +115,7 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
   useEffect(() => {
     let interval: any;
     if (autoRefreshLogs && isLogsExpanded) {
-      interval = setInterval(fetchLogs, 2000);
+      interval = setInterval(fetchLogs, 3500);
     }
     return () => clearInterval(interval);
   }, [autoRefreshLogs, isLogsExpanded]);
@@ -122,9 +130,9 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
     }
   };
 
-  const handleCopyLogs = () => {
+  const handleCopyLogs = async () => {
     const text = logs.map(l => `[${l.time}] [${l.level.toUpperCase()}] [${l.tag}] ${l.message} ${l.details ? JSON.stringify(l.details) : ''}`).join('\n');
-    navigator.clipboard.writeText(text);
+    await safeCopyToClipboard(text);
     toast.success('Журнал процессов скопирован в буфер обмена');
   };
 
@@ -172,8 +180,8 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
     }
   };
 
-  const handleCopyTag = (tag: string) => {
-    navigator.clipboard.writeText(tag);
+  const handleCopyTag = async (tag: string) => {
+    await safeCopyToClipboard(tag);
     setCopiedTag(tag);
     toast.success(`Скопировано: ${tag}`);
     setTimeout(() => setCopiedTag(null), 1500);

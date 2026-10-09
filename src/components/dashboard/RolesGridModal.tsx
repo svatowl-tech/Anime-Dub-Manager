@@ -3,6 +3,7 @@ import { X, Image as ImageIcon, Download, Copy, Table } from 'lucide-react';
 import { Project, Participant } from '../../types';
 import { toast } from 'sonner';
 import html2canvas from 'html2canvas';
+import { safeCopyToClipboard } from '../../lib/clipboard';
 
 interface RolesGridModalProps {
   project: Project | null;
@@ -329,8 +330,12 @@ export default function RolesGridModal({ project, participants, onClose }: Roles
     } catch (err) {
       console.error(err);
       try {
-        await navigator.clipboard.writeText(generateTSV());
-        toast.success('Скопировано (только текст)! Вставьте в Google Таблицы');
+        const ok = await safeCopyToClipboard(generateTSV());
+        if (ok) {
+          toast.success('Скопировано (только текст)! Вставьте в Google Таблицы');
+        } else {
+          toast.error('Не удалось скопировать в буфер обмена');
+        }
       } catch (e) {
         toast.error('Не удалось скопировать в буфер обмена');
       }

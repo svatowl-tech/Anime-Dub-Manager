@@ -175,6 +175,22 @@ function createWindow() {
     },
   });
 
+  // Handle external links safely via system browser, prevent renderer freezes
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith('http:') || url.startsWith('https:')) {
+      shell.openExternal(url).catch(() => {});
+    }
+    return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const isAppUrl = url.startsWith('http://localhost') || url.startsWith('file://');
+    if (!isAppUrl) {
+      event.preventDefault();
+      shell.openExternal(url).catch(() => {});
+    }
+  });
+
   // Gracefully show window once ready, with safety timeout fallback
   mainWindow.once('ready-to-show', () => {
     log.info('Main window ready-to-show event received.');

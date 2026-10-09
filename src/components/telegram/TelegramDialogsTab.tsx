@@ -12,6 +12,7 @@ import {
   Radio 
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../../lib/clipboard';
 import { TelegramMTProtoDialog } from '../../types';
 
 interface TelegramDialogsTabProps {
@@ -43,9 +44,9 @@ export const TelegramDialogsTab: React.FC<TelegramDialogsTabProps> = ({
     return true;
   });
 
-  const handleCopyId = (id: string, e: React.MouseEvent) => {
+  const handleCopyId = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    navigator.clipboard.writeText(id);
+    await safeCopyToClipboard(id);
     setCopiedId(id);
     toast.success(`ID ${id} скопирован в буфер обмена`);
     setTimeout(() => setCopiedId(null), 2000);

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { Play, Pause, CheckCircle, XCircle, AlertCircle, MessageSquare, Volume2, Check, X, Activity, User, Clock, FileAudio, Send, Video, Trash2, Mic, Sparkles, Save, SkipForward, Scissors, Zap, VolumeX, Volume1, Sliders, Info } from 'lucide-react';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../lib/clipboard';
 import { ipcSafe } from '../lib/ipcSafe';
 import { Episode, RoleAssignment, Participant, Track, SubtitleLine, Comment } from '../types';
 import { sanitizeFolderName } from '../lib/pathUtils';
@@ -45,6 +46,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [generatedMessage, setGeneratedMessage] = useState<string | null>(null);
   const [isMessageModalOpen, setIsMessageModalOpen] = useState(false);
+  const [isMessageCopied, setIsMessageCopied] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [isBaking, setIsBaking] = useState(false);
@@ -1109,13 +1111,19 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
 
   const handleGenerateFixesMessage = () => {
     if (!currentEpisode) return;
-    const msg = generateFixesIssuedMessage(currentEpisode, participants);
-    if (msg) {
-      setGeneratedMessage(msg);
-      setIsMessageModalOpen(true);
-    } else {
-      setGeneratedMessage(`✏️ ВЫПИСАНЫ ФИКСЫ: ${currentEpisode.project?.title}\n👾 Серия: ${currentEpisode.number}\n\n✅ Фиксов не обнаружено! Все даберы молодцы! ✨`);
-      setIsMessageModalOpen(true);
+    try {
+      const msg = generateFixesIssuedMessage(currentEpisode, participants);
+      setIsMessageCopied(false);
+      if (msg) {
+        setGeneratedMessage(msg);
+        setIsMessageModalOpen(true);
+      } else {
+        setGeneratedMessage(`✏️ ВЫПИСАНЫ ФИКСЫ: ${currentEpisode.project?.title}\n👾 Серия: ${currentEpisode.number}\n\n✅ Фиксов не обнаружено! Все даберы молодцы! ✨`);
+        setIsMessageModalOpen(true);
+      }
+    } catch (e: any) {
+      console.error('Failed to generate fixes message:', e);
+      toast.error('Ошибка генерации выписки фиксов: ' + (e?.message || String(e)));
     }
   };
 
@@ -1759,16 +1767,28 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
 
   const handleGenerateReminderMessage = () => {
     if (!currentEpisode) return;
-    const msg = generateStatusMessage(currentEpisode, participants);
-    setGeneratedMessage(msg);
-    setIsMessageModalOpen(true);
+    try {
+      const msg = generateStatusMessage(currentEpisode, participants);
+      setGeneratedMessage(msg);
+      setIsMessageCopied(false);
+      setIsMessageModalOpen(true);
+    } catch (e: any) {
+      console.error('Failed to generate reminder message:', e);
+      toast.error('Ошибка генерации напоминания: ' + (e?.message || String(e)));
+    }
   };
 
   const handleGenerateSoundEngineerReport = useCallback(() => {
     if (!currentEpisode) return;
-    const msg = generateSoundEngineerQAReport(currentEpisode, detectedGaps, participants);
-    setGeneratedMessage(msg);
-    setIsMessageModalOpen(true);
+    try {
+      const msg = generateSoundEngineerQAReport(currentEpisode, detectedGaps, participants);
+      setGeneratedMessage(msg);
+      setIsMessageCopied(false);
+      setIsMessageModalOpen(true);
+    } catch (e: any) {
+      console.error('Failed to generate sound engineer report:', e);
+      toast.error('Ошибка генерации отчета: ' + (e?.message || String(e)));
+    }
   }, [currentEpisode, detectedGaps, participants]);
 
   const handleExportSoundEngineer = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean, autoTiming?: boolean) => {
@@ -2711,14 +2731,27 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
               
               <div className="mt-6 flex gap-3">
                 <button 
-                  onClick={() => {
-                    navigator.clipboard.writeText(generatedMessage);
-                    toast.success('Скопировано в буфер обмена!');
+                  onClick={async () => {
+                    if (!generatedMessage) return;
+                    try {
+                      const ok = await safeCopyToClipboard(generatedMessage);
+                      if (ok) {
+                        setIsMessageCopied(true);
+                        toast.success('Скопировано в буфер обмена!');
+                        setTimeout(() => setIsMessageCopied(false), 2000);
+                      } else {
+                        toast.error('Не удалось скопировать в буфер обмена');
+                      }
+                    } catch (e: any) {
+                      toast.error('Ошибка копирования: ' + (e?.message || String(e)));
+                    }
                   }}
-                  className="flex-1 py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-lg shadow-blue-500/20"
+                  className={`flex-1 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer ${
+                    isMessageCopied ? 'bg-emerald-600 text-white shadow-emerald-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'
+                  }`}
                 >
-                  <Save className="w-5 h-5" />
-                  Скопировать текст
+                  {isMessageCopied ? <Check className="w-5 h-5" /> : <Save className="w-5 h-5" />}
+                  {isMessageCopied ? 'Скопировано!' : 'Скопировать текст'}
                 </button>
                 <button 
                   onClick={() => setIsMessageModalOpen(false)}

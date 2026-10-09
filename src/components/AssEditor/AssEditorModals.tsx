@@ -1,7 +1,8 @@
-import React from "react";
-import { X, MessageSquare } from "lucide-react";
+import React, { useState } from "react";
+import { X, MessageSquare, Check, Copy } from "lucide-react";
 import { Episode } from "../../types";
 import { ExportModal } from "../ExportModal";
+import { safeCopyToClipboard } from "../../lib/clipboard";
 
 interface AssEditorModalsProps {
   isExportModalOpen: boolean;
@@ -39,6 +40,7 @@ export default function AssEditorModals({
   generatedMessage,
   setStatus
 }: AssEditorModalsProps) {
+  const [isCopied, setIsCopied] = useState(false);
   return (
     <>
       {isExportModalOpen && currentEpisode && (
@@ -76,13 +78,26 @@ export default function AssEditorModals({
             </div>
             <div className="p-4 border-t border-neutral-800 bg-neutral-950/50 flex gap-3">
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText(generatedMessage);
-                  setStatus("Сообщение скопировано в буфер обмена!");
+                onClick={async () => {
+                  try {
+                    const ok = await safeCopyToClipboard(generatedMessage);
+                    if (ok) {
+                      setIsCopied(true);
+                      setStatus("Сообщение скопировано в буфер обмена!");
+                      setTimeout(() => setIsCopied(false), 2000);
+                    } else {
+                      setStatus("Не удалось скопировать сообщение");
+                    }
+                  } catch (e) {
+                    setStatus("Ошибка при копировании");
+                  }
                 }}
-                className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                className={`flex-1 px-4 py-2.5 rounded-lg font-medium transition-colors flex items-center justify-center gap-2 cursor-pointer ${
+                  isCopied ? 'bg-emerald-600 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
               >
-                Копировать
+                {isCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                {isCopied ? 'Скопировано!' : 'Копировать'}
               </button>
               <button
                 onClick={() => setIsMessageModalOpen(false)}

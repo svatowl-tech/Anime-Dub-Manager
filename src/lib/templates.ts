@@ -224,9 +224,14 @@ export const generateSoundEngineerQAReport = (
 };
 
 export const generateStatusMessage = (episode: Episode, participants: Participant[]) => {
-  const vars = getTemplateVariables(episode, participants);
-  const tpl = episode.statusMessageTemplate || episode.project?.statusMessageTemplate || DEFAULT_STATUS_TEMPLATE;
-  return applyTemplate(tpl, vars);
+  try {
+    const vars = getTemplateVariables(episode, participants);
+    const tpl = episode.statusMessageTemplate || episode.project?.statusMessageTemplate || DEFAULT_STATUS_TEMPLATE;
+    return applyTemplate(tpl, vars);
+  } catch (err) {
+    console.error('Error generating status reminder message:', err);
+    return `⏰ Напоминание о сдаче дорожек: ${episode.project?.title || 'Проект'} (Серия ${episode.number})\nДедлайн: ${episode.deadline || 'не указан'}`;
+  }
 };
 
 export const DEFAULT_TG_TEMPLATE_RECAST = `{emoji} {title} [{releaseTypeLabel}]
@@ -428,7 +433,14 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
   const prevLinkTg = prevEp?.tgPostLink || '';
   const prevLinkVk = prevEp?.vkPostLink || '';
 
-  const links = episode.project?.links ? JSON.parse(episode.project.links) : {};
+  let links: Record<string, any> = {};
+  if (episode.project?.links) {
+    try {
+      links = JSON.parse(episode.project.links);
+    } catch {
+      links = {};
+    }
+  }
 
   const seTgLink = se ? (se.tgChannel || `https://t.me/${(se.telegram || se.nickname).replace('@', '')}`) : 'https://t.me/Tenmag';
   const catalogLabel = 'Каталог всех релизов';
@@ -582,28 +594,33 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
 };
 
 export const applyTemplate = (template: string, vars: Record<string, any>) => {
+  if (!template) return '';
   let result = template;
 
   // 1. Handle lists: {listName:[itemTemplate], separator}
-  const listRegex = /\{(\w+):\[([\s\S]*?)\](?:, ([\s\S]*?))?\}/g;
+  const listRegex = /\{(\w+):\[([\s\S]*?)\](?:,\s*([\s\S]*?))?\}/g;
   result = result.replace(listRegex, (match, key, itemTemplate, separator) => {
     const list = vars[key];
     if (!Array.isArray(list)) return '';
     return list.map(item => {
       let itemResult = itemTemplate;
-      Object.entries(item).forEach(([k, v]) => {
-        itemResult = itemResult.replace(new RegExp(`\\{${k}\\}`, 'g'), String(v || ''));
-      });
+      if (item && typeof item === 'object') {
+        itemResult = itemResult.replace(/\{([a-zA-Z0-9_]+)\}/g, (m, k) => {
+          return k in item ? String(item[k] ?? '') : m;
+        });
+      }
       return itemResult;
-    }).join(separator || '');
+    }).join(separator !== undefined ? separator : '');
   });
 
-  // 2. Handle flat variables
-  for (const [key, value] of Object.entries(vars)) {
-    if (typeof value === 'string' || typeof value === 'number') {
-      result = result.replace(new RegExp(`{${key}}`, 'g'), String(value || ''));
+  // 2. Handle flat variables in a single fast, safe pass without regex compilation loop
+  result = result.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
+    if (key in vars && (typeof vars[key] === 'string' || typeof vars[key] === 'number')) {
+      return String(vars[key] ?? '');
     }
-  }
+    return match;
+  });
+
   return result;
 };
 
@@ -660,6 +677,19 @@ export const generateFinalTGMessage = (episode: Episode, participants: Participa
   return applyTemplate(defaultTpl, vars);
 };
 
+export const isTableSeparatorLine = (line: string): boolean => {
+  const trimmed = line.trim();
+  if (!trimmed || !trimmed.includes('-')) return false;
+  const cells = trimmed
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map(c => c.trim())
+    .filter(Boolean);
+  if (cells.length === 0) return false;
+  return cells.every(c => /^:?-+:?$/.test(c));
+};
+
 export const formatInlineMarkdown = (text: string): string => {
   if (!text) return '';
   let html = text
@@ -667,21 +697,21 @@ export const formatInlineMarkdown = (text: string): string => {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-  // Links: [text](url)
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
-    const safeUrl = url.replace(/"/g, '&quot;');
-    return `<a href="${safeUrl}" style="color: #64b5f6; font-style: italic; text-decoration: none;">${linkText}</a>`;
-  });
-
-  // Bold: **text**
-  html = html.replace(/\*\*([\s\S]+?)\*\*/g, '<b>$1</b>');
-
-  // Italic: __text__ or _text_
-  html = html.replace(/__([\s\S]+?)__/g, '<i>$1</i>');
-  html = html.replace(/(?<!_)_([^_]+?)_(?!_)/g, '<i>$1</i>');
-
   // Code: `code`
   html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.1); padding: 2px 4px; border-radius: 4px; font-family: monospace;">$1</code>');
+
+  // Bold: **text**
+  html = html.replace(/\*\*([^*]+?)\*\*/g, '<b>$1</b>');
+
+  // Italic: __text__ or _text_ (when not inside words or tags)
+  html = html.replace(/__([^_]+?)__/g, '<i>$1</i>');
+  html = html.replace(/(^|\s)_([^_]+?)_(\s|$|[.,!?;:])/g, '$1<i>$2</i>$3');
+
+  // Links: [text](url) - safe replacement avoiding mangling URLs with underscores
+  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
+    const safeUrl = url.replace(/"/g, '&quot;');
+    return `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: #64b5f6; font-style: italic; text-decoration: none;">${linkText}</a>`;
+  });
 
   return html;
 };
@@ -699,7 +729,7 @@ export const convertToHTMLForTelegram = (text: string): string => {
 
     let tableHtml = `<table style="width: 100%; max-width: 480px; margin: 12px auto; border-collapse: collapse; border: 1px solid #233d5d; border-radius: 8px; overflow: hidden; background-color: #141f2d; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13.5px; color: #ffffff; text-align: left;">\n<tbody>\n`;
 
-    const contentRows = tableRows.filter(r => !/^\s*\|?\s*:?-+:?\s*(\|?\s*:?-+:?\s*)+\|?\s*$/.test(r));
+    const contentRows = tableRows.filter(r => !isTableSeparatorLine(r));
 
     contentRows.forEach((row, idx) => {
       const cells = row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
@@ -807,16 +837,17 @@ export const markdownTableToUnicodeBox = (text: string): string => {
 
   const padRight = (str: string, targetWidth: number): string => {
     const currentWidth = getVisualLength(str);
-    if (currentWidth >= targetWidth) return str;
-    return str + ' '.repeat(targetWidth - currentWidth);
+    if (!targetWidth || currentWidth >= targetWidth) return str;
+    const diff = Math.max(0, targetWidth - currentWidth);
+    return str + ' '.repeat(diff);
   };
 
   const centerText = (str: string, targetWidth: number): string => {
     const currentWidth = getVisualLength(str);
-    if (currentWidth >= targetWidth) return str;
-    const totalSpaces = targetWidth - currentWidth;
+    if (!targetWidth || currentWidth >= targetWidth) return str;
+    const totalSpaces = Math.max(0, targetWidth - currentWidth);
     const leftSpaces = Math.floor(totalSpaces / 2);
-    const rightSpaces = totalSpaces - leftSpaces;
+    const rightSpaces = Math.max(0, totalSpaces - leftSpaces);
     return ' '.repeat(leftSpaces) + str + ' '.repeat(rightSpaces);
   };
 
@@ -827,7 +858,7 @@ export const markdownTableToUnicodeBox = (text: string): string => {
   const flushUnicodeTable = () => {
     if (tableRows.length === 0) return;
 
-    const contentRows = tableRows.filter(r => !/^\s*\|?\s*:?-+:?\s*(\|?\s*:?-+:?\s*)+\|?\s*$/.test(r));
+    const contentRows = tableRows.filter(r => !isTableSeparatorLine(r));
     if (contentRows.length === 0) {
       tableRows = [];
       return;
@@ -854,9 +885,9 @@ export const markdownTableToUnicodeBox = (text: string): string => {
       parsedRows.push({ isHeader, isFullWidth, col1, col2 });
     });
 
-    const col1Width = col1Max + 1;
-    const col2Width = col2Max + 1;
-    const totalInnerWidth = col1Width + col2Width + 3;
+    const col1Width = Math.max(10, col1Max + 1);
+    const col2Width = Math.max(10, col2Max + 1);
+    const totalInnerWidth = col1Width + col2Width + 5;
 
     const boxLines: string[] = [];
 

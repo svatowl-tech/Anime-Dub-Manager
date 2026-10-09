@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Plus, X, CheckCircle2, Clock, AlertCircle, Mic, FileAudio, UserPlus, Link as LinkIcon, MessageSquare, ExternalLink, Calendar, FileText, Image as ImageIcon, Database, FolderPlus, FolderOpen, ChevronRight, ChevronLeft, Save, Loader2, FileVideo, Activity, Users, Settings2, Hash, Globe, User, Download, Languages, Zap, RefreshCw, Table, Youtube, Layers, Send, Film } from 'lucide-react';
+import { Plus, X, CheckCircle2, Clock, AlertCircle, Mic, FileAudio, UserPlus, Link as LinkIcon, MessageSquare, ExternalLink, Calendar, FileText, Image as ImageIcon, Database, FolderPlus, FolderOpen, ChevronRight, ChevronLeft, Save, Loader2, FileVideo, Activity, Users, Settings2, Hash, Globe, User, Download, Languages, Zap, RefreshCw, Table, Youtube, Layers, Send, Film, Copy, Check } from 'lucide-react';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../lib/clipboard';
 import { TelegramClientPanel } from './TelegramClientPanel';
 import { getParticipants } from '../services/dbService';
 import { Participant, Project, Episode, EpisodeStatus, ReleaseType, RoleAssignment } from '../types';
@@ -110,6 +111,7 @@ export default function Dashboard({
 
   const [generatedMessage, setGeneratedMessage] = useState<string | null>(null);
   const [isMessageModalOpen, setIsMessageModalOpen] = useState(false);
+  const [isMessageCopied, setIsMessageCopied] = useState(false);
   const [isHardsubEnabled, setIsHardsubEnabled] = useState(false);
   const [subtitleTracks, setSubtitleTracks] = useState<MkvTrackInfo[]>([]);
   const [audioTracks, setAudioTracks] = useState<MkvTrackInfo[]>([]);
@@ -216,6 +218,9 @@ export default function Dashboard({
     }
   };
 
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+
   useEffect(() => {
     if (isTorrentModalOpen) {
       checkAnime365Auth();
@@ -226,10 +231,11 @@ export default function Dashboard({
     const removeCompletedListener = ipcSafe.on('task-completed', async (data: any) => {
       const { task } = data;
       if (task?.metadata?.roleName) {
-        const allEpisodes = projects.flatMap(p => p.episodes || []);
+        const currentProjects = projectsRef.current;
+        const allEpisodes = currentProjects.flatMap(p => p.episodes || []);
         const epMatch = allEpisodes.find((e: any) => e.id === task.metadata.episodeId);
         if (epMatch) {
-          const epWithProj = { ...epMatch, project: projects.find(p => p.id === epMatch.projectId) };
+          const epWithProj = { ...epMatch, project: currentProjects.find(p => p.id === epMatch.projectId) };
           const parts = await getParticipants();
           let msg = '';
           if (task.metadata.roleName === 'DABBER') {
@@ -248,9 +254,10 @@ export default function Dashboard({
     return () => {
       removeCompletedListener();
     };
-  }, [projects]);
+  }, []);
 
   const downloadPollIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const torrentPollIntervalsRef = useRef<Set<NodeJS.Timeout>>(new Set());
 
   // Anime 365 RAW and Subtitle download states
   const [anime365Translations, setAnime365Translations] = useState<any[]>([]);
@@ -420,7 +427,12 @@ export default function Dashboard({
     return () => {
       if (downloadPollIntervalRef.current) {
         clearInterval(downloadPollIntervalRef.current);
+        downloadPollIntervalRef.current = null;
       }
+      torrentPollIntervalsRef.current.forEach(intervalId => {
+        clearInterval(intervalId);
+      });
+      torrentPollIntervalsRef.current.clear();
     };
   }, []);
 
@@ -545,8 +557,19 @@ export default function Dashboard({
 
       if (res && res.downloadId) {
         setDirectDownloadId(res.downloadId);
+        let directPollAttempts = 0;
+        let directPollErrorCount = 0;
         
         const poll = setInterval(async () => {
+          directPollAttempts++;
+          if (directPollAttempts > 400) { // ~10 minutes max timeout
+            clearInterval(poll);
+            downloadPollIntervalRef.current = null;
+            setDirectDownloadId(null);
+            toast.error('Время ожидания прямой загрузки истекло.');
+            return;
+          }
+
           try {
             const status = await ipcSafe.invoke('anime365-get-direct-download-status', { downloadId: res.downloadId });
             if (status) {
@@ -554,6 +577,7 @@ export default function Dashboard({
               
               if (status.status === 'completed') {
                 clearInterval(poll);
+                downloadPollIntervalRef.current = null;
                 setDirectDownloadId(null);
                 
                 const updatedEp = { 
@@ -572,12 +596,19 @@ export default function Dashboard({
                 setIsTorrentModalOpen(false);
               } else if (status.status === 'error') {
                 clearInterval(poll);
+                downloadPollIntervalRef.current = null;
                 setDirectDownloadId(null);
                 toast.error('Ошибка скачивания: ' + (status.error || 'Неизвестная ошибка'));
               }
             }
           } catch (pollEx: any) {
             console.error('[Direct Download Poll Error]:', pollEx);
+            directPollErrorCount++;
+            if (directPollErrorCount > 8) {
+              clearInterval(poll);
+              downloadPollIntervalRef.current = null;
+              setDirectDownloadId(null);
+            }
           }
         }, 1500);
 
@@ -710,11 +741,21 @@ export default function Dashboard({
            });
            
            if (bgRes && bgRes.downloadId && selectedProject) {
+             let attempts = 0;
+             let errorCount = 0;
              const poll = setInterval(async () => {
+               attempts++;
+               if (attempts > 400) {
+                 clearInterval(poll);
+                 torrentPollIntervalsRef.current.delete(poll);
+                 return;
+               }
+
                try {
                  const st = await ipcSafe.invoke('get-torrent-download-status', { downloadId: bgRes.downloadId });
                  if (st && st.status === 'completed') {
                    clearInterval(poll);
+                   torrentPollIntervalsRef.current.delete(poll);
                    
                    if (st.filePath) {
                      const fallbackNum = selectedFileIndexes.length === 1 && currentEpisode 
@@ -742,13 +783,20 @@ export default function Dashboard({
                    }
                  } else if (st && st.status === 'error') {
                    clearInterval(poll);
+                   torrentPollIntervalsRef.current.delete(poll);
                    toast.error(`Ошибка загрузки торрента: ${st.error}`);
                    console.error(`Фоновая загрузка (${idx}) завершилась с ошибкой:`, st.error);
                  }
                } catch (e) {
                  console.error('Error polling torrent download status:', e);
+                 errorCount++;
+                 if (errorCount > 8) {
+                   clearInterval(poll);
+                   torrentPollIntervalsRef.current.delete(poll);
+                 }
                }
              }, 1500);
+             torrentPollIntervalsRef.current.add(poll);
            }
          } catch (e) {
            console.error('Error initiating torrent file download:', e);
@@ -843,9 +891,15 @@ export default function Dashboard({
 
   const handleGenerateReminderMessage = () => {
     if (!currentEpisode) return;
-    const msg = generateStatusMessage(currentEpisode, participants);
-    setGeneratedMessage(msg);
-    setIsMessageModalOpen(true);
+    try {
+      const msg = generateStatusMessage(currentEpisode, participants);
+      setGeneratedMessage(msg);
+      setIsMessageCopied(false);
+      setIsMessageModalOpen(true);
+    } catch (e: any) {
+      console.error('Failed to generate reminder message:', e);
+      toast.error('Ошибка формирования напоминания: ' + (e?.message || String(e)));
+    }
   };
 
 
@@ -1366,28 +1420,38 @@ export default function Dashboard({
       }
     }).catch(() => {});
 
+    let lastFfmpegTick = 0;
     const progressListener = (percent: number) => {
-      setTranscodingProgress(percent);
+      const now = Date.now();
+      if (now - lastFfmpegTick > 120 || percent === 100 || percent === 0) {
+        lastFfmpegTick = now;
+        setTranscodingProgress(percent);
+      }
     };
     const unsubFfmpeg = ipcSafe.on('ffmpeg-progress', progressListener);
 
+    let lastTaskTick = 0;
     const unsubTaskProgress = ipcSafe.on('task-progress', (data: { id: string, progress: number, eta: number | null, task?: any }) => {
       if (data && data.id) {
-        setTranscodingProgress(data.progress);
-        setTranscodingTasks(prev => {
-          const existing = prev[data.id] || { id: data.id, progress: 0, eta: null };
-          return {
-            ...prev,
-            [data.id]: {
-              ...existing,
-              id: data.id,
-              progress: data.progress,
-              eta: data.eta,
-              episodeId: data.task?.metadata?.episodeId || existing.episodeId,
-              title: data.task?.metadata?.title || existing.title
-            }
-          };
-        });
+        const now = Date.now();
+        if (now - lastTaskTick > 120 || data.progress === 100 || data.progress === 0) {
+          lastTaskTick = now;
+          setTranscodingProgress(data.progress);
+          setTranscodingTasks(prev => {
+            const existing = prev[data.id] || { id: data.id, progress: 0, eta: null };
+            return {
+              ...prev,
+              [data.id]: {
+                ...existing,
+                id: data.id,
+                progress: data.progress,
+                eta: data.eta,
+                episodeId: data.task?.metadata?.episodeId || existing.episodeId,
+                title: data.task?.metadata?.title || existing.title
+              }
+            };
+          });
+        }
       }
     });
 
@@ -1438,6 +1502,7 @@ export default function Dashboard({
 
   const [nextEpisodeDate, setNextEpisodeDate] = useState<string | null>(null);
   const [newEpisodeAvailable, setNewEpisodeAvailable] = useState<number | null>(null);
+  const projectTrackerCacheRef = useRef<Map<string, { timestamp: number; ep: number | null }>>(new Map());
 
   useEffect(() => {
     const fetchNextDate = async () => {
@@ -1467,6 +1532,14 @@ export default function Dashboard({
       setNewEpisodeAvailable(null);
       return;
     }
+
+    const cacheKey = `${selectedProject.id}_${selectedProject.episodes?.length || 0}`;
+    const cached = projectTrackerCacheRef.current.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < 10 * 60 * 1000) {
+      setNewEpisodeAvailable(cached.ep);
+      return;
+    }
+
     const checkNewOnTracker = async () => {
       try {
         // Primary: Check on Anime365
@@ -1475,9 +1548,11 @@ export default function Dashboard({
           const currentMaxEp = selectedProject.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
           if (checkRes.maxEpisode > currentMaxEp) {
             setNewEpisodeAvailable(checkRes.maxEpisode);
-            return; // Found a new episode announcements, skip fallback
+            projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: checkRes.maxEpisode });
+            return;
           } else {
             setNewEpisodeAvailable(null);
+            projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: null });
             return;
           }
         }
@@ -1486,7 +1561,7 @@ export default function Dashboard({
       }
 
       try {
-        // Fallback: Quietly search for RAWs to see if a newer episode is already uploaded on Nyaa
+        // Fallback: Quietly search for RAWs on Nyaa
         const results = await ipcSafe.invoke('search-nyaa-torrents', {
            query: selectedProject.originalTitle,
            category: 'anime',
@@ -1499,37 +1574,36 @@ export default function Dashboard({
               const match = r.title ? r.title.match(/[ -_]0*([1-9]\d*)[ -_xv]/i) : null;
               if (match) {
                  const ep = parseInt(match[1]);
-                 if (ep > maxEpFound && ep < 1000) maxEpFound = ep; // sanity check so it's not a year
+                 if (ep > maxEpFound && ep < 1000) maxEpFound = ep;
               }
            });
            
            const currentMaxEp = selectedProject.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
-           if (maxEpFound > currentMaxEp) {
-             setNewEpisodeAvailable(maxEpFound);
-           } else {
-             setNewEpisodeAvailable(null);
-           }
+           const finalEp = maxEpFound > currentMaxEp ? maxEpFound : null;
+           setNewEpisodeAvailable(finalEp);
+           projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: finalEp });
         } else {
            setNewEpisodeAvailable(null);
+           projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: null });
         }
       } catch (err) {
         console.warn('Network error or tracker unavailable during new episode check', err);
       }
     };
     checkNewOnTracker();
-  }, [selectedProject?.originalTitle, selectedProject?.episodes?.length]);
+  }, [selectedProject?.id, selectedProject?.originalTitle, selectedProject?.episodes?.length]);
 
-  const stats = {
+  const stats = useMemo(() => ({
     totalProjects: projects.length,
     activeEpisodes: projects.reduce((acc, p) => acc + (p.episodes?.filter(e => e.status !== 'FINISHED')?.length || 0), 0),
     finishedEpisodes: projects.reduce((acc, p) => acc + (p.episodes?.filter(e => e.status === 'FINISHED')?.length || 0), 0),
     pendingFixes: projects.reduce((acc, p) => acc + (p.episodes?.filter(e => e.status === 'FIXES')?.length || 0), 0)
-  };
+  }), [projects]);
 
-  const recentEpisodes = projects
+  const recentEpisodes = useMemo(() => projects
     .flatMap(p => (p.episodes || []).map(e => ({ ...e, projectTitle: p.title })))
     .sort((a, b) => new Date(b.updatedAt || 0).getTime() - new Date(a.updatedAt || 0).getTime())
-    .slice(0, 5);
+    .slice(0, 5), [projects]);
 
   const handleSaveProjectDubbers = async (selectedDubbers: string[]) => {
     if (!selectedProject) return;
@@ -1746,10 +1820,6 @@ export default function Dashboard({
       toast.error(`Ошибка при создании серии: ${e?.message || 'Неизвестная ошибка'}`);
     }
   };
-
-  useEffect(() => {
-    // We don't need to set newEpisodeNumber here anymore
-  }, [selectedProject, isNewEpisodeModalOpen]);
 
   const handleExportProject = async () => {
     if (!selectedProject) return;
@@ -2747,13 +2817,27 @@ export default function Dashboard({
             </div>
             <div className="p-4 border-t border-neutral-800 bg-neutral-950/50 flex gap-3">
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText(generatedMessage);
-                  toast.success("Сообщение скопировано в буфер обмена!");
+                onClick={async () => {
+                  if (!generatedMessage) return;
+                  try {
+                    const ok = await safeCopyToClipboard(generatedMessage);
+                    if (ok) {
+                      setIsMessageCopied(true);
+                      toast.success("Сообщение скопировано в буфер обмена!");
+                      setTimeout(() => setIsMessageCopied(false), 2000);
+                    } else {
+                      toast.error("Не удалось скопировать сообщение в буфер обмена");
+                    }
+                  } catch (e: any) {
+                    toast.error("Ошибка при копировании: " + (e?.message || String(e)));
+                  }
                 }}
-                className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                className={`flex-1 px-4 py-2.5 rounded-lg font-medium transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  isMessageCopied ? 'bg-emerald-600 text-white' : 'bg-blue-600 hover:bg-blue-500 text-white'
+                }`}
               >
-                Копировать
+                {isMessageCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                {isMessageCopied ? 'Скопировано!' : 'Копировать'}
               </button>
               <button
                 onClick={() => setIsMessageModalOpen(false)}

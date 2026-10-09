@@ -1,12 +1,13 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   PlaySquare, Send, Copy, MessageSquare, Sparkles, CheckCircle2, Globe, Link2, Save, 
-  Package, Loader2, Camera, Image as ImageIcon, Download, Upload, Plus, Trash2, Edit3, Check,
+  Package, Loader2, Download, Upload, Plus, Trash2, Edit3, Check,
   Table, ExternalLink, Columns, Eye, Code
 } from 'lucide-react';
 import { getParticipants } from '../services/dbService';
 import { Participant, Episode, Project } from '../types';
 import { ipcSafe, isWeb } from '../lib/ipcSafe';
+import { safeCopyToClipboard } from '../lib/clipboard';
 import { DesktopRequiredMessage } from './DesktopRequiredMessage';
 import { TelegramClientPanel } from './TelegramClientPanel';
 import { 
@@ -20,7 +21,6 @@ import {
   convertToHTMLForTelegram,
   markdownTableToUnicodeBox
 } from '../lib/templates';
-import { useVideoContext } from '../contexts/VideoContext';
 
 interface ReleasePanelProps {
   currentEpisode: Episode | null;
@@ -63,10 +63,6 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
   const [buildProgress, setBuildProgress] = useState(0);
   const [customAudioPath, setCustomAudioPath] = useState<string>('');
   const [customRawPath, setCustomRawPath] = useState<string>('');
-  const [videoDuration, setVideoDuration] = useState(0);
-  const [screenshotTime, setScreenshotTime] = useState(0);
-  const [screenshotPath, setScreenshotPath] = useState('');
-  const [isCapturing, setIsCapturing] = useState(false);
   const [isEditingTemplate, setIsEditingTemplate] = useState(false);
   const [editingTemplateStr, setEditingTemplateStr] = useState('');
   const [linksTemplateStr, setLinksTemplateStr] = useState('');
@@ -90,84 +86,80 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
   }, []);
 
   useEffect(() => {
-    loadProjects();
-  }, [loadProjects]);
-  const videoRef = useRef<HTMLVideoElement>(null);
-
-  const { registerPlayer, unregisterPlayer } = useVideoContext();
-
-  const togglePlayPause = useCallback(() => {
-    if (videoRef.current) {
-      if (videoRef.current.paused) {
-        videoRef.current.play().catch(e => console.error('Play error', e));
-      } else {
-        videoRef.current.pause();
-      }
+    if (isTelegramModalOpen) {
+      loadProjects();
     }
-  }, []);
+  }, [isTelegramModalOpen, loadProjects]);
+
+  const renderedHtmlArticle = useMemo(() => {
+    if (activeTemplate === 'TG_ARTICLE' && articleViewMode === 'visual' && postContent) {
+      return convertToHTMLForTelegram(postContent);
+    }
+    return '';
+  }, [activeTemplate, articleViewMode, postContent]);
+
+  const renderedUnicodeArticle = useMemo(() => {
+    if (activeTemplate === 'TG_ARTICLE' && articleViewMode === 'unicode' && postContent) {
+      return markdownTableToUnicodeBox(postContent);
+    }
+    return '';
+  }, [activeTemplate, articleViewMode, postContent]);
 
   useEffect(() => {
-    registerPlayer({ 
-      togglePlayPause,
-      seekToNext: () => {
-        if (videoRef.current) {
-          videoRef.current.currentTime += 5;
+    // Check initial running tasks in queue
+    ipcSafe.invoke('get-tasks').then((tasks: any[]) => {
+      if (Array.isArray(tasks) && currentEpisode) {
+        const buildTask = tasks.find(t => 
+          t.type === 'mux-release' && 
+          (t.status === 'running' || t.status === 'pending') &&
+          (t.payload?.episode?.id === currentEpisode.id || t.metadata?.episodeId === currentEpisode.id)
+        );
+        if (buildTask) {
+          setIsBuilding(true);
+          setBuildProgress(buildTask.progress || 0);
+        }
+      }
+    }).catch(() => {});
+
+    const removeQueueListener = ipcSafe.on('task-queue-updated', (tasks: any[]) => {
+      if (Array.isArray(tasks) && currentEpisode) {
+        const buildTask = tasks.find(t => 
+          t.type === 'mux-release' && 
+          (t.status === 'running' || t.status === 'pending') &&
+          (t.payload?.episode?.id === currentEpisode.id || t.metadata?.episodeId === currentEpisode.id)
+        );
+        if (buildTask) {
+          setIsBuilding(true);
+          if (typeof buildTask.progress === 'number') {
+            setBuildProgress(buildTask.progress);
+          }
+        } else {
+          setIsBuilding(false);
         }
       }
     });
-    return () => unregisterPlayer();
-  }, [registerPlayer, unregisterPlayer, togglePlayPause]);
 
-  useEffect(() => {
-    const path = customRawPath || currentEpisode?.rawPath;
-    if (path) {
-      ipcSafe.invoke('get-video-metadata', path).then(meta => {
-        if (meta && meta.format && meta.format.duration) {
-          setVideoDuration(meta.format.duration);
-        }
-      });
-    }
-  }, [currentEpisode?.rawPath, customRawPath]);
-
-  const handleTakeScreenshot = async () => {
-    const videoPath = customRawPath || currentEpisode?.rawPath;
-    if (!videoPath) return;
-    
-    setIsCapturing(true);
-    try {
-      const tempDir = await ipcSafe.invoke('get-temp-path');
-      const outputPath = `${tempDir}/screenshot_${Date.now()}.jpg`;
-      const res = await ipcSafe.invoke('take-screenshot', {
-        videoPath,
-        timestamp: screenshotTime,
-        outputPath
-      });
-      if (res && res.path) {
-        setScreenshotPath(res.path);
+    const removeProgressListener = ipcSafe.on('task-progress', (data: { id: string; progress: number }) => {
+      if (data && typeof data.progress === 'number') {
+        setBuildProgress(data.progress);
       }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setIsCapturing(false);
-    }
-  };
-
-  const formatTime = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
-  };
-
-  useEffect(() => {
-    const removeListener = ipcSafe.on('ffmpeg-progress', (percent: number) => {
-      setBuildProgress(percent);
     });
-    return () => removeListener();
-  }, []);
+
+    const removeFfmpegListener = ipcSafe.on('ffmpeg-progress', (percent: number) => {
+      if (typeof percent === 'number') {
+        setBuildProgress(percent);
+      }
+    });
+
+    return () => {
+      removeQueueListener();
+      removeProgressListener();
+      removeFfmpegListener();
+    };
+  }, [currentEpisode?.id]);
 
   const handleBuildRelease = async () => {
-    if (!currentEpisode) return;
+    if (!currentEpisode || isBuilding) return;
     
     try {
       const result = await ipcSafe.invoke('select-directory');
@@ -175,8 +167,9 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
       
       const targetDir = result.filePaths[0];
       
-      // Enqueue task instead of direct invocation
-      await ipcSafe.send('enqueue-ffmpeg-task', {
+      setIsBuilding(true);
+      setBuildProgress(0);
+      await ipcSafe.invoke('enqueue-ffmpeg-task', {
         type: 'mux-release',
         payload: { 
           episode: currentEpisode, 
@@ -185,12 +178,12 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
           customRawPath: customRawPath || undefined
         },
         metadata: {
+          episodeId: currentEpisode.id,
           title: `Сборка: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`
         }
       });
-      
-      // We don't wait for result here, the TaskQueuePanel will show progress
     } catch (error: any) {
+      setIsBuilding(false);
       if (error && error.message !== 'Selection canceled') {
         alert(`Ошибка при постановке в очередь: ${error.message}`);
       }
@@ -229,7 +222,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
       setLinks(defaultRequiredLinks);
       setQuickLinks(DEFAULT_QUICK_LINKS);
     }
-  }, [currentEpisode?.project?.id]);
+  }, [currentEpisode?.project?.id, currentEpisode?.project?.links]);
 
   const updateLinksAndSync = (newLinks: ProjectLinks) => {
     setLinks(newLinks);
@@ -320,9 +313,9 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
       setTimeout(() => setIsCopied(false), 2000);
     } catch (err) {
       console.error('Failed to copy rich text: ', err);
-      // Fallback to standard plain text copying if ClipboardItem is not permitted/supported
+      // Fallback to safe non-blocking plain text copying
       try {
-        await navigator.clipboard.writeText(postContent);
+        await safeCopyToClipboard(postContent);
         setIsCopied(true);
         setTimeout(() => setIsCopied(false), 2000);
       } catch (fallbackErr) {
@@ -1007,20 +1000,29 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
         
         <div className="p-6 space-y-4">
           <div className="flex flex-wrap gap-4 items-end">
-            {Object.keys(links).filter(k => k !== 'quickUploadLinks').map((key) => (
-              <div key={key} className="flex-1 min-w-[280px] space-y-2 bg-neutral-900/40 p-4 rounded-xl border border-neutral-800/60 relative group">
+            {Object.keys(links).filter(k => k !== 'quickUploadLinks').map((key, index) => (
+              <div key={`link-card-${key}-${index}`} className="flex-1 min-w-[280px] space-y-2 bg-neutral-900/40 p-4 rounded-xl border border-neutral-800/60 relative group">
                 <div className="flex items-center justify-between gap-2 mb-1">
                   <div className="flex flex-col">
                     <input 
                       type="text" 
-                      value={key} 
-                      onChange={(e) => {
+                      defaultValue={key} 
+                      key={`key-input-${key}`}
+                      onBlur={(e) => {
                         const newKey = e.target.value.replace(/[^a-zA-Z0-9]/g, '');
-                        if (!newKey || newKey === key) return;
+                        if (!newKey || newKey === key) {
+                          e.target.value = key;
+                          return;
+                        }
                         const newLinks = { ...links };
                         newLinks[newKey] = newLinks[key];
                         delete newLinks[key];
                         updateLinksAndSync(newLinks);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          (e.target as HTMLInputElement).blur();
+                        }
                       }}
                       className="bg-transparent border-none text-[10px] font-bold text-neutral-500 uppercase tracking-widest focus:outline-none focus:text-purple-400 w-full"
                       placeholder="Ключ (лат.)"
@@ -1148,7 +1150,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                       <button
                         onClick={async () => {
                           try {
-                            await navigator.clipboard.writeText(postContent);
+                            await safeCopyToClipboard(postContent);
                             setIsCopiedMarkdown(true);
                             setTimeout(() => setIsCopiedMarkdown(false), 2000);
                           } catch (e) {
@@ -1168,7 +1170,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                         onClick={async () => {
                           try {
                             const unicodeText = markdownTableToUnicodeBox(postContent);
-                            await navigator.clipboard.writeText(unicodeText);
+                            await safeCopyToClipboard(unicodeText);
                             setIsCopiedUnicode(true);
                             setTimeout(() => setIsCopiedUnicode(false), 2000);
                           } catch (e) {
@@ -1336,15 +1338,26 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                 className="w-full bg-black/50 border border-neutral-800 rounded-xl p-6 text-sm text-neutral-300 font-mono leading-relaxed min-h-[400px] focus:outline-none focus:ring-2 focus:ring-purple-500/50"
               />
             ) : activeTemplate === 'TG_ARTICLE' && articleViewMode === 'visual' ? (
-              <div className="bg-[#0e1621] border border-[#233d5d] rounded-2xl p-6 overflow-x-auto shadow-inner flex justify-center">
+              <div 
+                className="bg-[#0e1621] border border-[#233d5d] rounded-2xl p-6 overflow-x-auto shadow-inner flex justify-center cursor-default"
+                onClick={(e) => {
+                  const target = e.target as HTMLElement;
+                  const anchor = target.closest('a');
+                  if (anchor && anchor.href) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handleOpenExternal(anchor.href, e as any);
+                  }
+                }}
+              >
                 <div 
                   className="w-full max-w-[540px]"
-                  dangerouslySetInnerHTML={{ __html: convertToHTMLForTelegram(postContent) }}
+                  dangerouslySetInnerHTML={{ __html: renderedHtmlArticle }}
                 />
               </div>
             ) : activeTemplate === 'TG_ARTICLE' && articleViewMode === 'unicode' ? (
               <pre className="bg-black/60 border border-neutral-800 rounded-xl p-6 text-sm text-emerald-300/90 whitespace-pre font-mono leading-tight max-h-[550px] overflow-x-auto overflow-y-auto custom-scrollbar">
-                {markdownTableToUnicodeBox(postContent)}
+                {renderedUnicodeArticle}
               </pre>
             ) : (
               <pre className="bg-black/50 border border-neutral-800 rounded-xl p-8 text-sm text-neutral-300 whitespace-pre-wrap font-mono leading-relaxed max-h-[500px] overflow-y-auto custom-scrollbar">

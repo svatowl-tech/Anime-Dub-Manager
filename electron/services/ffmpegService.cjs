@@ -436,8 +436,9 @@ function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, 
       command = command
         .videoFilters(`ass=filename='${escapedAssPath}'`)
         .videoCodec('libx264')
-        .outputOptions('-crf 18')
-        .outputOptions('-preset slow');
+        .outputOptions('-crf 19')
+        .outputOptions('-preset fast')
+        .outputOptions('-threads 0');
     } else {
       // Если надписей нет, просто копируем видеопоток для скорости и качества
       command = command.videoCodec('copy');

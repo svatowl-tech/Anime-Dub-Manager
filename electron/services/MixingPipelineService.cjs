@@ -3808,6 +3808,9 @@ class MixingPipelineService {
       const outName = `${prefix}${nick}.wav`;
       const outPath = path.join(stepFolder, outName);
 
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
       logFn(`[${i+1}/${inputFiles.length}] Применение модели VoiceFixer к дорожке «${nick}»...`);
 
       let usedNeural = false;
@@ -3863,9 +3866,6 @@ class MixingPipelineService {
           .audioChannels(2)
           .audioFrequency(48000)
           .output(outPath);
-
-        const trackStartPct = Math.round((i / inputFiles.length) * 100);
-        const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
 
         await this._execFfmpeg(cmd, {
           logFn,

@@ -1,4 +1,4 @@
-import { Request, Response } from 'express';
+import type { Request, Response } from 'express';
 import axios from 'axios';
 
 // In-memory cookie store per domain to keep user sessions across requests in web mode

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   FolderOpen, Calendar, Clock, MessageSquare, Zap, 
   ExternalLink, Plus, Users, Mic, CheckCircle2, 
@@ -8,6 +8,7 @@ import { Project, Episode, Participant, EpisodeStatus } from '../../types';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { toast } from 'sonner';
 import { formatFullDeadline } from '../../lib/templates';
+import { safeCopyToClipboard } from '../../lib/clipboard';
 
 interface GeneralHubProps {
   projects: Project[];
@@ -37,6 +38,13 @@ const STATUS_COLORS: Record<EpisodeStatus, string> = {
   FINISHED: 'bg-emerald-950/40 text-emerald-400 border-emerald-900/50'
 };
 
+// Module-level cache to prevent repetitive tracker scrapes across tab switches
+const hubTrackerCache: { timestamp: number; data: Record<string, number | null> } = {
+  timestamp: 0,
+  data: {}
+};
+const TRACKER_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
 export default function GeneralHub({
   projects,
   onProjectSelect,
@@ -47,8 +55,14 @@ export default function GeneralHub({
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [servicesStatus, setServicesStatus] = useState<Record<string, { status: string; latency: number; error?: string }>>({});
   const [isCheckingServices, setIsCheckingServices] = useState(false);
-  const [newEpisodesMap, setNewEpisodesMap] = useState<Record<string, number | null>>({});
+  const [newEpisodesMap, setNewEpisodesMap] = useState<Record<string, number | null>>(() => {
+    if (Date.now() - hubTrackerCache.timestamp < TRACKER_CACHE_TTL_MS) {
+      return hubTrackerCache.data;
+    }
+    return {};
+  });
   const [isCheckingNewEpisodes, setIsCheckingNewEpisodes] = useState(false);
+  const isCheckingTrackerRef = useRef(false);
   const [searchQuery, setSearchQuery] = useState('');
   
   // Reminder modal state
@@ -58,7 +72,7 @@ export default function GeneralHub({
   const [copied, setCopied] = useState(false);
 
   // Filter only active projects for the main hub
-  const activeProjects = projects.filter(p => p.status !== 'COMPLETED');
+  const activeProjects = useMemo(() => projects.filter(p => p.status !== 'COMPLETED'), [projects]);
 
   // Load participants on mount
   useEffect(() => {
@@ -91,14 +105,24 @@ export default function GeneralHub({
   };
 
   // Check new episodes on trackers for active projects
-  const checkNewEpisodesOnTracker = async () => {
-    if (isCheckingNewEpisodes || activeProjects.length === 0) return;
+  const checkNewEpisodesOnTracker = async (isManual = false) => {
+    if (isCheckingTrackerRef.current || activeProjects.length === 0) return;
+    
+    // Check cache validity unless manual refresh is explicitly requested
+    if (!isManual && Date.now() - hubTrackerCache.timestamp < TRACKER_CACHE_TTL_MS && Object.keys(hubTrackerCache.data).length > 0) {
+      setNewEpisodesMap(hubTrackerCache.data);
+      return;
+    }
+
+    isCheckingTrackerRef.current = true;
     setIsCheckingNewEpisodes(true);
-    toast.info('Проверяем новые серии на трекерах...');
+    if (isManual) {
+      toast.info('Проверяем новые серии на трекерах...');
+    }
     
-    const resultsMap: Record<string, number | null> = {};
+    const resultsMap: Record<string, number | null> = { ...hubTrackerCache.data };
     
-    // Check concurrently up to 4 projects at a time to be fast and safe
+    // Check concurrently up to 3 projects at a time to be fast and safe
     const checkProject = async (p: Project) => {
       try {
         const checkRes = await ipcSafe.invoke('anime365-check-new-episodes', { projectId: p.id });
@@ -140,26 +164,31 @@ export default function GeneralHub({
     };
 
     try {
-      // Process in batches
+      // Process in batches of 3
       for (let i = 0; i < activeProjects.length; i += 3) {
         const batch = activeProjects.slice(i, i + 3);
         await Promise.all(batch.map(p => checkProject(p)));
       }
+      hubTrackerCache.timestamp = Date.now();
+      hubTrackerCache.data = resultsMap;
       setNewEpisodesMap(resultsMap);
-      toast.success('Проверка серий завершена!');
+      if (isManual) {
+        toast.success('Проверка серий завершена!');
+      }
     } catch (e) {
       console.error('Error during batch tracker check:', e);
     } finally {
       setIsCheckingNewEpisodes(false);
+      isCheckingTrackerRef.current = false;
     }
   };
 
-  // Trigger tracker check automatically when projects change
+  // Trigger tracker check smoothly without loops
   useEffect(() => {
     if (activeProjects.length > 0 && Object.keys(newEpisodesMap).length === 0) {
-      checkNewEpisodesOnTracker();
+      checkNewEpisodesOnTracker(false);
     }
-  }, [projects]);
+  }, [activeProjects.length]);
 
   // Handle archiving a project
   const handleArchiveProject = async (p: Project, e: React.MouseEvent) => {
@@ -204,70 +233,79 @@ export default function GeneralHub({
   // Generate reminder message
   const triggerReminder = (p: Project, ep: Episode, e: React.MouseEvent) => {
     e.stopPropagation();
-    
-    const pendingDubbers = ep.assignments
-      .filter(a => a.status === 'PENDING' || a.status === 'FIXES_NEEDED' || a.status === 'REJECTED')
-      .map(a => {
-        const part = participants.find(part => part.id === a.dubberId);
-        const name = part ? (part.telegram ? `@${part.telegram}` : part.nickname) : a.characterName;
-        const stateLabel = a.status === 'FIXES_NEEDED' ? '⚠️ (нужны правки)' : '🎙️ (ожидает озвучки)';
-        return `• ${name} — роль ${a.characterName} ${stateLabel}`;
-      });
+    try {
+      const assignments = ep.assignments || [];
+      const pendingDubbers = assignments
+        .filter(a => a.status === 'PENDING' || a.status === 'FIXES_NEEDED' || a.status === 'REJECTED')
+        .map(a => {
+          const dubberId = a.substituteId || a.dubberId;
+          const part = participants.find(part => part.id === dubberId);
+          const name = part ? (part.telegram ? `@${part.telegram}` : part.nickname) : a.characterName;
+          const stateLabel = a.status === 'FIXES_NEEDED' ? '⚠️ (нужны правки)' : '🎙️ (ожидает озвучки)';
+          return `• ${name} — роль ${a.characterName} ${stateLabel}`;
+        });
 
-    const formatDeadlineShort = (dateStr?: string) => {
-      if (!dateStr) return 'не указан';
-      const date = new Date(dateStr);
-      const day = date.getDate().toString().padStart(2, '0');
-      const month = (date.getMonth() + 1).toString().padStart(2, '0');
-      return `${day}.${month}`;
-    };
+      const deadlineStr = formatFullDeadline(ep.deadline, ep.fixesDeadline);
+      
+      let msg = `⏰ **Напоминание о сдаче серии!**\n`;
+      msg += `🎬 Проект: **${p.emoji || '❤️'} ${p.title}**\n`;
+      msg += `👾 Серия **#${ep.number}**\n`;
+      msg += `📅 Дедлайн сдачи: **${deadlineStr}**\n`;
+      msg += `📊 Текущий этап: **${STATUS_LABELS[ep.status] || ep.status}**\n\n`;
+      
+      if (pendingDubbers.length > 0) {
+        msg += `Ребята, очень ждем ваши озвучки / правки:\n${pendingDubbers.join('\n')}\n\nСдаем по возможности скорее! 🙏`;
+      } else if (ep.status === 'SOUND_ENGINEERING') {
+        const se = participants.find(part => part.id === p.soundEngineerId);
+        const seMention = se ? (se.telegram ? `@${se.telegram}` : se.nickname) : 'звукорежиссер';
+        msg += `🔊 Серия уже на этапе звукорежиссуры у **${seMention}**. Готовимся к релизу! 🚀`;
+      } else {
+        msg += `🎉 Все роли успешно сданы и проверены! Серия готовится к финализации.`;
+      }
 
-    const deadlineStr = formatFullDeadline(ep.deadline, ep.fixesDeadline);
-    
-    let msg = `⏰ **Напоминание о сдаче серии!**\n`;
-    msg += `🎬 Проект: **${p.emoji || '❤️'} ${p.title}**\n`;
-    msg += `👾 Серия **#${ep.number}**\n`;
-    msg += `📅 Дедлайн сдачи: **${deadlineStr}**\n`;
-    msg += `📊 Текущий этап: **${STATUS_LABELS[ep.status] || ep.status}**\n\n`;
-    
-    if (pendingDubbers.length > 0) {
-      msg += `Ребята, очень ждем ваши озвучки / правки:\n${pendingDubbers.join('\n')}\n\nСдаем по возможности скорее! 🙏`;
-    } else if (ep.status === 'SOUND_ENGINEERING') {
-      const se = participants.find(part => part.id === p.soundEngineerId);
-      const seMention = se ? (se.telegram ? `@${se.telegram}` : se.nickname) : 'звукорежиссер';
-      msg += `🔊 Серия уже на этапе звукорежиссуры у **${seMention}**. Готовимся к релизу! 🚀`;
-    } else {
-      msg += `🎉 Все роли успешно сданы и проверены! Серия готовится к финализации.`;
-    }
-
-    setReminderText(msg);
-    setReminderProject(p);
-    setReminderEpisode(ep);
-    setCopied(false);
-  };
-
-  const copyToClipboard = () => {
-    if (reminderText) {
-      navigator.clipboard.writeText(reminderText);
-      setCopied(true);
-      toast.success('Текст напоминания скопирован в буфер обмена!');
-      setTimeout(() => setCopied(false), 2000);
+      setReminderText(msg);
+      setReminderProject(p);
+      setReminderEpisode(ep);
+      setCopied(false);
+    } catch (err: any) {
+      console.error('Failed to generate reminder message:', err);
+      toast.error('Ошибка генерации напоминания: ' + (err?.message || String(err)));
     }
   };
 
-  // Stats calculation
-  const stats = {
+  const copyToClipboard = async () => {
+    if (!reminderText) return;
+    try {
+      const ok = await safeCopyToClipboard(reminderText);
+      if (ok) {
+        setCopied(true);
+        toast.success('Текст напоминания скопирован в буфер обмена!');
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        toast.error('Не удалось автоматически скопировать текст в буфер');
+      }
+    } catch (e: any) {
+      toast.error('Ошибка копирования в буфер обмена');
+    }
+  };
+
+  // Stats calculation memoized to prevent lag during filtering or typing
+  const stats = useMemo(() => ({
     totalActive: activeProjects.length,
     inProgressEpisodes: activeProjects.reduce((acc, p) => acc + (p.episodes?.filter(e => e.status !== 'FINISHED')?.length || 0), 0),
     completedEpisodes: activeProjects.reduce((acc, p) => acc + (p.episodes?.filter(e => e.status === 'FINISHED')?.length || 0), 0),
     fixesRequiredCount: activeProjects.reduce((acc, p) => acc + (p.episodes?.filter(e => e.status === 'FIXES')?.length || 0), 0)
-  };
+  }), [activeProjects]);
 
-  // Filter projects based on search query
-  const filteredProjects = activeProjects.filter(p => 
-    p.title.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    (p.originalTitle && p.originalTitle.toLowerCase().includes(searchQuery.toLowerCase()))
-  );
+  // Filter projects based on search query memoized
+  const filteredProjects = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return activeProjects;
+    return activeProjects.filter(p => 
+      p.title.toLowerCase().includes(q) || 
+      (p.originalTitle && p.originalTitle.toLowerCase().includes(q))
+    );
+  }, [activeProjects, searchQuery]);
 
   return (
     <div className="space-y-8 pb-12">
@@ -296,7 +334,7 @@ export default function GeneralHub({
             />
           </div>
           <button
-            onClick={checkNewEpisodesOnTracker}
+            onClick={() => checkNewEpisodesOnTracker(true)}
             disabled={isCheckingNewEpisodes}
             className="flex items-center gap-2 px-4 py-2.5 bg-neutral-900 border border-neutral-800 hover:border-neutral-700 text-neutral-300 hover:text-white rounded-xl text-sm font-semibold transition-all cursor-pointer disabled:opacity-50"
             title="Проверить появление новых серий на Anime365 и Nyaa"

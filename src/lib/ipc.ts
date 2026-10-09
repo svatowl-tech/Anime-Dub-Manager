@@ -856,6 +856,36 @@ function handleIpcMock(channel: string, args: any[]): any {
     return { success: true, path: args[0].outputPath };
   }
 
+  if (channel === 'clipboard-write-text') {
+    return (async () => {
+      const text = String(args[0] ?? '');
+      try {
+        if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (e) {
+        // Fallback
+      }
+      try {
+        if (typeof document !== 'undefined') {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.position = 'fixed';
+          ta.style.left = '-9999px';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          return true;
+        }
+      } catch (e) {
+        // Fallback failed
+      }
+      return false;
+    })();
+  }
+
   if (channel === 'copy-file') {
     return (async () => {
       const { fileName, targetDir } = args[0] || {};

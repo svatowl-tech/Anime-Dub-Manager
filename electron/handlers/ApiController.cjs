@@ -787,6 +787,7 @@ function registerApiHandlers(getData, saveData, mainWindow, taskQueue) {
           let lastNonZeroProgressTime = Date.now();
           let downloadStartTime = Date.now();
           let ffmpegKillTriggered = false;
+          let fallbackCheckInterval = null;
 
           const downloadPromise = new Promise((resolve, reject) => {
             cmd.on('start', (commandLine) => {
@@ -874,10 +875,12 @@ function registerApiHandlers(getData, saveData, mainWindow, taskQueue) {
               } catch (sendEx) {}
             })
             .on('end', () => {
+              clearInterval(fallbackCheckInterval);
               jobLog(`Источник #${currentUrlIndex + 1} успешно скачан на 100%!`);
               resolve();
             })
             .on('error', (err) => {
+              clearInterval(fallbackCheckInterval);
               if (state.status === 'cancelled') {
                 reject(new Error('USER_CANCELLED'));
                 return;
@@ -888,7 +891,7 @@ function registerApiHandlers(getData, saveData, mainWindow, taskQueue) {
             .run();
 
             // Периодическая проверка полной остановки прогресс-событий (зависание сокета)
-            const fallbackCheckInterval = setInterval(() => {
+            fallbackCheckInterval = setInterval(() => {
               if (state.status === 'cancelled' || downloadSuccess) {
                 clearInterval(fallbackCheckInterval);
                 return;

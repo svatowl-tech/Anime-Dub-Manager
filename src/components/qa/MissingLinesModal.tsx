@@ -41,6 +41,7 @@ import {
   UserPlus
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../../lib/clipboard';
 import { 
   MissingLineDetection, 
   DefectCategory, 
@@ -582,9 +583,9 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
     setHasCopiedReport(false);
   };
 
-  const handleCopyReport = () => {
+  const handleCopyReport = async () => {
     if (!soundEngineerReportText) return;
-    navigator.clipboard.writeText(soundEngineerReportText);
+    await safeCopyToClipboard(soundEngineerReportText);
     setHasCopiedReport(true);
     toast.success('Сообщение для звукаря скопировано в буфер обмена!');
     setTimeout(() => setHasCopiedReport(false), 2500);
@@ -3291,16 +3292,16 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
 
               <button
                 type="button"
-                onClick={() => {
+                onClick={async () => {
                   const allText = (activeReport?.logs || [])
                     .map(l => `[${l.timestamp}] [${l.stage.toUpperCase()}] [${l.level.toUpperCase()}] ${l.message}${l.details ? ' -> ' + l.details : ''}`)
                     .join('\n');
-                  navigator.clipboard.writeText(allText);
+                  await safeCopyToClipboard(allText);
                   setCopiedLogs(true);
                   toast.success('Лог проверок скопирован в буфер обмена');
                   setTimeout(() => setCopiedLogs(false), 2000);
                 }}
-                className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5"
+                className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
               >
                 {copiedLogs ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
                 <span>{copiedLogs ? 'Скопировано!' : 'Копировать лог'}</span>

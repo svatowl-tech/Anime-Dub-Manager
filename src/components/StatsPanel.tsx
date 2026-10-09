@@ -7,6 +7,7 @@ import {
 import { ipcSafe } from '../lib/ipcSafe';
 import { Project, Episode, Participant, RoleAssignment, UploadedFile, EpisodeStatus } from '../types';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../lib/clipboard';
 
 interface ParticipantStats {
   id: string;
@@ -394,7 +395,7 @@ export const StatsPanel: React.FC = () => {
     calculateStatistics(projects, participants, val);
   };
 
-  const copyStatsToClipboard = () => {
+  const copyStatsToClipboard = async () => {
     let text = `📊 **СТАТИСТИКА КОМАНДЫ ДАББИНГА** 📊\n`;
     text += `─────────────────────────\n`;
     text += `📁 Проект: ${selectedProjectId === 'all' ? 'Все тайтлы' : projects.find(p => p.id === selectedProjectId)?.title || 'Выбранный проект'}\n`;
@@ -417,7 +418,7 @@ export const StatsPanel: React.FC = () => {
     text += `─────────────────────────\n`;
     text += `Сгенерировано в Anime Dub Manager 🎙️✨`;
 
-    navigator.clipboard.writeText(text);
+    await safeCopyToClipboard(text);
     toast.success('Красивая текстовая статистика скопирована в буфер обмена!');
   };
 

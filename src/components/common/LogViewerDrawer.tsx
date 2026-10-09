@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Terminal, X, Trash2, Copy, Check, ChevronDown, ChevronUp, AlertCircle, AlertTriangle, Info } from 'lucide-react';
 import { LogEntry } from '../../lib/appLogger';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../../lib/clipboard';
 
 interface LogViewerDrawerProps {
   title: string;
@@ -40,12 +41,12 @@ export const LogViewerDrawer: React.FC<LogViewerDrawerProps> = ({
     }
   }, [filteredLogs.length, isOpen]);
 
-  const handleCopyAll = () => {
+  const handleCopyAll = async () => {
     if (logs.length === 0) return;
     const text = logs
       .map(l => `[${l.time}] [${l.level.toUpperCase()}] [${l.scope}] ${l.message}${l.details ? ' ' + JSON.stringify(l.details) : ''}`)
       .join('\n');
-    navigator.clipboard.writeText(text);
+    await safeCopyToClipboard(text);
     setCopied(true);
     toast.success('Журнал скопирован в буфер обмена');
     setTimeout(() => setCopied(false), 2000);

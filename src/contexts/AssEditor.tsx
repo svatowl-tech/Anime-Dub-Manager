@@ -24,7 +24,9 @@ import {
   Video,
   Terminal,
   Tag,
+  Copy,
 } from "lucide-react";
+import { safeCopyToClipboard } from "../lib/clipboard";
 import TranslatePanel from "../components/TranslatePanel";
 import AssOcrPanel from "../components/AssOcrPanel";
 import AssWhisperPanel from "../components/AssWhisperPanel";
@@ -1935,12 +1937,22 @@ export default function AssEditor({
             </div>
             <div className="p-4 border-t border-neutral-800 bg-neutral-950/50 flex gap-3">
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText(generatedMessage);
-                  setStatus("Сообщение скопировано в буфер обмена!");
+                onClick={async () => {
+                  try {
+                    const ok = await safeCopyToClipboard(generatedMessage);
+                    if (ok) {
+                      setStatus("Сообщение скопировано в буфер обмена!");
+                      toast.success("Сообщение скопировано в буфер обмена!");
+                    } else {
+                      setStatus("Не удалось скопировать сообщение");
+                    }
+                  } catch (e) {
+                    setStatus("Ошибка при копировании");
+                  }
                 }}
-                className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2"
+                className="flex-1 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition-colors flex items-center justify-center gap-2 cursor-pointer"
               >
+                <Copy className="w-4 h-4" />
                 Копировать
               </button>
               <button

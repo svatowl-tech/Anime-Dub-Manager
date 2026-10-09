@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Task } from '../types';
 import { ipcSafe } from '../lib/ipcSafe';
+import { safeCopyToClipboard } from '../lib/clipboard';
 import { X, Loader2, CheckCircle2, AlertCircle, XCircle, Clock, Terminal, Copy, Check, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -31,10 +32,23 @@ export default function TaskQueuePanel() {
       }
     });
 
+    let lastProgressTick = 0;
     const removeProgressListener = ipcSafe.on('task-progress', (data: { id: string, progress: number, eta: number | null, step?: string, log?: string, logs?: string[] }) => {
+      const now = Date.now();
+      const isMilestone = data.progress === 100 || data.progress === 0 || !!data.log || !!data.logs;
+      if (!isMilestone && now - lastProgressTick < 100) {
+        return;
+      }
+      lastProgressTick = now;
+
       setTasks(prevTasks => prevTasks.map(task => {
         if (task.id !== data.id) return task;
-        const newLogs = data.logs || (data.log ? [...(task.logs || []), data.log] : task.logs);
+        let newLogs = task.logs;
+        if (data.logs) {
+          newLogs = data.logs.slice(-200);
+        } else if (data.log) {
+          newLogs = [...(task.logs || []).slice(-199), data.log];
+        }
         return { 
           ...task, 
           progress: data.progress, 
@@ -70,9 +84,9 @@ export default function TaskQueuePanel() {
     }
   };
 
-  const handleCopyLogs = (taskId: string, logs?: string[]) => {
+  const handleCopyLogs = async (taskId: string, logs?: string[]) => {
     if (!logs || logs.length === 0) return;
-    navigator.clipboard.writeText(logs.join('\n'));
+    await safeCopyToClipboard(logs.join('\n'));
     setCopiedTaskId(taskId);
     setTimeout(() => setCopiedTaskId(null), 2000);
   };

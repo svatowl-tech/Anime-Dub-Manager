@@ -544,6 +544,9 @@ def process_deepfilternet(args):
     eff_atten = atten_limit if sensitivity >= 3.0 else max(-40.0, atten_limit * (sensitivity / 3.0))
 
     import torch
+    import threading
+    import time
+
     num_channels = audio_data.shape[0]
     enhanced_channels = []
 
@@ -552,8 +555,28 @@ def process_deepfilternet(args):
         ch_arr = np.ascontiguousarray(audio_data[ch:ch+1], dtype=np.float32)
         ch_tensor = torch.from_numpy(ch_arr).to(device=device, dtype=torch.float32)
 
-        with torch.no_grad():
-            enhanced_ch = enhance(model, df_state, ch_tensor, atten_lim_db=eff_atten)
+        done_event = threading.Event()
+        start_progress = 40.0 + (ch / num_channels) * 45.0
+        max_progress = 40.0 + ((ch + 0.95) / num_channels) * 45.0
+
+        def _heartbeat():
+            t0 = time.time()
+            step = 0
+            while not done_event.wait(2.5):
+                step += 1
+                elapsed = int(time.time() - t0)
+                cur = start_progress + (max_progress - start_progress) * (1.0 - (0.95 ** step))
+                emit_progress(round(cur, 1), f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, {elapsed}с, {str(device).upper()})...")
+
+        hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+        hb_thread.start()
+
+        try:
+            with torch.no_grad():
+                enhanced_ch = enhance(model, df_state, ch_tensor, atten_lim_db=eff_atten)
+        finally:
+            done_event.set()
+            hb_thread.join(timeout=1.0)
 
         enhanced_np = enhanced_ch.cpu().numpy()
         enhanced_channels.append(enhanced_np)
@@ -1039,32 +1062,41 @@ def process_voicefixer(args):
         try:
             import torch
             cuda_available = torch.cuda.is_available()
-            emit_progress(30.0, f"Применение нейросети VoiceFixer (cuda={cuda_available})...")
-            temp_in = output_path + ".temp_in.wav"
-            temp_out = output_path + ".temp_out.wav"
 
             audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
                 input_path, target_sr=44100, force_stereo=False, remove_dc=True
             )
-            AudioConditioner.save_audio(temp_in, audio_data, current_sr=44100, target_sr=44100, orig_channels=orig_channels)
+            duration_sec = audio_data.shape[-1] / 44100.0
 
-            try:
-                vf.restore(input=temp_in, output=temp_out, cuda=cuda_available, mode=0)
-                if os.path.exists(temp_out):
-                    vf_audio, vf_sr, _, _ = AudioConditioner.load_audio(temp_out, target_sr=48000, force_stereo=False)
-                    polished = _apply_studio_harmonic_restoration(
-                        vf_audio, sample_rate=48000, orig_channels=orig_channels,
-                        air_boost=air_boost * 0.5, saturation=saturation * 0.3, clarity=clarity * 0.3,
-                        warm_tube=warm_tube, sub_bass=sub_bass
-                    )
-                    AudioConditioner.save_audio(output_path, polished, current_sr=48000, target_sr=48000, orig_channels=orig_channels)
-                else:
-                    vf = None
-            finally:
-                try: os.unlink(temp_in)
-                except Exception: pass
-                try: os.unlink(temp_out)
-                except Exception: pass
+            # On CPU without CUDA, full neural inference of 20-30 min audio takes ~45-90 minutes at 100% CPU lock
+            if not cuda_available and duration_sec > 45.0:
+                sys.stdout.write(f"LOG:VoiceFixer: Дорожка {duration_sec:.1f}с на CPU. Задействован гибридный студийный экситер высокой четкости во избежание перегрузки процессора.\n")
+                sys.stdout.flush()
+                vf = None
+            else:
+                emit_progress(30.0, f"Применение нейросети VoiceFixer (cuda={cuda_available})...")
+                temp_in = output_path + ".temp_in.wav"
+                temp_out = output_path + ".temp_out.wav"
+                AudioConditioner.save_audio(temp_in, audio_data, current_sr=44100, target_sr=44100, orig_channels=orig_channels)
+
+                try:
+                    vf.restore(input=temp_in, output=temp_out, cuda=cuda_available, mode=0)
+                    if os.path.exists(temp_out):
+                        vf_audio, vf_sr, _, _ = AudioConditioner.load_audio(temp_out, target_sr=48000, force_stereo=False)
+                        polished = _apply_studio_harmonic_restoration(
+                            vf_audio, sample_rate=48000, orig_channels=orig_channels,
+                            air_boost=air_boost * 0.5, saturation=saturation * 0.3, clarity=clarity * 0.3,
+                            warm_tube=warm_tube, sub_bass=sub_bass
+                        )
+                        AudioConditioner.save_audio(output_path, polished, current_sr=48000, target_sr=48000, orig_channels=orig_channels)
+                        emit_progress(100.0, "Нейросетевое восстановление гармоник VoiceFixer успешно завершено")
+                    else:
+                        vf = None
+                finally:
+                    try: os.unlink(temp_in)
+                    except Exception: pass
+                    try: os.unlink(temp_out)
+                    except Exception: pass
         except Exception as e:
             sys.stdout.write(f"LOG:VoiceFixer neural inference fallback: {e}\n")
             sys.stdout.flush()
@@ -1084,6 +1116,7 @@ def process_voicefixer(args):
         )
         emit_progress(85.0, f"Сохранение восстановленного аудио: {os.path.basename(output_path)}...")
         AudioConditioner.save_audio(output_path, restored, current_sr=48000, target_sr=48000, orig_channels=orig_channels)
+        emit_progress(100.0, "Студийное гармоническое восстановление вокала успешно завершено")
 
     emit_progress(100.0, f"Восстановление гармоник успешно завершено ({used_engine})!")
     sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': used_engine})}\n")

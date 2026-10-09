@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { ipcSafe } from "../../lib/ipcSafe";
+import { safeCopyToClipboard } from "../../lib/clipboard";
 
 interface WhisperSnippetModalProps {
   isOpen: boolean;
@@ -453,11 +454,11 @@ export const WhisperSnippetModal: React.FC<WhisperSnippetModalProps> = ({
               />
               {recognizedText && (
                 <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(recognizedText);
+                  onClick={async () => {
+                    await safeCopyToClipboard(recognizedText);
                     toast.success('Оригинальный текст скопирован');
                   }}
-                  className="absolute right-2 bottom-2 p-1 text-neutral-500 hover:text-neutral-300 bg-neutral-900/80 rounded"
+                  className="absolute right-2 bottom-2 p-1 text-neutral-500 hover:text-neutral-300 bg-neutral-900/80 rounded cursor-pointer"
                   title="Скопировать оригинал"
                 >
                   <Copy className="w-3 h-3" />
@@ -502,11 +503,11 @@ export const WhisperSnippetModal: React.FC<WhisperSnippetModalProps> = ({
               />
               {translatedText && (
                 <button
-                  onClick={() => {
-                    navigator.clipboard.writeText(translatedText);
+                  onClick={async () => {
+                    await safeCopyToClipboard(translatedText);
                     toast.success('Перевод скопирован');
                   }}
-                  className="absolute right-2 bottom-2 p-1 text-neutral-500 hover:text-neutral-300 bg-neutral-900/80 rounded"
+                  className="absolute right-2 bottom-2 p-1 text-neutral-500 hover:text-neutral-300 bg-neutral-900/80 rounded cursor-pointer"
                   title="Скопировать перевод"
                 >
                   <Copy className="w-3 h-3" />

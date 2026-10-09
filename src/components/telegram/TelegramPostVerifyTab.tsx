@@ -18,6 +18,7 @@ import {
   LogIn
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../../lib/clipboard';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { Episode, Project, TelegramMTProtoDialog } from '../../types';
 import { TelegramPostSearchResult } from './types';
@@ -152,8 +153,8 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
     }
   };
 
-  const handleCopyLink = (post: TelegramPostSearchResult) => {
-    navigator.clipboard.writeText(post.link);
+  const handleCopyLink = async (post: TelegramPostSearchResult) => {
+    await safeCopyToClipboard(post.link);
     setCopiedId(post.id);
     toast.success('Ссылка на пост скопирована в буфер обмена');
     setTimeout(() => setCopiedId(null), 2000);

@@ -1,7 +1,6 @@
 import { useCallback, useRef } from 'react';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { Episode, Project } from '../../types';
-import { SIGN_KEYWORDS } from '../../constants';
 
 export const useEpisodeSync = (
   currentEpisode: Episode | null,
@@ -9,19 +8,36 @@ export const useEpisodeSync = (
   onRefresh: () => void
 ) => {
   const syncedSignatureRef = useRef<string>('');
+  const isSyncingRef = useRef<boolean>(false);
+  const currentEpisodeRef = useRef<Episode | null>(currentEpisode);
+  currentEpisodeRef.current = currentEpisode;
+  const selectedProjectRef = useRef<Project | undefined>(selectedProject);
+  selectedProjectRef.current = selectedProject;
+  const onRefreshRef = useRef(onRefresh);
+  onRefreshRef.current = onRefresh;
 
   const syncEpisodeWithGlobalMapping = useCallback(async () => {
-    if (!currentEpisode || !selectedProject) return;
+    const ep = currentEpisodeRef.current;
+    const proj = selectedProjectRef.current;
+    if (!ep || !proj || isSyncingRef.current) return;
     
-    const syncSignature = `${currentEpisode.id}_${selectedProject.globalMapping || ''}_${(currentEpisode.assignments || []).length}`;
+    // Create detailed signature including assignments state
+    const assignmentsSummary = (ep.assignments || [])
+      .map(a => `${a.characterName}:${a.dubberId || ''}:${a.isMain ? 1 : 0}`)
+      .join(';');
+    const syncSignature = `${ep.id}_${proj.globalMapping || ''}_${assignmentsSummary}`;
     if (syncedSignatureRef.current === syncSignature) {
       return; // Already synced for this exact state
     }
-    syncedSignatureRef.current = syncSignature;
+
+    if (!proj.globalMapping || proj.globalMapping === '[]' || proj.globalMapping === '{}') {
+      syncedSignatureRef.current = syncSignature;
+      return;
+    }
 
     let globalMapping: any[] = [];
     try {
-      const parsed = JSON.parse(selectedProject.globalMapping || '[]');
+      const parsed = JSON.parse(proj.globalMapping);
       if (Array.isArray(parsed)) {
         globalMapping = parsed;
       } else if (parsed && typeof parsed === 'object') {
@@ -29,12 +45,16 @@ export const useEpisodeSync = (
       }
     } catch (e) {
       console.error("Error parsing global mapping:", e);
+      syncedSignatureRef.current = syncSignature;
       return;
     }
 
-    if (globalMapping.length === 0) return;
+    if (globalMapping.length === 0) {
+      syncedSignatureRef.current = syncSignature;
+      return;
+    }
 
-    const existingAssignments = Array.isArray(currentEpisode.assignments) ? currentEpisode.assignments : [];
+    const existingAssignments = Array.isArray(ep.assignments) ? ep.assignments : [];
     const updatedAssignments = [...existingAssignments];
     let hasChanges = false;
 
@@ -76,22 +96,29 @@ export const useEpisodeSync = (
       }
     });
 
-    // REMOVED: Adding all characters from global mapping to every episode.
-    // This was causing "all roles ever assigned" to show up in every episode.
-    // We only want to sync dubbers for characters that are actually in this episode.
+    // Mark as checked to prevent re-entering while async call is underway
+    syncedSignatureRef.current = syncSignature;
 
     if (hasChanges) {
+      isSyncingRef.current = true;
       try {
         await ipcSafe.invoke('save-episode', { 
-          ...currentEpisode, 
+          ...ep, 
           assignments: updatedAssignments 
         });
-        onRefresh();
+        // Also update signature for new state so onRefresh doesn't bounce back
+        const newSummary = updatedAssignments
+          .map(a => `${a.characterName}:${a.dubberId || ''}:${a.isMain ? 1 : 0}`)
+          .join(';');
+        syncedSignatureRef.current = `${ep.id}_${proj.globalMapping || ''}_${newSummary}`;
+        onRefreshRef.current();
       } catch (error) {
         console.error("Failed to auto-sync episode assignments:", error);
+      } finally {
+        isSyncingRef.current = false;
       }
     }
-  }, [currentEpisode, selectedProject?.globalMapping, onRefresh]);
+  }, []);
 
   return { syncEpisodeWithGlobalMapping };
 };

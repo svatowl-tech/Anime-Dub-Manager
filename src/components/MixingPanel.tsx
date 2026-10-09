@@ -50,6 +50,7 @@ import {
   Activity
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { safeCopyToClipboard } from '../lib/clipboard';
 import { 
   Episode, 
   MixingManifest, 
@@ -1276,11 +1277,11 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   };
 
   // Copy all console logs to clipboard
-  const handleCopyLogs = () => {
+  const handleCopyLogs = async () => {
     const text = logs
       .map(l => `[${l.timestamp}] [${l.level.toUpperCase()}] [${l.tag}] ${l.message}${l.meta ? '\n  ' + JSON.stringify(l.meta) : ''}`)
       .join('\n');
-    navigator.clipboard.writeText(text);
+    await safeCopyToClipboard(text);
     toast.success(`Скопировано ${logs.length} строк логов в буфер обмена 📋`);
     mixLog('debug', 'Консоль', `Все логи (${logs.length} записей) скопированы в буфер обмена`);
   };
@@ -1388,9 +1389,6 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     eqPresenceFreq: { label: 'Частота презенса речи (Presence)', unit: 'Гц' },
     eqPresenceGain: { label: 'Усиление презенса (Presence Gain)', unit: 'dB' },
     eqLowpass: { label: 'Lowpass срез верха (Air Guard)', unit: 'Гц' },
-    bodyGainDb: { label: 'Тело голоса (Body Warmth 250Hz)', unit: 'dB' },
-    boxCutGainDb: { label: 'Срез коробочного гула 500Hz', unit: 'dB' },
-    airGainDb: { label: 'Воздушный шелк (Air 12kHz)', unit: 'dB' },
     compThresholdDb: { label: 'Порог компрессора (Threshold)', unit: 'dB' },
     compRatio: { label: 'Степень сжатия (Ratio)', unit: ':1' },
     compAttackMs: { label: 'Атака компрессора (Attack)', unit: 'мс' },
@@ -3046,7 +3044,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
             <div className="space-y-2.5 max-h-[60vh] overflow-y-auto pr-1">
               {moduleDatabase.map((modDef) => {
-                const isUltimate = modDef.isUltimate || ['voice_master_strip', 'ultimate_denoiser', 'ultimate_dereverb', 'ultimate_separation', 'ultimate_loudness'].includes(modDef.id);
+                const isUltimate = (modDef as any).isUltimate || ['voice_master_strip', 'ultimate_denoiser', 'ultimate_dereverb', 'ultimate_separation', 'ultimate_loudness'].includes(modDef.id);
                 return (
                   <div
                     key={modDef.id}

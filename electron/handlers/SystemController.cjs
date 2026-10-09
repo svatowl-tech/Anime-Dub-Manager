@@ -1,4 +1,4 @@
-const { ipcMain, dialog, app, shell, BrowserWindow } = require('electron');
+const { ipcMain, dialog, app, shell, BrowserWindow, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const { exec } = require('child_process');
@@ -9,6 +9,16 @@ const { setCustomFfmpegPath, getActiveProcesses, silenceAudioIntervals, transfer
 
 function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow) || BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+
+  ipcMain.handle('clipboard-write-text', wrapIpcHandler(async (event, text) => {
+    try {
+      clipboard.writeText(typeof text === 'string' ? text : String(text || ''));
+      return true;
+    } catch (clipErr) {
+      log.error('Native clipboard write failed:', clipErr);
+      return false;
+    }
+  }));
 
   ipcMain.handle('open-external', wrapIpcHandler(async (event, url) => {
     if (!url) throw new Error('Missing URL');
@@ -282,22 +292,30 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     };
   }));
 
-  ipcMain.handle('check-services-status', wrapIpcHandler(async () => {
+  // In-memory cache for service connectivity to avoid spamming external servers on every mount
+  let cachedServicesStatus = null;
+  let cachedServicesTime = 0;
+
+  ipcMain.handle('check-services-status', wrapIpcHandler(async (event, { force = false } = {}) => {
+    const now = Date.now();
+    if (!force && cachedServicesStatus && (now - cachedServicesTime < 60000)) {
+      return cachedServicesStatus;
+    }
+
     const services = [
-      { name: 'Anime365', url: 'https://smotret-anime.com', host: 'smotret-anime.com' },
-      { name: 'Shikimori', url: 'https://shikimori.one', host: 'shikimori.one' },
-      { name: 'Nyaa Tracker', url: 'https://nyaa.si', host: 'nyaa.si' },
-      { name: 'Yandex Disk', url: 'https://cloud-api.yandex.net/v1/disk/', host: 'cloud-api.yandex.net' },
-      { name: 'Telegram API', url: 'https://api.telegram.org', host: 'api.telegram.org' }
+      { name: 'Anime365', url: 'https://smotret-anime.com' },
+      { name: 'Shikimori', url: 'https://shikimori.one' },
+      { name: 'Nyaa Tracker', url: 'https://nyaa.si' },
+      { name: 'Yandex Disk', url: 'https://cloud-api.yandex.net/v1/disk/' },
+      { name: 'Telegram API', url: 'https://api.telegram.org' }
     ];
 
     const results = {};
-    for (const service of services) {
+    const checks = services.map(async (service) => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      const start = Date.now();
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 4000);
-        const start = Date.now();
-        
         let res;
         try {
           res = await fetch(service.url, { 
@@ -305,30 +323,32 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
             signal: controller.signal,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
           });
-        } catch (fetchErr) {
-          // If HEAD fails (some APIs don't support HEAD), try a quick GET
+        } catch {
           res = await fetch(service.url, { 
             method: 'GET', 
             signal: controller.signal,
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
           });
         }
-        
         clearTimeout(timeoutId);
-        const latency = Date.now() - start;
         results[service.name] = {
           status: res && (res.status >= 200 && res.status < 500) ? 'online' : 'offline',
-          latency,
+          latency: Date.now() - start,
           code: res ? res.status : null
         };
       } catch (err) {
+        clearTimeout(timeoutId);
         results[service.name] = {
           status: 'offline',
           latency: 0,
-          error: err.message
+          error: err.name === 'AbortError' ? 'Timeout' : err.message
         };
       }
-    }
+    });
+
+    await Promise.allSettled(checks);
+    cachedServicesStatus = results;
+    cachedServicesTime = Date.now();
     return results;
   }));
 
@@ -353,14 +373,22 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
   ipcMain.handle('abort-task', wrapIpcHandler(async (event, taskId) => taskQueue.abort(taskId)));
   ipcMain.handle('clear-task-history', wrapIpcHandler(async () => taskQueue.clearHistory()));
 
-  // Search Nyaa Torrents
+  // In-memory cache for tracker searches
+  const trackerSearchCache = new Map();
+
+  // Search Nyaa Torrents with timeout and memory cache
   ipcMain.handle('search-nyaa-torrents', wrapIpcHandler(async (event, { query, category = 'anime', subCategory = 'raw', sort = 'seeders', order = 'desc' }) => {
     if (!query) throw new Error('Query is required');
-    log.info(`Searching Nyaa & others for: "${query}", category: "${category}", subCategory: "${subCategory}", sort: "${sort}", order: "${order}"`);
-    
+    const cacheKey = `${query}_${category}_${subCategory}_${sort}_${order}`;
+    const cached = trackerSearchCache.get(cacheKey);
+    if (cached && (Date.now() - cached.time < 300000)) {
+      return cached.results;
+    }
+
+    log.info(`Searching Nyaa & others for: "${query}", category: "${category}", subCategory: "${subCategory}"`);
     let results = [];
     
-    // 1. Search Nyaa
+    // 1. Search Nyaa with 4s timeout
     try {
       const url = new URL('https://nyaaapi.onrender.com/nyaa');
       url.searchParams.append('q', query);
@@ -369,12 +397,18 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
       if (sort) url.searchParams.append('sort', sort);
       if (order) url.searchParams.append('order', order);
 
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
+
       const res = await fetch(url.toString(), {
+        signal: controller.signal,
         headers: {
           'Accept': 'application/json',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
       });
+      clearTimeout(timeoutId);
+
       if (res.ok) {
         const data = await res.json();
         let rawList = [];
@@ -395,7 +429,7 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
         });
       }
     } catch (err) {
-      log.error('Nyaa search error:', err.message);
+      log.warn('Nyaa search timed out or error:', err.message);
     }
     
     // 2. Search TokyoTosho
@@ -490,6 +524,7 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
       log.warn(`No results found on any tracker for ${query}`);
     }
     
+    trackerSearchCache.set(cacheKey, { time: Date.now(), results });
     return results;
   }));
 

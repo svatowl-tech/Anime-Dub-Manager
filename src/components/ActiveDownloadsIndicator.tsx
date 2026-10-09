@@ -22,13 +22,18 @@ export default function ActiveDownloadsIndicator() {
         const data = await ipcSafe.invoke('get-active-downloads');
         if (isMounted && data && Array.isArray(data)) {
           const active = data.filter(d => d.status === 'downloading' || d.status === 'error');
-          setDownloads(active);
+          setDownloads(prev => {
+            if (prev.length === 0 && active.length === 0) return prev;
+            if (prev.length !== active.length) return active;
+            const isDifferent = active.some((a, idx) => a.id !== prev[idx]?.id || a.progress !== prev[idx]?.progress || a.status !== prev[idx]?.status);
+            return isDifferent ? active : prev;
+          });
           
-          // If active downloads exist, poll faster (2s), otherwise slow down (8s)
-          const nextInterval = active.length > 0 ? 2000 : 8000;
+          // If active downloads exist, poll faster (2s), otherwise slow down (12s)
+          const nextInterval = active.length > 0 ? 2000 : 12000;
           timerId = setTimeout(fetchDownloads, nextInterval);
         } else if (isMounted) {
-          timerId = setTimeout(fetchDownloads, 8000);
+          timerId = setTimeout(fetchDownloads, 12000);
         }
       } catch (e) {
         console.error('Failed to fetch downloads:', e);

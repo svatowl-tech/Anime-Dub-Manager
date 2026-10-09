@@ -68,6 +68,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   const [logs, setLogs] = useState<Array<{ time: string; text: string; isError?: boolean }>>([]);
 
   const qrPollIntervalRef = useRef<any>(null);
+  const lastBackendLogRef = useRef<string>('');
 
   const getEffectiveCredentials = () => {
     const effId = apiId.trim() ? Number(apiId.trim()) : Number(DEFAULT_TG_API_ID);
@@ -163,12 +164,13 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
         const status = await ipcSafe.invoke('telegram-mtproto-check-qr');
         if (!status) return;
 
-        // Also fetch latest backend logs to show live progress
+        // Fetch latest backend logs to show live progress only when changed
         try {
           const backendLogs = await ipcSafe.invoke('telegram-mtproto-get-logs', { limit: 5 });
           if (Array.isArray(backendLogs) && backendLogs.length > 0) {
             const latest = backendLogs[backendLogs.length - 1];
-            if (latest && latest.message) {
+            if (latest && latest.message && latest.message !== lastBackendLogRef.current) {
+              lastBackendLogRef.current = latest.message;
               addLog(`[${latest.tag}] ${latest.message}`, latest.level === 'error');
             }
           }
@@ -176,6 +178,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
 
         if (status.status === 'authenticated' || (status.me && (status.status === 'connected' || status.status === 'authenticated'))) {
           clearInterval(qrPollIntervalRef.current);
+          qrPollIntervalRef.current = null;
           setIsQrActive(false);
           const userName = status.me?.firstName || status.me?.username || status.me?.id || 'Пользователь';
           addLog(`Вход по QR-коду успешно выполнен: ${userName}`);
@@ -183,6 +186,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
           onSuccess();
         } else if (status.status === 'password_required') {
           clearInterval(qrPollIntervalRef.current);
+          qrPollIntervalRef.current = null;
           setIsQr2FARequired(true);
           setQrStatusText('QR-код подтвержден! Введите облачный 2FA пароль для завершения.');
           addLog('QR-код подтвержден на телефоне. Требуется ввод 2FA Cloud Password');
@@ -192,6 +196,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
           setQrExpiresIn(30);
         } else if (status.status === 'error') {
           clearInterval(qrPollIntervalRef.current);
+          qrPollIntervalRef.current = null;
           setIsQrActive(false);
           addLog(`Ошибка QR: ${status.error}`, true);
           toast.error(status.error || 'Ошибка авторизации по QR');
@@ -199,7 +204,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
       } catch (e: any) {
         console.warn('QR polling check error:', e);
       }
-    }, 1200);
+    }, 1800);
   };
 
   const handleRefreshQr = async () => {
