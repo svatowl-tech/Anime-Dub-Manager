@@ -25,18 +25,27 @@ export default function DebugConsole() {
     };
 
     fetchStats();
-    const interval = setInterval(fetchStats, 1000);
+    // Фоновое обновление раз в 3.5 секунды снижает нагрузку на CPU
+    const interval = setInterval(fetchStats, 3500);
 
     const removeListener = ipcSafe.on('task-queue-updated', (updatedTasks: Task[]) => {
       setTasks(updatedTasks);
     });
 
+    // Троттлинг обновлений списка логов (раз в 300мс) для предотвращения лагов React при шквале событий
+    let logDebounceTimer: any = null;
     const unsubscribeLogs = appLogger.subscribe('all', () => {
-      setTimeline(appLogger.getTimeline());
+      if (!logDebounceTimer) {
+        logDebounceTimer = setTimeout(() => {
+          setTimeline(appLogger.getTimeline());
+          logDebounceTimer = null;
+        }, 300);
+      }
     });
 
     return () => {
       clearInterval(interval);
+      if (logDebounceTimer) clearTimeout(logDebounceTimer);
       removeListener();
       unsubscribeLogs();
     };

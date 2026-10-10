@@ -204,7 +204,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "llvmlite==0.42.0\n"
         "numba==0.59.1\n"
         "librosa>=0.10.0,<0.11.0\n"
-        "onnxruntime>=1.16.0,<1.20.0\n",
+        "onnxruntime==1.16.3\n",
         encoding="utf-8"
     )
 
@@ -256,7 +256,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "soundfile>=0.12.1",
         "scipy>=1.10.0,<1.14.0",
         "librosa>=0.10.0,<0.11.0",
-        "onnxruntime>=1.16.0,<1.20.0",
+        "onnxruntime==1.16.3",
         "huggingface-hub>=0.20.0",
         "tqdm>=4.65.0",
         "einops>=0.7.0",
@@ -439,10 +439,10 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    import numba
-    import librosa
-    import scipy
-    import onnxruntime
+    print("Importing numba...", flush=True); import numba
+    print("Importing librosa...", flush=True); import librosa
+    print("Importing scipy...", flush=True); import scipy
+    print("Importing onnxruntime...", flush=True); import onnxruntime
     print(f"  [VERIFY OK] Numba ({numba.__version__}), Librosa ({librosa.__version__}), SciPy ({scipy.__version__}), ONNXRuntime ({onnxruntime.__version__})", flush=True)
 except Exception as e:
     print(f"  [VERIFY FAILED] DSP / Audio Stack: {e}", flush=True)

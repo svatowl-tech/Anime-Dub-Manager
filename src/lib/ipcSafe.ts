@@ -3,10 +3,79 @@ import { appLogger } from './appLogger';
 
 export const isWeb = typeof window !== 'undefined' && !(window as any).electronAPI;
 
+// Тяжелые фоновые операции: инференс AI, транскодирование, рендеринг, большие скачивания
+// Для них расчетные таймауты устанавливаются адаптивно, чтобы не генерировать ложные ошибки зависания
+const HEAVY_CHANNELS: Record<string, number> = {
+  // Audio AI Cleanup & DSP
+  'ai-denoise-audio': 60000,
+  'ai-separate-stems': 120000,
+  'ai-dereverb-audio': 60000,
+  'ai-voice-fixer': 60000,
+  'ai-process-subtitles': 90000,
+  
+  // Whisper Speech-to-Text & Diarization
+  'transcribe-whisper-snippet': 30000,
+  'timing-whisper-transcribe-clips': 60000,
+  'qa-whisper-check-lines': 60000,
+  'run-diarization': 120000,
+  'load-local-translate-model': 45000,
+  'translate-local': 30000,
+  'load-diarization-model': 45000,
+  'ollama-generate': 45000,
+  'ollama-chat': 45000,
+  
+  // Media / Video / Transcoding
+  'transcode-video': 180000,
+  'render-final-video': 240000,
+  'export-mix-audio': 120000,
+  'extract-subtitle-track': 30000,
+  'analyze-mkv-subtitles': 30000,
+  'silence-audio-intervals': 45000,
+  'burn-subtitles': 180000,
+  'download-youtube-audio': 90000,
+  
+  // Network / Downloads
+  'start-torrent-download': 30000,
+  'search-nyaa-torrents': 25000,
+  'get-torrent-metadata': 30000,
+  'anime365-download-subtitle': 20000,
+  'anime365-start-direct-download': 30000,
+  'telegram-download-file': 120000,
+  'telegram-upload-file': 120000,
+  'cloud-push': 60000,
+  'cloud-pull': 60000,
+};
+
+// Каналы циклического фонового мониторинга / телеметрии
+// Их успешные рутинные вызовы не спамят консоль и буфер логов
+const POLLING_CHANNELS = new Set([
+  'get-active-downloads',
+  'get-debug-stats',
+  'get-tasks',
+  'get-torrent-download-status',
+  'anime365-get-direct-download-status',
+  'cloud-sync-status',
+  'check-diarization-status',
+  'check-ollama-status',
+  'telegram-get-status',
+  'telegram-get-logs'
+]);
+
 export const ipcSafe = {
   invoke: async (channel: string, ...args: any[]) => {
-    // Start tracking process with automatic hang detection
-    const proc = appLogger.startProcess('IPC', channel, args.length > 0 ? args : undefined);
+    const isPolling = POLLING_CHANNELS.has(channel);
+    const expectedDurationMs = HEAVY_CHANNELS[channel];
+
+    // Start tracking process with smart adaptive hang detection
+    const proc = appLogger.startProcess(
+      'IPC',
+      channel,
+      args.length > 0 ? (args.length === 1 ? args[0] : args) : undefined,
+      {
+        silentPolling: isPolling,
+        expectedDurationMs
+      }
+    );
 
     try {
       const response = await ipcRenderer.invoke(channel, ...args);

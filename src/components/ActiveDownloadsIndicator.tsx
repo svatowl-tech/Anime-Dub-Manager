@@ -10,17 +10,20 @@ export default function ActiveDownloadsIndicator() {
   useEffect(() => {
     let timerId: any = null;
     let isMounted = true;
+    let idleStreak = 0;
     
     const fetchDownloads = async () => {
       if (document.hidden) {
         // Postpone if document is not visible
-        timerId = setTimeout(fetchDownloads, 5000);
+        timerId = setTimeout(fetchDownloads, 10000);
         return;
       }
       
       try {
         const data = await ipcSafe.invoke('get-active-downloads');
-        if (isMounted && data && Array.isArray(data)) {
+        if (!isMounted) return;
+
+        if (data && Array.isArray(data)) {
           const active = data.filter(d => d.status === 'downloading' || d.status === 'error');
           setDownloads(prev => {
             if (prev.length === 0 && active.length === 0) return prev;
@@ -29,24 +32,41 @@ export default function ActiveDownloadsIndicator() {
             return isDifferent ? active : prev;
           });
           
-          // If active downloads exist, poll faster (2s), otherwise slow down (12s)
-          const nextInterval = active.length > 0 ? 2000 : 12000;
-          timerId = setTimeout(fetchDownloads, nextInterval);
-        } else if (isMounted) {
-          timerId = setTimeout(fetchDownloads, 12000);
+          if (active.length > 0) {
+            idleStreak = 0;
+            // Активные загрузки требуют частого обновления шкалы
+            timerId = setTimeout(fetchDownloads, 2000);
+          } else {
+            idleStreak++;
+            // Адаптивное увеличение интервала при простое (12s -> 18s -> 25s -> max 30s)
+            const nextInterval = Math.min(30000, 12000 + idleStreak * 3000);
+            timerId = setTimeout(fetchDownloads, nextInterval);
+          }
+        } else {
+          timerId = setTimeout(fetchDownloads, 20000);
         }
       } catch (e) {
-        console.error('Failed to fetch downloads:', e);
-        if (isMounted) timerId = setTimeout(fetchDownloads, 10000);
+        // Ошибка перехвачена и обработана без падения
+        if (isMounted) timerId = setTimeout(fetchDownloads, 20000);
       }
     };
 
     fetchDownloads();
 
+    // Мгновенное пробуждение при старте новых фоновых задач
+    const wakeUp = () => {
+      idleStreak = 0;
+      clearTimeout(timerId);
+      fetchDownloads();
+    };
+
+    const removeTaskListener = ipcSafe.on('task-queue-updated', wakeUp);
+    const removeTorrentListener = ipcSafe.on('torrent-download-started', wakeUp);
+    const removeProgressListener = ipcSafe.on('download-progress', wakeUp);
+
     const handleVisibility = () => {
       if (!document.hidden) {
-        clearTimeout(timerId);
-        fetchDownloads();
+        wakeUp();
       }
     };
     document.addEventListener('visibilitychange', handleVisibility);
@@ -54,6 +74,9 @@ export default function ActiveDownloadsIndicator() {
     return () => {
       isMounted = false;
       clearTimeout(timerId);
+      removeTaskListener();
+      removeTorrentListener();
+      removeProgressListener();
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);

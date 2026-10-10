@@ -35,8 +35,16 @@ export interface InFlightProcess {
   startedAt: number;     // performance.now()
   startTimeStr: string;  // HH:mm:ss.SSS
   meta?: any;
-  hangTimer3s?: any;
-  hangTimer10s?: any;
+  hangTimerWarn?: any;
+  hangTimerError?: any;
+  hangWarnFired?: boolean;
+}
+
+export interface ProcessOptions {
+  expectedDurationMs?: number; // e.g. 60000ms for AI stem separation
+  silentPolling?: boolean;     // don't log routine start/finish unless slow or error
+  customWarnMs?: number;       // override warning delay
+  customErrorMs?: number;      // override error delay
 }
 
 export interface ProcessHandle {
@@ -50,11 +58,14 @@ export interface ProcessHandle {
 
 type LogListener = (entry: LogEntry) => void;
 
-// Safe deep clone / sanitizer to prevent circular reference crashes in JSON
+// Safe deep clone / sanitizer to prevent circular reference crashes and memory leaks
 function safeSerialize(obj: any, maxDepth = 3, currentDepth = 0): any {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj !== 'object') {
     if (typeof obj === 'function') return `[Function: ${obj.name || 'anonymous'}]`;
+    if (typeof obj === 'string' && obj.length > 600) {
+      return obj.slice(0, 600) + `... [длина ${obj.length} симв.]`;
+    }
     return obj;
   }
   if (currentDepth >= maxDepth) return '[Object / Max Depth Exceeded]';
@@ -69,9 +80,15 @@ function safeSerialize(obj: any, maxDepth = 3, currentDepth = 0): any {
     };
   }
 
-  // Handle TypedArrays
+  // Handle TypedArrays & Buffers
   if (ArrayBuffer.isView(obj)) {
     return `[${obj.constructor.name}: length ${obj.byteLength} bytes]`;
+  }
+  if (obj instanceof ArrayBuffer) {
+    return `[ArrayBuffer: ${obj.byteLength} bytes]`;
+  }
+  if (typeof Blob !== 'undefined' && obj instanceof Blob) {
+    return `[Blob: ${obj.size} bytes, type ${obj.type}]`;
   }
 
   if (Array.isArray(obj)) {
@@ -238,20 +255,20 @@ class AppLogger {
     };
 
     const sc = scopeColors[scope] || { bg: 'rgba(148, 163, 184, 0.15)', text: '#cbd5e1' };
-    const scopeStyle = `background: ${sc.bg}; color: ${sc.text}; font-weight: 700; padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 11px;`;
+    const scopeStyle = `background: ${sc.bg}; color: ${sc.text}; font-weight: 700; padding: 1px 6px; border-radius: 4px;`;
 
     let levelIcon = 'ℹ️';
-    let msgStyle = 'color: #f1f5f9; font-weight: 500; font-size: 12px;';
+    let msgStyle = 'color: #f1f5f9; font-weight: 500;';
 
     if (level === 'error') {
       levelIcon = '❌';
       msgStyle = 'color: #f87171; font-weight: 800; font-size: 12px;';
     } else if (level === 'warn') {
       levelIcon = '⚠️';
-      msgStyle = 'color: #facc15; font-weight: 700; font-size: 12px;';
+      msgStyle = 'color: #facc15; font-weight: 700;';
     } else if (level === 'debug') {
       levelIcon = '🔍';
-      msgStyle = 'color: #94a3b8; font-style: italic; font-size: 11px;';
+      msgStyle = 'color: #94a3b8; font-style: italic;';
     } else if (level === 'process') {
       levelIcon = durationMs !== undefined ? '✓' : '▶';
       msgStyle = durationMs !== undefined ? 'color: #4ade80; font-weight: 600;' : 'color: #38bdf8; font-weight: 600;';
@@ -305,38 +322,100 @@ class AppLogger {
    * ДЕТЕКТОР ЗАВИСАНИЙ И УПРАВЛЕНИЕ ЖИЗНЕННЫМ ЦИКЛОМ ПРОЦЕССОВ (Process Tracker)
    * =========================================================================
    */
-  public startProcess(scope: string, name: string, meta?: any): ProcessHandle {
+  public startProcess(scope: string, name: string, meta?: any, options?: ProcessOptions): ProcessHandle {
     this.processCounter++;
     const procId = `p#${this.processCounter}-${name}`;
     const startedAt = performance.now();
     const now = new Date();
     const startTimeStr = now.toLocaleTimeString('ru-RU', { hour12: false }) + '.' + String(now.getMilliseconds()).padStart(3, '0');
+    const isSilent = Boolean(options?.silentPolling);
+    const expectedMs = options?.expectedDurationMs;
 
-    // Логируем старт
-    this.log(scope, 'process', `▶ Запуск: «${name}»`, meta, procId);
+    // Вычисляем адаптивные пороги задержки
+    let warnDelay = 6000;   // Базовый порог предупреждения: 6 сек (вместо 3)
+    let errorDelay = 25000; // Базовый порог зависания: 25 сек (вместо 10)
 
-    // Устанавливаем таймеры контроля зависания
-    const hangTimer3s = setTimeout(() => {
+    if (options?.customWarnMs) {
+      warnDelay = options.customWarnMs;
+    } else if (expectedMs && expectedMs > 0) {
+      // Для тяжелых задач (AI, рендеринг, транскодирование, загрузки)
+      warnDelay = Math.max(15000, Math.round(expectedMs * 0.8));
+    } else if (isSilent) {
+      // Для фонового опроса
+      warnDelay = 10000;
+    }
+
+    if (options?.customErrorMs) {
+      errorDelay = options.customErrorMs;
+    } else if (expectedMs && expectedMs > 0) {
+      // Подозрение на сбой для тяжелых задач ставим с запасом в 2.5x от расчетного
+      errorDelay = Math.max(50000, Math.round(expectedMs * 2.5));
+    } else if (isSilent) {
+      errorDelay = 30000;
+    }
+
+    // Логируем старт (если не тихий режим опроса)
+    if (!isSilent) {
+      const startNote = expectedMs ? ` (расчетное время ~${Math.round(expectedMs / 1000)}с)` : '';
+      this.log(scope, 'process', `▶ Запуск: «${name}»${startNote}`, meta, procId);
+    }
+
+    let hangWarnFired = false;
+
+    // Устанавливаем адаптивные таймеры контроля зависания
+    const hangTimerWarn = setTimeout(() => {
+      hangWarnFired = true;
       const elapsed = Math.round(performance.now() - startedAt);
-      this.log(
-        'HANG',
-        'warn',
-        `⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «${name}» (${procId}) выполняется уже ${elapsed}ms без ответа...`,
-        { scope, name, elapsedMs: elapsed, meta },
-        procId
-      );
-    }, 3000);
+      
+      if (expectedMs && expectedMs > 0) {
+        // Для тяжелых задач выводим информационное подтверждение продолжения работы (НЕ как ошибку)
+        this.log(
+          scope,
+          'info',
+          `⏳ [ПРОЦЕСС ВЫПОЛНЯЕТСЯ] «${name}» (${procId}) выполняется уже ${elapsed}ms (тяжелая фоновая задача, ожидание в пределах нормы ~${Math.round(expectedMs / 1000)}с)...`,
+          { scope, name, elapsedMs: elapsed, meta },
+          procId
+        );
+      } else if (isSilent) {
+        // Фоновый опрос задержался дольше обычного
+        this.log(
+          'HANG',
+          'warn',
+          `⏳ [ЗАДЕРЖКА ФОНОВОГО ОПРОСА] Фоновый вызов «${name}» (${procId}) выполняется уже ${elapsed}ms...`,
+          { scope, name, elapsedMs: elapsed, meta },
+          procId
+        );
+      } else {
+        this.log(
+          'HANG',
+          'warn',
+          `⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «${name}» (${procId}) выполняется уже ${elapsed}ms без ответа...`,
+          { scope, name, elapsedMs: elapsed, meta },
+          procId
+        );
+      }
+    }, warnDelay);
 
-    const hangTimer10s = setTimeout(() => {
+    const hangTimerError = setTimeout(() => {
       const elapsed = Math.round(performance.now() - startedAt);
-      this.log(
-        'HANG',
-        'error',
-        `🚨 [КРИТИЧЕСКОЕ ЗАВИСАНИЕ] Процесс «${name}» (${procId}) не отвечает более ${elapsed}ms! Возможен краш или бесконечный цикл.`,
-        { scope, name, elapsedMs: elapsed, meta },
-        procId
-      );
-    }, 10000);
+      if (expectedMs && expectedMs > 0) {
+        this.log(
+          'HANG',
+          'warn',
+          `⚠️ [ПРЕВЫШЕН ЛИМИТ ВРЕМЕНИ] Длительная операция «${name}» (${procId}) выполняется уже ${elapsed}ms (превышение расчетных ~${Math.round(expectedMs / 1000)}с). Проверьте системные ресурсы.`,
+          { scope, name, elapsedMs: elapsed, meta },
+          procId
+        );
+      } else {
+        this.log(
+          'HANG',
+          'error',
+          `🚨 [КРИТИЧЕСКОЕ ЗАВИСАНИЕ] Процесс «${name}» (${procId}) не отвечает более ${elapsed}ms! Возможен краш или бесконечный цикл.`,
+          { scope, name, elapsedMs: elapsed, meta },
+          procId
+        );
+      }
+    }, errorDelay);
 
     const inFlight: InFlightProcess = {
       id: procId,
@@ -345,15 +424,16 @@ class AppLogger {
       startedAt,
       startTimeStr,
       meta: safeSerialize(meta),
-      hangTimer3s,
-      hangTimer10s
+      hangTimerWarn,
+      hangTimerError,
+      hangWarnFired: false
     };
 
     this.inFlightProcesses.set(procId, inFlight);
 
     const clearTimers = () => {
-      if (inFlight.hangTimer3s) clearTimeout(inFlight.hangTimer3s);
-      if (inFlight.hangTimer10s) clearTimeout(inFlight.hangTimer10s);
+      if (inFlight.hangTimerWarn) clearTimeout(inFlight.hangTimerWarn);
+      if (inFlight.hangTimerError) clearTimeout(inFlight.hangTimerError);
       this.inFlightProcesses.delete(procId);
     };
 
@@ -364,7 +444,20 @@ class AppLogger {
       success: (details?: any) => {
         clearTimers();
         const durationMs = Math.round(performance.now() - startedAt);
-        this.log(scope, 'process', `✓ Завершен: «${name}»`, details, procId, durationMs);
+        
+        if (hangWarnFired) {
+          // Если ранее сработал алерт о задержке, информируем об успешном выходе из задержки
+          this.log(
+            scope,
+            'process',
+            `✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «${name}» успешно выполнен за ${durationMs}ms (система отработала штатно)`,
+            details,
+            procId,
+            durationMs
+          );
+        } else if (!isSilent) {
+          this.log(scope, 'process', `✓ Завершен: «${name}»`, details, procId, durationMs);
+        }
       },
       fail: (err: any, details?: any) => {
         clearTimers();

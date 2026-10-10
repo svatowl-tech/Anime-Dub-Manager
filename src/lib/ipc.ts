@@ -429,6 +429,24 @@ function handleIpcMock(channel: string, args: any[]): any {
     };
   }
 
+  if (channel === 'get-active-downloads') {
+    const currentProgress = parseInt(localStorage.getItem('mock_download_progress') || '-1', 10);
+    if (currentProgress >= 0 && currentProgress < 100) {
+      const downloadName = localStorage.getItem('mock_download_name') || 'Sousou no Frieren - 01 (1080p) [RAW]';
+      return [{
+        id: 'mock-dl-12345',
+        name: downloadName.substring(0, 60) + (downloadName.length > 60 ? '...' : ''),
+        progress: currentProgress,
+        downloadSpeed: 8500000,
+        numPeers: 38,
+        status: 'downloading',
+        filePath: null,
+        error: null
+      }];
+    }
+    return [];
+  }
+
   if (channel === 'get-episode-title') {
     return '';
   }
