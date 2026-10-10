@@ -2320,24 +2320,18 @@ class MixingPipelineService {
         }
 
         const baseNoExt = f.replace(audioExts, '');
-        // Skip files without letters (e.g. pure numbers, timestamps, step indices)
-        if (!/[a-zA-Zа-яА-ЯёЁ]/.test(baseNoExt) || /^[\d\s._-]+$/.test(baseNoExt)) {
-          continue;
-        }
 
         const fullP = path.join(sDir, f);
         const st = fsSync.statSync(fullP);
         
         let dubberNick = f;
+        const bracketMatch = f.match(/\[(.*?)\]/);
         if (f.startsWith('00_timed_')) {
           dubberNick = f.replace(/^00_timed_/, '').replace(audioExts, '');
+        } else if (bracketMatch && bracketMatch[1]) {
+          dubberNick = bracketMatch[1];
         } else {
-          const match = f.match(/\[(.*?)\]/);
-          if (match && match[1]) {
-            dubberNick = match[1];
-          } else {
-            dubberNick = baseNoExt.replace(/^.*?_/, '');
-          }
+          dubberNick = baseNoExt.replace(/^dub_/i, '').replace(/^.*?_/, '');
         }
 
         // Clean out track/layer/fix suffixes from nickname
@@ -2347,8 +2341,37 @@ class MixingPipelineService {
           .replace(/[_\s-]+$/, '')
           .trim();
 
-        if (!dubberNick || !/[a-zA-Zа-яА-ЯёЁ]/.test(dubberNick) || /^[\d\s._-]+$/.test(dubberNick)) {
-          continue;
+        // Check if dubberNick is a numeric participant ID or upload ID and resolve real nickname
+        if (Array.isArray(episode?.uploads)) {
+          const matchingUpload = episode.uploads.find(u => 
+            (u.path && path.basename(u.path) === f) || 
+            (u.uploadedById && (u.uploadedById === dubberNick || String(u.uploadedById) === String(dubberNick)))
+          );
+          if (matchingUpload) {
+            const nick = matchingUpload.dubberNick || matchingUpload.dubberName;
+            if (nick && /[a-zA-Zа-яА-ЯёЁ]/.test(nick)) {
+              dubberNick = nick;
+            }
+          }
+        }
+
+        // Check against global participants if still numeric or not resolved
+        if ((!dubberNick || /^\d+$/.test(dubberNick) || dubberNick.startsWith('0.')) && Array.isArray(episode?.assignments)) {
+          const matchingAssignment = episode.assignments.find(a => 
+            a.dubberId === dubberNick || String(a.dubberId) === String(dubberNick) ||
+            a.substituteId === dubberNick || String(a.substituteId) === String(dubberNick)
+          );
+          if (matchingAssignment) {
+            const pId = matchingAssignment.dubberId || matchingAssignment.substituteId;
+            const p = (Array.isArray(episode?.project?.assignedDubbers) ? episode.project.assignedDubbers : []).find(part => String(part.id) === String(pId));
+            if (p && p.nickname) {
+              dubberNick = p.nickname;
+            }
+          }
+        }
+
+        if (!dubberNick || dubberNick.trim().length === 0) {
+          dubberNick = baseNoExt || 'Даббер';
         }
 
         if (foundDubberTracks.some(t => t.path === fullP || (t.name === f && t.size === st.size))) {
@@ -2368,8 +2391,9 @@ class MixingPipelineService {
     }
 
     // Fallback: If no files found on disk yet, but episode has QA uploads, use episode uploads (excluding slice files)
-    if (foundDubberTracks.length === 0 && Array.isArray(episode?.uploads)) {
-      const qaUploads = episode.uploads.filter(u => 
+    const episodeUploads = (episode?.uploads && episode.uploads.length > 0) ? episode.uploads : [];
+    if (foundDubberTracks.length === 0 && Array.isArray(episodeUploads) && episodeUploads.length > 0) {
+      const qaUploads = episodeUploads.filter(u => 
         (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && 
         u.path && 
         fsSync.existsSync(u.path) &&
@@ -2523,6 +2547,18 @@ class MixingPipelineService {
     );
 
     logFn('Экспорт завершен. Анализ полученных дорожек...');
+
+    // If autoTiming is disabled (direct QA import), clear any stale 00_timed_ master tracks from prior timing runs
+    if (!autoTiming && fsSync.existsSync(workingDir)) {
+      try {
+        const existingFiles = fsSync.readdirSync(workingDir);
+        for (const f of existingFiles) {
+          if (f.startsWith('00_timed_') && /\.(wav|mp3|flac|ogg|m4a|aac)$/i.test(f)) {
+            try { fsSync.unlinkSync(path.join(workingDir, f)); } catch (e) {}
+          }
+        }
+      } catch (e) {}
+    }
 
     const videoSource = episode?.rawPath;
     const origAudioOut = path.join(rawDir, '00_original_audio.wav');
@@ -3241,15 +3277,8 @@ class MixingPipelineService {
       const measuredThresh = typeof stats.lufsThresholdDb === 'number' ? stats.lufsThresholdDb : -33.0;
       const rms = typeof stats.speechRmsDb === 'number' ? stats.speechRmsDb : -24.0;
 
-      // Smart pre-gain boost for quiet dubbers who recorded with low gain
-      let filter = '';
-      if (rms < -27.0 || measuredI < -27.0) {
-        const preGain = Math.min(maxGainDb, Math.max(0, -22.0 - rms));
-        logFn(`  ⚡ «${nick}» — тихая запись (RMS ${rms} dB, LUFS ${measuredI}). Применяем пред-разгон +${preGain.toFixed(1)} dB для выравнивания с остальными дабберами.`);
-        filter = `volume=${preGain.toFixed(1)}dB,loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=10:measured_I=${(measuredI + preGain).toFixed(1)}:measured_TP=${Math.min(0, measuredTp + preGain).toFixed(1)}:measured_LRA=${measuredLra}:measured_thresh=${(measuredThresh + preGain).toFixed(1)}:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
-      } else {
-        filter = `loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=10:measured_I=${measuredI}:measured_TP=${measuredTp}:measured_LRA=${measuredLra}:measured_thresh=${measuredThresh}:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
-      }
+      // Intelligent EBU R128 loudness normalization
+      let filter = `loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=10:measured_I=${measuredI}:measured_TP=${measuredTp}:measured_LRA=${measuredLra}:measured_thresh=${measuredThresh}:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -4118,13 +4147,7 @@ class MixingPipelineService {
         filter = `volume=${preGain.toFixed(1)}dB,dynaudnorm=f=180:g=15:p=0.92:m=${maxGainDb}:s=12,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
       } else {
         // Two-pass measured EBU R128 with intelligent pre-gain for weak mics
-        if (rms < -27.0 || measuredI < -27.0) {
-          const preGain = Math.min(maxGainDb, Math.max(0, -22.0 - rms));
-          logFn(`  ⚡ «${nick}» — компенсация тихой записи +${preGain.toFixed(1)} dB -> целевой уровень ${trackTargetLufs} LUFS`);
-          filter = `volume=${preGain.toFixed(1)}dB,loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=${lra}:measured_I=${(measuredI + preGain).toFixed(1)}:measured_TP=${Math.min(0, measuredTp + preGain).toFixed(1)}:measured_LRA=${measuredLra}:measured_thresh=${(measuredThresh + preGain).toFixed(1)}:linear=true:dual_mono=${dualMono ? 'true' : 'false'},alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
-        } else {
-          filter = `loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=${lra}:measured_I=${measuredI}:measured_TP=${measuredTp}:measured_LRA=${measuredLra}:measured_thresh=${measuredThresh}:linear=true:dual_mono=${dualMono ? 'true' : 'false'},alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
-        }
+        filter = `loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=${lra}:measured_I=${measuredI}:measured_TP=${measuredTp}:measured_LRA=${measuredLra}:measured_thresh=${measuredThresh}:linear=true:dual_mono=${dualMono ? 'true' : 'false'},alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
       }
 
       const cmd = ffmpeg(track.path)

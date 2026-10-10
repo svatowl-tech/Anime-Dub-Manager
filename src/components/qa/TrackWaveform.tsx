@@ -182,13 +182,6 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
       else onTimeUpdate(time);
     });
 
-    wavesurferRef.current.on('play', () => {
-      if (!isPlayingRef.current) onPlayPause();
-    });
-    wavesurferRef.current.on('pause', () => {
-      if (isPlayingRef.current) onPlayPause();
-    });
-
     let isUnmounted = false;
 
     // Add regions

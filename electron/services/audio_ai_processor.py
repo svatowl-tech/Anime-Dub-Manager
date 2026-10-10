@@ -1218,8 +1218,10 @@ def check_env():
         env_status["demucs"] = True
     except Exception: pass
     try:
-        import pedalboard
-        env_status["pedalboard"] = True
+        pb_check = subprocess.run([sys.executable, "-c", "import pedalboard"], capture_output=True, timeout=5)
+        if pb_check.returncode == 0:
+            import pedalboard
+            env_status["pedalboard"] = True
     except Exception: pass
     try:
         import voicefixer

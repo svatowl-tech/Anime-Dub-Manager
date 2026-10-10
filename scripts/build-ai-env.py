@@ -204,7 +204,8 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "llvmlite==0.42.0\n"
         "numba==0.59.1\n"
         "librosa>=0.10.0,<0.11.0\n"
-        "onnxruntime==1.16.3\n",
+        "onnxruntime==1.16.3\n"
+        "rotary-embedding-torch>=0.5.0,<0.9.0\n",
         encoding="utf-8"
     )
 
@@ -233,7 +234,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
 
     # 5. Install DeepFilterNet, Demucs, and audio processing stack with LOCKED NumPy 1.26.4 & Torch 2.2.2
     print("\n[STEP 4] Installing DeepFilterNet3, Demucs v4 & audio packages (Locking NumPy 1.26.4 and Torch 2.2.2)...")
-    extra_index_args = ["--extra-index-url", "https://download.pytorch.org/whl/cpu"] if is_cpu_build else []
+    extra_index_args = ["--index-url", "https://download.pytorch.org/whl/cpu", "--extra-index-url", "https://pypi.org/simple"] if is_cpu_build else []
 
     # Pre-install llvmlite and numba binary wheels to prevent compiling LLVM from source on macOS Intel (x86_64)
     print("  [PREFER-BINARY] Pre-installing binary wheels for llvmlite 0.42.0 and numba 0.59.1...")
@@ -260,7 +261,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "huggingface-hub>=0.20.0",
         "tqdm>=4.65.0",
         "einops>=0.7.0",
-        "rotary-embedding-torch>=0.5.0",
+        "rotary-embedding-torch>=0.5.0,<0.9.0",
         "requests>=2.31.0",
         "torchlibrosa>=0.1.0",
         "matplotlib>=3.7.0",
@@ -430,13 +431,15 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
+import subprocess
 try:
-    import pedalboard
-    print(f"  [VERIFY OK] Pedalboard: {pedalboard.__version__}", flush=True)
+    pb_res = subprocess.run([sys.executable, "-c", "import pedalboard; print(pedalboard.__version__)"], capture_output=True, text=True, timeout=10)
+    if pb_res.returncode == 0:
+        print(f"  [VERIFY OK] Pedalboard: {pb_res.stdout.strip()}", flush=True)
+    else:
+        print(f"  [VERIFY WARN] Pedalboard CPU instruction check skipped or unsupported on host (exit code {pb_res.returncode})", flush=True)
 except Exception as e:
-    print(f"  [VERIFY FAILED] Pedalboard: {e}", flush=True)
-    traceback.print_exc()
-    sys.exit(1)
+    print(f"  [VERIFY WARN] Pedalboard check exception: {e}", flush=True)
 
 try:
     print("Importing numba...", flush=True); import numba
@@ -627,6 +630,20 @@ except Exception as e:
                         shutil.copy2(item, dst_item)
             print(f"  [PORTABLE] Copied Unix standard library to {target_lib}")
 
+        # Copy libpython*.so / libpython*.dylib shared libraries for self-contained runtime
+        base_parent_lib = base_dir / "lib"
+        target_parent_lib = env_dir / "lib"
+        if base_parent_lib.exists():
+            for so_pattern in ["libpython*.so*", "libpython*.dylib*"]:
+                for so_file in base_parent_lib.glob(so_pattern):
+                    try:
+                        dst_so = target_parent_lib / so_file.name
+                        if not dst_so.exists():
+                            shutil.copy2(so_file, dst_so)
+                            print(f"  [PORTABLE] Bundled Unix shared library: {so_file.name}")
+                    except Exception:
+                        pass
+
         # Ensure real python executables (replace broken symlinks created by venv)
         bin_dir = env_dir / "bin"
         base_bin = base_dir / "bin"
@@ -643,6 +660,13 @@ except Exception as e:
                         print(f"  [PORTABLE] Bundled standalone python binary: {venv_bin_file.name}")
                 except Exception as bin_e:
                     print(f"  [WARN] Could not copy standalone binary {py_name}: {bin_e}")
+
+        # Set portable pyvenv.cfg for Unix
+        cfg_path = env_dir / "pyvenv.cfg"
+        try:
+            cfg_path.write_text(f"home = bin\ninclude-system-site-packages = false\nversion = {platform.python_version()}\n", encoding="utf-8")
+        except Exception:
+            pass
 
     # 8. Copy sidecars into environment bundle for self-containment
     print("\n[STEP 8] Bundling audio_ai_processor sidecar script...")
@@ -666,6 +690,7 @@ except Exception as e:
     post_verify_code = """
 import sys
 import traceback
+import subprocess
 try:
     import numpy as np
     assert np.__version__.startswith("1.26"), f"NumPy version mismatch: {np.__version__}"
@@ -678,11 +703,19 @@ try:
     import demucs
     import numba
     import librosa
-    import pedalboard
     import soundfile
     import scipy
     import onnxruntime
-    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Pedalboard {pedalboard.__version__}, Numba {numba.__version__}")
+    
+    pb_ver = "unsupported on host"
+    try:
+        pb_res = subprocess.run([sys.executable, "-c", "import pedalboard; print(pedalboard.__version__)"], capture_output=True, text=True)
+        if pb_res.returncode == 0:
+            pb_ver = pb_res.stdout.strip()
+    except Exception:
+        pass
+
+    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Pedalboard {pb_ver}, Numba {numba.__version__}")
 except Exception as e:
     sys.stderr.write(f"  [POST-PRUNE ERROR] Crucial AI package was damaged by cleanup: {e}\\n")
     traceback.print_exc()

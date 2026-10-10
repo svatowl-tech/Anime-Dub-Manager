@@ -760,7 +760,7 @@ async function transferAudioPhrase(sourcePath, targetPath, startSec, endSec, opt
     const filterComplex = [
       `[0:a]aresample=48000:async=1,aformat=sample_fmts=s16:channel_layouts=stereo[target_base]`,
       `[1:a]aresample=48000:async=1,aformat=sample_fmts=s16:channel_layouts=stereo,adelay=${delayMs}|${delayMs}[phrase_delayed]`,
-      `[target_base][phrase_delayed]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1',alimiter=limit=0.95:attack=5:release=50[out]`
+      `[target_base][phrase_delayed]amix=inputs=2:duration=first:dropout_transition=0:weights='1 1',alimiter=limit=-0.5dB:attack=2:release=35:level=true[out]`
     ].join(';');
 
     const cmd = ffmpeg()

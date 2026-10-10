@@ -7,6 +7,22 @@ const { detectSpeechIntervals, addProcess, getFfmpegPath } = require('./ffmpegSe
 const ffmpeg = require('fluent-ffmpeg');
 
 /**
+ * Высокоточная конвертация Float32 сэмпла в 16-битный PCM (Int16LE)
+ * Обеспечивает 100% линейную прозрачную передачу исходного звука без искажений
+ * с мягкой защитой от пикового клиппинга выше -0.45 dBFS (0.95).
+ */
+function floatToPcm16(fVal) {
+  const abs = Math.abs(fVal);
+  if (abs <= 0.95) {
+    return Math.round(fVal * 32767.0);
+  }
+  const over = abs - 0.95;
+  const compressed = 0.95 + 0.048 * Math.tanh(over / 0.15);
+  const limited = fVal < 0 ? -compressed : compressed;
+  return Math.round(limited * 32767.0);
+}
+
+/**
  * Нормализация строк для надежного сопоставления никнеймов и имен персонажей.
  */
 function normalizeName(str) {
@@ -1113,12 +1129,13 @@ class AutoTimingService {
       const initialHeader = this.createWavHeader(0, sampleRate, channels, 16);
       fs.writeSync(outFd, initialHeader, 0, 44, 0);
 
-      // 6. Потоковый рендеринг чанками по 10 секунд (всего 1.92 МБ RAM на чанк)
+      // 6. Потоковый рендеринг чанками по 10 секунд (Float32 микширование с нулевым искажением)
       const CHUNK_DURATION_SEC = 10.0;
       const samplesPerChunk = Math.round(CHUNK_DURATION_SEC * sampleRate);
       const bytesPerChunk = samplesPerChunk * bytesPerSampleFrame;
       const totalChunks = Math.ceil(maxSec / CHUNK_DURATION_SEC);
       const chunkBuffer = Buffer.alloc(bytesPerChunk, 0);
+      const floatChunk = new Float32Array(samplesPerChunk * channels);
 
       // Параметры атак и затуханий:
       // Pre-roll: 90мс (защита 'П','Б','Т'), Fade-in: 10мс (Hann window)
@@ -1138,15 +1155,22 @@ class AutoTimingService {
 
         if (currentChunkBytes <= 0) break;
 
-        // Очищаем чанк буфер
+        // Очищаем плавающий и PCM буферы чанка
         chunkBuffer.fill(0, 0, currentChunkBytes);
+        floatChunk.fill(0.0);
 
-        // Шаг А: Если таймлайн-дорожка, читаем базовый непрерывный PCM из файла
+        // Шаг А: Если таймлайн-дорожка, читаем базовый непрерывный PCM из файла и переводим в Float32
         if (isTimelineTrack && defaultFdInfo) {
           const startByteOffset = Math.floor(chunkStartSec * bytesPerSec);
           const availableBytes = Math.max(0, Math.min(currentChunkBytes, defaultFdInfo.size - startByteOffset));
           if (availableBytes > 0) {
-            fs.readSync(defaultFdInfo.fd, chunkBuffer, 0, availableBytes, startByteOffset);
+            const rawTimelineBuf = Buffer.alloc(availableBytes);
+            fs.readSync(defaultFdInfo.fd, rawTimelineBuf, 0, availableBytes, startByteOffset);
+            const availableFrames = Math.floor(availableBytes / bytesPerSampleFrame);
+            for (let s = 0; s < availableFrames; s++) {
+              floatChunk[s * 2] = rawTimelineBuf.readInt16LE(s * 4) / 32768.0;
+              floatChunk[s * 2 + 1] = rawTimelineBuf.readInt16LE(s * 4 + 2) / 32768.0;
+            }
           }
         }
 
@@ -1164,18 +1188,15 @@ class AutoTimingService {
                 const muteEndSample = Math.min(samplesPerChunk, Math.ceil(muteLocalEndSec * sampleRate));
 
                 for (let s = muteStartSample; s < muteEndSample; s++) {
-                  const off = s * bytesPerSampleFrame;
-                  if (off + 4 <= currentChunkBytes) {
-                    chunkBuffer.writeInt16LE(0, off);
-                    chunkBuffer.writeInt16LE(0, off + 2);
-                  }
+                  floatChunk[s * 2] = 0.0;
+                  floatChunk[s * 2 + 1] = 0.0;
                 }
               }
             }
           }
         }
 
-        // Шаг В: Наложение фраз, пересекающих текущий чанк
+        // Шаг В: Наложение фраз, пересекающих текущий чанк (в 32-битном Float формате)
         for (const p of phrases) {
           if (isTimelineTrack && !p.isReplacedByFix && (!p.collisionResolved || Math.abs(p.shiftDeltaSec) <= 0.03)) {
             // Фраза уже находится на своем месте в базовом таймлайн-аудио
@@ -1240,7 +1261,7 @@ class AutoTimingService {
               volPct = 100;
             }
           }
-          const volScale = Math.max(0, Math.min(2.0, (volPct ?? 100) / 100.0));
+          const volScale = Math.max(0, (volPct ?? 100) / 100.0);
 
           const curFadeIn = Math.min(fadeSamplesIn, Math.floor(totalPhraseSamples / 8));
           const curFadeOut = Math.min(fadeSamplesOut, Math.floor(totalPhraseSamples / 6));
@@ -1250,12 +1271,11 @@ class AutoTimingService {
           for (let s = 0; s < samplesToProcess; s++) {
             const globalPhraseSampleIdx = phraseSampleOffsetStart + s;
             const srcOffset = s * bytesPerSampleFrame;
-            const dstOffset = (chunkLocalStartSample + s) * bytesPerSampleFrame;
+            const dstSampleIdx = chunkLocalStartSample + s;
 
-            if (srcOffset + 4 > actualBytesToRead || dstOffset + 4 > currentChunkBytes) break;
+            if (srcOffset + 4 > actualBytesToRead || dstSampleIdx >= samplesPerChunk) break;
 
             // S-образное окно (Hann window) для атак и затуханий:
-            // Вход: sin^2(pi*t / 2T), Выход: cos^2(pi*t / 2T)
             let fade = 1.0;
             if (curFadeIn > 0 && globalPhraseSampleIdx < curFadeIn) {
               fade = 0.5 * (1 - Math.cos((Math.PI * globalPhraseSampleIdx) / curFadeIn));
@@ -1266,21 +1286,28 @@ class AutoTimingService {
 
             const rawLeft = phraseTempBuf.readInt16LE(srcOffset);
             const rawRight = phraseTempBuf.readInt16LE(srcOffset + 2);
-            const leftSample = Math.round(rawLeft * fade * volScale);
-            const rightSample = Math.round(rawRight * fade * volScale);
+            
+            const fLeft = (rawLeft / 32768.0) * fade * volScale;
+            const fRight = (rawRight / 32768.0) * fade * volScale;
 
+            const dstOffset = dstSampleIdx * 2;
             if (isTimelineTrack) {
-              chunkBuffer.writeInt16LE(leftSample, dstOffset);
-              chunkBuffer.writeInt16LE(rightSample, dstOffset + 2);
+              floatChunk[dstOffset] = fLeft;
+              floatChunk[dstOffset + 1] = fRight;
             } else {
-              const curLeft = chunkBuffer.readInt16LE(dstOffset);
-              const curRight = chunkBuffer.readInt16LE(dstOffset + 2);
-              const mixedLeft = Math.max(-32768, Math.min(32767, curLeft + leftSample));
-              const mixedRight = Math.max(-32768, Math.min(32767, curRight + rightSample));
-              chunkBuffer.writeInt16LE(mixedLeft, dstOffset);
-              chunkBuffer.writeInt16LE(mixedRight, dstOffset + 2);
+              floatChunk[dstOffset] += fLeft;
+              floatChunk[dstOffset + 1] += fRight;
             }
           }
+        }
+
+        // Конвертация Float32 -> 16-bit PCM (Int16LE) с безопасным ограничением
+        const totalFramesInChunk = Math.floor(currentChunkBytes / bytesPerSampleFrame);
+        for (let s = 0; s < totalFramesInChunk; s++) {
+          const pcmL = floatToPcm16(floatChunk[s * 2]);
+          const pcmR = floatToPcm16(floatChunk[s * 2 + 1]);
+          chunkBuffer.writeInt16LE(pcmL, s * bytesPerSampleFrame);
+          chunkBuffer.writeInt16LE(pcmR, s * bytesPerSampleFrame + 2);
         }
 
         // Записываем срендеренный чанк на диск

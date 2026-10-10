@@ -1325,6 +1325,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       const res: any = await ipcSafe.invoke('mixing-import-sound-engineer-files', {
         episode: currentEpisode,
         targetDir: effectiveTarget,
+        importSource,
         autoTiming: importAutoTiming,
         autoApplyFixes: importAutoFixes,
         includeSubtitles: importSubtitles,

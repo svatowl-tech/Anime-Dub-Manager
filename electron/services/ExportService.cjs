@@ -253,6 +253,9 @@ class ExportService {
     const assignments = (episode.assignments && episode.assignments.length > 0)
       ? episode.assignments
       : (epFromProject && epFromProject.assignments ? epFromProject.assignments : []);
+    const episodeUploads = (episode.uploads && episode.uploads.length > 0)
+      ? episode.uploads
+      : (epFromProject && epFromProject.uploads ? epFromProject.uploads : []);
 
     const logs = [];
     const logFilePath = path.join(targetDir, 'ЭКСПОРТ_ЛОГ.txt');
@@ -395,23 +398,30 @@ class ExportService {
       }
 
       const dubberFiles = {};
-      for (const upload of (episode.uploads || [])) {
+      for (const upload of episodeUploads) {
         if (upload.type === 'DUBBER_FILE' || upload.type === 'FIXES') {
-          const dubberId = upload.uploadedById;
+          const dubberId = upload.uploadedById || upload.participantId || upload.dubberId || 'unknown';
           if (!dubberFiles[dubberId]) dubberFiles[dubberId] = { original: [], fixes: [] };
           if (upload.type === 'DUBBER_FILE') dubberFiles[dubberId].original.push(upload);
           else dubberFiles[dubberId].fixes.push(upload);
         }
       }
 
-      const getNick = (id) => {
-        const p = participantsData.find(part => part.id === id);
-        return p ? p.nickname : 'Unknown';
+      const getNick = (id, upload) => {
+        if (id) {
+          const p = participantsData.find(part => part.id === id || String(part.id) === String(id));
+          if (p && p.nickname) return p.nickname;
+        }
+        if (upload) {
+          if (upload.dubberNick) return upload.dubberNick;
+          if (upload.dubberName) return upload.dubberName;
+        }
+        return (id && id !== 'unknown' && !/^\d+$/.test(id)) ? id : 'Даббер';
       };
 
       const getExportName = (upload, isFix) => {
-        const nick = getNick(upload.uploadedById);
-        const ext = path.extname(upload.path);
+        const nick = getNick(upload.uploadedById || upload.participantId, upload);
+        const ext = path.extname(upload.path || upload.fileName || '.wav');
         const fixSuffix = isFix ? '_[фикс]' : '';
         return `${baseVideoName}_[${nick}]${fixSuffix}${ext}`;
       };
@@ -422,7 +432,7 @@ class ExportService {
       if (autoTiming && episode.subPath) {
         await logStep(`[АУДИО-КОНВЕЙЕР: АВТОТАЙМИНГ И ВШИТИЕ ФИКСОВ] Запуск конвейера тайминга и сведения...`, 'info', 32);
 
-        const rawDubberUploads = (episode.uploads || []).filter(u => u.type === 'DUBBER_FILE' || u.type === 'FIXES');
+        const rawDubberUploads = episodeUploads.filter(u => u.type === 'DUBBER_FILE' || u.type === 'FIXES');
         await logStep(`[Бэкап] Сохранение ${rawDubberUploads.length} исходных дорожек до автотайминга в «бэкап»...`, 'info', 33);
 
         const rawBackupDir = path.join(targetDir, 'бэкап', 'исходные_дорожки_до_автотайминга');

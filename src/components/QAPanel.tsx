@@ -2025,6 +2025,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         ipcSafe.invoke('audio-run-track-analysis', {
           audioPath: res.path,
           options: {
+            skipWhisper: true,
             isFix: type === 'FIXES',
             dubberNick: (assignment as any)?.dubber?.nickname || (assignment as any)?.dubber?.username || (assignment as any)?.dubber?.name || baseDubberId,
             characterName: (assignment as any)?.character?.name || (assignment as any)?.characterName || 'Персонаж'
