@@ -90,7 +90,7 @@ class AudioNeuralService {
     if (!scriptPath || !fs.existsSync(scriptPath)) return;
     try {
       const code = fs.readFileSync(scriptPath, 'utf8');
-      if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim')) {
+      if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim') || !code.includes('airwindows_restore') || !code.includes('loudness_norm') || code.includes('choices=[')) {
         const bundledCandidates = [
           path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
           path.join(__dirname, 'audio_ai_processor.py'),

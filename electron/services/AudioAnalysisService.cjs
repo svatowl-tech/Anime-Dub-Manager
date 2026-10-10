@@ -13,6 +13,8 @@ try {
 } catch (e) {}
 
 let whisperInstance = null;
+const pendingAnalyses = new Map();
+
 function getWhisperService() {
   if (!whisperInstance && WhisperService) {
     try {
@@ -279,8 +281,9 @@ class AudioAnalysisService {
       });
     }
 
-    // 4. Пакетная транскрибация Whisper (если не отключена)
-    if (!options.skipWhisper && phrases.length > 0) {
+    // 4. Пакетная транскрибация Whisper (по умолчанию отключена, запускается только по явной просьбе)
+    const shouldRunWhisper = options.skipWhisper === false && options.runWhisper === true;
+    if (shouldRunWhisper && phrases.length > 0) {
       if (onProgress) onProgress({ status: 'transcribing_whisper', progress: 65 });
       const whisperService = getWhisperService();
       const lang = options.language || 'ru';
@@ -347,6 +350,14 @@ class AudioAnalysisService {
       throw new Error(`Audio file does not exist: ${audioPath}`);
     }
 
+    const normPath = path.resolve(audioPath);
+
+    // Если анализ данного файла уже выполняется в данный момент - подсоединяемся к текущему промису
+    if (pendingAnalyses.has(normPath)) {
+      log.info(`[AudioAnalysisService] Deduplicating active analysis for ${normPath}`);
+      return await pendingAnalyses.get(normPath);
+    }
+
     const jsonPath = path.join(path.dirname(audioPath), `${path.basename(audioPath, path.extname(audioPath))}.analysis.json`);
     const currentMtimeMs = fs.statSync(audioPath).mtimeMs;
 
@@ -369,7 +380,12 @@ class AudioAnalysisService {
       }
     }
 
-    return await this.analyzeTrack(audioPath, options, onProgress);
+    const analysisPromise = this.analyzeTrack(audioPath, options, onProgress).finally(() => {
+      pendingAnalyses.delete(normPath);
+    });
+
+    pendingAnalyses.set(normPath, analysisPromise);
+    return await analysisPromise;
   }
 
   /**
@@ -434,26 +450,33 @@ class AudioAnalysisService {
   /**
    * Автоматический поиск заранее разделенной дорожки вокала оригинала
    */
-  static findOriginalVocalsTrack(candidateDirs = [], manifest = null) {
+  static findOriginalVocalsTrack(candidateDirs = [], manifest = null, ourVocalsPath = null) {
     let validDirs = (Array.isArray(candidateDirs) ? candidateDirs : [candidateDirs]).filter(Boolean);
+    const resolvedOurPath = ourVocalsPath ? path.resolve(ourVocalsPath).toLowerCase() : '';
 
-    // 1. First check manifest.pipeline step outputs for stem separation steps
+    const isExcluded = (fullPath) => {
+      if (!fullPath) return true;
+      const resolved = path.resolve(fullPath).toLowerCase();
+      if (resolvedOurPath && resolved === resolvedOurPath) return true;
+      const name = path.basename(resolved);
+      const excludedKeywords = [
+        'matched', 'dub', 'our_', 'voices_master', 'combined', 'ducked', 'master',
+        'final', 'no_vocal', 'instrumental', 'bgm', 'fix', 'norm', 'dubber'
+      ];
+      return excludedKeywords.some(k => name.includes(k));
+    };
+
+    // 1. Check manifest.pipeline step outputs for original stem separation steps
     if (manifest && Array.isArray(manifest.pipeline)) {
       for (const step of manifest.pipeline) {
         if (step.outputFiles && Array.isArray(step.outputFiles)) {
           for (const file of step.outputFiles) {
             if (file && file.path && fs.existsSync(file.path) && fs.statSync(file.path).size > 1000) {
+              if (isExcluded(file.path)) continue;
               const lowerName = path.basename(file.path).toLowerCase();
               if (
+                (lowerName.includes('original') || lowerName.includes('orig_')) &&
                 (lowerName.includes('vocal') || lowerName.includes('stem')) &&
-                !lowerName.includes('no_vocal') &&
-                !lowerName.includes('instrumental') &&
-                !lowerName.includes('bgm') &&
-                !lowerName.includes('dub') &&
-                !lowerName.includes('our_') &&
-                !lowerName.includes('matched') &&
-                !lowerName.includes('voices_master') &&
-                !lowerName.includes('combined') &&
                 file.path.endsWith('.wav')
               ) {
                 return file.path;
@@ -473,7 +496,7 @@ class AudioAnalysisService {
       ].filter(Boolean);
 
       for (const sPath of sources) {
-        if (fs.existsSync(sPath) && fs.statSync(sPath).size > 1000) {
+        if (fs.existsSync(sPath) && fs.statSync(sPath).size > 1000 && !isExcluded(sPath)) {
           const lowerName = path.basename(sPath).toLowerCase();
           if (lowerName.includes('vocal') || lowerName.includes('original') || lowerName.includes('stem')) {
             return sPath;
@@ -482,7 +505,7 @@ class AudioAnalysisService {
       }
     }
 
-    // 3. Expand candidate directories by adding all subdirectories in candidateDirs (e.g. 01_htdemucs, 02_separate, etc.)
+    // 3. Expand candidate directories by adding all subdirectories
     const expandedDirs = [...validDirs];
     for (const dirPath of validDirs) {
       if (!dirPath || !fs.existsSync(dirPath)) continue;
@@ -501,26 +524,27 @@ class AudioAnalysisService {
 
     const candidateFilenames = [
       'original_vocals.wav',
-      'vocals.wav',
       'original_vocal.wav',
-      'stem_vocals.wav',
-      'vocals_only.wav',
+      'orig_vocals.wav',
+      'bs_roformer_original_vocals.wav',
       'htdemucs_original_vocals.wav',
-      'demucs_vocals.wav',
-      'uvr_vocals.wav'
+      'uvr_original_vocals.wav',
+      'stem_original_vocals.wav',
+      'vocals.wav'
     ];
 
     const isOriginalVocalFile = (filename) => {
       const lower = filename.toLowerCase();
       if (!lower.endsWith('.wav')) return false;
-
-      const excludedKeywords = ['matched', 'dub', 'our_', 'voices_master', 'combined', 'ducked', 'master', 'final', 'no_vocal', 'instrumental', 'bgm', 'fix', 'norm'];
+      const excludedKeywords = [
+        'matched', 'dub', 'our_', 'voices_master', 'combined', 'ducked', 'master',
+        'final', 'no_vocal', 'instrumental', 'bgm', 'fix', 'norm', 'dubber'
+      ];
       if (excludedKeywords.some(k => lower.includes(k))) return false;
 
       return (
-        lower.includes('vocal') ||
         lower.includes('original') ||
-        lower.includes('stem') ||
+        lower.includes('orig_') ||
         candidateFilenames.includes(lower)
       );
     };
@@ -530,7 +554,7 @@ class AudioAnalysisService {
 
       for (const name of candidateFilenames) {
         const fullPath = path.join(dirPath, name);
-        if (fs.existsSync(fullPath) && fs.statSync(fullPath).size > 1000) {
+        if (fs.existsSync(fullPath) && fs.statSync(fullPath).size > 1000 && !isExcluded(fullPath)) {
           return fullPath;
         }
       }
@@ -539,11 +563,9 @@ class AudioAnalysisService {
         const entries = fs.readdirSync(dirPath, { withFileTypes: true });
         for (const entry of entries) {
           if (entry.isFile()) {
-            if (isOriginalVocalFile(entry.name)) {
-              const fullPath = path.join(dirPath, entry.name);
-              if (fs.statSync(fullPath).size > 1000) {
-                return fullPath;
-              }
+            const fullPath = path.join(dirPath, entry.name);
+            if (isOriginalVocalFile(entry.name) && !isExcluded(fullPath) && fs.statSync(fullPath).size > 1000) {
+              return fullPath;
             }
           } else if (entry.isDirectory()) {
             try {
@@ -551,7 +573,7 @@ class AudioAnalysisService {
               for (const subName of subEntries) {
                 if (isOriginalVocalFile(subName)) {
                   const fullPath = path.join(dirPath, entry.name, subName);
-                  if (fs.existsSync(fullPath) && fs.statSync(fullPath).size > 1000) {
+                  if (fs.existsSync(fullPath) && !isExcluded(fullPath) && fs.statSync(fullPath).size > 1000) {
                     return fullPath;
                   }
                 }

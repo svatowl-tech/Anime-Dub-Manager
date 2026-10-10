@@ -2008,14 +2008,6 @@ def main():
     parser.add_argument(
         "--mode",
         required=True,
-        choices=[
-            "denoise", "dereverb", "deepfilternet",
-            "separate", "separate_stems", "demucs",
-            "pedalboard_channel_strip", "pedalboard_dsp",
-            "voice_eq", "voice_compressor", "voice_deesser", "voice_reverb", "voice_limiter", "voice_master_strip",
-            "airwindows_dsp", "airwindows_restore", "airwindows_saturate",
-            "voicefixer", "diarize", "whisper", "aeneas_align", "mfa_analyze", "loudness_norm", "check_env", "download_model"
-        ],
         help="Processing mode"
     )
     parser.add_argument("--input", help="Path to input audio/video file")

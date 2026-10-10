@@ -43,6 +43,8 @@ import {
   Search,
   AlertTriangle,
   AlertCircle,
+  Loader2,
+  Zap,
   XCircle,
   FileDown,
   RotateCcw,
@@ -204,6 +206,39 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [eqStrength, setEqStrength] = useState<number>(100);
   const [targetLufsOffset, setTargetLufsOffset] = useState<number>(0.0);
   const [acousticMatchResult, setAcousticMatchResult] = useState<any | null>(null);
+
+  // Video Preview Proxy state
+  const [isCreatingProxy, setIsCreatingProxy] = useState<boolean>(false);
+  const [proxyProgress, setProxyProgress] = useState<number>(0);
+
+  const handleCreateVideoProxy = async () => {
+    const sourcePath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
+    if (!sourcePath) return;
+    try {
+      setIsCreatingProxy(true);
+      setProxyProgress(0);
+      toast.info('Создание легкого MP4-прокси для плеера (H.264/AAC)...');
+
+      const unsub = ipcSafe.on('video-proxy-progress', (data: any) => {
+        if (data && typeof data.percent === 'number') {
+          setProxyProgress(data.percent);
+        }
+      });
+
+      const res = await ipcSafe.invoke('create-video-preview-proxy', { videoPath: sourcePath });
+      if (typeof unsub === 'function') unsub();
+
+      setIsCreatingProxy(false);
+      if (res && res.proxyPath) {
+        toast.success('MP4-прокси успешно создан! Воспроизведение подключено. 🎬');
+        setVideoSrc(formatMediaUrl(res.proxyPath));
+        setVideoPlaybackError(null);
+      }
+    } catch (e: any) {
+      setIsCreatingProxy(false);
+      toast.error(`Ошибка создания прокси: ${e.message}`);
+    }
+  };
 
   // Active step processing
   const [activeProcessingStepId, setActiveProcessingStepId] = useState<string | null>(null);
@@ -420,10 +455,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:')) {
       return filePath;
     }
-    const cleanP = filePath.replace(/^file:\/\//, '').replace(/\\/g, '/');
+    const cleanP = filePath.replace(/^file:\/\//, '').replace(/^custom-media:\/\//, '').replace(/\\/g, '/');
     if (window.electronAPI) {
-      // Direct file:// scheme is standard and reliable in Electron
-      return cleanP.startsWith('/') ? `file://${cleanP}` : `file:///${cleanP}`;
+      // custom-media:// scheme is standard, secure, and supports Range requests / streaming in Electron
+      return cleanP.startsWith('/') ? `custom-media://${cleanP}` : `custom-media:///${cleanP}`;
     }
     return filePath;
   }, []);
@@ -1162,9 +1197,25 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     setAcousticMatchResult(null);
 
     let ourPath = '';
-    const dubTracks = manifest?.sourceFiles?.dubberTracks || [];
-    if (dubTracks.length > 0 && dubTracks[0].path) {
-      ourPath = dubTracks[0].path;
+    // Поиск сохраненных обработанных дорожек дабберов на диске в рабочей папке
+    if (workingDir) {
+      try {
+        const files: string[] = await ipcSafe.invoke('get-dir-files', workingDir);
+        if (Array.isArray(files)) {
+          const dubberWavs = files.filter(f => f.endsWith('.wav') && (f.includes('dubber') || f.includes('dub') || f.includes('voices_master') || f.includes('eq_') || f.includes('restore_') || f.includes('matched')));
+          if (dubberWavs.length > 0) {
+            // Сортировка по номеру шага / имени по убыванию
+            dubberWavs.sort((a, b) => b.localeCompare(a));
+            ourPath = `${workingDir}/${dubberWavs[0]}`.replace(/\\/g, '/');
+          }
+        }
+      } catch (e) {}
+    }
+    if (!ourPath) {
+      const dubTracks = manifest?.sourceFiles?.dubberTracks || [];
+      if (dubTracks.length > 0 && dubTracks[0].path) {
+        ourPath = dubTracks[0].path;
+      }
     }
     setOurVocalsPath(ourPath);
 
@@ -1173,7 +1224,11 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     if (epDir) searchDirs.push(epDir);
 
     try {
-      const foundOrig = await ipcSafe.invoke('audio-find-original-vocals', { searchDirs });
+      const foundOrig = await ipcSafe.invoke('audio-find-original-vocals', {
+        searchDirs,
+        manifest,
+        ourVocalsPath: ourPath
+      });
       if (foundOrig && typeof foundOrig === 'string') {
         setOrigVocalsPath(foundOrig);
         mixLog('info', 'Слепок', `✓ Обнаружен разделенный вокал оригинала: ${foundOrig}`);
@@ -2633,7 +2688,26 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                     Совет: Видео в контейнерах MKV или с аудиокодеками AC3/DTS/HEVC не поддерживается HTML5-плеером Electron.
                   </p>
                 </div>
-                <div className="flex items-center gap-2 pt-1">
+                <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                  {(manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath) && (
+                    <button
+                      onClick={handleCreateVideoProxy}
+                      disabled={isCreatingProxy}
+                      className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-white text-xs font-semibold rounded-lg transition shadow flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {isCreatingProxy ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>Создание MP4-прокси... {proxyProgress}%</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-3.5 h-3.5" />
+                          <span>⚡ Создать быстрый MP4-прокси (H.264/AAC)</span>
+                        </>
+                      )}
+                    </button>
+                  )}
                   {(manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath) && (
                     <button
                       onClick={() => {
@@ -2643,16 +2717,16 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           setVideoPlaybackError(null);
                         }
                       }}
-                      className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium rounded-lg transition"
+                      className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium rounded-lg transition border border-neutral-700"
                     >
-                      📻 Переключить на исходник
+                      📻 Попробовать исходник
                     </button>
                   )}
                   <button
                     onClick={() => handleSelectExternalFile('video')}
                     className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium rounded-lg transition border border-neutral-700"
                   >
-                    📂 Выбрать видеофайл...
+                    📂 Выбрать другой файл...
                   </button>
                   <button
                     onClick={() => setVideoPlaybackError(null)}

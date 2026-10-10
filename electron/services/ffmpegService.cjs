@@ -1103,9 +1103,56 @@ async function applyFixesToOriginalAudio(originalPath, fixPath, outputPath, opti
   });
 }
 
+function createVideoProxy(inputPath, outputPath = null, onProgress = null) {
+  return new Promise((resolve, reject) => {
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      return reject(new Error(`Input video file not found: ${inputPath}`));
+    }
+    const targetOutput = outputPath || `${inputPath}.preview_proxy.mp4`;
+
+    getVideoMetadata(inputPath).then((meta) => {
+      const durationSec = parseFloat(meta?.format?.duration || '0') || 0;
+
+      const command = ffmpeg(inputPath)
+        .output(targetOutput)
+        .format('mp4')
+        .videoCodec('libx264')
+        .outputOptions([
+          '-preset ultrafast',
+          '-crf 26',
+          '-vf scale=-2:720',
+          '-c:a aac',
+          '-b:a 128k',
+          '-pix_fmt yuv420p',
+          '-movflags +faststart'
+        ])
+        .on('progress', (p) => {
+          if (onProgress && durationSec > 0 && p.timemark) {
+            const parts = p.timemark.split(':');
+            const secs = parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+            const pct = Math.min(99, Math.round((secs / durationSec) * 100));
+            onProgress(pct);
+          }
+        })
+        .on('end', () => {
+          if (onProgress) onProgress(100);
+          resolve(targetOutput);
+        })
+        .on('error', (err) => {
+          log.error('[ffmpegService] Error creating video proxy:', err);
+          reject(err);
+        });
+
+      addProcess('createVideoProxy', command);
+      command.run();
+    }).catch(reject);
+  });
+}
+
 module.exports = {
   bakeSubtitles,
   transcodeToMp4,
+  createVideoProxy,
   muxRelease,
   takeScreenshot,
   getVideoMetadata,

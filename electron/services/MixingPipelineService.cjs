@@ -3168,29 +3168,85 @@ class MixingPipelineService {
     const currentStep = manifest?.pipeline?.[stepIndex];
     const moduleId = currentStep?.moduleId;
 
+    // Build category lookup from MODULE_DATABASE
+    const moduleCategoryMap = {};
+    if (Array.isArray(MODULE_DATABASE)) {
+      MODULE_DATABASE.forEach(m => {
+        if (m && m.id) moduleCategoryMap[m.id] = m.category;
+      });
+    }
+
     // List of modules that expect dubber tracks on input
     const isDubberStep = [
       'auto_timing', 'stage_mfa_lipsync', 'mfa_lipsync', 'acoustic_original_match',
-      'vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm',
+      'acoustic_match_full', 'acoustic_match_soft_reverb', 'acoustic_match_dry_focus', 'vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm',
       'auto_norm_phrases', 'silence_gate', 'apply_fixes', 'stage_loudness_norm',
       'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'deepfilternet3', 'uvr_denoise_full',
       'uvr_deecho_normal', 'vst-spectral-dereverb', 'reverb_foxjoy', 'uvr_deecho_aggressive',
-      'mdx_dereverb_room', 'voicefixer_fe', 'airwindows_dsp'
+      'mdx_dereverb_room', 'voicefixer_fe', 'airwindows_dsp', 'deesser', 'airwindows_restore',
+      'airwindows_saturate', 'glue_compress', 'de_plosive', 'vocal_thickener',
+      'spectral_dereverb_lite', 'voice_eq', 'voice_compressor', 'voice_deesser',
+      'voice_reverb', 'voice_limiter', 'voice_master_strip'
     ].includes(moduleId);
 
     const isNonDubberStep = (step) => {
-      const cat = step?.category;
-      const mod = step?.moduleId;
-      return cat === 'separation' || [
+      if (!step) return false;
+      const mod = (step.moduleId || '').toLowerCase();
+      const cat = (step.category || moduleCategoryMap[step.moduleId] || '').toLowerCase();
+
+      // Categories that process original audio stems or final master/export rather than per-dubber voice tracks
+      if (['separation', 'stem_separation', 'export', 'balance', 'mastering'].includes(cat)) {
+        return true;
+      }
+
+      // Explicit separation / stem / master / video mux module IDs
+      if ([
         'htdemucs', 'htdemucs_ft', 'htdemucs_vocals_bgm', 'uvr_mdx_inst_hq3',
-        'separate', 'separate_stems', 'demucs', 'uvr_mdx_voc_ft', 'ducking',
+        'uvr_mdx_voc_ft', 'kim_vocal_2', 'mdx23c_8step', 'hp_karaoke_uvr',
+        'mel_band_roformer_vocals', 'bs_roformer_viperx', 'bs_roformer_cinema',
+        'separate', 'separate_stems', 'demucs', 'ducking',
         'master_audio_mix', 'video_mux'
-      ].includes(mod);
+      ].includes(mod)) {
+        return true;
+      }
+
+      // Pattern matching for stem separation or master muxing
+      if (
+        mod.includes('roformer') ||
+        mod.includes('demucs') ||
+        mod.includes('separate') ||
+        mod.includes('stem') ||
+        mod.startsWith('uvr_mdx') ||
+        mod.startsWith('mdx') ||
+        mod === 'video_mux' ||
+        mod === 'master_audio_mix'
+      ) {
+        return true;
+      }
+
+      // Inspect outputFiles of the step: if output files look like original separated stems or master muxes
+      if (Array.isArray(step.outputFiles) && step.outputFiles.length > 0) {
+        const firstOut = typeof step.outputFiles[0] === 'string' ? step.outputFiles[0] : step.outputFiles[0]?.path || step.outputFiles[0]?.name || '';
+        const lowerOut = firstOut.toLowerCase();
+        if (
+          lowerOut.includes('original_vocals') ||
+          lowerOut.includes('stem_') ||
+          lowerOut.includes('_no_vocal') ||
+          lowerOut.includes('_instrumental') ||
+          lowerOut.includes('_bgm') ||
+          lowerOut.includes('master_audio') ||
+          lowerOut.includes('final_mux')
+        ) {
+          return true;
+        }
+      }
+
+      return false;
     };
 
     for (let i = stepIndex - 1; i >= 0; i--) {
       const prevStep = manifest.pipeline[i];
-      if (prevStep.enabled && prevStep.outputFiles && prevStep.outputFiles.length > 0) {
+      if (prevStep && prevStep.enabled && prevStep.outputFiles && prevStep.outputFiles.length > 0) {
         if (isDubberStep && isNonDubberStep(prevStep)) {
           continue;
         }

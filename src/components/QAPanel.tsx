@@ -2022,17 +2022,19 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
 
       // Pre-calculate audio analysis sidecar passport in background so Timing & Mixing load instantly
       if (res && res.path) {
-        ipcSafe.invoke('audio-run-track-analysis', {
-          audioPath: res.path,
-          options: {
-            skipWhisper: true,
-            isFix: type === 'FIXES',
-            dubberNick: (assignment as any)?.dubber?.nickname || (assignment as any)?.dubber?.username || (assignment as any)?.dubber?.name || baseDubberId,
-            characterName: (assignment as any)?.character?.name || (assignment as any)?.characterName || 'Персонаж'
-          }
-        }).catch(err => {
+        try {
+          await ipcSafe.invoke('audio-run-track-analysis', {
+            audioPath: res.path,
+            options: {
+              skipWhisper: true,
+              isFix: type === 'FIXES',
+              dubberNick: (assignment as any)?.dubber?.nickname || (assignment as any)?.dubber?.username || (assignment as any)?.dubber?.name || baseDubberId,
+              characterName: (assignment as any)?.character?.name || (assignment as any)?.characterName || 'Персонаж'
+            }
+          });
+        } catch (err) {
           console.warn('[QA] Pre-analysis sidecar calculation warning:', err);
-        });
+        }
       }
       
       onRefresh();

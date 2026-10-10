@@ -42,8 +42,8 @@ function registerAudioAnalysisHandlers() {
     return await AudioAnalysisService.getTimingAnalysis(episodeDir);
   }));
 
-  ipcMain.handle('audio-find-original-vocals', wrapIpcHandler(async (event, { searchDirs = [] }) => {
-    return AudioAnalysisService.findOriginalVocalsTrack(searchDirs);
+  ipcMain.handle('audio-find-original-vocals', wrapIpcHandler(async (event, { searchDirs = [], manifest = null, ourVocalsPath = null }) => {
+    return AudioAnalysisService.findOriginalVocalsTrack(searchDirs, manifest, ourVocalsPath);
   }));
 
   ipcMain.handle('audio-analyze-original-snapshots', wrapIpcHandler(async (event, { audioPath, options = {} }) => {

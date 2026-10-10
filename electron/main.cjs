@@ -393,7 +393,14 @@ app.whenReady().then(async () => {
           decodedPath = decodedPath.slice(1);
         }
         decodedPath = decodedPath.replace(/\//g, path.sep);
-        return net.fetch(require('url').pathToFileURL(decodedPath).toString());
+        let targetFile = decodedPath;
+        if (/\.(mkv|avi|flv|ts|wmv|hevc)$/i.test(decodedPath)) {
+          const proxyPath = `${decodedPath}.preview_proxy.mp4`;
+          if (fs.existsSync(proxyPath)) {
+            targetFile = proxyPath;
+          }
+        }
+        return net.fetch(require('url').pathToFileURL(targetFile).toString());
       } catch (err) {
         log.error('[custom-media] protocol error:', err);
         return new Response('Media file not found or invalid', { status: 404 });

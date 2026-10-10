@@ -48,6 +48,18 @@ function registerMixingHandlers(getData, mainWindow) {
     return await MixingPipelineService.getStatus({ episode, targetDir, baseDir });
   }));
 
+  ipcMain.handle('create-video-preview-proxy', wrapIpcHandler(async (event, { videoPath, outputPath }) => {
+    if (!videoPath) throw new Error('videoPath обязателен для создания MP4-прокси');
+    const { createVideoProxy } = require('../services/ffmpegService.cjs');
+    const onProgress = (percent) => {
+      try {
+        event.sender.send('video-proxy-progress', { videoPath, percent });
+      } catch (e) {}
+    };
+    const proxyPath = await createVideoProxy(videoPath, outputPath, onProgress);
+    return { success: true, proxyPath };
+  }));
+
   ipcMain.handle('mixing-save-pipeline-config', wrapIpcHandler(async (event, { episode, targetDir, pipeline }) => {
     if (!episode || !pipeline) throw new Error('Параметры серии и конвейера обязательны');
     const config = await getData('config.json');
