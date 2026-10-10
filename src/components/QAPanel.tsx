@@ -466,7 +466,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         }
       }));
 
-      analyzeAudioForPreview(audioUrl, cacheKey).then(metrics => {
+      analyzeAudioForPreview(audioUrl, cacheKey, selectedFile?.path).then(metrics => {
         if (!isCancelled) {
           setNormalizationMetrics(prev => ({ ...prev, [track.id]: metrics }));
         }

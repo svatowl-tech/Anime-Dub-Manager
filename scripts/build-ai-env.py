@@ -83,9 +83,9 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
             dir_lower = name.lower()
             norm_root = root.replace("\\", "/").lower()
 
-            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard'
+            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm'
             # Subpackages such as 'torch/cuda', 'torch/testing', 'torchaudio/compliance' are required at runtime!
-            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard']):
+            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm']):
                 continue
 
             # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
@@ -265,13 +265,28 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "requests>=2.31.0",
         "torchlibrosa>=0.1.0",
         "matplotlib>=3.7.0",
-        "pyyaml>=6.0"
+        "pyyaml>=6.0",
+        "aeneas>=1.7.3",
+        "pyloudnorm>=0.1.0"
     ]
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--prefer-binary", "-c", str(constraints_file)] + extra_index_args + pinned_stack)
 
     # Install VoiceFixer with --no-deps to prevent streamlit bloat
     print("  [VOICEFIXER] Installing VoiceFixer package (--no-deps)...")
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "voicefixer>=0.1.3"])
+
+    # System Dependencies for Aeneas Forced Alignment (espeak / espeak-ng)
+    print("\n[STEP 4.1] Checking system dependencies for Aeneas (espeak / espeak-ng / ffmpeg)...")
+    try:
+        if is_linux:
+            run_cmd(["apt-get", "update"], check=False)
+            run_cmd(["apt-get", "install", "-y", "espeak", "espeak-ng", "ffmpeg", "libcew-dev"], check=False)
+        elif is_mac:
+            run_cmd(["brew", "install", "espeak", "ffmpeg"], check=False)
+        elif is_win:
+            print("  [INFO] Windows: Ensure eSpeak / eSpeak-NG binary is available in PATH or ai_env.")
+    except Exception as espeak_err:
+        print(f"  [WARN] System package check skipped: {espeak_err}")
 
     # Re-enforce numpy 1.26.4, torch 2.2.2 and torchaudio 2.2.2 strictly to prevent any transitive override
     print("  [STRICT] Re-enforcing NumPy 1.26.4 and TorchAudio 2.2.2 pinning...")
@@ -676,6 +691,35 @@ except Exception as e:
     if sidecar_src.exists():
         shutil.copy2(sidecar_src, sidecar_dst_dir / "audio_ai_processor.py")
         print(f"  [OK] Copied audio_ai_processor.py to {sidecar_dst_dir}")
+
+    # 8b. Setup Airwindows VST3 DSP Suite plugins bundle directory
+    print("\n[STEP 8b] Setting up Airwindows VST3 DSP Suite plugins directory...")
+    airwindows_base = build_temp_dir / "plugins" / "airwindows"
+    airwindows_win = airwindows_base / "win64"
+    airwindows_mac = airwindows_base / "mac"
+    airwindows_linux = airwindows_base / "linux"
+    
+    airwindows_win.mkdir(parents=True, exist_ok=True)
+    airwindows_mac.mkdir(parents=True, exist_ok=True)
+    airwindows_linux.mkdir(parents=True, exist_ok=True)
+
+    # Copy any locally available Airwindows VST3 files from repo or build sources
+    local_plugins_src = root_dir / "plugins" / "airwindows"
+    if local_plugins_src.exists():
+        for plat in ["win64", "mac", "linux"]:
+            src_plat = local_plugins_src / plat
+            dst_plat = airwindows_base / plat
+            if src_plat.exists():
+                for item in src_plat.glob("*"):
+                    try:
+                        if item.is_dir():
+                            shutil.copytree(item, dst_plat / item.name, dirs_exist_ok=True)
+                        else:
+                            shutil.copy2(item, dst_plat / item.name)
+                        print(f"  [AIRWINDOWS] Bundled plugin: {plat}/{item.name}")
+                    except Exception:
+                        pass
+    print(f"  [OK] Airwindows VST3 directory initialized at {airwindows_base}")
 
     # 9. Create portable launcher / environment marker
     version_info_path = build_temp_dir / "env_info.json"

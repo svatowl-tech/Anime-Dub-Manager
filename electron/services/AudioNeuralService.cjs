@@ -504,6 +504,127 @@ class AudioNeuralService {
 
     return outputPath;
   }
+
+  /**
+   * Airwindows DSP Suite (DeEss, Pop, Slew3, VoiceTrick / Density)
+   */
+  async processAirwindowsDsp({ inputPath, outputPath, moduleId = 'airwindows_restore', params = {}, onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const mode = moduleId === 'airwindows_saturate' ? 'airwindows_saturate' : (moduleId === 'airwindows_dsp' ? 'airwindows_dsp' : 'airwindows_restore');
+
+    const args = [
+      '--mode', mode,
+      '--input', inputPath,
+      '--output', outputPath,
+      '--model_id', moduleId,
+      '--deess_intensity', String(params.deessIntensity ?? params.deess_intensity ?? 0.50),
+      '--pop_intensity', String(params.popIntensity ?? params.pop_intensity ?? 0.50),
+      '--slew_intensity', String(params.slewIntensity ?? params.slew_intensity ?? 0.40),
+      '--density_drive', String(params.densityDrive ?? params.density_drive ?? 0.40),
+      '--params_json', JSON.stringify({ ...params, moduleId, mode })
+    ];
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Airwindows DSP [${moduleId}]`
+    });
+
+    return outputPath;
+  }
+
+  /**
+   * Aeneas Forced Alignment (Audio & Subtitles Synchronization)
+   */
+  async aeneasAlign({ inputPath, subtitlesJsonPath, outputPath, language = 'ru', onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    const args = [
+      '--mode', 'aeneas_align',
+      '--input', inputPath,
+      '--subtitles_json', subtitlesJsonPath,
+      '--language', language
+    ];
+
+    if (outputPath) {
+      args.push('--output', outputPath);
+    }
+
+    const res = await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: 'Aeneas Forced Alignment'
+    });
+
+    return res;
+  }
+
+  /**
+   * Montreal Forced Aligner (MFA) Phonetic Lipsync Analysis
+   */
+  async mfaAnalyze({ dubAudioPath, origAudioPath = '', subtitlesJsonPath, outputPath, acousticModel = 'russian_mfa', dictionary = 'russian_mfa', onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(dubAudioPath)) {
+      throw new Error(`Файл дубляжа не существует: ${dubAudioPath}`);
+    }
+
+    const args = [
+      '--mode', 'mfa_analyze',
+      '--dub_audio', dubAudioPath,
+      '--orig_audio', origAudioPath || '',
+      '--subtitles_json', subtitlesJsonPath,
+      '--acoustic_model', acousticModel,
+      '--dictionary', dictionary
+    ];
+
+    if (outputPath) {
+      args.push('--output', outputPath);
+    }
+
+    const res = await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: 'MFA Phonetic Lipsync Analysis'
+    });
+
+    return res;
+  }
+
+  /**
+   * EBU R128 Loudness Normalization (pyloudnorm)
+   */
+  async loudnessNorm({ inputPath, outputPath, targetLufs = -23.0, truePeak = -1.0, modeType = 'track', onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    const args = [
+      '--mode', 'loudness_norm',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--target_lufs', String(targetLufs),
+      '--true_peak', String(truePeak),
+      '--mode_type', modeType
+    ];
+
+    const res = await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `EBU R128 Loudness Norm (${targetLufs} LUFS)`
+    });
+
+    return res;
+  }
 }
 
 module.exports = new AudioNeuralService();

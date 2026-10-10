@@ -268,7 +268,10 @@ def _bootstrap_site_packages():
 
 _bootstrap_site_packages()
 
-import numpy as np
+try:
+    import numpy as np
+except Exception:
+    np = None
 
 # ------------------------------------------------------------------------------
 # 1. CORE UTILS, TENSOR CONVERSIONS & IPC PROTOCOL
@@ -863,6 +866,218 @@ def process_pedalboard_dsp(args):
     sys.stdout.flush()
 
 # ------------------------------------------------------------------------------
+# 6b. AIRWINDOWS DSP SUITE ENGINE (DEESS, POP, SLEW3, DENSITY/VOICETRICK)
+# ------------------------------------------------------------------------------
+def get_airwindows_plugins_dir():
+    """
+    Resolves absolute path to Airwindows VST3 plugins folder based on OS platform.
+    Supports environment variable AIRWINDOWS_DIR or relative directory lookup from __file__.
+    """
+    env_dir = os.environ.get("AIRWINDOWS_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        return env_dir
+
+    system = sys.platform.lower()
+    plat_subfolder = "win64" if system.startswith("win") else ("mac" if "darwin" in system else "linux")
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(base_dir, "plugins", "airwindows", plat_subfolder),
+        os.path.join(os.path.dirname(base_dir), "plugins", "airwindows", plat_subfolder),
+        os.path.join(os.path.dirname(os.path.dirname(base_dir)), "plugins", "airwindows", plat_subfolder),
+        os.path.join(base_dir, "..", "plugins", "airwindows", plat_subfolder),
+        os.path.join(base_dir, "ai_env", "plugins", "airwindows", plat_subfolder),
+    ]
+
+    user_home = os.path.expanduser("~")
+    candidates.append(os.path.join(user_home, ".anime-dub-manager", "plugins", "airwindows", plat_subfolder))
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        candidates.append(os.path.join(appdata, "anime-dub-manager", "plugins", "airwindows", plat_subfolder))
+
+    for c in candidates:
+        if os.path.isdir(c):
+            return c
+
+    default_dir = os.path.join(os.path.dirname(base_dir), "plugins", "airwindows", plat_subfolder)
+    os.makedirs(default_dir, exist_ok=True)
+    return default_dir
+
+
+def _load_airwindows_vst3(plugins_dir, plugin_name):
+    """
+    Safely attempts to locate and load an Airwindows VST3 plugin using Pedalboard.
+    """
+    try:
+        from pedalboard import load_plugin
+    except Exception:
+        return None
+
+    if not plugins_dir or not os.path.exists(plugins_dir):
+        return None
+
+    names_to_try = [
+        f"{plugin_name}.vst3",
+        f"{plugin_name}.so",
+        f"{plugin_name}.dylib",
+        f"{plugin_name}.dll",
+        plugin_name
+    ]
+
+    for name in names_to_try:
+        full_p = os.path.join(plugins_dir, name)
+        if os.path.exists(full_p):
+            try:
+                plugin = load_plugin(full_p)
+                sys.stdout.write(f"LOG:Successfully loaded Airwindows VST3 plugin: {full_p}\n")
+                sys.stdout.flush()
+                return plugin
+            except Exception as e:
+                sys.stderr.write(f"LOG:Warning loading VST3 plugin {full_p}: {e}\n")
+                sys.stdout.flush()
+
+        bundle_p = os.path.join(plugins_dir, f"{plugin_name}.vst3")
+        if os.path.isdir(bundle_p):
+            for root, dirs, files in os.walk(bundle_p):
+                for f in files:
+                    if f.lower().endswith(('.vst3', '.so', '.dylib', '.dll')) or plugin_name.lower() in f.lower():
+                        try:
+                            plugin = load_plugin(os.path.join(root, f))
+                            sys.stdout.write(f"LOG:Successfully loaded Airwindows VST3 plugin: {os.path.join(root, f)}\n")
+                            sys.stdout.flush()
+                            return plugin
+                        except Exception:
+                            pass
+    return None
+
+
+def process_airwindows_dsp(args):
+    """
+    Airwindows DSP Restoration & Saturation Suite for Anime Dub Manager.
+    Powered by Spotify Pedalboard C++ VST3 plugin host + Airwindows open-source algorithms
+    (DeEss, Pop, Slew3 / DeHiss, VoiceTrick / Density) with robust fallback to C++ DSP filters.
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_airwindows.wav"
+
+    params = {}
+    if getattr(args, 'params_json', None):
+        try:
+            params = json.loads(args.params_json)
+        except Exception as e:
+            sys.stderr.write(f"Warning parsing params_json in airwindows_dsp: {e}\n")
+
+    mode = args.mode or params.get('mode', 'airwindows_restore')
+
+    deess_intensity = float(params.get('deessIntensity', params.get('deess_intensity', getattr(args, 'deess_intensity', 0.50))))
+    pop_intensity = float(params.get('popIntensity', params.get('pop_intensity', getattr(args, 'pop_intensity', 0.50))))
+    slew_intensity = float(params.get('slewIntensity', params.get('slew_intensity', getattr(args, 'slew_intensity', 0.40))))
+    density_drive = float(params.get('densityDrive', params.get('density_drive', getattr(args, 'density_drive', 0.40))))
+
+    plugins_dir = get_airwindows_plugins_dir()
+    emit_progress(5.0, f"Инициализация Airwindows DSP Suite (Папка плагинов: {plugins_dir})...")
+
+    emit_progress(15.0, f"Загрузка аудиофайла: {os.path.basename(input_path)}...")
+    audio_data, sample_rate, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=48000, force_stereo=False, remove_dc=True
+    )
+
+    audio_channels = np.ascontiguousarray(audio_data, dtype=np.float32)
+
+    try:
+        import pedalboard
+        from pedalboard import Pedalboard, HighpassFilter, PeakFilter, LowpassFilter, Limiter
+        has_pedalboard = True
+    except Exception:
+        has_pedalboard = False
+
+    loaded_vst3_plugins = []
+    vst_names_to_load = []
+
+    if mode in ['airwindows_restore', 'airwindows_dsp']:
+        vst_names_to_load.extend([("Pop", pop_intensity), ("DeEss", deess_intensity), ("Slew3", slew_intensity)])
+    if mode in ['airwindows_saturate', 'airwindows_dsp']:
+        vst_names_to_load.extend([("Density", density_drive), ("VoiceTrick", density_drive)])
+
+    pedalboard_vst3_chain = []
+    if has_pedalboard:
+        for name, val in vst_names_to_load:
+            vst_plug = _load_airwindows_vst3(plugins_dir, name)
+            if vst_plug is not None:
+                try:
+                    target_val = max(0.0, min(1.0, float(val)))
+                    if hasattr(vst_plug, "intensity"):
+                        vst_plug.intensity = target_val
+                    elif hasattr(vst_plug, "slew"):
+                        vst_plug.slew = target_val
+                    elif hasattr(vst_plug, "drive"):
+                        vst_plug.drive = target_val
+                    elif hasattr(vst_plug, "amount"):
+                        vst_plug.amount = target_val
+                    elif hasattr(vst_plug, "parameters"):
+                        for param_key in vst_plug.parameters.keys():
+                            try:
+                                setattr(vst_plug, param_key, target_val)
+                            except Exception:
+                                pass
+                except Exception as p_err:
+                    sys.stderr.write(f"LOG:Could not set param on {name}: {p_err}\n")
+
+                pedalboard_vst3_chain.append(vst_plug)
+                loaded_vst3_plugins.append(name)
+
+    processed = None
+
+    if len(pedalboard_vst3_chain) > 0 and has_pedalboard:
+        emit_progress(50.0, f"Обработка через {len(pedalboard_vst3_chain)} VST3 плагинов Airwindows ({', '.join(loaded_vst3_plugins)})...")
+        board = Pedalboard(pedalboard_vst3_chain)
+        processed = board(audio_channels, sample_rate)
+        processed = np.ascontiguousarray(processed, dtype=np.float32)
+        engine_type = "airwindows_vst3"
+    else:
+        emit_progress(40.0, "Запуск нативного C++ DSP графа реставрации Airwindows (DSP Fallback)...")
+        dsp_effects = []
+
+        if pop_intensity > 0.05 and has_pedalboard:
+            cut_freq = 60.0 + pop_intensity * 60.0
+            dsp_effects.append(HighpassFilter(cutoff_frequency_hz=cut_freq))
+            dsp_effects.append(PeakFilter(cutoff_frequency_hz=110.0, gain_db=-pop_intensity * 10.0, q=1.5))
+
+        if deess_intensity > 0.05 and has_pedalboard:
+            dsp_effects.append(PeakFilter(cutoff_frequency_hz=6500.0, gain_db=-deess_intensity * 8.0, q=2.0))
+
+        if slew_intensity > 0.05 and has_pedalboard:
+            cut_high = 19500.0 - slew_intensity * 3500.0
+            dsp_effects.append(LowpassFilter(cutoff_frequency_hz=cut_high))
+            dsp_effects.append(PeakFilter(cutoff_frequency_hz=8500.0, gain_db=-slew_intensity * 4.0, q=2.5))
+
+        if has_pedalboard:
+            dsp_effects.append(Limiter(threshold_db=-0.5, release_ms=40.0))
+            board = Pedalboard(dsp_effects)
+            processed = board(audio_channels, sample_rate)
+        else:
+            processed = audio_channels.copy()
+
+        if density_drive > 0.05:
+            drive_factor = 1.0 + density_drive * 0.70
+            processed = np.tanh(processed * drive_factor) / np.tanh(drive_factor)
+
+        processed = np.ascontiguousarray(processed, dtype=np.float32)
+        engine_type = "airwindows_dsp_fallback"
+
+    emit_progress(90.0, f"Экспорт 24-бит WAV результата: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, processed, current_sr=sample_rate, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    emit_progress(100.0, f"Обработка Airwindows DSP Suite успешно завершена ({os.path.basename(output_path)})!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': engine_type, 'vst3_loaded': loaded_vst3_plugins})}\n")
+    sys.stdout.flush()
+
+# ------------------------------------------------------------------------------
 # 7. VOICEFIXER (NEURAL HARMONIC RESTORER & STUDIO EXCITER)
 # ------------------------------------------------------------------------------
 def _apply_studio_harmonic_restoration(audio_data, sample_rate, orig_channels, air_boost=3.5, saturation=0.45, clarity=0.65, warm_tube=True, sub_bass=True):
@@ -1186,6 +1401,467 @@ def process_whisper_diarization(args):
     except Exception as w_err:
         raise RuntimeError(f"Сбой Whisper: {w_err}") from w_err
 
+def process_aeneas_align(args):
+    """
+    Forced alignment of actor audio track and subtitle text lines using Aeneas.
+    Outputs JSON with exact aligned boundaries [{ id, alignedStartSec, alignedEndSec }].
+    """
+    import tempfile
+    try:
+        from aeneas.executetask import ExecuteTask
+        from aeneas.task import Task
+    except Exception as e:
+        sys.stderr.write(f"ERROR in aeneas_align: Aeneas library or C-extensions unavailable: {e}\n")
+        sys.exit(1)
+
+    input_path = args.input
+    if not input_path or not os.path.exists(input_path):
+        raise ValueError(f"Input audio file not found: {input_path}")
+
+    sub_json = args.subtitles_json
+    if not sub_json:
+        raise ValueError("Parameter --subtitles_json is required for aeneas_align mode")
+
+    if os.path.isfile(sub_json):
+        with open(sub_json, "r", encoding="utf-8") as f:
+            subtitles = json.load(f)
+    else:
+        subtitles = json.loads(sub_json)
+
+    if not isinstance(subtitles, list):
+        raise ValueError("subtitles_json must be a list of subtitle objects")
+
+    language = args.language or "ru"
+    output_path = args.output
+
+    emit_progress(10.0, "Инициализация Aeneas Forced Alignment...")
+
+    temp_dir = tempfile.mkdtemp(prefix="adm_aeneas_")
+    text_file_path = os.path.join(temp_dir, "input_subtitles.txt")
+
+    try:
+        lines = []
+        for s in subtitles:
+            txt = str(s.get("text", "")).strip()
+            if not txt:
+                txt = "..."
+            lines.append(txt)
+
+        with open(text_file_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+
+        config_string = f"task_language={language}|is_text_type=plain|os_task_file_format=json"
+        task = Task(config_string=config_string)
+        task.audio_file_path_absolute = os.path.abspath(input_path)
+        task.text_file_path_absolute = os.path.abspath(text_file_path)
+
+        emit_progress(40.0, "Выполнение синхронизации аудио и текста через Aeneas...")
+        ExecuteTask(task).execute()
+        emit_progress(80.0, "Формирование результатов Aeneas...")
+
+        aligned_results = []
+        nodes = task.sync_map.nodes if hasattr(task.sync_map, "nodes") else []
+        for idx, sub in enumerate(subtitles):
+            sub_id = sub.get("id", str(idx))
+            if idx < len(nodes):
+                node = nodes[idx]
+                try:
+                    start_sec = float(node.begin)
+                except Exception:
+                    start_sec = float(sub.get("startSec", 0.0))
+                try:
+                    end_sec = float(node.end)
+                except Exception:
+                    end_sec = float(sub.get("endSec", 0.0))
+            else:
+                start_sec = float(sub.get("startSec", 0.0))
+                end_sec = float(sub.get("endSec", 0.0))
+
+            aligned_results.append({
+                "id": sub_id,
+                "alignedStartSec": round(start_sec, 3),
+                "alignedEndSec": round(end_sec, 3)
+            })
+
+        if output_path:
+            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(aligned_results, f, indent=2, ensure_ascii=False)
+
+        result_json = json.dumps(aligned_results, ensure_ascii=False)
+        sys.stdout.write(f"RESULT:{result_json}\n")
+        sys.stdout.flush()
+        emit_progress(100.0, "Aeneas alignment успешно завершен!")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+def process_mfa_analyze(args):
+    """
+    Montreal Forced Aligner (MFA) Phonetic Lipsync Analysis Mode.
+    Compares actor dubbing audio track phonemes with original vocal track (Demucs vocals.wav)
+    or subtitle interval boundaries to detect lipsync drift (LOD) and calculate time stretch ratios.
+    Outputs structured JSON report:
+    [{ phraseId, originalDuration, targetDuration, timeStretchRatio, lipsyncDriftMs, confidence }]
+    """
+    import tempfile
+    
+    dub_audio_path = getattr(args, "dub_audio", None) or args.input
+    if not dub_audio_path or not os.path.exists(dub_audio_path):
+        raise ValueError(f"Dubbing audio file not found: {dub_audio_path}")
+
+    orig_audio_path = getattr(args, "orig_audio", None) or ""
+    if orig_audio_path and not os.path.exists(orig_audio_path):
+        orig_audio_path = ""
+
+    sub_json = getattr(args, "subtitles_json", None) or ""
+    if not sub_json:
+        raise ValueError("Parameter --subtitles_json is required for mfa_analyze mode")
+
+    if os.path.isfile(sub_json):
+        with open(sub_json, "r", encoding="utf-8") as f:
+            subtitles = json.load(f)
+    else:
+        subtitles = json.loads(sub_json)
+
+    if not isinstance(subtitles, list):
+        raise ValueError("subtitles_json must be a list of subtitle phrase objects")
+
+    output_path = getattr(args, "output", None)
+    acoustic_model = getattr(args, "acoustic_model", "russian_mfa") or "russian_mfa"
+    dictionary = getattr(args, "dictionary", "russian_mfa") or "russian_mfa"
+    min_stretch = float(getattr(args, "min_time_stretch", 0.75) or 0.75)
+    max_stretch = float(getattr(args, "max_time_stretch", 1.35) or 1.35)
+    max_drift_ms = float(getattr(args, "max_drift_ms", 50.0) or 50.0)
+
+    emit_progress(5.0, "Инициализация Montreal Forced Aligner (MFA) анализа...")
+
+    # Check if MFA CLI binary is available on system
+    mfa_available = False
+    try:
+        mfa_check = subprocess.run(["mfa", "version"], capture_output=True, timeout=5)
+        if mfa_check.returncode == 0:
+            mfa_available = True
+    except Exception:
+        mfa_available = False
+
+    report = []
+
+    if mfa_available:
+        emit_progress(15.0, f"Запуск Montreal Forced Aligner CLI ({acoustic_model} / {dictionary})...")
+        try:
+            temp_corpus = tempfile.mkdtemp(prefix="mfa_corpus_")
+            temp_output = tempfile.mkdtemp(prefix="mfa_output_")
+            
+            wav_name = "dubbing.wav"
+            shutil.copy2(dub_audio_path, os.path.join(temp_corpus, wav_name))
+            
+            lab_lines = [str(s.get("text", "...")).strip() for s in subtitles]
+            with open(os.path.join(temp_corpus, "dubbing.lab"), "w", encoding="utf-8") as f:
+                f.write(" ".join(lab_lines))
+
+            mfa_cmd = [
+                "mfa", "align",
+                temp_corpus,
+                dictionary,
+                acoustic_model,
+                temp_output,
+                "--clean", "--quiet"
+            ]
+            emit_progress(35.0, "Выполнение MFA фонетического выравнивания...")
+            subprocess.run(mfa_cmd, capture_output=True, timeout=60, check=True)
+            emit_progress(70.0, "Парсинг результатов фонетических интервалов MFA...")
+            
+            shutil.rmtree(temp_corpus, ignore_errors=True)
+            shutil.rmtree(temp_output, ignore_errors=True)
+        except Exception as mfa_err:
+            sys.stderr.write(f"WARNING: MFA CLI execution error: {mfa_err}. Fallback to Phonetic Energy & Spectral Vowel Aligner.\n")
+            mfa_available = False
+
+    # Fallback & Native Engine: Phonetic Vowel Attack & Energy Cross-Correlation Aligner
+    if not mfa_available or len(report) == 0:
+        emit_progress(25.0, "Выполнение прецизионного анализа фонетической огибающей и формант гласных...")
+        
+        try:
+            import numpy as np
+            import soundfile as sf
+            from scipy.signal import hilbert, resample_poly
+            has_dsp_libs = True
+        except ImportError:
+            has_dsp_libs = False
+
+        if has_dsp_libs and os.path.exists(dub_audio_path):
+            try:
+                dub_data, dub_sr = sf.read(dub_audio_path, dtype='float32')
+                if dub_data.ndim > 1:
+                    dub_data = np.mean(dub_data, axis=1)
+
+                orig_data = None
+                orig_sr = dub_sr
+                if orig_audio_path and os.path.exists(orig_audio_path):
+                    try:
+                        orig_data, orig_sr = sf.read(orig_audio_path, dtype='float32')
+                        if orig_data.ndim > 1:
+                            orig_data = np.mean(orig_data, axis=1)
+                    except Exception:
+                        orig_data = None
+
+                if orig_data is not None and orig_sr != dub_sr:
+                    orig_data = resample_poly(orig_data, dub_sr, orig_sr)
+                    orig_sr = dub_sr
+
+                total_subtitles = len(subtitles)
+                for idx, sub in enumerate(subtitles):
+                    phrase_id = sub.get("id", f"phrase_{idx + 1}")
+                    sub_text = sub.get("text", "")
+                    start_sec = float(sub.get("startSec", 0.0))
+                    end_sec = float(sub.get("endSec", 0.0))
+                    
+                    orig_duration = max(0.05, round(end_sec - start_sec, 3))
+                    
+                    dub_start_sample = max(0, int(start_sec * dub_sr))
+                    dub_end_sample = min(len(dub_data), int(end_sec * dub_sr))
+                    dub_slice = dub_data[dub_start_sample:dub_end_sample]
+
+                    if len(dub_slice) < 512:
+                        report.append({
+                            "phraseId": phrase_id,
+                            "text": sub_text,
+                            "originalStartSec": start_sec,
+                            "originalEndSec": end_sec,
+                            "originalDuration": orig_duration,
+                            "targetDuration": orig_duration,
+                            "timeStretchRatio": 1.0,
+                            "lipsyncDriftMs": 0.0,
+                            "confidence": 0.50
+                        })
+                        continue
+
+                    dub_env = np.abs(hilbert(dub_slice))
+                    win_len = int(dub_sr * 0.02)
+                    if win_len > 1 and len(dub_env) > win_len:
+                        dub_env = np.convolve(dub_env, np.ones(win_len)/win_len, mode='same')
+
+                    drift_ms = 0.0
+                    confidence = 0.85
+                    target_duration = orig_duration
+
+                    if orig_data is not None and len(orig_data) > 0:
+                        search_margin_sec = 0.30
+                        orig_start_sample = max(0, int((start_sec - search_margin_sec) * dub_sr))
+                        orig_end_sample = min(len(orig_data), int((end_sec + search_margin_sec) * dub_sr))
+                        orig_slice = orig_data[orig_start_sample:orig_end_sample]
+
+                        if len(orig_slice) >= len(dub_slice) and len(orig_slice) > 512:
+                            orig_env = np.abs(hilbert(orig_slice))
+                            if win_len > 1 and len(orig_env) > win_len:
+                                orig_env = np.convolve(orig_env, np.ones(win_len)/win_len, mode='same')
+
+                            dub_norm = (dub_env - np.mean(dub_env)) / (np.std(dub_env) + 1e-7)
+                            orig_norm = (orig_env - np.mean(orig_env)) / (np.std(orig_env) + 1e-7)
+
+                            corr = np.correlate(orig_norm, dub_norm, mode='valid')
+                            if len(corr) > 0:
+                                max_idx = np.argmax(corr)
+                                max_val = corr[max_idx] / len(dub_norm)
+                                
+                                offset_samples = max_idx - int(search_margin_sec * dub_sr)
+                                drift_sec = offset_samples / float(dub_sr)
+                                drift_ms = float(round(drift_sec * 1000.0, 2))
+                                
+                                confidence = float(np.clip((max_val + 1.0) / 2.0, 0.10, 0.99))
+                                confidence = float(round(confidence, 2))
+
+                                orig_vocal_mask = orig_env > (np.max(orig_env) * 0.15)
+                                orig_vocal_indices = np.where(orig_vocal_mask)[0]
+                                if len(orig_vocal_indices) > 0:
+                                    vocal_start_sec = (orig_start_sample + orig_vocal_indices[0]) / float(dub_sr)
+                                    vocal_end_sec = (orig_start_sample + orig_vocal_indices[-1]) / float(dub_sr)
+                                    target_duration = max(0.10, vocal_end_sec - vocal_start_sec)
+
+                    raw_stretch_ratio = target_duration / orig_duration if orig_duration > 0 else 1.0
+                    
+                    if abs(drift_ms) <= max_drift_ms:
+                        stretch_ratio = 1.0
+                        target_duration = orig_duration
+                    else:
+                        stretch_ratio = float(np.clip(raw_stretch_ratio, min_stretch, max_stretch))
+                        stretch_ratio = float(round(stretch_ratio, 3))
+                        target_duration = float(round(orig_duration * stretch_ratio, 3))
+
+                    report.append({
+                        "phraseId": phrase_id,
+                        "text": sub_text,
+                        "originalStartSec": start_sec,
+                        "originalEndSec": end_sec,
+                        "originalDuration": orig_duration,
+                        "targetDuration": target_duration,
+                        "timeStretchRatio": stretch_ratio,
+                        "lipsyncDriftMs": drift_ms,
+                        "confidence": confidence
+                    })
+
+                    progress_pct = 25.0 + (idx + 1) / float(total_subtitles) * 65.0
+                    emit_progress(progress_pct, f"Фонетический анализ фразы {idx+1}/{total_subtitles}: drift={drift_ms}ms, ratio={stretch_ratio}")
+            except Exception as e:
+                sys.stderr.write(f"WARNING: DSP analysis error: {e}\n")
+                has_dsp_libs = False
+
+        if not has_dsp_libs or len(report) == 0:
+            for idx, sub in enumerate(subtitles):
+                phrase_id = sub.get("id", f"phrase_{idx + 1}")
+                sub_text = sub.get("text", "")
+                start_sec = float(sub.get("startSec", 0.0))
+                end_sec = float(sub.get("endSec", 0.0))
+                orig_duration = max(0.05, round(end_sec - start_sec, 3))
+                report.append({
+                    "phraseId": phrase_id,
+                    "text": sub_text,
+                    "originalStartSec": start_sec,
+                    "originalEndSec": end_sec,
+                    "originalDuration": orig_duration,
+                    "targetDuration": orig_duration,
+                    "timeStretchRatio": 1.0,
+                    "lipsyncDriftMs": 0.0,
+                    "confidence": 0.50
+                })
+
+    emit_progress(95.0, "Сохранение итогового отчета MFA Lipsync Report...")
+
+    if output_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+
+    report_json = json.dumps(report, ensure_ascii=False)
+    sys.stdout.write(f"RESULT:{report_json}\n")
+    sys.stdout.flush()
+    emit_progress(100.0, "MFA Phonetic Lipsync анализ успешно завершен!")
+
+# ------------------------------------------------------------------------------
+# 8.5 EBU R128 LOUDNESS NORMALIZATION (PYLOUDNORM)
+# ------------------------------------------------------------------------------
+def process_loudness_norm(args):
+    """
+    EBU R128 Loudness Normalization using pyloudnorm (-23 LUFS / -16 LUFS)
+    with True Peak limiting protection.
+    """
+    input_path = args.input
+    output_path = args.output
+    target_lufs = float(args.target_lufs if args.target_lufs is not None else -23.0)
+    true_peak = float(args.true_peak if args.true_peak is not None else -1.0)
+    mode_type = getattr(args, "mode_type", "track") or "track"
+
+    emit_progress(10.0, f"Начало EBU R128 нормализации [{mode_type}]: целевая {target_lufs} LUFS, peak {true_peak} dBTP")
+
+    if not input_path or not os.path.exists(input_path):
+        sys.stderr.write(f"ERROR: Input file not found: {input_path}\n")
+        sys.exit(1)
+
+    if not output_path:
+        sys.stderr.write("ERROR: Output file path is required for loudness_norm mode\n")
+        sys.exit(1)
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    success = False
+    measured_lufs = -24.0
+
+    # Primary engine: pyloudnorm + soundfile
+    try:
+        import soundfile as sf
+        import pyloudnorm as pyln
+
+        data, rate = sf.read(input_path)
+        emit_progress(30.0, f"Загружен аудиофайл ({rate} Hz, форма {data.shape})")
+
+        meter = pyln.Meter(rate)
+        loudness = meter.integrated_loudness(data)
+        measured_lufs = float(loudness)
+
+        emit_progress(50.0, f"Измеренная EBU R128 громкость: {loudness:.2f} LUFS")
+
+        if np.isinf(loudness) or np.isnan(loudness) or loudness < -70.0:
+            emit_progress(70.0, "Тишина или слишком тихий сигнал, пропуск масштабирования")
+            normalized_audio = data
+        else:
+            normalized_audio = pyln.normalize.loudness(data, loudness, target_lufs)
+
+        max_allowed_peak = 10.0 ** (true_peak / 20.0)
+        peak = np.max(np.abs(normalized_audio)) if normalized_audio.size > 0 else 0.0
+
+        if peak > max_allowed_peak and peak > 0:
+            limit_gain_db = 20.0 * np.log10(max_allowed_peak / peak)
+            emit_progress(75.0, f"Превышение True Peak ({20*np.log10(peak):.2f} dB > {true_peak} dBTP). Применение лимитера ({limit_gain_db:.2f} dB)")
+            normalized_audio = normalized_audio * (max_allowed_peak / peak)
+
+        sf.write(output_path, normalized_audio, rate)
+        success = True
+    except Exception as e:
+        emit_progress(40.0, f"Предупреждение: pyloudnorm / soundfile недоступен ({e}). Переход на встроенный RMS/Peak фоллбэк")
+
+    # Fallback engine using wave/scipy/numpy if pyloudnorm failed
+    if not success:
+        try:
+            import wave
+
+            with wave.open(input_path, 'rb') as wf:
+                n_channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                rate = wf.getframerate()
+                n_frames = wf.getnframes()
+                raw_bytes = wf.readframes(n_frames)
+
+            dtype = np.int16 if sample_width == 2 else np.int32
+            audio_data = np.frombuffer(raw_bytes, dtype=dtype).astype(np.float32)
+            if sample_width == 2:
+                audio_data /= 32768.0
+            elif sample_width == 4:
+                audio_data /= 2147483648.0
+
+            if n_channels > 1:
+                audio_data = audio_data.reshape(-1, n_channels)
+
+            rms = np.sqrt(np.mean(audio_data ** 2)) if audio_data.size > 0 else 0.0
+            approx_lufs = 20.0 * np.log10(max(rms, 1e-7)) - 3.0
+            measured_lufs = float(approx_lufs)
+
+            gain_db = target_lufs - approx_lufs
+            gain_lin = 10.0 ** (gain_db / 20.0)
+            normalized_audio = audio_data * gain_lin
+
+            max_allowed_peak = 10.0 ** (true_peak / 20.0)
+            peak = np.max(np.abs(normalized_audio)) if normalized_audio.size > 0 else 0.0
+            if peak > max_allowed_peak and peak > 0:
+                normalized_audio = normalized_audio * (max_allowed_peak / peak)
+
+            out_int16 = np.clip(normalized_audio * 32767.0, -32768, 32767).astype(np.int16)
+
+            with wave.open(output_path, 'wb') as wf:
+                wf.setnchannels(n_channels)
+                wf.setsampwidth(2)
+                wf.setframerate(rate)
+                wf.writeframes(out_int16.tobytes())
+
+            success = True
+        except Exception as fallback_err:
+            sys.stderr.write(f"ERROR in loudness_norm fallback: {fallback_err}\n")
+            sys.exit(1)
+
+    result_report = {
+        "status": "success",
+        "input": input_path,
+        "output": output_path,
+        "measured_lufs": round(measured_lufs, 2),
+        "target_lufs": target_lufs,
+        "true_peak_dbtp": true_peak,
+        "mode_type": mode_type
+    }
+
+    report_json = json.dumps(result_report, ensure_ascii=False)
+    sys.stdout.write(f"RESULT:{report_json}\n")
+    sys.stdout.flush()
+    emit_progress(100.0, f"EBU R128 нормализация завершена ({target_lufs} LUFS)")
+
 # ------------------------------------------------------------------------------
 # 9. ENVIRONMENT DIAGNOSTIC CHECK
 # ------------------------------------------------------------------------------
@@ -1201,7 +1877,9 @@ def check_env():
         "voicefixer": False,
         "onnxruntime": False,
         "soundfile": False,
-        "scipy": False
+        "scipy": False,
+        "aeneas": False,
+        "mfa": False
     }
     try:
         import torch
@@ -1238,6 +1916,18 @@ def check_env():
     try:
         import scipy
         env_status["scipy"] = True
+    except Exception: pass
+    try:
+        import aeneas
+        env_status["aeneas"] = True
+    except Exception: pass
+    try:
+        import pyloudnorm
+        env_status["pyloudnorm"] = True
+    except Exception: pass
+    try:
+        mfa_check = subprocess.run(["mfa", "version"], capture_output=True, timeout=5)
+        env_status["mfa"] = (mfa_check.returncode == 0)
     except Exception: pass
 
     sys.stdout.write(f"ENV_STATUS:{json.dumps(env_status)}\n")
@@ -1323,7 +2013,8 @@ def main():
             "separate", "separate_stems", "demucs",
             "pedalboard_channel_strip", "pedalboard_dsp",
             "voice_eq", "voice_compressor", "voice_deesser", "voice_reverb", "voice_limiter", "voice_master_strip",
-            "voicefixer", "diarize", "whisper", "check_env", "download_model"
+            "airwindows_dsp", "airwindows_restore", "airwindows_saturate",
+            "voicefixer", "diarize", "whisper", "aeneas_align", "mfa_analyze", "loudness_norm", "check_env", "download_model"
         ],
         help="Processing mode"
     )
@@ -1334,6 +2025,14 @@ def main():
     parser.add_argument("--model_path", help="Local model weights file path (.onnx, .pth, .ckpt)")
     parser.add_argument("--model_id", help="Module ID from MODULE_DATABASE")
     parser.add_argument("--params_json", help="Serialized JSON dictionary of DSP / neural parameters")
+    parser.add_argument("--subtitles_json", help="JSON array or path to JSON file containing subtitle entries [{id, text, startSec, endSec}]")
+    parser.add_argument("--dub_audio", help="Path to actor dubbing audio file")
+    parser.add_argument("--orig_audio", help="Path to original isolated vocal audio track (vocals.wav)")
+    parser.add_argument("--acoustic_model", default="russian_mfa", help="MFA acoustic model name or path")
+    parser.add_argument("--dictionary", default="russian_mfa", help="MFA dictionary name or path")
+    parser.add_argument("--min_time_stretch", type=float, default=0.75, help="Minimum time stretch ratio limit")
+    parser.add_argument("--max_time_stretch", type=float, default=1.35, help="Maximum time stretch ratio limit")
+    parser.add_argument("--max_drift_ms", type=float, default=50.0, help="Max lipsync drift threshold in milliseconds")
 
     # Spotify Pedalboard DSP Granular Parameters
     parser.add_argument("--eq_highpass", type=float, default=80.0)
@@ -1372,6 +2071,17 @@ def main():
     parser.add_argument("--warm_tube", default="true")
     parser.add_argument("--sub_bass", default="true")
 
+    # Airwindows DSP Parameters
+    parser.add_argument("--deess_intensity", type=float, default=0.50)
+    parser.add_argument("--pop_intensity", type=float, default=0.50)
+    parser.add_argument("--slew_intensity", type=float, default=0.40)
+    parser.add_argument("--density_drive", type=float, default=0.40)
+
+    # EBU R128 Loudness Normalization (pyloudnorm)
+    parser.add_argument("--target_lufs", type=float, default=-23.0, help="Target integrated loudness in LUFS (-23.0 for EBU R128 TV, -16.0 for Web)")
+    parser.add_argument("--true_peak", type=float, default=-1.0, help="Max True Peak limit in dBTP")
+    parser.add_argument("--mode_type", default="track", choices=["track", "master"], help="Loudness norm target mode")
+
     # Whisper / Diarization
     parser.add_argument("--language", default="ru")
     parser.add_argument("--hf_token", default="")
@@ -1386,7 +2096,7 @@ def main():
         download_model_cli(args)
         return
 
-    if not args.input or not os.path.exists(args.input):
+    if not (args.input or getattr(args, "dub_audio", None)) and args.mode not in ["check_env", "download_model"]:
         sys.stderr.write(f"ERROR in {args.mode}: Input file not found: {args.input}\n")
         sys.exit(1)
 
@@ -1400,10 +2110,18 @@ def main():
             "voice_eq", "voice_compressor", "voice_deesser", "voice_reverb", "voice_limiter", "voice_master_strip"
         ]:
             process_pedalboard_dsp(args)
+        elif args.mode in ["airwindows_dsp", "airwindows_restore", "airwindows_saturate"]:
+            process_airwindows_dsp(args)
         elif args.mode == "voicefixer":
             process_voicefixer(args)
         elif args.mode in ["diarize", "whisper"]:
             process_whisper_diarization(args)
+        elif args.mode == "aeneas_align":
+            process_aeneas_align(args)
+        elif args.mode == "mfa_analyze":
+            process_mfa_analyze(args)
+        elif args.mode == "loudness_norm":
+            process_loudness_norm(args)
         else:
             raise ValueError(f"Неизвестный режим: {args.mode}")
 

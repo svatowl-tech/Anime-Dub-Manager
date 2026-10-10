@@ -434,8 +434,71 @@ class AudioAnalysisService {
   /**
    * Автоматический поиск заранее разделенной дорожки вокала оригинала
    */
-  static findOriginalVocalsTrack(candidateDirs = []) {
-    const validDirs = (Array.isArray(candidateDirs) ? candidateDirs : [candidateDirs]).filter(Boolean);
+  static findOriginalVocalsTrack(candidateDirs = [], manifest = null) {
+    let validDirs = (Array.isArray(candidateDirs) ? candidateDirs : [candidateDirs]).filter(Boolean);
+
+    // 1. First check manifest.pipeline step outputs for stem separation steps
+    if (manifest && Array.isArray(manifest.pipeline)) {
+      for (const step of manifest.pipeline) {
+        if (step.outputFiles && Array.isArray(step.outputFiles)) {
+          for (const file of step.outputFiles) {
+            if (file && file.path && fs.existsSync(file.path) && fs.statSync(file.path).size > 1000) {
+              const lowerName = path.basename(file.path).toLowerCase();
+              if (
+                (lowerName.includes('vocal') || lowerName.includes('stem')) &&
+                !lowerName.includes('no_vocal') &&
+                !lowerName.includes('instrumental') &&
+                !lowerName.includes('bgm') &&
+                !lowerName.includes('dub') &&
+                !lowerName.includes('our_') &&
+                !lowerName.includes('matched') &&
+                !lowerName.includes('voices_master') &&
+                !lowerName.includes('combined') &&
+                file.path.endsWith('.wav')
+              ) {
+                return file.path;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Next check manifest.sourceFiles
+    if (manifest && manifest.sourceFiles) {
+      const sources = [
+        manifest.sourceFiles.originalVocals?.path,
+        manifest.sourceFiles.originalAudio?.path,
+        manifest.sourceFiles.vocals?.path
+      ].filter(Boolean);
+
+      for (const sPath of sources) {
+        if (fs.existsSync(sPath) && fs.statSync(sPath).size > 1000) {
+          const lowerName = path.basename(sPath).toLowerCase();
+          if (lowerName.includes('vocal') || lowerName.includes('original') || lowerName.includes('stem')) {
+            return sPath;
+          }
+        }
+      }
+    }
+
+    // 3. Expand candidate directories by adding all subdirectories in candidateDirs (e.g. 01_htdemucs, 02_separate, etc.)
+    const expandedDirs = [...validDirs];
+    for (const dirPath of validDirs) {
+      if (!dirPath || !fs.existsSync(dirPath)) continue;
+      try {
+        const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const fullSub = path.join(dirPath, entry.name);
+            if (!expandedDirs.includes(fullSub)) {
+              expandedDirs.push(fullSub);
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
     const candidateFilenames = [
       'original_vocals.wav',
       'vocals.wav',
@@ -447,7 +510,22 @@ class AudioAnalysisService {
       'uvr_vocals.wav'
     ];
 
-    for (const dirPath of validDirs) {
+    const isOriginalVocalFile = (filename) => {
+      const lower = filename.toLowerCase();
+      if (!lower.endsWith('.wav')) return false;
+
+      const excludedKeywords = ['matched', 'dub', 'our_', 'voices_master', 'combined', 'ducked', 'master', 'final', 'no_vocal', 'instrumental', 'bgm', 'fix', 'norm'];
+      if (excludedKeywords.some(k => lower.includes(k))) return false;
+
+      return (
+        lower.includes('vocal') ||
+        lower.includes('original') ||
+        lower.includes('stem') ||
+        candidateFilenames.includes(lower)
+      );
+    };
+
+    for (const dirPath of expandedDirs) {
       if (!dirPath || !fs.existsSync(dirPath)) continue;
 
       for (const name of candidateFilenames) {
@@ -460,23 +538,25 @@ class AudioAnalysisService {
       try {
         const entries = fs.readdirSync(dirPath, { withFileTypes: true });
         for (const entry of entries) {
-          if (entry.isDirectory()) {
-            const subDir = path.join(dirPath, entry.name);
-            for (const name of candidateFilenames) {
-              const fullPath = path.join(subDir, name);
-              if (fs.existsSync(fullPath) && fs.statSync(fullPath).size > 1000) {
-                return fullPath;
-              }
-            }
-          } else if (entry.isFile()) {
-            const lowerName = entry.name.toLowerCase();
-            if ((lowerName.includes('original_vocal') || lowerName.includes('stem_vocal') || (lowerName.includes('vocal') && lowerName.includes('original'))) &&
-                !lowerName.includes('matched') && !lowerName.includes('dub') && !lowerName.includes('our_') && lowerName.endsWith('.wav')) {
+          if (entry.isFile()) {
+            if (isOriginalVocalFile(entry.name)) {
               const fullPath = path.join(dirPath, entry.name);
               if (fs.statSync(fullPath).size > 1000) {
                 return fullPath;
               }
             }
+          } else if (entry.isDirectory()) {
+            try {
+              const subEntries = fs.readdirSync(path.join(dirPath, entry.name));
+              for (const subName of subEntries) {
+                if (isOriginalVocalFile(subName)) {
+                  const fullPath = path.join(dirPath, entry.name, subName);
+                  if (fs.existsSync(fullPath) && fs.statSync(fullPath).size > 1000) {
+                    return fullPath;
+                  }
+                }
+              }
+            } catch (e) {}
           }
         }
       } catch (e) {

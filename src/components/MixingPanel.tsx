@@ -148,7 +148,12 @@ const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = 
   reverbDry: { min: 0.0, max: 1.0, step: 0.01 },
   limiterThresholdDb: { min: -12.0, max: 0.0, step: 0.1 },
   limiterReleaseMs: { min: 10, max: 300, step: 5 },
-  levelingSpeedMs: { min: 50, max: 1000, step: 25 }
+  levelingSpeedMs: { min: 50, max: 1000, step: 25 },
+  // Airwindows DSP Specs
+  deessIntensity: { min: 0.0, max: 1.0, step: 0.05 },
+  popIntensity: { min: 0.0, max: 1.0, step: 0.05 },
+  slewIntensity: { min: 0.0, max: 1.0, step: 0.05 },
+  densityDrive: { min: 0.0, max: 1.0, step: 0.05 }
 };
 
 export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelProps) {
@@ -303,6 +308,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const trackAudioRef = useRef<HTMLAudioElement | null>(null);
   const mixAudioElementsRef = useRef<HTMLAudioElement[]>([]);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [videoPlaybackError, setVideoPlaybackError] = useState<string | null>(null);
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<{
     id: string;
     name: string;
@@ -408,43 +414,109 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     setCustomTargetDir('');
   }, [currentEpisode?.id]);
 
+  // Format video file URL for HTML5 video element safely
+  const formatMediaUrl = useCallback((filePath: string) => {
+    if (!filePath) return '';
+    if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:')) {
+      return filePath;
+    }
+    const cleanP = filePath.replace(/^file:\/\//, '').replace(/\\/g, '/');
+    if (window.electronAPI) {
+      // Direct file:// scheme is standard and reliable in Electron
+      return cleanP.startsWith('/') ? `file://${cleanP}` : `file:///${cleanP}`;
+    }
+    return filePath;
+  }, []);
+
   // Resolve video URL for HTML5 video element
   useEffect(() => {
     let active = true;
+    setVideoPlaybackError(null);
+
     const resolveVideo = async () => {
-      const vPath = manifest?.finalVideo?.path || manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
-      if (!vPath) {
+      // 1. Candidate paths in order of priority: source video -> current episode raw path -> final video
+      const sourcePath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
+      const finalPath = manifest?.finalVideo?.path;
+
+      let targetPath = sourcePath;
+
+      // Check if final video path exists first if user selected or completed final video
+      if (finalPath) {
+        let finalExists = true;
+        if (window.electronAPI) {
+          try {
+            finalExists = await ipcSafe.invoke('file-exists', finalPath);
+          } catch (e) {
+            finalExists = true;
+          }
+        }
+        if (finalExists) {
+          targetPath = finalPath;
+        }
+      }
+
+      if (!targetPath) {
         if (active) setVideoSrc(null);
         return;
       }
 
       if (window.electronAPI) {
-        let src = vPath;
-        if (!src.startsWith('http') && !src.startsWith('custom-media://') && !src.startsWith('blob:')) {
-          const cleanP = src.replace(/^file:\/\//, '').replace(/\\/g, '/');
-          src = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
-        }
+        const formatted = formatMediaUrl(targetPath);
         if (active) {
-          setVideoSrc(src);
-          const fileName = vPath.split(/[/\\]/).pop() || src;
-          mixLog('debug', 'Видео', `Видеопоток подключен: ${fileName} (${src.slice(0, 50)}...)`);
+          setVideoSrc(formatted);
+          const fileName = targetPath.split(/[/\\]/).pop() || targetPath;
+          mixLog('debug', 'Видео', `Видеопоток подключен: ${fileName}`);
         }
       } else {
+        const cleanName = targetPath.replace(/\\/g, '/').split('/').pop() || targetPath;
+        const cachedFile = (window as any).getFileFromCache?.(cleanName);
+        if (cachedFile) {
+          if (active) {
+            setVideoSrc(URL.createObjectURL(cachedFile));
+            mixLog('debug', 'Видео', `Видео из браузерного кэша: ${cleanName}`);
+          }
+          return;
+        }
         try {
-          const resolved = await resolveLocalPath(vPath);
+          const resolved = await resolveLocalPath(targetPath);
           if (active) {
             setVideoSrc(resolved);
-            mixLog('debug', 'Видео', `Локальный видеопоток разрешен: ${vPath}`);
+            mixLog('debug', 'Видео', `Локальный видеопоток браузера: ${targetPath}`);
           }
         } catch (e) {
-          if (active) setVideoSrc(vPath);
+          if (active) setVideoSrc(targetPath);
         }
       }
     };
 
     resolveVideo();
     return () => { active = false; };
-  }, [manifest?.finalVideo?.path, manifest?.sourceFiles?.video?.path, currentEpisode?.rawPath, mixLog]);
+  }, [manifest?.finalVideo?.path, manifest?.sourceFiles?.video?.path, currentEpisode?.rawPath, mixLog, formatMediaUrl]);
+
+  const handleVideoError = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
+    const videoEl = e.currentTarget;
+    const err = videoEl.error;
+    console.warn('[MixingPanel] Video element playback error:', err, 'src:', videoSrc);
+
+    // Fallback: If current src was final video, try falling back to original source video
+    const sourcePath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
+    if (sourcePath && videoSrc && !videoSrc.includes(encodeURIComponent(sourcePath)) && !videoSrc.includes(sourcePath.replace(/\\/g, '/'))) {
+      mixLog('warn', 'Видео', `Сбой воспроизведения сведенного видео. Автопереключение на исходный видеоряд: ${sourcePath}`);
+      setVideoSrc(formatMediaUrl(sourcePath));
+      setVideoPlaybackError(null);
+      return;
+    }
+
+    let errMsg = 'Формат или кодек видео недоступен для браузерного воспроизведения';
+    if (err) {
+      if (err.code === 1) errMsg = 'Воспроизведение видео прервано пользователем';
+      if (err.code === 2) errMsg = 'Сбой сети при получении видеопотока';
+      if (err.code === 3) errMsg = 'Ошибка декодирования (несовместимый видеокодек HEVC или контейнер MKV)';
+      if (err.code === 4) errMsg = 'Контейнер/кодек видео не поддерживается плеером (напр. MKV / AC3 / 10-bit H.264)';
+    }
+    setVideoPlaybackError(errMsg);
+    mixLog('warn', 'Видео', `Несовместимость плеера видео: ${errMsg}`);
+  };
 
   // Listen to IPC progress and log events
   useEffect(() => {
@@ -2541,11 +2613,54 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 onTimeUpdate={handleVideoTimeUpdate}
                 onLoadedMetadata={handleVideoLoadedMetadata}
                 onEnded={() => setIsPlaying(false)}
+                onError={handleVideoError}
               />
             ) : (
               <div className="text-center p-6 text-neutral-500 space-y-2">
                 <Film className="w-10 h-10 mx-auto text-neutral-700" />
                 <p className="text-xs">Видеоряд серии еще не импортирован</p>
+              </div>
+            )}
+
+            {/* Video Playback Compatibility Error Overlay */}
+            {videoPlaybackError && (
+              <div className="absolute inset-0 bg-neutral-950/90 backdrop-blur-sm p-4 flex flex-col items-center justify-center text-center space-y-3 z-20">
+                <AlertCircle className="w-9 h-9 text-amber-400 shrink-0" />
+                <div className="max-w-md space-y-1">
+                  <h4 className="text-sm font-semibold text-amber-200">Несовместимость воспроизведения видео</h4>
+                  <p className="text-xs text-neutral-300 leading-relaxed">{videoPlaybackError}</p>
+                  <p className="text-[11px] text-neutral-400 italic pt-1">
+                    Совет: Видео в контейнерах MKV или с аудиокодеками AC3/DTS/HEVC не поддерживается HTML5-плеером Electron.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 pt-1">
+                  {(manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath) && (
+                    <button
+                      onClick={() => {
+                        const srcPath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
+                        if (srcPath) {
+                          setVideoSrc(formatMediaUrl(srcPath));
+                          setVideoPlaybackError(null);
+                        }
+                      }}
+                      className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium rounded-lg transition"
+                    >
+                      📻 Переключить на исходник
+                    </button>
+                  )}
+                  <button
+                    onClick={() => handleSelectExternalFile('video')}
+                    className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-xs font-medium rounded-lg transition border border-neutral-700"
+                  >
+                    📂 Выбрать видеофайл...
+                  </button>
+                  <button
+                    onClick={() => setVideoPlaybackError(null)}
+                    className="px-2.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 text-neutral-400 text-xs rounded-lg transition"
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
             )}
 

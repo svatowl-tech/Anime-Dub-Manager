@@ -102,6 +102,11 @@ async function downloadModels() {
       }
     }
 
+    console.log('\n----------------------------------------\nModel: Silero VAD v5 ONNX');
+    const sileroDest = path.join(MODELS_DIR, 'silero_vad.onnx');
+    const sileroUrl = 'https://raw.githubusercontent.com/snakers4/silero-vad/v5.0/files/silero_vad.onnx';
+    await downloadFile(sileroUrl, sileroDest);
+
     console.log('\n----------------------------------------\nModel: Whisper (Native GGML)');
     const whisperModelsDir = path.join(MODELS_DIR, 'whisper');
     fs.mkdirSync(whisperModelsDir, { recursive: true });

@@ -796,13 +796,9 @@ async function transferAudioPhrase(sourcePath, targetPath, startSec, endSec, opt
 }
 
 /**
- * Detects voiced/speech intervals in an audio file using FFmpeg silencedetect filter.
- * 
- * @param {string} filePath Path to audio file
- * @param {object} options Optional parameters { noiseDb, minSilenceDuration }
- * @returns {Promise<{duration: number, silences: Array<{start: number, end: number}>, speechIntervals: Array<{startSec: number, endSec: number, durationSec: number}>}>}
+ * Fallback speech interval detection using classic FFmpeg silencedetect filter.
  */
-function detectSpeechIntervals(filePath, options = {}) {
+function detectSpeechIntervalsViaFfmpeg(filePath, options = {}) {
   return new Promise(async (resolve, reject) => {
     if (!filePath || !fs.existsSync(filePath)) {
       return reject(new Error(`Audio file not found: ${filePath}`));
@@ -817,7 +813,7 @@ function detectSpeechIntervals(filePath, options = {}) {
         totalDur = Number(meta.format.duration);
       }
     } catch (metaErr) {
-      log.warn(`[detectSpeechIntervals] Could not probe duration for ${filePath}:`, metaErr.message);
+      log.warn(`[detectSpeechIntervalsViaFfmpeg] Could not probe duration for ${filePath}:`, metaErr.message);
     }
 
     const silences = [];
@@ -839,7 +835,7 @@ function detectSpeechIntervals(filePath, options = {}) {
 
     // 60-second safety timeout for speech detection
     timeoutId = setTimeout(() => {
-      log.warn(`[detectSpeechIntervals] Timeout (60s) reached for ${filePath}. Returning fallback full-length interval.`);
+      log.warn(`[detectSpeechIntervalsViaFfmpeg] Timeout (60s) reached for ${filePath}. Returning fallback full-length interval.`);
       try {
         if (cmd && typeof cmd.kill === 'function') {
           cmd.kill('SIGKILL');
@@ -898,7 +894,7 @@ function detectSpeechIntervals(filePath, options = {}) {
           for (const s of silences) {
             if (s.start - curPos > 0.08) {
               const start = Math.max(0, curPos - 0.08);
-              const end = s.start + 0.22; // 220ms safety margin ensures no vocal tail or quiet consonant is ever clipped
+              const end = s.start + 0.22; // 220ms safety margin
               rawSpeech.push({
                 startSec: start,
                 endSec: end,
@@ -918,7 +914,7 @@ function detectSpeechIntervals(filePath, options = {}) {
           }
         }
 
-        // Merge contiguous intervals separated by gap (< 0.50s) so natural intra-phrase pauses don't cut words
+        // Merge contiguous intervals
         const speechIntervals = [];
         for (const interval of rawSpeech) {
           if (speechIntervals.length === 0) {
@@ -934,7 +930,7 @@ function detectSpeechIntervals(filePath, options = {}) {
           }
         }
 
-        log.info(`[detectSpeechIntervals] Found ${speechIntervals.length} voiced intervals in ${filePath}`);
+        log.info(`[detectSpeechIntervalsViaFfmpeg] Found ${speechIntervals.length} voiced intervals in ${filePath}`);
         resolve({
           duration: finalDur,
           silences,
@@ -943,7 +939,7 @@ function detectSpeechIntervals(filePath, options = {}) {
       })
       .on('error', (err) => {
         cleanup();
-        log.warn('[detectSpeechIntervals] Error detecting speech intervals, falling back to full length:', err.message);
+        log.warn('[detectSpeechIntervalsViaFfmpeg] Error detecting speech intervals, falling back to full length:', err.message);
         const dur = totalDur || 300;
         resolve({
           duration: dur,
@@ -952,9 +948,22 @@ function detectSpeechIntervals(filePath, options = {}) {
         });
       });
 
-    processId = addProcess('detectSpeechIntervals', cmd);
+    processId = addProcess('detectSpeechIntervalsViaFfmpeg', cmd);
     cmd.run();
   });
+}
+
+/**
+ * Primary speech interval detection function with Silero VAD v5 ONNX and reliable FFmpeg fallback.
+ */
+async function detectSpeechIntervals(filePath, options = {}) {
+  try {
+    const { detectSpeechWithSileroVad } = require('./SileroVadService.cjs');
+    return await detectSpeechWithSileroVad(filePath, options, ffmpegPath || 'ffmpeg');
+  } catch (err) {
+    log.warn(`[AutoTiming] Silero VAD failed, falling back to FFmpeg silencedetect: ${err.message}`);
+    return await detectSpeechIntervalsViaFfmpeg(filePath, options);
+  }
 }
 
 /**
@@ -1105,6 +1114,7 @@ module.exports = {
   silenceAudioIntervals,
   transferAudioPhrase,
   detectSpeechIntervals,
+  detectSpeechIntervalsViaFfmpeg,
   applyFixesToOriginalAudio,
   setCustomFfmpegPath,
   getActiveProcesses,

@@ -1,9 +1,4 @@
-/**
- * Audio Normalization Engine for QA Preview
- * 
- * Analyzes audio tracks non-destructively for playback normalization during QA review.
- * Original files on disk and exported files remain 100% untouched.
- */
+import { ipcSafe } from '../ipcSafe';
 
 export interface NormalizationMetrics {
   gain: number; // Multiplier (e.g. 1.0 = 0dB, 1.41 = +3dB, 0.7 = -3dB)
@@ -21,15 +16,16 @@ const normalizationCache = new Map<string, NormalizationMetrics>();
 // Target parameters for comfortable voiceover QA listening
 const TARGET_SPEECH_RMS = 0.125; // ~ -18 dBFS (standard dialogue target)
 const TARGET_MAX_PEAK = 0.92;    // ~ -0.7 dBFS (prevents digital clipping)
-const MAX_BOOST_GAIN = 31.62;     // Max +30 dB boost (was +12 dB)
-const MIN_CUT_GAIN = 0.0316;      // Max -30 dB cut (was -12 dB)
+const MAX_BOOST_GAIN = 31.62;     // Max +30 dB boost
+const MIN_CUT_GAIN = 0.0316;      // Max -30 dB cut
 
 /**
  * Decodes audio from an URL / file path and analyzes peak & speech RMS to compute optimal preview gain.
  */
 export async function analyzeAudioForPreview(
   audioUrl: string,
-  cacheKey?: string
+  cacheKey?: string,
+  filePath?: string
 ): Promise<NormalizationMetrics> {
   const key = cacheKey || audioUrl;
   
@@ -51,8 +47,56 @@ export async function analyzeAudioForPreview(
   };
   normalizationCache.set(key, initialMetrics);
 
+  // Strategy 1: Try fast IPC sidecar analysis via backend FFmpeg (Instant <5ms, ZERO RAM blowup)
+  const rawPath = filePath || (audioUrl.startsWith('file://') ? audioUrl.replace(/^file:\/\//, '') : null);
+  if (rawPath && typeof window !== 'undefined' && (window as any).electronAPI) {
+    try {
+      const analysis: any = await ipcSafe.invoke('audio-get-track-analysis', {
+        audioPath: rawPath,
+        options: { skipWhisper: true }
+      });
+
+      if (analysis && analysis.energyProfile) {
+        const { speechRmsDb, peakDb: profilePeakDb } = analysis.energyProfile;
+        const rmsDbVal = typeof speechRmsDb === 'number' ? speechRmsDb : -18;
+        const peakDbVal = typeof profilePeakDb === 'number' ? profilePeakDb : 0;
+
+        const activeRms = Math.pow(10, rmsDbVal / 20);
+        const globalMaxPeak = Math.pow(10, peakDbVal / 20);
+
+        let computedGain = TARGET_SPEECH_RMS / Math.max(0.01, activeRms);
+        if (globalMaxPeak * computedGain > TARGET_MAX_PEAK) {
+          computedGain = TARGET_MAX_PEAK / Math.max(0.001, globalMaxPeak);
+        }
+        computedGain = Math.max(MIN_CUT_GAIN, Math.min(MAX_BOOST_GAIN, computedGain));
+
+        const gainDb = Math.round((20 * Math.log10(computedGain)) * 10) / 10;
+        const result: NormalizationMetrics = {
+          gain: computedGain,
+          gainDb,
+          peak: globalMaxPeak,
+          peakDb: Math.round(peakDbVal * 10) / 10,
+          rms: activeRms,
+          rmsDb: Math.round(rmsDbVal * 10) / 10,
+          status: 'ready',
+        };
+
+        normalizationCache.set(key, result);
+        return result;
+      }
+    } catch (ipcErr) {
+      // Fallback to Web Audio if IPC analysis unavailable
+    }
+  }
+
+  // Strategy 2: Web Audio API decoding fallback with timeout & safety limits
   try {
-    const response = await fetch(audioUrl);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+    const response = await fetch(audioUrl, { signal: controller.signal });
+    clearTimeout(timeoutId);
+
     if (!response.ok) {
       throw new Error(`Failed to fetch audio: ${response.status} ${response.statusText}`);
     }
@@ -81,11 +125,8 @@ export async function analyzeAudioForPreview(
     let sumSquaresActive = 0;
     let activeSampleCount = 0;
     
-    // Voice activity threshold to ignore silent pauses (-45 dBFS)
     const voiceThreshold = 0.0056;
-
-    // Fast sub-sampling for large files to keep analysis instant (<50ms)
-    const step = length > 1000000 ? Math.ceil(length / 500000) : 1;
+    const step = length > 500000 ? Math.ceil(length / 250000) : 1;
 
     for (let c = 0; c < numChannels; c++) {
       const channelData = audioBuffer.getChannelData(c);
@@ -94,7 +135,6 @@ export async function analyzeAudioForPreview(
         if (absVal > globalMaxPeak) {
           globalMaxPeak = absVal;
         }
-
         if (absVal >= voiceThreshold) {
           sumSquaresActive += absVal * absVal;
           activeSampleCount++;
@@ -106,15 +146,10 @@ export async function analyzeAudioForPreview(
       ? Math.sqrt(sumSquaresActive / activeSampleCount)
       : globalMaxPeak * 0.5;
 
-    // Compute ideal gain based on speech RMS
     let computedGain = TARGET_SPEECH_RMS / Math.max(0.01, activeRms);
-
-    // Prevent clipping: peak after gain must not exceed TARGET_MAX_PEAK
     if (globalMaxPeak * computedGain > TARGET_MAX_PEAK) {
       computedGain = TARGET_MAX_PEAK / globalMaxPeak;
     }
-
-    // Clamp to sensible safety limits
     computedGain = Math.max(MIN_CUT_GAIN, Math.min(MAX_BOOST_GAIN, computedGain));
 
     const gainDb = Math.round((20 * Math.log10(computedGain)) * 10) / 10;
@@ -134,7 +169,7 @@ export async function analyzeAudioForPreview(
     normalizationCache.set(key, result);
     return result;
   } catch (err: any) {
-    console.warn(`Audio normalization analysis failed for ${key}:`, err);
+    console.warn(`Audio normalization analysis fallback failed for ${key}:`, err);
     const fallback: NormalizationMetrics = {
       gain: 1.0,
       gainDb: 0,

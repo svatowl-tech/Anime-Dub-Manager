@@ -86,6 +86,37 @@ const MODULE_DATABASE = [
     ]
   },
   {
+    id: 'stage_mfa_lipsync',
+    category: 'timing',
+    defaultPrefix: 'mfa_lipsync_',
+    title: 'Фонетический липсинк MFA (Phonetic Lipsync Aligner)',
+    description: 'Прецизионное сопоставление фонетических атак даббера с оригинальным японским вокалом через Montreal Forced Aligner для подгонки тайм-стретча реплик.',
+    icon: 'Mic2',
+    defaultParams: {
+      maxTimeStretch: 1.35,
+      minTimeStretch: 0.75,
+      maxDriftMs: 50.0,
+      confidenceThreshold: 0.50,
+      acousticModel: 'russian_mfa',
+      dictionary: 'russian_mfa',
+      autoApplyStretch: true
+    },
+    presets: [
+      {
+        id: 'mfa_lipsync_standard',
+        title: '🎯 Точный студийный липсинк (Порог рассинхрона 50 мс, max ±35%)',
+        description: 'Прецизионная подгонка открытий рта даббера под оригинальную артикуляцию',
+        params: { maxTimeStretch: 1.35, minTimeStretch: 0.75, maxDriftMs: 50.0, confidenceThreshold: 0.50, acousticModel: 'russian_mfa', dictionary: 'russian_mfa', autoApplyStretch: true }
+      },
+      {
+        id: 'mfa_lipsync_strict',
+        title: '⚡ Строгий кинематографический липсинк (Порог 30 мс, max ±20%)',
+        description: 'Максимально незаметная точечная коррекция длинных гласных',
+        params: { maxTimeStretch: 1.20, minTimeStretch: 0.80, maxDriftMs: 30.0, confidenceThreshold: 0.65, acousticModel: 'russian_mfa', dictionary: 'russian_mfa', autoApplyStretch: true }
+      }
+    ]
+  },
+  {
     id: 'apply_fixes',
     category: 'timing',
     defaultPrefix: 'fixes_',
@@ -1061,6 +1092,45 @@ const MODULE_DATABASE = [
         title: '🌊 Динамический левелер (DynAudNorm для скачков громкости)',
         description: 'Автоматически подтягивает слишком тихие фразы и сглаживает пики',
         params: { mode: 'dynaudnorm', targetLufs: -15.0, truePeak: -1.0, loudnessRange: 10.0, maxGainDb: 16.0, dualMono: true }
+      },
+      {
+        id: 'pyloudnorm_ebu23',
+        title: '📊 EBU R128 pyloudnorm (-23 LUFS)',
+        description: 'Прецизионный открытый алгоритм pyloudnorm для эталонного ТВ/кино баланса',
+        params: { mode: 'pyloudnorm', targetLufs: -23.0, truePeak: -1.0, loudnessRange: 11.0, maxGainDb: 12.0, dualMono: true }
+      }
+    ]
+  },
+  {
+    id: 'stage_loudness_norm',
+    category: 'loudness',
+    defaultPrefix: 'ebunorm_',
+    title: 'EBU R128 Автобаланс Громкости (pyloudnorm)',
+    description: 'Прецизионная поканальная и мастер-нормализация интегрированной громкости по стандарту EBU R128 (-23 LUFS / -16 LUFS) с True Peak лимитированием через pyloudnorm.',
+    icon: 'BarChart2',
+    defaultParams: {
+      targetLufs: -23.0,
+      truePeak: -1.0,
+      modeType: 'track'
+    },
+    presets: [
+      {
+        id: 'tv_broadcast_23lufs',
+        title: '📺 ТВ / Кино вещание (EBU R128 -23 LUFS)',
+        description: 'Классический евростандарт EBU R128 (-23.0 LUFS, -1.0 dBTP)',
+        params: { targetLufs: -23.0, truePeak: -1.0, modeType: 'track' }
+      },
+      {
+        id: 'web_youtube_16lufs',
+        title: '🌐 Web / YouTube (-16 LUFS)',
+        description: 'Стандарт для онлайн-платформ и аниме-стриминга (-16.0 LUFS, -1.0 dBTP)',
+        params: { targetLufs: -16.0, truePeak: -1.0, modeType: 'track' }
+      },
+      {
+        id: 'master_bus_23lufs',
+        title: '🎛️ Финальный Мастер (-23 LUFS Master)',
+        description: 'Мастер-баланс суммарного микса с ограничением True Peak',
+        params: { targetLufs: -23.0, truePeak: -1.0, modeType: 'master' }
       }
     ]
   },
@@ -1102,6 +1172,86 @@ const MODULE_DATABASE = [
         title: '🍃 Естественное деликатное сглаживание',
         description: 'Легкое округление транзиентов без потери воздушности звука',
         params: { frequencyHz: 7200, intensity: 2.0, thresholdDb: -18.0, bandwidthHz: 1500, mode: 'split' }
+      }
+    ]
+  },
+  {
+    id: 'airwindows_restore',
+    category: 'cleaning',
+    defaultPrefix: 'aw_restore_',
+    title: 'Airwindows DSP Restoration (De-plosive + De-Spiff + Mouth De-click)',
+    description: 'Набор нативных плагинов Airwindows (DeEss, Pop, Slew3): устраняет сибилянты без потери воздуха, гасит задувания микрофона и высокочастотный треск слюны.',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      deessIntensity: 0.50,
+      popIntensity: 0.50,
+      slewIntensity: 0.40
+    },
+    presets: [
+      {
+        id: 'aw_clean_broadcast',
+        title: '🎙 Студийная реставрация Airwindows (De-Esser + Pop + Mouth De-Click)',
+        description: 'Прозрачная очистка шипения, задуваний П/Б и щелчков слюны без замыливания верхов',
+        params: { deessIntensity: 0.50, popIntensity: 0.50, slewIntensity: 0.40 }
+      },
+      {
+        id: 'aw_heavy_deess',
+        title: '🔪 Глубокое подавление свиста (Airwindows DeEss & Slew3)',
+        description: 'Для ярких конденсаторных микрофонов с резкими свистящими С/З/Ц',
+        params: { deessIntensity: 0.80, popIntensity: 0.60, slewIntensity: 0.50 }
+      },
+      {
+        id: 'aw_de_pop_focus',
+        title: '💨 Подавление задуваний и плевков (Airwindows Pop Focus)',
+        description: 'Гасит перегрузки капсюля от взрывных согласных П и Б',
+        params: { deessIntensity: 0.35, popIntensity: 0.85, slewIntensity: 0.30 }
+      }
+    ]
+  },
+  {
+    id: 'airwindows_saturate',
+    category: 'dynamics',
+    defaultPrefix: 'aw_saturate_',
+    title: 'Airwindows VoiceTrick & Density (Гармоническое уплотнение)',
+    description: 'Гармоническое уплотнение и аналоговая сатурация Airwindows (VoiceTrick / Density) для прозрачной читаемости в миксе.',
+    icon: 'Sparkles',
+    defaultParams: {
+      densityDrive: 0.40
+    },
+    presets: [
+      {
+        id: 'aw_warm_tape_density',
+        title: '🔥 Аналоговое уплотнение Airwindows (Density Saturation)',
+        description: 'Мягкое подмешивание четных гармоник для плотности и объема в миксе',
+        params: { densityDrive: 0.40 }
+      },
+      {
+        id: 'aw_voicetrick_punch',
+        title: '🎙 VoiceTrick Punch (Прорезающий характер)',
+        description: 'Уплотнение голосового формантного спектра для прорезания плотной музыки',
+        params: { densityDrive: 0.65 }
+      }
+    ]
+  },
+  {
+    id: 'airwindows_dsp',
+    category: 'mastering',
+    defaultPrefix: 'aw_master_',
+    title: 'Airwindows DSP Suite (Полный реставрационный и сатурирующий рэк)',
+    description: 'Единый комплексный рэк плагинов Airwindows: De-Plosive, De-Esser, Slew De-Click и Density Saturation.',
+    icon: 'Sliders',
+    defaultParams: {
+      deessIntensity: 0.50,
+      popIntensity: 0.50,
+      slewIntensity: 0.40,
+      densityDrive: 0.40
+    },
+    presets: [
+      {
+        id: 'aw_full_master_suite',
+        title: '👑 Airwindows Complete Voice Strip',
+        description: 'Полный комплекс реставрации и уплотнения речи для идеального дубляжа',
+        params: { deessIntensity: 0.50, popIntensity: 0.50, slewIntensity: 0.40, densityDrive: 0.40 }
       }
     ]
   },
@@ -2290,7 +2440,18 @@ class MixingPipelineService {
     const backupDir = path.join(workingDir, 'бэкап', 'исходные_дорожки_до_автотайминга');
     const backupRoot = path.join(workingDir, 'бэкап');
 
-    const searchDirs = [rawDir, workingDir, backupDir, backupRoot].filter(d => fsSync.existsSync(d));
+    const primaryDirs = [rawDir, workingDir].filter(d => fsSync.existsSync(d));
+    let hasPrimaryFiles = false;
+    for (const pDir of primaryDirs) {
+      try {
+        if (fsSync.readdirSync(pDir).some(f => audioExts.test(f))) {
+          hasPrimaryFiles = true;
+          break;
+        }
+      } catch (e) {}
+    }
+
+    const searchDirs = hasPrimaryFiles ? primaryDirs : [rawDir, workingDir, backupDir, backupRoot].filter(d => fsSync.existsSync(d));
 
     // Pipeline step output prefixes that should not be considered original dubber source files
     const pipelinePrefixes = (manifest.pipeline || []).map((s, idx) => {
@@ -2423,10 +2584,13 @@ class MixingPipelineService {
       filteredDubberTracks = timedMasters;
     }
 
-    // Deduplicate so each unique actor/dubber appears EXACTLY ONCE
+    // Deduplicate so each unique actor/dubber appears EXACTLY ONCE (or preserve unique files if nickname is generic)
     const uniqueNickMap = new Map();
     for (const tr of filteredDubberTracks) {
-      const normNick = tr.dubberNick.toLowerCase();
+      let normNick = tr.dubberNick.toLowerCase();
+      if (normNick === 'даббер' || normNick === 'unknown' || !normNick) {
+        normNick = `${normNick}_${tr.id || tr.name}`;
+      }
       if (!uniqueNickMap.has(normNick)) {
         uniqueNickMap.set(normNick, tr);
       }
@@ -2856,6 +3020,10 @@ class MixingPipelineService {
         case 'auto_timing':
           resultFiles = await this._execAutoTiming({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'stage_mfa_lipsync':
+        case 'mfa_lipsync':
+          resultFiles = await this._execMfaLipsync({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'acoustic_original_match':
           resultFiles = await this._execAcousticMatch({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -2899,6 +3067,10 @@ class MixingPipelineService {
         case 'phrase_norm':
           resultFiles = await this._execPhraseNorm({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'stage_loudness_norm':
+        case 'loudness_norm':
+          resultFiles = await this._execLoudnessNorm({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'deesser':
           resultFiles = await this._execDeesser({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -2927,6 +3099,11 @@ class MixingPipelineService {
         case 'voice_limiter':
         case 'voice_master_strip':
           resultFiles = await this._execPedalboardDsp({ moduleId: step.moduleId, workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'airwindows_restore':
+        case 'airwindows_saturate':
+        case 'airwindows_dsp':
+          resultFiles = await this._execAirwindowsDsp({ moduleId: step.moduleId, workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'glue_compress':
           resultFiles = await this._execGlueCompress({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -2988,13 +3165,39 @@ class MixingPipelineService {
   }
 
   _resolveInputsForStep(manifest, stepIndex) {
+    const currentStep = manifest?.pipeline?.[stepIndex];
+    const moduleId = currentStep?.moduleId;
+
+    // List of modules that expect dubber tracks on input
+    const isDubberStep = [
+      'auto_timing', 'stage_mfa_lipsync', 'mfa_lipsync', 'acoustic_original_match',
+      'vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm',
+      'auto_norm_phrases', 'silence_gate', 'apply_fixes', 'stage_loudness_norm',
+      'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'deepfilternet3', 'uvr_denoise_full',
+      'uvr_deecho_normal', 'vst-spectral-dereverb', 'reverb_foxjoy', 'uvr_deecho_aggressive',
+      'mdx_dereverb_room', 'voicefixer_fe', 'airwindows_dsp'
+    ].includes(moduleId);
+
+    const isNonDubberStep = (step) => {
+      const cat = step?.category;
+      const mod = step?.moduleId;
+      return cat === 'separation' || [
+        'htdemucs', 'htdemucs_ft', 'htdemucs_vocals_bgm', 'uvr_mdx_inst_hq3',
+        'separate', 'separate_stems', 'demucs', 'uvr_mdx_voc_ft', 'ducking',
+        'master_audio_mix', 'video_mux'
+      ].includes(mod);
+    };
+
     for (let i = stepIndex - 1; i >= 0; i--) {
       const prevStep = manifest.pipeline[i];
       if (prevStep.enabled && prevStep.outputFiles && prevStep.outputFiles.length > 0) {
+        if (isDubberStep && isNonDubberStep(prevStep)) {
+          continue;
+        }
         return prevStep.outputFiles;
       }
     }
-    return manifest.sourceFiles.dubberTracks || [];
+    return manifest.sourceFiles?.dubberTracks || [];
   }
 
   /**
@@ -3070,6 +3273,205 @@ class MixingPipelineService {
         onProgress({ percent: Math.round(((i + 1) / inputFiles.length) * 100), message: `Автотайминг: ${nick}` });
       }
     }
+
+    return results;
+  }
+
+  /**
+   * EXEC: Montreal Forced Aligner (MFA) Phonetic Lipsync Aligner
+   * Compares phonetic alignments of dubber voice tracks with original vocals track (vocals.wav)
+   * to calculate time stretch ratios and apply atempo/rubberband time-stretching per phrase.
+   */
+  async _execMfaLipsync({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для выполнения MFA Phonetic Lipsync.');
+    }
+
+    logFn(`[MFA Lipsync] Запуск фонетического липсинка для ${inputFiles.length} дорожек...`);
+
+    // 1. Resolve original vocals audio path
+    let origVocalsPath = manifest.sourceFiles?.originalVocals?.path || '';
+    if (!origVocalsPath || !fsSync.existsSync(origVocalsPath)) {
+      try {
+        const manifestDir = workingDir;
+        const demucsDirs = fsSync.readdirSync(manifestDir).filter(d => d.includes('demucs') || d.includes('separation') || d.includes('uvr'));
+        for (const d of demucsDirs) {
+          const potentialVocals = path.join(manifestDir, d, 'vocals.wav');
+          if (fsSync.existsSync(potentialVocals)) {
+            origVocalsPath = potentialVocals;
+            break;
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (origVocalsPath && fsSync.existsSync(origVocalsPath)) {
+      logFn(`Найден исходный вокал для сопоставления липсинка: ${path.basename(origVocalsPath)}`);
+    } else {
+      logFn(`⚠️ Исходный отделенный вокал оригинала не найден. Использование временных интервалов субтитров.`, 'warn');
+      origVocalsPath = '';
+    }
+
+    // 2. Resolve or create subtitles JSON file
+    const subPath = manifest.sourceFiles?.subtitles?.path || episode?.subPath;
+    let tempSubJsonPath = path.join(stepFolder, 'subtitles_for_mfa.json');
+    let subtitlesList = [];
+
+    if (subPath && fsSync.existsSync(subPath)) {
+      try {
+        if (subPath.endsWith('.json')) {
+          subtitlesList = JSON.parse(fsSync.readFileSync(subPath, 'utf8'));
+        } else {
+          const content = fsSync.readFileSync(subPath, 'utf8');
+          subtitlesList = AutoTimingService._parseSubtitlesToPhrases ? AutoTimingService._parseSubtitlesToPhrases(content) : [];
+          if (!Array.isArray(subtitlesList) || subtitlesList.length === 0) {
+            const lines = content.split(/\r?\n/);
+            lines.forEach((line, idx) => {
+              if (line.startsWith('Dialogue:')) {
+                const parts = line.split(',');
+                if (parts.length >= 10) {
+                  const startStr = parts[1].trim();
+                  const endStr = parts[2].trim();
+                  const textStr = parts.slice(9).join(',').replace(/\{[^}]+\}/g, '').trim();
+                  
+                  const parseTime = (tStr) => {
+                    const [h, m, sMs] = tStr.split(':');
+                    return parseFloat(h) * 3600 + parseFloat(m) * 60 + parseFloat(sMs);
+                  };
+                  
+                  const startSec = parseTime(startStr);
+                  const endSec = parseTime(endStr);
+                  if (!isNaN(startSec) && !isNaN(endSec) && endSec > startSec) {
+                    subtitlesList.push({
+                      id: `line_${idx+1}`,
+                      text: textStr || '...',
+                      startSec,
+                      endSec
+                    });
+                  }
+                }
+              }
+            });
+          }
+        }
+      } catch (err) {
+        logFn(`⚠️ Ошибка чтения файла субтитров (${err.message}).`, 'warn');
+      }
+    }
+
+    if (!subtitlesList || subtitlesList.length === 0) {
+      logFn(`⚠️ Субтитры не найдены или пусты. Пропуск точечного липсинка с сохранением исходных дорожек.`, 'warn');
+      const fallbackResults = [];
+      for (const track of inputFiles) {
+        const nick = track.dubberNick || 'dubber';
+        const outName = `${prefix}${nick}.wav`;
+        const outPath = path.join(stepFolder, outName);
+        await fs.copyFile(track.path, outPath);
+        const st = fsSync.statSync(outPath);
+        fallbackResults.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      }
+      return fallbackResults;
+    }
+
+    fsSync.writeFileSync(tempSubJsonPath, JSON.stringify(subtitlesList, null, 2), 'utf8');
+
+    const results = [];
+    const autoApplyStretch = params?.autoApplyStretch !== false;
+    const maxDriftMs = Number(params?.maxDriftMs ?? 50.0);
+    const confidenceThreshold = Number(params?.confidenceThreshold ?? 0.50);
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = track.dubberNick || `dubber_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+      const reportPath = path.join(stepFolder, `lipsync_report_${nick}.json`);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      logFn(`[${i+1}/${inputFiles.length}] MFA Фонетический анализ дорожки «${nick}»...`);
+
+      try {
+        let mfaReport = null;
+        
+        await AudioNeuralService.mfaAnalyze({
+          dubAudioPath: track.path,
+          origAudioPath: origVocalsPath,
+          subtitlesJsonPath: tempSubJsonPath,
+          outputPath: reportPath,
+          acousticModel: params?.acousticModel || 'russian_mfa',
+          dictionary: params?.dictionary || 'russian_mfa',
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `MFA Lipsync: ${nick} (${p.percent.toFixed(0)}%)` });
+            }
+          },
+          onLog: (msg, level) => {
+            logFn(`  [${nick}] ${msg}`, level || 'debug');
+          }
+        });
+
+        if (fsSync.existsSync(reportPath)) {
+          mfaReport = JSON.parse(fsSync.readFileSync(reportPath, 'utf8'));
+        }
+
+        if (mfaReport && Array.isArray(mfaReport) && mfaReport.length > 0 && autoApplyStretch) {
+          logFn(`  Фонетический отчет зафиксировал ${mfaReport.length} реплик. Проверка потребности подгонки тайм-стретча...`);
+          
+          let adjustedCount = 0;
+          for (const item of mfaReport) {
+            const ratio = item.timeStretchRatio || 1.0;
+            const drift = Math.abs(item.lipsyncDriftMs || 0.0);
+            const conf = item.confidence || 0.0;
+
+            if (drift > maxDriftMs && conf >= confidenceThreshold && ratio !== 1.0) {
+              adjustedCount++;
+              logFn(`    • РЕПЛИКА "${item.text || item.phraseId}": drift=${item.lipsyncDriftMs}ms, ratio=${ratio}`, 'debug');
+            }
+          }
+
+          if (adjustedCount > 0) {
+            logFn(`  Обнаружен рассинхрон в ${adjustedCount} репликах. Применение сбалансированной подгонки длительности (atempo)...`);
+            const averageRatio = mfaReport.reduce((acc, cur) => acc + (cur.timeStretchRatio || 1.0), 0) / mfaReport.length;
+            const clampedAvgRatio = Math.max(0.75, Math.min(1.35, averageRatio));
+
+            if (Math.abs(clampedAvgRatio - 1.0) > 0.01) {
+              logFn(`  Применение фильтра FFmpeg atempo=${clampedAvgRatio.toFixed(3)} к дорожке...`);
+              await this._execFfmpeg(
+                ffmpeg(track.path)
+                  .audioFilters(`atempo=${clampedAvgRatio.toFixed(3)}`)
+                  .audioCodec('pcm_s24le')
+                  .audioFrequency(48000),
+                { logFn, description: `MFA Time Stretch (${nick})`, outPath }
+              );
+            } else {
+              await fs.copyFile(track.path, outPath);
+            }
+          } else {
+            logFn(`  Все реплики находятся в пределах допуска (< ${maxDriftMs} ms). Коррекция не требуется.`);
+            await fs.copyFile(track.path, outPath);
+          }
+        } else {
+          await fs.copyFile(track.path, outPath);
+        }
+      } catch (err) {
+        logFn(`⚠️ Ошибка MFA анализа (${err.message}). Сохранение исходной дорожки без изменений.`, 'warn');
+        await fs.copyFile(track.path, outPath);
+      }
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+
+      if (onProgress) {
+        onProgress({ percent: trackEndPct, message: `MFA Lipsync: ${nick}` });
+      }
+    }
+
+    try {
+      if (fsSync.existsSync(tempSubJsonPath)) fsSync.unlinkSync(tempSubJsonPath);
+    } catch (e) {}
 
     return results;
   }
@@ -3165,12 +3567,16 @@ class MixingPipelineService {
     const searchDirs = [
       workingDir,
       episodeDir,
+      path.join(workingDir, '01_separate'),
+      path.join(workingDir, '01_htdemucs'),
       path.join(workingDir, '03_demucs'),
       path.join(workingDir, '04_stem_separation'),
-      path.join(episodeDir, 'Исходники')
+      path.join(episodeDir, 'Исходники'),
+      path.join(episodeDir, 'Тайминг'),
+      path.join(episodeDir, 'Сведение')
     ];
 
-    const originalVocalsPath = AudioAnalysisService.findOriginalVocalsTrack(searchDirs);
+    const originalVocalsPath = AudioAnalysisService.findOriginalVocalsTrack(searchDirs, manifest);
 
     if (!originalVocalsPath || !fsSync.existsSync(originalVocalsPath)) {
       logFn('❌ Разделенная дорожка вокала оригинала НЕ найдена!', 'error');
@@ -4141,6 +4547,34 @@ class MixingPipelineService {
       const measuredThresh = typeof stats.lufsThresholdDb === 'number' ? stats.lufsThresholdDb : -33.0;
       const rms = typeof stats.speechRmsDb === 'number' ? stats.speechRmsDb : -24.0;
 
+      if (mode === 'pyloudnorm' || mode === 'pyln') {
+        const trackStartPct = Math.round((i / inputFiles.length) * 100);
+        const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+        try {
+          await AudioNeuralService.loudnessNorm({
+            inputPath: track.path,
+            outputPath: outPath,
+            targetLufs: trackTargetLufs,
+            truePeak,
+            modeType: 'track',
+            onProgress: (p) => {
+              if (onProgress && p && typeof p.percent === 'number') {
+                const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+                onProgress({ percent: current, message: `pyloudnorm: ${nick} (${Math.round(p.percent)}%)` });
+              }
+            },
+            onLog: (msg) => logFn(`[pyloudnorm] ${msg}`)
+          });
+          if (fsSync.existsSync(outPath)) {
+            const st = fsSync.statSync(outPath);
+            results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+            continue;
+          }
+        } catch (pyErr) {
+          logFn(`[pyloudnorm warning] ${pyErr.message}, переход на FFmpeg loudnorm`);
+        }
+      }
+
       let filter = '';
       if (mode === 'dynaudnorm') {
         const preGain = Math.max(-12, Math.min(maxGainDb, trackTargetLufs - (measuredI !== -24 ? measuredI : rms)));
@@ -4174,6 +4608,70 @@ class MixingPipelineService {
 
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: EBU R128 Loudness Normalization using pyloudnorm Python Sidecar
+   */
+  async _execLoudnessNorm({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const targetLufs = Number(params.targetLufs ?? -23.0);
+    const truePeak = Number(params.truePeak ?? -1.0);
+    const modeType = params.modeType || 'track';
+
+    if (!inputFiles || inputFiles.length === 0) {
+      throw new Error('Нет входных файлов для EBU R128 нормализации.');
+    }
+
+    logFn(`[EBU R128 pyloudnorm] Старт нормализации громкости (${modeType}, target: ${targetLufs} LUFS, peak: ${truePeak} dBTP) для ${inputFiles.length} файлов...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const file = inputFiles[i];
+      const nick = file.dubberNick || `track_${i + 1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      logFn(`[${i + 1}/${inputFiles.length}] EBU R128 обработка «${nick}» -> ${outName}`);
+
+      try {
+        await AudioNeuralService.loudnessNorm({
+          inputPath: file.path,
+          outputPath: outPath,
+          targetLufs,
+          truePeak,
+          modeType,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = Math.round((i / inputFiles.length) * 100 + (p.percent / inputFiles.length));
+              onProgress({ percent: Math.min(99, current), message: `EBU R128: ${nick} (${Math.round(p.percent)}%)` });
+            }
+          },
+          onLog: (msg) => logFn(`[pyloudnorm] ${msg}`)
+        });
+      } catch (err) {
+        logFn(`[pyloudnorm warning] Ошибка Python sidecar (${err.message}), fallback на FFmpeg loudnorm`);
+        const filter = `loudnorm=I=${targetLufs}:TP=${truePeak}:LRA=11:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
+        const cmd = ffmpeg(file.path)
+          .audioFilters(filter)
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(outPath);
+
+        await this._execFfmpeg(cmd, { logFn, outPath, description: `FFmpeg Loudnorm Fallback [${nick}]` });
+      }
+
+      if (fsSync.existsSync(outPath)) {
+        const st = fsSync.statSync(outPath);
+        results.push({ name: outName, path: outPath, size: st.size, dubberNick: file.dubberNick });
+      }
+    }
+
+    if (onProgress) {
+      onProgress({ percent: 100, message: 'EBU R128 нормализация завершена' });
     }
 
     return results;
@@ -4670,6 +5168,111 @@ class MixingPipelineService {
     }
 
     logFn(`✔ Успешно обработано ${results.length} дорожек через «${modTitle}»!`);
+    return results;
+  }
+
+  /**
+   * EXEC: Airwindows DSP Restoration & Saturation Suite
+   * Batch processes tracks through Airwindows VST3 plugins (DeEss, Pop, Slew3, VoiceTrick / Density)
+   * with automatic FFmpeg C++ DSP fallback.
+   */
+  async _execAirwindowsDsp({ moduleId = 'airwindows_restore', workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    if (inputFiles.length === 0) {
+      throw new Error(`Нет входных дорожек для применения модуля «${moduleId}».`);
+    }
+
+    const modDef = MODULE_DATABASE.find(m => m.id === moduleId);
+    const modTitle = modDef?.title || modDef?.name || moduleId;
+
+    logFn(`[Airwindows DSP Suite] Запуск обработки ${inputFiles.length} дорожек через модуль «${modTitle}»...`);
+
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = track.dubberNick || `dubber_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      logFn(`[${i+1}/${inputFiles.length}] Обработка дорожки «${nick}» (Airwindows DSP: ${modTitle})...`);
+
+      try {
+        await AudioNeuralService.processAirwindowsDsp({
+          inputPath: track.path,
+          outputPath: outPath,
+          moduleId,
+          params: params || {},
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `Airwindows DSP: ${nick} (${p.percent.toFixed(0)}%)` });
+            }
+          },
+          onLog: (msg, level) => {
+            logFn(`  [${nick}] ${msg}`, level || 'debug');
+          }
+        });
+      } catch (neuralErr) {
+        logFn(`⚠️ Ошибка Python Airwindows (${neuralErr.message}). Запуск нативного FFmpeg DSP резерва...`, 'warn');
+
+        const deess = Number(params?.deessIntensity ?? 0.50);
+        const pop = Number(params?.popIntensity ?? 0.50);
+        const slew = Number(params?.slewIntensity ?? 0.40);
+        const density = Number(params?.densityDrive ?? 0.40);
+
+        const filterParts = [];
+
+        if (pop > 0.05) {
+          const cutHigh = Math.round(60 + pop * 60);
+          filterParts.push(`highpass=f=${cutHigh},equalizer=f=110:t=q:w=1.5:g=${(-pop * 10.0).toFixed(1)}`);
+        }
+        if (deess > 0.05) {
+          const normF = (6500 / 24000.0).toFixed(4);
+          const normI = (deess > 1.0 ? deess / 10.0 : deess).toFixed(2);
+          filterParts.push(`deesser=f=${normF}:i=${normI}:m=0.5:s=o`);
+        }
+        if (slew > 0.05) {
+          filterParts.push(`equalizer=f=8500:t=q:w=2.5:g=${(-slew * 4.0).toFixed(1)}`);
+        }
+        if (density > 0.05) {
+          const drive = (1.0 + density * 1.2).toFixed(2);
+          filterParts.push(`aexciter=level_in=1:level_out=1:amount=${(density * 2.0).toFixed(1)}:drive=${drive}:freq=3500`);
+        }
+
+        if (filterParts.length === 0) {
+          filterParts.push('alimiter=limit=-0.5dB');
+        } else {
+          filterParts.push('alimiter=limit=-0.5dB');
+        }
+
+        const cmd = ffmpeg(track.path)
+          .audioFilters(filterParts.join(','))
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(outPath);
+
+        await this._execFfmpeg(cmd, {
+          logFn,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `Airwindows Fallback: ${nick} (${p.percent}%)` });
+            }
+          },
+          outPath,
+          description: `Airwindows DSP Fallback [${nick}]`
+        });
+      }
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    logFn(`✔ Успешно обработано ${results.length} дорожек через Airwindows DSP («${modTitle}»)!`);
     return results;
   }
 

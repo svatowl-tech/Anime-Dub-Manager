@@ -1,0 +1,26 @@
+# Neural Audio Processing & AI Alignment Requirements for Anime Dub Manager (ADM)
+# Includes DeepFilterNet3, Demucs v4, Spotify Pedalboard, VoiceFixer, PyTorch, and Aeneas Forced Alignment
+
+torch>=2.1.0,<=2.3.1
+torchaudio>=2.1.0,<=2.3.1
+deepfilternet>=0.5.6
+demucs>=4.0.1
+onnxruntime>=1.16.0,<1.20.0
+soundfile>=0.12.1
+pedalboard==0.9.25
+numpy>=1.24.0,<2.0.0
+scipy>=1.10.0
+librosa>=0.10.0,<0.11.0
+tqdm>=4.65.0
+packaging>=23.0,<24.0
+einops>=0.7.0
+rotary-embedding-torch>=0.5.0
+requests>=2.31.0
+huggingface-hub>=0.20.0
+voicefixer>=0.1.3
+aeneas>=1.7.3
+
+# System dependencies for Aeneas forced alignment (eSpeak / eSpeak-NG TTS & C-extensions):
+# Linux (Debian/Ubuntu): sudo apt-get install -y espeak espeak-ng ffmpeg libcew-dev
+# macOS (Homebrew): brew install espeak ffmpeg
+# Windows: Download and install eSpeak / eSpeak-NG binary to PATH or ai_env

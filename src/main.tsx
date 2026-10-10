@@ -12,7 +12,12 @@ const isDebug = window.location.hash === '#/debug';
 // Global uncaught exception listener with rich diagnostic trace
 window.addEventListener('error', (event) => {
   const msg = event.message || '';
-  if (msg.includes('GUEST_VIEW_MANAGER_CALL') || msg.includes('ERR_ABORTED') || msg.includes('(-3)')) {
+  if (
+    msg.includes('GUEST_VIEW_MANAGER_CALL') ||
+    msg.includes('ERR_ABORTED') ||
+    msg.includes('(-3)') ||
+    msg.toLowerCase().includes('websocket')
+  ) {
     event.preventDefault();
     return;
   }
@@ -36,7 +41,9 @@ window.addEventListener('unhandledrejection', (event) => {
   if (
     msg.includes('GUEST_VIEW_MANAGER_CALL') ||
     msg.includes('ERR_ABORTED') ||
-    msg.includes('-3')
+    msg.includes('-3') ||
+    msg.toLowerCase().includes('websocket') ||
+    msg.toLowerCase().includes('vite')
   ) {
     event.preventDefault();
     return;

@@ -149,6 +149,83 @@ function formatSeconds(sec) {
 class AutoTimingService {
 
   /**
+   * Детекция речевых интервалов Silero VAD v5 с автоматическим отказоустойчивым фоллбэком на FFmpeg silencedetect.
+   */
+  static async detectSpeechIntervals(filePath, options = {}) {
+    try {
+      const { detectSpeechWithSileroVad } = require('./SileroVadService.cjs');
+      return await detectSpeechWithSileroVad(filePath, options, getFfmpegPath() || 'ffmpeg');
+    } catch (err) {
+      log.warn(`[AutoTiming] Silero VAD failed, falling back to FFmpeg silencedetect: ${err.message}`);
+      return await detectSpeechIntervals(filePath, options);
+    }
+  }
+
+  /**
+   * Выполнение принудительного пословного/пофразового выравнивания через Aeneas sidecar
+   * с перехватом ошибок и отказоустойчивым фоллбэком на сопоставление по Whisper / VAD.
+   */
+  static async alignTrackWithSubtitles(trackPath, charLines, options = {}) {
+    if (!trackPath || !fs.existsSync(trackPath) || !charLines || charLines.length === 0) {
+      return null;
+    }
+
+    const subtitlesPayload = charLines.map((line, idx) => ({
+      id: String(line.id ?? line.rawLineIndex ?? idx),
+      text: line.text || '',
+      startSec: line.startSec ?? parseTimeToSeconds(line.start),
+      endSec: line.endSec ?? parseTimeToSeconds(line.end)
+    }));
+
+    let tempSubJsonPath = null;
+    let tempOutPath = null;
+
+    try {
+      const AudioNeuralService = require('./AudioNeuralService.cjs');
+      const tmpDir = os.tmpdir();
+      const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+      tempSubJsonPath = path.join(tmpDir, `adm_aeneas_sub_${uniqueSuffix}.json`);
+      tempOutPath = path.join(tmpDir, `adm_aeneas_out_${uniqueSuffix}.json`);
+
+      fs.writeFileSync(tempSubJsonPath, JSON.stringify(subtitlesPayload, null, 2), 'utf8');
+
+      log.info(`[AutoTiming] Попытка Aeneas alignment для ${path.basename(trackPath)} (${subtitlesPayload.length} реплик)...`);
+
+      const result = await AudioNeuralService.aeneasAlign({
+        inputPath: trackPath,
+        subtitlesJsonPath: tempSubJsonPath,
+        outputPath: tempOutPath,
+        language: options.language || 'ru'
+      });
+
+      let alignedResults = null;
+      if (fs.existsSync(tempOutPath)) {
+        try {
+          const rawOut = fs.readFileSync(tempOutPath, 'utf8');
+          alignedResults = JSON.parse(rawOut);
+        } catch (e) {}
+      }
+
+      if (!alignedResults && Array.isArray(result)) {
+        alignedResults = result;
+      }
+
+      if (Array.isArray(alignedResults) && alignedResults.length > 0) {
+        log.info(`[AutoTiming] Aeneas alignment успешно выравнял ${alignedResults.length} реплик.`);
+        return alignedResults;
+      }
+
+      throw new Error('Aeneas output invalid or empty');
+    } catch (err) {
+      log.warn(`[AutoTiming] Aeneas alignment unavailable, fallback to Whisper matching: ${err.message}`);
+      return null;
+    } finally {
+      try { if (tempSubJsonPath && fs.existsSync(tempSubJsonPath)) fs.unlinkSync(tempSubJsonPath); } catch (e) {}
+      try { if (tempOutPath && fs.existsSync(tempOutPath)) fs.unlinkSync(tempOutPath); } catch (e) {}
+    }
+  }
+
+  /**
    * Автоматическое сопоставление персонажей из субтитров и загруженных аудиодорожек.
    */
   static async matchActorsWithAudioTracks(subPath, audioFiles, participantsData = [], characterAliases = {}, existingAssignments = []) {
@@ -546,7 +623,7 @@ class AutoTimingService {
     for (const track of matchedTracks) {
       let intervals = [];
       try {
-        const detectRes = await detectSpeechIntervals(track.trackPath, {
+        const detectRes = await AutoTimingService.detectSpeechIntervals(track.trackPath, {
           noiseDb: options.noiseDb || -45,
           minSilenceDuration: options.minSilenceDuration || 0.30
         });

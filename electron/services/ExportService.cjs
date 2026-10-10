@@ -397,27 +397,44 @@ class ExportService {
         await logStep('[Видео] Исходный видеофайл отсутствует в серии, видео-этап пропущен.', 'info', 30);
       }
 
-      const dubberFiles = {};
-      for (const upload of episodeUploads) {
-        if (upload.type === 'DUBBER_FILE' || upload.type === 'FIXES') {
-          const dubberId = upload.uploadedById || upload.participantId || upload.dubberId || 'unknown';
-          if (!dubberFiles[dubberId]) dubberFiles[dubberId] = { original: [], fixes: [] };
-          if (upload.type === 'DUBBER_FILE') dubberFiles[dubberId].original.push(upload);
-          else dubberFiles[dubberId].fixes.push(upload);
-        }
-      }
-
       const getNick = (id, upload) => {
-        if (id) {
+        if (id && id !== 'unknown') {
           const p = participantsData.find(part => part.id === id || String(part.id) === String(id));
           if (p && p.nickname) return p.nickname;
+          if (Array.isArray(episode.assignments)) {
+            const as = episode.assignments.find(a => a.dubberId === id || String(a.dubberId) === String(id) || a.substituteId === id || String(a.substituteId) === String(id) || a.id === id);
+            if (as) {
+              const nick = as.substitute?.nickname || as.dubber?.nickname || as.dubberName || as.dubberNick;
+              if (nick) return nick;
+            }
+          }
         }
         if (upload) {
           if (upload.dubberNick) return upload.dubberNick;
           if (upload.dubberName) return upload.dubberName;
+          if (upload.assignmentId && Array.isArray(episode.assignments)) {
+            const as = episode.assignments.find(a => a.id === upload.assignmentId);
+            if (as) {
+              const nick = as.substitute?.nickname || as.dubber?.nickname || as.dubberName || as.dubberNick;
+              if (nick) return nick;
+            }
+          }
         }
-        return (id && id !== 'unknown' && !/^\d+$/.test(id)) ? id : 'Даббер';
+        if (id && id !== 'unknown' && !/^\d+$/.test(id) && !id.startsWith('0.')) return id;
+        if (upload?.fileName) return path.basename(upload.fileName, path.extname(upload.fileName)).replace(/\[?(фикс|fix|take|layer)\s*\d*\]?/gi, '').trim();
+        return 'Даббер';
       };
+
+      const dubberFiles = {};
+      for (const upload of episodeUploads) {
+        if (upload.type === 'DUBBER_FILE' || upload.type === 'FIXES') {
+          const nick = getNick(upload.uploadedById || upload.participantId || upload.dubberId, upload);
+          const key = upload.uploadedById || upload.participantId || upload.dubberId || nick;
+          if (!dubberFiles[key]) dubberFiles[key] = { original: [], fixes: [], nick };
+          if (upload.type === 'DUBBER_FILE') dubberFiles[key].original.push(upload);
+          else dubberFiles[key].fixes.push(upload);
+        }
+      }
 
       const getExportName = (upload, isFix) => {
         const nick = getNick(upload.uploadedById || upload.participantId, upload);
@@ -614,15 +631,18 @@ class ExportService {
 
             if (fixes && fixes.length > 0) {
               const sortedFixes = [...fixes].sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+              const hasOriginals = original && original.length > 0;
               for (let fIdx = 0; fIdx < sortedFixes.length; fIdx++) {
                 const fixFile = sortedFixes[fIdx];
                 const ext = path.extname(fixFile.path) || '.wav';
-                const fixName = sortedFixes.length === 1
-                  ? `${baseVideoName}_[${nick}]_[фикс]${ext}`
-                  : `${baseVideoName}_[${nick}]_[фикс${fIdx + 1}]${ext}`;
+                const fixName = (!hasOriginals && sortedFixes.length === 1)
+                  ? `${baseVideoName}_[${nick}]${ext}`
+                  : (sortedFixes.length === 1
+                    ? `${baseVideoName}_[${nick}]_[фикс]${ext}`
+                    : `${baseVideoName}_[${nick}]_[фикс${fIdx + 1}]${ext}`);
                 const fixOut = path.join(targetDir, fixName);
                 await fs.copyFile(fixFile.path, fixOut);
-                await logStep(`[Экспорт] Дорожка фикса «${nick}» ${sortedFixes.length > 1 ? `(фикс ${fIdx + 1})` : ''}: ${path.basename(fixOut)}`, 'info', dubberPercent);
+                await logStep(`[Экспорт] Дорожка даббера «${nick}»: ${path.basename(fixOut)}`, 'info', dubberPercent);
               }
             }
           }
