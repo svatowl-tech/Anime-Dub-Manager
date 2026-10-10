@@ -146,6 +146,10 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     is_mac = "macos" in tag or platform.system().lower() == "darwin"
     is_linux = "linux" in tag or platform.system().lower() == "linux"
 
+    # Set AENEAS_WITH_CEW=False globally to disable optional C-extension compilation during setup.py wheel builds
+    # This prevents MSVC espeak.lib unresolved external symbol (LNK2001) errors on Windows while keeping full pure Python functionality
+    os.environ["AENEAS_WITH_CEW"] = "False"
+
     print("=" * 60)
     print(f"[BUILD] Building AI_env for platform tag: {tag}")
     print(f"[PATH] Project Root: {root_dir}")
@@ -266,7 +270,6 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "torchlibrosa>=0.1.0",
         "matplotlib>=3.7.0",
         "pyyaml>=6.0",
-        "aeneas>=1.7.3",
         "pyloudnorm>=0.1.0"
     ]
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--prefer-binary", "-c", str(constraints_file)] + extra_index_args + pinned_stack)
@@ -274,6 +277,33 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     # Install VoiceFixer with --no-deps to prevent streamlit bloat
     print("  [VOICEFIXER] Installing VoiceFixer package (--no-deps)...")
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "voicefixer>=0.1.3"])
+
+    # Install Aeneas Forced Alignment package in a dedicated isolated step
+    # AENEAS_WITH_CEW=False disables compilation of optional cew C-extensions that fail on Windows MSVC without espeak.lib
+    print("  [AENEAS] Installing Aeneas forced alignment package (AENEAS_WITH_CEW=False)...")
+    aeneas_env = {"AENEAS_WITH_CEW": "False"}
+    try:
+        run_cmd([
+            str(venv_python), "-m", "pip", "install",
+            "--no-cache-dir",
+            "--prefer-binary",
+            "-c", str(constraints_file),
+            "aeneas>=1.7.3"
+        ], env=aeneas_env)
+        print("  [AENEAS] Aeneas installed successfully.")
+    except Exception as aeneas_err:
+        print(f"  [WARN] Standard Aeneas installation failed: {aeneas_err}. Retrying with --no-deps...")
+        try:
+            run_cmd([
+                str(venv_python), "-m", "pip", "install",
+                "--no-cache-dir",
+                "--prefer-binary",
+                "--no-deps",
+                "aeneas>=1.7.3"
+            ], env=aeneas_env)
+            print("  [AENEAS] Aeneas installed successfully with --no-deps.")
+        except Exception as aeneas_err2:
+            print(f"  [WARN] Aeneas could not be installed: {aeneas_err2}. AutoTimingService will fallback to Whisper auto-timing.")
 
     # System Dependencies for Aeneas Forced Alignment (espeak / espeak-ng)
     print("\n[STEP 4.1] Checking system dependencies for Aeneas (espeak / espeak-ng / ffmpeg)...")
