@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ipcSafe } from '../lib/ipcSafe';
-import { Activity, Cpu, List, MemoryStick, Terminal, XCircle, Info, Calendar, GitBranch } from 'lucide-react';
+import { appLogger, LogEntry } from '../lib/appLogger';
+import { Activity, Cpu, List, MemoryStick, Terminal, XCircle, Info, Calendar, GitBranch, Copy } from 'lucide-react';
 import { Task } from '../types';
 // @ts-ignore
 import buildMetadata from '../build-metadata.json';
@@ -8,6 +9,7 @@ import buildMetadata from '../build-metadata.json';
 export default function DebugConsole() {
   const [stats, setStats] = useState({ cpu: 0, ram: 0, ffmpeg: [] });
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [timeline, setTimeline] = useState<LogEntry[]>(() => appLogger.getTimeline());
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -29,9 +31,14 @@ export default function DebugConsole() {
       setTasks(updatedTasks);
     });
 
+    const unsubscribeLogs = appLogger.subscribe('all', () => {
+      setTimeline(appLogger.getTimeline());
+    });
+
     return () => {
       clearInterval(interval);
       removeListener();
+      unsubscribeLogs();
     };
   }, []);
 
@@ -179,6 +186,41 @@ export default function DebugConsole() {
                 </div>
               ))}
             </div>
+          )}
+        </div>
+      </div>
+
+      {/* Live Application Process Stream */}
+      <div className="mt-8 border-t border-green-900 pt-6">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <Terminal className="w-5 h-5 text-green-400" />
+            <h2 className="text-lg font-bold">Live Application Process Stream ({timeline.length} events)</h2>
+          </div>
+          <button
+            onClick={() => appLogger.copyToClipboard()}
+            className="text-xs bg-green-950 border border-green-700 px-3 py-1.5 rounded hover:bg-green-900 transition font-bold flex items-center gap-1.5"
+          >
+            <Copy className="w-3.5 h-3.5" />
+            <span>📋 Copy Process Log (Clipboard)</span>
+          </button>
+        </div>
+        <div className="bg-black/90 border border-green-900/60 rounded-lg p-3 font-mono text-[11px] h-64 overflow-y-auto space-y-1">
+          {timeline.length === 0 ? (
+            <div className="text-green-800 italic">No events logged yet</div>
+          ) : (
+            timeline.slice(-100).map((entry) => (
+              <div 
+                key={entry.id} 
+                className={
+                  entry.level === 'error' ? 'text-red-400 font-bold' : 
+                  entry.level === 'warn' ? 'text-yellow-400' : 
+                  entry.level === 'debug' ? 'text-green-700' : 'text-green-300'
+                }
+              >
+                [{entry.time}] [{entry.scope}] {entry.message} {entry.durationMs !== undefined ? `(${entry.durationMs}ms)` : ''}
+              </div>
+            ))
           )}
         </div>
       </div>

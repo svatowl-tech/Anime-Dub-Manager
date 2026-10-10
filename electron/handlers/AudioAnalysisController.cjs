@@ -41,6 +41,40 @@ function registerAudioAnalysisHandlers() {
     }
     return await AudioAnalysisService.getTimingAnalysis(episodeDir);
   }));
+
+  ipcMain.handle('audio-find-original-vocals', wrapIpcHandler(async (event, { searchDirs = [] }) => {
+    return AudioAnalysisService.findOriginalVocalsTrack(searchDirs);
+  }));
+
+  ipcMain.handle('audio-analyze-original-snapshots', wrapIpcHandler(async (event, { audioPath, options = {} }) => {
+    if (!audioPath) {
+      throw new Error('audioPath обязателен для построения 3-х слепков оригинала');
+    }
+    const onProgress = (progress) => {
+      try {
+        event.sender.send('audio-analysis-progress', { audioPath, ...progress });
+      } catch (e) {}
+    };
+    return await AudioAnalysisService.analyzeOriginalAcousticSnapshots(audioPath, options, onProgress);
+  }));
+
+  ipcMain.handle('audio-apply-acoustic-match', wrapIpcHandler(async (event, { ourVocalsPath, originalVocalsPath, searchDirs = [], options = {} }) => {
+    if (!ourVocalsPath) {
+      throw new Error('ourVocalsPath обязателен для приведения к оригиналу');
+    }
+    const onProgress = (progress) => {
+      try {
+        event.sender.send('audio-analysis-progress', { ourVocalsPath, ...progress });
+      } catch (e) {}
+    };
+    return await AudioAnalysisService.applyAcousticProfileMatch({
+      ourVocalsPath,
+      originalVocalsPath,
+      searchDirs,
+      options,
+      onProgress
+    });
+  }));
 }
 
 module.exports = {

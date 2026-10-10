@@ -202,7 +202,9 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "setuptools<70.0.0\n"
         "wheel<0.45.0\n"
         "llvmlite==0.42.0\n"
-        "numba==0.59.1\n",
+        "numba==0.59.1\n"
+        "librosa>=0.10.0,<0.11.0\n"
+        "onnxruntime>=1.16.0,<1.20.0\n",
         encoding="utf-8"
     )
 
@@ -253,8 +255,8 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "demucs>=4.0.0,<4.1.0",
         "soundfile>=0.12.1",
         "scipy>=1.10.0,<1.14.0",
-        "librosa>=0.10.0",
-        "onnxruntime>=1.16.0",
+        "librosa>=0.10.0,<0.11.0",
+        "onnxruntime>=1.16.0,<1.20.0",
         "huggingface-hub>=0.20.0",
         "tqdm>=4.65.0",
         "einops>=0.7.0",

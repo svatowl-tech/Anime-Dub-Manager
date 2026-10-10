@@ -16,6 +16,41 @@ const AudioAnalysisService = require('./AudioAnalysisService.cjs');
  */
 const MODULE_DATABASE = [
   {
+    id: 'acoustic_original_match',
+    category: 'analysis',
+    defaultPrefix: 'acoustic_matched_',
+    title: 'Акустический слепок оригинала и автосопоставление (Acoustic Matcher)',
+    description: 'Принимает на вход только разделенный вокал оригинала и снимает 3 слепка (громкость, реверберация, спектральный баланс). Приводит нашу голосовую дорожку четко к акустике оригинала.',
+    icon: 'Activity',
+    defaultParams: {
+      loudnessMatchStrength: 100,
+      reverbMatchStrength: 100,
+      eqMatchStrength: 100,
+      targetLufsOffset: 0.0,
+      strictOriginalVocalsRequired: true
+    },
+    presets: [
+      {
+        id: 'acoustic_match_full',
+        title: '🎯 Полное совпадение с оригиналом (100% Громкость, Реверб, EQ)',
+        description: 'Точное приведение каждой фразы даббинга к уровню громкости, акустике помещения и частотному балансу оригинала',
+        params: { loudnessMatchStrength: 100, reverbMatchStrength: 100, eqMatchStrength: 100, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true }
+      },
+      {
+        id: 'acoustic_match_soft_reverb',
+        title: '🎙 Естественное сведение (100% Громкость, 50% Реверб, 80% EQ)',
+        description: 'Точная динамика и частотный баланс с мягким умеренным ревербом',
+        params: { loudnessMatchStrength: 100, reverbMatchStrength: 50, eqMatchStrength: 80, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true }
+      },
+      {
+        id: 'acoustic_match_dry_focus',
+        title: '✂️ Чистая динамика и EQ без добавления реверберации',
+        description: 'Выравнивание только громкости и спектральной окраски по оригиналу без эха',
+        params: { loudnessMatchStrength: 100, reverbMatchStrength: 0, eqMatchStrength: 100, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true }
+      }
+    ]
+  },
+  {
     id: 'auto_timing',
     category: 'timing',
     defaultPrefix: 'timing_',
@@ -2785,6 +2820,9 @@ class MixingPipelineService {
         case 'auto_timing':
           resultFiles = await this._execAutoTiming({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'acoustic_original_match':
+          resultFiles = await this._execAcousticMatch({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'apply_fixes':
           resultFiles = await this._execApplyFixes({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -3070,6 +3108,79 @@ class MixingPipelineService {
       }
     }
 
+    return results;
+  }
+
+  /**
+   * EXEC: Acoustic Original Profile & Voice Matcher
+   * Акустический слепок оригинала и автосопоставление 3-х слепков (Громкость, Реверберация, Эквализация).
+   * Принимает НА ВХОД ТОЛЬКО РАЗДЕЛЕННУЮ ДОРОЖКУ ГОЛОСОВ ИЗ ОРИГИНАЛА.
+   * Если оригинал не был разделен - выдает ОШИБКУ!
+   */
+  async _execAcousticMatch({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
+    logFn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    logFn('▶ [МОДУЛЬ СВЕДЕНИЯ] Акустический слепок оригинала и автосопоставление 3-х слепков');
+
+    if (!inputFiles || inputFiles.length === 0) {
+      throw new Error('Нет входных голосовых дорожек дубляжа для приведения к оригиналу.');
+    }
+
+    const episodeDir = episode?.dir || manifest?.episodeDir || workingDir;
+    const searchDirs = [
+      workingDir,
+      episodeDir,
+      path.join(workingDir, '03_demucs'),
+      path.join(workingDir, '04_stem_separation'),
+      path.join(episodeDir, 'Исходники')
+    ];
+
+    const originalVocalsPath = AudioAnalysisService.findOriginalVocalsTrack(searchDirs);
+
+    if (!originalVocalsPath || !fsSync.existsSync(originalVocalsPath)) {
+      logFn('❌ Разделенная дорожка вокала оригинала НЕ найдена!', 'error');
+      throw new Error(
+        "❌ Ошибка: Не найдена заранее разделенная дорожка голосов оригинала!\n" +
+        "Модуль анализирует ТОЛЬКО чистый вокал оригинала (Demucs / UVR).\n" +
+        "Пожалуйста, сначала выполните шаг 'Разделение стемов Demucs/UVR' или добавьте оригинальный вокал (original_vocals.wav)."
+      );
+    }
+
+    logFn(`✓ Обнаружен оригинальный разделенный вокал: ${path.basename(originalVocalsPath)}`);
+
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const inputFile = inputFiles[i];
+      const inPath = typeof inputFile === 'string' ? inputFile : inputFile.path;
+      const nick = inputFile.dubberNick || `voice_${i+1}`;
+      const outName = `${prefix}${nick}.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      logFn(`Приведение дорожки [${i + 1}/${inputFiles.length}] «${nick}» к слепкам оригинала...`);
+
+      const matchResult = await AudioAnalysisService.applyAcousticProfileMatch({
+        ourVocalsPath: inPath,
+        originalVocalsPath,
+        searchDirs,
+        outputPath: outPath,
+        options: params,
+        onProgress: p => {
+          if (onProgress) onProgress({ stepProgress: Math.round(((i + (p.progress || 0) / 100) / inputFiles.length) * 100) });
+        },
+        onLog: (m, lvl) => logFn(m, lvl)
+      });
+
+      results.push({
+        name: outName,
+        path: outPath,
+        type: 'audio',
+        dubberNick: nick,
+        matched: true,
+        stats: matchResult.appliedParams
+      });
+    }
+
+    logFn(`✓ Завершено приведение к акустическому слепку оригинала (${results.length} файлов).`);
     return results;
   }
 

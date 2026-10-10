@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare, Sliders, Clock } from 'lucide-react';
-import { Toaster } from 'sonner';
+import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare, Sliders, Clock, Terminal } from 'lucide-react';
+import { Toaster, toast } from 'sonner';
 import Dashboard from './components/Dashboard';
 import QAPanel from './components/QAPanel';
 import TimingPanel from './components/TimingPanel';
@@ -19,6 +19,7 @@ import { TelegramClientPanel } from './components/TelegramClientPanel';
 import { UnsavedChangesModal } from './components/ui/UnsavedChangesModal';
 import { Project, Episode } from './types';
 import { ipcSafe, isWeb } from './lib/ipcSafe';
+import { appLogger } from './lib/appLogger';
 import { VideoProvider } from './contexts/VideoContext';
 import { useGlobalKeyboard } from './hooks/useGlobalKeyboard';
  
@@ -26,6 +27,22 @@ function AppContent() {
   type TabType = 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [savedAudioUrl, setSavedAudioUrl] = useState<string | null>(null);
+  const [logEventCount, setLogEventCount] = useState<number>(0);
+
+  useEffect(() => {
+    return appLogger.subscribe('all', () => {
+      setLogEventCount(appLogger.getTimeline().length);
+    });
+  }, []);
+
+  const handleCopyLogsToClipboard = async () => {
+    const ok = await appLogger.copyToClipboard();
+    if (ok) {
+      toast.success('📋 Полный лог всех процессов успешно скопирован в буфер обмена!');
+    } else {
+      toast.error('Не удалось скопировать лог в буфер обмена.');
+    }
+  };
   
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -194,11 +211,13 @@ function AppContent() {
 
   const handleNavigate = (tab: TabType) => {
     if (tab === activeTab) return;
+    appLogger.info('NAV', `Переключение вкладки: "${activeTab}" ➔ "${tab}"`);
     confirmIfUnsaved(() => setActiveTab(tab));
   };
 
   const handleProjectSelect = (projectId: string) => {
     confirmIfUnsaved(() => {
+      appLogger.info('PROJECT', `Выбор проекта: "${projectId || 'none'}"`);
       setSelectedProjectId(projectId || null);
       if (!projectId) {
         setCurrentEpisode(null);
@@ -221,6 +240,7 @@ function AppContent() {
   const handleEpisodeSelect = async (episodeNumber: number) => {
     confirmIfUnsaved(async () => {
       if (!selectedProjectId) return;
+      appLogger.info('PROJECT', `Выбор эпизода #${episodeNumber} в проекте "${selectedProjectId}"`);
       const project = projects.find(p => p.id === selectedProjectId);
       if (project) {
         await ipcSafe.invoke('save-project', { ...project, lastActiveEpisode: episodeNumber });
@@ -430,6 +450,23 @@ function AppContent() {
             <Settings className="w-5 h-5" />
             <span>Настройки</span>
           </button>
+
+          {/* Quick Diagnostics & Copy Logs Button */}
+          <div className="pt-2 border-t border-neutral-800/80">
+            <button
+              onClick={handleCopyLogsToClipboard}
+              title="Скопировать подробный диагностический лог всех процессов в буфер обмена"
+              className="w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-mono font-medium text-sky-300 bg-sky-950/40 hover:bg-sky-900/50 border border-sky-800/50 transition-colors shadow-sm group"
+            >
+              <div className="flex items-center gap-2 truncate">
+                <Terminal className="w-3.5 h-3.5 text-sky-400 shrink-0 group-hover:animate-pulse" />
+                <span className="truncate">📋 Логи процессов</span>
+              </div>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-900/80 text-sky-200 border border-sky-700/60">
+                {logEventCount}
+              </span>
+            </button>
+          </div>
         </div>
       </aside>
 

@@ -4,7 +4,7 @@
  * ============================================================================
  */
 
-import { appLogger } from '../lib/appLogger';
+import { appLogger, ProcessHandle } from '../lib/appLogger';
 
 export class SystemLogger {
   private static instance: SystemLogger;
@@ -30,6 +30,10 @@ export class SystemLogger {
 
   public debug(scope: string, message: string, ...args: any[]): void {
     appLogger.log(scope, 'debug', message, args.length > 0 ? args : undefined);
+  }
+
+  public startProcess(scope: string, name: string, meta?: any): ProcessHandle {
+    return appLogger.startProcess(scope, name, meta);
   }
 }
 

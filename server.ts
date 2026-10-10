@@ -605,23 +605,32 @@ async function startServer() {
     }
 
     if (handler) {
+      const startTime = Date.now();
       try {
-        console.log(`[IPC Server] Executing channel "${channel}" with args:`, JSON.stringify(args));
+        let argsPreview = '';
+        try {
+          argsPreview = JSON.stringify(args).slice(0, 300);
+        } catch (e) {
+          argsPreview = '[Complex or Non-Serializable Args]';
+        }
+        console.log(`[IPC Server ▶] Executing channel "${channel}" ${argsPreview}`);
         const result = await handler({ sender: { send: () => {} } }, ...args);
+        const elapsed = Date.now() - startTime;
         
         // If the response is wrapped by wrapIpcHandler and has success === false, log details
         if (result && typeof result === 'object' && result.success === false) {
-          console.error(`[IPC Server Error Response] channel: ${channel}, error:`, result.error);
+          console.error(`[IPC Server ❌ Error Response] channel: ${channel} (${elapsed}ms), error:`, result.error);
           if (result.stderr) console.error(`[IPC Server Error stderr]:`, result.stderr);
           if (result.stdout) console.error(`[IPC Server Error stdout]:`, result.stdout);
           if (result.stack) console.error(`[IPC Server Error stack]:`, result.stack);
         } else {
-          console.log(`[IPC Server Success] channel: ${channel}`);
+          console.log(`[IPC Server ✓ Success] channel: ${channel} (${elapsed}ms)`);
         }
         
         res.json({ success: true, data: result });
       } catch (error: any) {
-        console.error(`[IPC Server Crash] channel: ${channel}, crash error:`, error.stack || error.message || error);
+        const elapsed = Date.now() - startTime;
+        console.error(`[IPC Server 💥 Crash] channel: ${channel} (${elapsed}ms), crash error:`, error.stack || error.message || error);
         res.json({ 
           success: false, 
           error: error.message || String(error),
