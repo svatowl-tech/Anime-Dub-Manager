@@ -19,7 +19,7 @@ import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval, tr
 import { QAScanConfigModal } from './qa/QAScanConfigModal';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import { saveQAGapsToTimingProject } from '../lib/qa/timingSyncService';
-import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
+import { prepareQATracksForTiming, normalizeKey } from '../lib/qaTimingHelper';
 import { resolveLocalPath } from '../lib/webFileSystem';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
@@ -1959,7 +1959,11 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     try {
       const updatedAssignments = currentEpisode.assignments?.map(a => {
         const assignedId = a.substituteId || a.dubberId;
-        return assignedId === id ? { ...a, status: dbStatus } : a
+        const normNick = normalizeKey(a.substitute?.nickname || a.dubber?.nickname || '');
+        const rawTrackId = id.replace(/^track_/, '').split('_')[0];
+        const normTrackId = normalizeKey(rawTrackId);
+        const isMatch = (assignedId && (assignedId === id || id.startsWith(assignedId + '__'))) || (normNick && normNick === normTrackId);
+        return isMatch ? { ...a, status: dbStatus } : a;
       }) || [];
 
       // Check if all assignments are approved
@@ -1990,8 +1994,16 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     if (!file || !currentEpisode) return;
 
     // Find one of the assignments for this dubber to link the upload to
-    const baseDubberId = trackId.split('__')[0];
-    const assignment = currentEpisode.assignments?.find(a => (a.substituteId || a.dubberId) === baseDubberId);
+    const parts = trackId.split('__');
+    const baseDubberId = parts[0];
+    const rawNickKey = normalizeKey(trackId.replace(/^track_/, '').split('_')[0]);
+
+    const assignment = currentEpisode.assignments?.find(a => {
+      const aDubberId = a.substituteId || a.dubberId;
+      if (aDubberId && (aDubberId === baseDubberId || aDubberId === trackId)) return true;
+      const aNick = normalizeKey(a.substitute?.nickname || a.dubber?.nickname || '');
+      return aNick && (aNick === rawNickKey || aNick === normalizeKey(baseDubberId));
+    });
     if (!assignment) return;
 
     const projectTitle = sanitizeFolderName(currentEpisode.project?.title || 'Project');

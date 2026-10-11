@@ -77,9 +77,18 @@ export function prepareQATracksForTiming(
   }>();
 
   const registerActor = (rawNick: string, dubberId?: string, charName?: string, assignmentId?: string, comments?: any[], status?: string) => {
-    const nick = cleanDubberNick(rawNick) || rawNick.trim();
-    if (!nick || /^[\d\s._-]+$/.test(nick)) return;
-    const normKey = normalizeKey(nick);
+    let nick = cleanDubberNick(rawNick) || (rawNick ? rawNick.trim() : '');
+    if (!nick) {
+      if (charName) {
+        nick = charName;
+      } else if (dubberId) {
+        nick = `Даббер (${dubberId.slice(0, 8)})`;
+      } else {
+        nick = 'Даббер';
+      }
+    }
+
+    const normKey = normalizeKey(nick) || (dubberId ? normalizeKey(dubberId) : (assignmentId ? normalizeKey(assignmentId) : 'dubber_unknown'));
     if (!normKey) return;
 
     if (!actorMap.has(normKey)) {
@@ -163,40 +172,76 @@ export function prepareQATracksForTiming(
       return str.includes('fix') || str.includes('фикс');
     };
 
-    // Separate main files and fix files, deduplicated by file path
-    const mainPathMap = new Map<string, { id?: string; name: string; path: string; size: number; createdAt?: string; type: 'DUBBER_FILE' }>();
-    actorUploads.filter(u => !isFixFile(u) && u.path).forEach(u => {
-      mainPathMap.set(u.path, { id: u.id, name: u.path.split(/[/\\]/).pop() || 'Дорожка', path: u.path, size: (u as any).size || 0, createdAt: u.createdAt, type: 'DUBBER_FILE' });
+    // Separate files, deduplicated by file path
+    const allActorFilesMap = new Map<string, { id?: string; name: string; path: string; size: number; createdAt?: string; type: 'DUBBER_FILE' | 'FIXES' }>();
+
+    actorUploads.filter(u => u.path).forEach(u => {
+      const isFix = u.type === 'FIXES' || /fix|фикс/i.test(`${u.path.split(/[/\\]/).pop() || ''}`);
+      allActorFilesMap.set(u.path, {
+        id: u.id,
+        name: u.path.split(/[/\\]/).pop() || 'Дорожка',
+        path: u.path,
+        size: (u as any).size || 0,
+        createdAt: u.createdAt,
+        type: isFix ? 'FIXES' : 'DUBBER_FILE'
+      });
     });
-    actorManifestFiles.filter(m => !isFixFile(m) && m.path).forEach(m => {
-      if (!mainPathMap.has(m.path)) {
-        mainPathMap.set(m.path, { id: m.id || m.path, name: m.name || m.path.split(/[/\\]/).pop() || 'Дорожка', path: m.path, size: m.size || 0, createdAt: '', type: 'DUBBER_FILE' });
+
+    actorManifestFiles.filter(m => m.path).forEach(m => {
+      if (!allActorFilesMap.has(m.path)) {
+        const isFix = /fix|фикс/i.test(`${m.name || m.path}`);
+        allActorFilesMap.set(m.path, {
+          id: m.id || m.path,
+          name: m.name || m.path.split(/[/\\]/).pop() || 'Дорожка',
+          path: m.path,
+          size: m.size || 0,
+          createdAt: '',
+          type: isFix ? 'FIXES' : 'DUBBER_FILE'
+        });
       }
     });
 
-    const fixPathMap = new Map<string, { id?: string; name: string; path: string; size: number; createdAt?: string; type: 'FIXES' }>();
-    actorUploads.filter(u => isFixFile(u) && u.path).forEach(u => {
-      fixPathMap.set(u.path, { id: u.id, name: u.path.split(/[/\\]/).pop() || 'Фикс', path: u.path, size: (u as any).size || 0, createdAt: u.createdAt, type: 'FIXES' });
-    });
-    actorManifestFiles.filter(m => isFixFile(m) && m.path).forEach(m => {
-      if (!fixPathMap.has(m.path)) {
-        fixPathMap.set(m.path, { id: m.id || m.path, name: m.name || m.path.split(/[/\\]/).pop() || 'Фикс', path: m.path, size: m.size || 0, createdAt: '', type: 'FIXES' });
-      }
-    });
-
-    const mainCandidates = Array.from(mainPathMap.values()).sort((a, b) => {
+    const sortedAllFiles = Array.from(allActorFilesMap.values()).sort((a, b) => {
       const timeDiff = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
       if (timeDiff !== 0) return timeDiff;
       return a.name.localeCompare(b.name);
     });
 
-    const fixCandidates = Array.from(fixPathMap.values()).sort((a, b) => {
-      const timeDiff = new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
-      if (timeDiff !== 0) return timeDiff;
-      return a.name.localeCompare(b.name);
+    if (sortedAllFiles.length === 0) {
+      const trackId = dubberId ? `${dubberId}__${normKey}` : `track_${normKey}`;
+      finalTracks.push({
+        id: trackId,
+        projectId: episode.projectId,
+        episodeId: episode.id,
+        participant: dubberNick,
+        character: charStr,
+        dubberName: dubberNick,
+        characterName: charStr,
+        filePath: '',
+        role: 'dubber',
+        status: (actor.assignmentStatus?.toLowerCase() || 'pending') as Track['status'],
+        files: [],
+        comments: actor.comments || []
+      } as any);
+      return;
+    }
+
+    // Determine max size to identify short patch snippets vs full recording tracks
+    const maxSize = Math.max(...sortedAllFiles.map(f => f.size || 0));
+
+    // A file is a short patch snippet ONLY if there is a main file AND this file is much smaller (< 50% size AND < 2MB)
+    const fixCandidates = sortedAllFiles.filter(f => {
+      if (f.type !== 'FIXES' && !/fix|фикс/i.test(f.name)) return false;
+      if (maxSize > 0 && f.size > 0) {
+        const ratio = f.size / maxSize;
+        if (ratio >= 0.50 || (maxSize - f.size) / (1024 * 1024) <= 2.0) {
+          return false;
+        }
+      }
+      return true;
     });
 
-    if (mainCandidates.length === 0 && fixCandidates.length === 0) return;
+    const mainCandidates = sortedAllFiles.filter(f => !fixCandidates.some(fix => fix.path === f.path));
 
     // Helper to test if a fix file is intended for a specific track by name / suffix
     const isFixForTrack = (fixFile: typeof fixCandidates[0], trackName: string, trackIdx: number): boolean => {
@@ -222,18 +267,8 @@ export function prepareQATracksForTiming(
       let patchSnippet: typeof newestFix = null;
 
       if (newestMain && newestFix) {
-        const mainSize = newestMain.size || 1;
-        const fixSize = newestFix.size || 0;
-        const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
-        const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
-
-        if (ratio >= 0.70 || sizeDiffMb <= 3.0 || fixSize === 0) {
-          selectedFile = newestFix;
-          patchSnippet = null;
-        } else {
-          selectedFile = newestMain;
-          patchSnippet = newestFix;
-        }
+        selectedFile = newestMain;
+        patchSnippet = newestFix;
       } else if (newestFix) {
         selectedFile = newestFix;
       } else {
@@ -242,10 +277,10 @@ export function prepareQATracksForTiming(
 
       if (!selectedFile) return;
 
-      const allFiles = [...mainCandidates, ...fixCandidates];
+      const trackId = dubberId ? `${dubberId}__${normKey}` : `track_${normKey}`;
 
       finalTracks.push({
-        id: `track_${normKey}`,
+        id: trackId,
         projectId: episode.projectId,
         episodeId: episode.id,
         participant: dubberNick,
@@ -255,7 +290,7 @@ export function prepareQATracksForTiming(
         filePath: selectedFile.path,
         role: 'dubber',
         status: (actor.assignmentStatus?.toLowerCase() || (selectedFile.type === 'FIXES' ? 'fixes_needed' : 'recorded')) as Track['status'],
-        files: (allFiles.length > 0 ? allFiles : [selectedFile]) as any,
+        files: sortedAllFiles as any,
         selectedFileId: selectedFile.id,
         comments: actor.comments || [],
         patchSnippet: patchSnippet ? {
@@ -268,50 +303,26 @@ export function prepareQATracksForTiming(
     }
 
     // СЦЕНАРИЙ 2: У даббера ДВЕ (или более) основных дорожек
-    // Правило: "Если у дабера две дорожки, но нет фиксов, значит, дальше в тайминг и в сведение идёт две дорожки. Вот жёстко две дорожки.
-    // Если у дабера две дорожки и фиксы (три суммарно), то фиксы встраиваются в одну из дорожек, в ту, в которой есть эта фраза,
-    // после чего в сведение идёт также две дорожки".
     for (let tIdx = 0; tIdx < mainCandidates.length; tIdx++) {
       const mainFile = mainCandidates[tIdx];
       const trackNum = tIdx + 1;
       const trackLabel = `${dubberNick} (Дорожка ${trackNum})`;
 
-      // Ищем фиксы, предназначенные именно для этой дорожки
       const matchingFixes = fixCandidates.filter(f => isFixForTrack(f, mainFile.name, tIdx));
-      // Если фикс один и не имеет явных меток трека, но есть нераспределенный фикс:
       let assignedFix = matchingFixes.length > 0 ? matchingFixes[matchingFixes.length - 1] : null;
       if (!assignedFix && fixCandidates.length > 0) {
-        // Если фикс ровно один на все дорожки и не распределен, привязываем к дорожке 1
-        // (в тайминге фразы фикса дополнительно маршрутизируются по содержанию реплик)
         if (tIdx === 0 && !fixCandidates.some(f => isFixForTrack(f, '', 1))) {
           assignedFix = fixCandidates[fixCandidates.length - 1];
         }
       }
 
-      let effectiveFile: { id?: string; name: string; path: string; size: number; createdAt?: string; type: 'DUBBER_FILE' | 'FIXES' } = mainFile;
-      let effectivePatchSnippet: typeof assignedFix = null;
+      const effectiveFile = mainFile;
+      const effectivePatchSnippet = assignedFix;
 
-      if (assignedFix) {
-        const mainSize = mainFile.size || 1;
-        const fixSize = assignedFix.size || 0;
-        const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
-        const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
-
-        // Тип 1: Цельный фикс (плюс-минус как оригинал по размеру/весу, >= 70% или разница <= 3 МБ)
-        // Заменяет соответствующую дорожку целиком, вшивать не нужно!
-        if (ratio >= 0.70 || sizeDiffMb <= 3.0) {
-          effectiveFile = assignedFix;
-          effectivePatchSnippet = null;
-        } else {
-          // Тип 2: Фиксы частями (отдельные фразы, гораздо легче оригинала)
-          // Вшиваются в дорожку оригинала
-          effectiveFile = mainFile;
-          effectivePatchSnippet = assignedFix;
-        }
-      }
+      const trackId = dubberId ? `${dubberId}__${normKey}_${trackNum}` : `track_${normKey}_${trackNum}`;
 
       finalTracks.push({
-        id: `track_${normKey}_${trackNum}`,
+        id: trackId,
         projectId: episode.projectId,
         episodeId: episode.id,
         participant: trackLabel,
@@ -321,8 +332,8 @@ export function prepareQATracksForTiming(
         subTrackIndex: trackNum,
         filePath: effectiveFile.path,
         role: 'dubber',
-        status: (actor.assignmentStatus?.toLowerCase() || (effectiveFile.type === 'FIXES' ? 'fixes_needed' : 'recorded')) as Track['status'],
-        files: [effectiveFile] as any,
+        status: (actor.assignmentStatus?.toLowerCase() || 'recorded') as Track['status'],
+        files: sortedAllFiles as any,
         selectedFileId: effectiveFile.id,
         comments: actor.comments || [],
         patchSnippet: effectivePatchSnippet ? {

@@ -7,6 +7,41 @@
     <meta name="description" content="Гибридное кроссплатформенное десктопное приложение для студии озвучки и фандаба." />
     <meta property="og:title" content="Anime Dub Manager" />
     <meta property="og:description" content="Гибридное кроссплатформенное десктопное приложение для студии озвучки и фандаба." />
+    <script>
+      (function() {
+        function shouldSuppress(msg, stack, filename) {
+          var full = (String(msg || '') + ' ' + String(stack || '') + ' ' + String(filename || '')).toLowerCase();
+          return full.indexOf('metamask') !== -1 ||
+                 full.indexOf('chrome-extension://') !== -1 ||
+                 full.indexOf('moz-extension://') !== -1 ||
+                 full.indexOf('safari-extension://') !== -1 ||
+                 full.indexOf('inpage.js') !== -1 ||
+                 full.indexOf('failed to connect') !== -1;
+        }
+        window.addEventListener('unhandledrejection', function(event) {
+          var reason = event ? event.reason : null;
+          var msg = reason ? (reason.message || String(reason)) : '';
+          var stack = reason ? (reason.stack || '') : '';
+          if (shouldSuppress(msg, stack)) {
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+          }
+        }, true);
+        window.addEventListener('error', function(event) {
+          var msg = event ? (event.message || '') : '';
+          var stack = (event && event.error) ? event.error.stack : '';
+          var filename = event ? (event.filename || '') : '';
+          if (shouldSuppress(msg, stack, filename)) {
+            event.preventDefault();
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+          }
+        }, true);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

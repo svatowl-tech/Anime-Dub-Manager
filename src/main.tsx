@@ -9,16 +9,35 @@ import './lib/webFileSystem.ts';
 
 const isDebug = window.location.hash === '#/debug';
 
+function isIgnorableError(msg: string, stack?: string, filename?: string): boolean {
+  const fullText = `${msg} ${stack || ''} ${filename || ''}`.toLowerCase();
+  return (
+    fullText.includes('chrome-extension://') ||
+    fullText.includes('moz-extension://') ||
+    fullText.includes('safari-extension://') ||
+    fullText.includes('metamask') ||
+    fullText.includes('ethereum') ||
+    fullText.includes('inpage.js') ||
+    fullText.includes('guest_view_manager_call') ||
+    fullText.includes('err_aborted') ||
+    fullText.includes('(-3)') ||
+    fullText.includes('resizeobserver') ||
+    fullText.includes('websocket') ||
+    fullText.includes('vite')
+  );
+}
+
 // Global uncaught exception listener with rich diagnostic trace
 window.addEventListener('error', (event) => {
   const msg = event.message || '';
-  if (
-    msg.includes('GUEST_VIEW_MANAGER_CALL') ||
-    msg.includes('ERR_ABORTED') ||
-    msg.includes('(-3)') ||
-    msg.toLowerCase().includes('websocket')
-  ) {
+  const stack = event.error ? event.error.stack : '';
+  const filename = event.filename || '';
+
+  if (isIgnorableError(msg, stack, filename)) {
     event.preventDefault();
+    if (typeof event.stopImmediatePropagation === 'function') {
+      event.stopImmediatePropagation();
+    }
     return;
   }
 
@@ -32,20 +51,19 @@ window.addEventListener('error', (event) => {
   if ((window as any).electronAPI && (window as any).electronAPI.send) {
     (window as any).electronAPI.send('log-error', event.error ? event.error.stack : event.message);
   }
-});
+}, true);
 
 // Global unhandled promise rejection listener
 window.addEventListener('unhandledrejection', (event) => {
   const reason = event.reason;
   const msg = reason ? (reason.message || String(reason)) : '';
-  if (
-    msg.includes('GUEST_VIEW_MANAGER_CALL') ||
-    msg.includes('ERR_ABORTED') ||
-    msg.includes('-3') ||
-    msg.toLowerCase().includes('websocket') ||
-    msg.toLowerCase().includes('vite')
-  ) {
+  const stack = reason ? (reason.stack || '') : '';
+
+  if (isIgnorableError(msg, stack)) {
     event.preventDefault();
+    if (typeof event.stopImmediatePropagation === 'function') {
+      event.stopImmediatePropagation();
+    }
     return;
   }
 
@@ -57,7 +75,7 @@ window.addEventListener('unhandledrejection', (event) => {
   if ((window as any).electronAPI && (window as any).electronAPI.send) {
     (window as any).electronAPI.send('log-error', reason ? (reason.stack || String(reason)) : 'Unhandled Rejection');
   }
-});
+}, true);
 
 appLogger.info('SYSTEM', '🚀 Инициализация React интерфейса Anime Dub Manager завершена.');
 
