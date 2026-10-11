@@ -545,7 +545,7 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
   vars.yandexUrl = yandexUrl;
   vars.yandexSection = yandexUrl ? `\n📁 Исходники серии: ${yandexUrl}\n` : '';
 
-  const dubberFixes: Record<string, { dubber: Participant, fixes: { character: string, comments: any[] }[] }> = {};
+  const dubberFixes: Record<string, { dubber: Participant, comments: any[] }> = {};
   assignments.forEach(as => {
     const assignedId = as.substituteId || as.dubberId;
     if (!assignedId || as.status !== 'FIXES_NEEDED') return;
@@ -554,20 +554,35 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
     let comments = [];
     try { comments = JSON.parse(as.comments || '[]'); } catch (e) {}
     if (!Array.isArray(comments) || comments.length === 0) return;
-    if (!dubberFixes[assignedId]) dubberFixes[assignedId] = { dubber, fixes: [] };
-    dubberFixes[assignedId].fixes.push({ character: as.characterName, comments });
+    if (!dubberFixes[assignedId]) dubberFixes[assignedId] = { dubber, comments: [] };
+    const getCommentKey = (c: any) => {
+      if (c.subId !== undefined && c.subId !== null) {
+        return `sub_${c.subId}_${(c.text || '').trim()}`;
+      }
+      return `${(c.text || '').trim()}_${Math.round(c.timestamp || 0)}`;
+    };
+    comments.forEach(c => {
+      const key = getCommentKey(c);
+      if (!dubberFixes[assignedId].comments.some(existing => existing.id === c.id || getCommentKey(existing) === key)) {
+        dubberFixes[assignedId].comments.push(c);
+      }
+    });
   });
 
   vars.dubberFixesSections = Object.keys(dubberFixes).map(id => {
-    const { dubber, fixes } = dubberFixes[id];
+    const { dubber, comments } = dubberFixes[id];
     const mention = (dubber.telegram && dubber.telegram.startsWith('@')) ? dubber.telegram : `@${dubber.telegram || dubber.nickname}`;
-    const fixesText = fixes.map(f => {
-      const characterFixes = f.comments.map(c => {
-        const time = typeof c.timestamp === 'number' ? new Date(c.timestamp * 1000).toISOString().substr(14, 5) : '??:??';
-        return `  • [${time}] ${c.text}`;
-      }).join('\n');
-      return `🔹 ${f.character}:\n${characterFixes}`;
-    }).join('\n\n');
+    const sortedComments = [...comments].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const fixesText = sortedComments.map(c => {
+      const sec = typeof c.timestamp === 'number' ? c.timestamp : 0;
+      const hours = Math.floor(sec / 3600);
+      const mins = Math.floor((sec % 3600) / 60);
+      const secs = Math.floor(sec % 60);
+      const timeStr = hours > 0 
+        ? `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+        : `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+      return `  • [${timeStr}] ${c.text}`;
+    }).join('\n');
     return `${dubber.nickname} (${mention}):\n${fixesText}`;
   }).join('\n\n') || '';
 

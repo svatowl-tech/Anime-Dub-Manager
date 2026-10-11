@@ -364,6 +364,24 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [isVideoMuted, setIsVideoMuted] = useState<boolean>(false);
   const [trackVolume, setTrackVolume] = useState<number>(0.95);
   const [isTrackMuted, setIsTrackMuted] = useState<boolean>(false);
+  const [rolesVolumeMap, setRolesVolumeMap] = useState<Record<string, number>>({});
+
+  const handleUpdateDubberVolume = useCallback(async (trackKey: string, newPct: number) => {
+    setRolesVolumeMap(prev => {
+      const updated = { ...prev, [trackKey]: newPct };
+      if (currentEpisode) {
+        ipcSafe.invoke('mixing-save-timing-metadata', {
+          episode: currentEpisode,
+          targetDir: workingDir || undefined,
+          timingMetadata: {
+            rolesVolumeMap: updated,
+            updatedAt: new Date().toISOString()
+          }
+        }).catch(() => {});
+      }
+      return updated;
+    });
+  }, [currentEpisode, workingDir]);
 
   // Helper to stop and clear multi-track module mix audio
   const stopAndClearModuleMix = useCallback(() => {
@@ -414,6 +432,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         setWorkingDir(res.workingDir || '');
         if (res.moduleDatabase) {
           setModuleDatabase(res.moduleDatabase);
+        }
+        if (res.rolesVolumeMap) {
+          setRolesVolumeMap(res.rolesVolumeMap);
         }
         mixLog('info', 'Статус', `Состояние загружено: «${res.workingDir || ''}». Модулей: ${res.manifest.pipeline?.length || 0}. Исходных дорожек: ${res.manifest.sourceFiles?.dubberTracks?.length || 0}`, {
           manifest: res.manifest,
@@ -1999,6 +2020,33 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                         </div>
 
                         <div className="flex items-center gap-3 shrink-0 text-[11px] text-neutral-400">
+                          {/* Dubber Track Volume Slider */}
+                          {(() => {
+                            const trackKey = tr.dubberNick || tr.name;
+                            const curVol = rolesVolumeMap[trackKey] ?? rolesVolumeMap[tr.name] ?? 100;
+                            return (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="flex items-center gap-1.5 px-2 py-0.5 rounded bg-neutral-950/80 border border-neutral-800"
+                                title={`Индивидуальная громкость даббера: ${curVol}% (сохраняется в сведении и тайминге)`}
+                              >
+                                <Volume2 className="w-3 h-3 text-cyan-400 shrink-0" />
+                                <input
+                                  type="range"
+                                  min="20"
+                                  max="180"
+                                  step="5"
+                                  value={curVol}
+                                  onChange={(e) => handleUpdateDubberVolume(trackKey, parseInt(e.target.value, 10))}
+                                  className="w-16 h-1 accent-cyan-400 bg-neutral-800 rounded cursor-pointer"
+                                />
+                                <span className={`font-mono text-[10px] w-8 text-right font-medium ${curVol !== 100 ? 'text-cyan-300 font-bold' : 'text-neutral-400'}`}>
+                                  {curVol}%
+                                </span>
+                              </div>
+                            );
+                          })()}
+
                           <span>{formatFileSize(tr.size)}</span>
                           <span className="px-2 py-0.5 bg-neutral-800 rounded text-emerald-400 text-[10px] font-medium">
                             {isSelected ? '▶ Играет' : 'Слушать'}

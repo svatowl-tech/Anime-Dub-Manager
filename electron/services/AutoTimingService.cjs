@@ -8,18 +8,12 @@ const ffmpeg = require('fluent-ffmpeg');
 
 /**
  * Высокоточная конвертация Float32 сэмпла в 16-битный PCM (Int16LE)
- * Обеспечивает 100% линейную прозрачную передачу исходного звука без искажений
- * с мягкой защитой от пикового клиппинга выше -0.45 dBFS (0.95).
+ * Обеспечивает 100% линейную прозрачную передачу исходного звука без искажений,
+ * лимитеров и сатурации.
  */
 function floatToPcm16(fVal) {
-  const abs = Math.abs(fVal);
-  if (abs <= 0.95) {
-    return Math.round(fVal * 32767.0);
-  }
-  const over = abs - 0.95;
-  const compressed = 0.95 + 0.048 * Math.tanh(over / 0.15);
-  const limited = fVal < 0 ? -compressed : compressed;
-  return Math.round(limited * 32767.0);
+  if (Number.isNaN(fVal)) return 0;
+  return Math.max(-32768, Math.min(32767, Math.round(fVal * 32768.0)));
 }
 
 /**
@@ -512,35 +506,73 @@ class AutoTimingService {
       const mainTracks = actorTracks.filter(t => !t.isFix);
       const fixTracks = actorTracks.filter(t => t.isFix);
 
-      const newestMain = mainTracks.length > 0 ? mainTracks[mainTracks.length - 1] : null;
-      const newestFix = fixTracks.length > 0 ? fixTracks[fixTracks.length - 1] : null;
+      // СЦЕНАРИЙ 1: У даббера 1 основная дорожка (или только фиксы)
+      if (mainTracks.length <= 1) {
+        const newestMain = mainTracks[0] || null;
+        const newestFix = fixTracks.length > 0 ? fixTracks[fixTracks.length - 1] : null;
 
-      if (newestMain && newestFix) {
-        let mainSize = 0;
-        let fixSize = 0;
-        try { mainSize = fs.statSync(newestMain.trackPath).size; } catch (e) {}
-        try { fixSize = fs.statSync(newestFix.trackPath).size; } catch (e) {}
+        if (newestMain && newestFix) {
+          let mainSize = 0;
+          let fixSize = 0;
+          try { mainSize = fs.statSync(newestMain.trackPath).size; } catch (e) {}
+          try { fixSize = fs.statSync(newestFix.trackPath).size; } catch (e) {}
 
-        const ratio = (mainSize > 0 && fixSize > 0) ? (fixSize / mainSize) : 0;
+          const ratio = (mainSize > 0 && fixSize > 0) ? (fixSize / mainSize) : 0;
+          const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
 
-        // Rule 2a: Full Fix (size/duration >= 70%)
-        // Draft track (DUBBER_FILE) is COMPLETELY EXCLUDED!
-        if (ratio >= 0.70 || fixSize === 0) {
+          // Тип 1: Цельный фикс (плюс-минус как оригинал по размеру, >= 70% или разница <= 3 МБ)
+          // Заменяет предыдущую дорожку целиком, вшивание не требуется!
+          if (ratio >= 0.70 || sizeDiffMb <= 3.0 || fixSize === 0) {
+            newestFix.isFix = false;
+            deduplicatedMatchedTracks.push(newestFix);
+          } else {
+            // Тип 2: Фиксы частями (отдельные фразы, гораздо легче оригинала) — вшиваются в оригинал
+            if (!newestMain.fixTargetLines || newestMain.fixTargetLines.length === 0) {
+              newestMain.fixTargetLines = newestFix.fixTargetLines;
+            }
+            newestMain.patchSnippetPath = newestFix.trackPath;
+            deduplicatedMatchedTracks.push(newestMain);
+          }
+        } else if (newestFix) {
           newestFix.isFix = false;
           deduplicatedMatchedTracks.push(newestFix);
-        } else {
-          // Rule 2b: Local snippet (< 70%)
-          if (!newestMain.fixTargetLines || newestMain.fixTargetLines.length === 0) {
-            newestMain.fixTargetLines = newestFix.fixTargetLines;
-          }
-          newestMain.patchSnippetPath = newestFix.trackPath;
+        } else if (newestMain) {
           deduplicatedMatchedTracks.push(newestMain);
         }
-      } else if (newestFix) {
-        newestFix.isFix = false;
-        deduplicatedMatchedTracks.push(newestFix);
-      } else if (newestMain) {
-        deduplicatedMatchedTracks.push(newestMain);
+        continue;
+      }
+
+      // СЦЕНАРИЙ 2: У даббера 2 (или более) основных дорожек
+      // Обе дорожки сохраняются, а цельный фикс заменяет соответствующую дорожку, либо сниппет вшивается в неё
+      for (let mIdx = 0; mIdx < mainTracks.length; mIdx++) {
+        const mainTr = mainTracks[mIdx];
+        const assignedFix = fixTracks.find(f => {
+          const fName = (f.trackPath || '').toLowerCase();
+          const trNum = mIdx + 1;
+          return fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`);
+        }) || (mIdx === 0 && fixTracks.length === 1 ? fixTracks[0] : null);
+
+        if (assignedFix) {
+          let mainSize = 0;
+          let fixSize = 0;
+          try { mainSize = fs.statSync(mainTr.trackPath).size; } catch (e) {}
+          try { fixSize = fs.statSync(assignedFix.trackPath).size; } catch (e) {}
+
+          const ratio = (mainSize > 0 && fixSize > 0) ? (fixSize / mainSize) : 0;
+          const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
+
+          if (ratio >= 0.70 || sizeDiffMb <= 3.0) {
+            // Цельный фикс заменяет данную дорожку целиком
+            assignedFix.isFix = false;
+            deduplicatedMatchedTracks.push(assignedFix);
+          } else {
+            // Фикс частями — прикрепляем сниппет для вшивания
+            mainTr.patchSnippetPath = assignedFix.trackPath;
+            deduplicatedMatchedTracks.push(mainTr);
+          }
+        } else {
+          deduplicatedMatchedTracks.push(mainTr);
+        }
       }
     }
 
@@ -873,13 +905,14 @@ class AutoTimingService {
       const { track: fixTrack, phrases: fixPhrases } = fixItem;
       if (fixPhrases.length === 0) continue;
 
-      const origItem = originalTracks.find(t => 
+      // Находим все дорожки этого актёра (если их 2: дорожка 1 и дорожка 2)
+      const actorOrigItems = originalTracks.filter(t => 
         (fixTrack.dubberId && t.track.dubberId === fixTrack.dubberId) ||
         (t.track.characterName === fixTrack.characterName) ||
         (t.track.dubberNick && fixTrack.dubberNick && isNameMatch(t.track.dubberNick, fixTrack.dubberNick))
       );
 
-      if (!origItem) {
+      if (actorOrigItems.length === 0) {
         const standaloneItem = {
           track: { ...fixTrack, isFix: false },
           phrases: fixPhrases
@@ -888,26 +921,34 @@ class AutoTimingService {
         continue;
       }
 
-      const origPhrases = origItem.phrases;
-
       for (const fixPhrase of fixPhrases) {
+        let bestOrigItem = null;
         let matchedOrigIdx = -1;
         let minDiff = Infinity;
 
-        for (let i = 0; i < origPhrases.length; i++) {
-          const origP = origPhrases[i];
-          if (origP.subId && fixPhrase.subId && origP.subId === fixPhrase.subId) {
-            matchedOrigIdx = i;
-            break;
+        // Ищем, в какой именно из дорожек даббера присутствует эта фраза (по subId или таймкоду)
+        for (const origItem of actorOrigItems) {
+          const origPhrases = origItem.phrases;
+          for (let i = 0; i < origPhrases.length; i++) {
+            const origP = origPhrases[i];
+            if (origP.subId && fixPhrase.subId && origP.subId === fixPhrase.subId) {
+              bestOrigItem = origItem;
+              matchedOrigIdx = i;
+              minDiff = 0;
+              break;
+            }
+            const diff = Math.abs(origP.subStartSec - fixPhrase.subStartSec);
+            if (diff < minDiff && diff < 3.0) {
+              minDiff = diff;
+              bestOrigItem = origItem;
+              matchedOrigIdx = i;
+            }
           }
-          const diff = Math.abs(origP.subStartSec - fixPhrase.subStartSec);
-          if (diff < minDiff && diff < 3.0) {
-            minDiff = diff;
-            matchedOrigIdx = i;
-          }
+          if (minDiff === 0) break;
         }
 
-        if (matchedOrigIdx >= 0) {
+        if (bestOrigItem && matchedOrigIdx >= 0) {
+          const origPhrases = bestOrigItem.phrases;
           const oldOrigPhrase = origPhrases[matchedOrigIdx];
           fixesAppliedCount++;
 
@@ -919,7 +960,7 @@ class AutoTimingService {
             leftoverTailsCleanedCount++;
             const tailSec = Math.abs(durDiff);
             const tailMsg = `Фраза фикса короче оригинала на ${tailSec.toFixed(2)}с. Старая фраза полностью обнулена/заглушена, хвост удален.`;
-            fixLogs.push(`[${formatSeconds(oldOrigPhrase.targetStartSec)}] Даббер «${origItem.track.dubberNick}»: ${tailMsg}`);
+            fixLogs.push(`[${formatSeconds(oldOrigPhrase.targetStartSec)}] Даббер «${bestOrigItem.track.dubberNick}»: ${tailMsg}`);
           }
 
           const replacedPhrase = {
@@ -947,7 +988,7 @@ class AutoTimingService {
               const pushDelta = (replacedPhrase.targetEndSec + minGapSec) - nextPhrase.targetStartSec;
               
               const logMsg = `Фраза фикса длиннее оригинала на ${durDiff.toFixed(2)}с и перекрывала следующую фразу. Каскадный сдвиг (ripple shift) на +${pushDelta.toFixed(2)}с вперед.`;
-              fixLogs.push(`[${formatSeconds(nextPhrase.targetStartSec)}] Даббер «${origItem.track.dubberNick}»: ${logMsg}`);
+              fixLogs.push(`[${formatSeconds(nextPhrase.targetStartSec)}] Даббер «${bestOrigItem.track.dubberNick}»: ${logMsg}`);
               collisionLogs.push(`[${formatSeconds(nextPhrase.targetStartSec)}] ${logMsg}`);
 
               for (let r = matchedOrigIdx + 1; r < origPhrases.length; r++) {
@@ -1215,12 +1256,18 @@ class AutoTimingService {
       const floatChunk = new Float32Array(samplesPerChunk * channels);
 
       // Параметры атак и затуханий:
-      // Pre-roll: 90мс (защита 'П','Б','Т'), Fade-in: 10мс (Hann window)
-      // Post-roll: 180мс (хвост реверберации комнаты), Fade-out: 15мс (Hann window)
-      const safetyPreSec = 0.090; // 90 ms
-      const safetyPostSec = 0.180; // 180 ms
-      const fadeSamplesIn = Math.min(480, Math.floor(sampleRate * 0.010)); // 10 ms = 480 samples
-      const fadeSamplesOut = Math.min(720, Math.floor(sampleRate * 0.015)); // 15 ms = 720 samples
+      // При экспорте из тайминга (renderFromClips / exactTimelineRender) границы фраз УЖЕ точно выставлены
+      // пользователем/детектором тишины. Смещение назад (pre-roll) и вперед (post-roll) отключаются,
+      // чтобы фразы не наезжали друг на друга и не создавали искусственных перегрузок звука.
+      const isExactTimingExport = Boolean(options.renderFromClips || options.exactTimelineRender);
+      const safetyPreSec = isExactTimingExport ? 0.0 : 0.090; // 90 ms для автотайминга, 0 для ручного/тайминг-экспорта
+      const safetyPostSec = isExactTimingExport ? 0.0 : 0.180; // 180 ms для автотайминга, 0 для ручного/тайминг-экспорта
+      const fadeSamplesIn = isExactTimingExport
+        ? Math.min(384, Math.floor(sampleRate * 0.008)) // 8 ms = 384 samples (чистый микрофейд без щелчков)
+        : Math.min(480, Math.floor(sampleRate * 0.010)); // 10 ms = 480 samples
+      const fadeSamplesOut = isExactTimingExport
+        ? Math.min(384, Math.floor(sampleRate * 0.008)) // 8 ms
+        : Math.min(720, Math.floor(sampleRate * 0.015)); // 15 ms
 
       let totalPcmBytesWritten = 0;
 
@@ -1284,7 +1331,8 @@ class AutoTimingService {
           if (!srcFdInfo) continue;
 
           // Расчет исходных границ считывания с учетом доступных пред- и пост-интервалов
-          const srcDurationSec = srcFdInfo.size / bytesPerSec;
+          const srcTotalFrames = Math.floor(srcFdInfo.size / bytesPerSampleFrame);
+          const srcDurationSec = srcTotalFrames / sampleRate;
           const srcStart = typeof p.sourceStartSec === 'number' ? p.sourceStartSec : 0;
           const srcEnd = typeof p.sourceEndSec === 'number' ? p.sourceEndSec : (srcStart + (p.durationSec || 1.0));
           const trgStart = typeof p.targetStartSec === 'number' ? p.targetStartSec : 0;
@@ -1295,7 +1343,7 @@ class AutoTimingService {
           const rawSrcStartSec = srcStart - availablePreSec;
           const rawSrcEndSec = srcEnd + availablePostSec;
           const totalPhraseDuration = Math.max(0, rawSrcEndSec - rawSrcStartSec);
-          const totalPhraseSamples = Math.floor(totalPhraseDuration * sampleRate);
+          const totalPhraseSamples = Math.round(totalPhraseDuration * sampleRate);
           if (totalPhraseSamples <= 0) continue;
 
           const phraseTargetStart = trgStart - availablePreSec;
@@ -1306,46 +1354,57 @@ class AutoTimingService {
             continue;
           }
 
-          // Расчет относительного смещения внутри чанка
+          // Расчет относительного смещения внутри чанка (строго в целых сэмплах!)
           const overlapStartSec = Math.max(chunkStartSec, phraseTargetStart);
           const overlapEndSec = Math.min(chunkEndSec, phraseTargetEnd);
 
-          const phraseSampleOffsetStart = Math.max(0, Math.floor((overlapStartSec - phraseTargetStart) * sampleRate));
-          const phraseSampleOffsetEnd = Math.min(totalPhraseSamples, Math.ceil((overlapEndSec - phraseTargetStart) * sampleRate));
+          const phraseSampleOffsetStart = Math.max(0, Math.round((overlapStartSec - phraseTargetStart) * sampleRate));
+          const phraseSampleOffsetEnd = Math.min(totalPhraseSamples, Math.round((overlapEndSec - phraseTargetStart) * sampleRate));
           const samplesToProcess = phraseSampleOffsetEnd - phraseSampleOffsetStart;
           if (samplesToProcess <= 0) continue;
 
-          const bytesToRead = samplesToProcess * bytesPerSampleFrame;
-          const srcStartByte = Math.floor(rawSrcStartSec * bytesPerSec) + (phraseSampleOffsetStart * bytesPerSampleFrame);
+          // Строго фрейм-выровненный расчет байтов источника (кратно 4 байтам!)
+          // Исключает чтение через границу сэмпла (главная причина дисторсии и треска перегруза)
+          const rawSrcStartSample = Math.max(0, Math.round(rawSrcStartSec * sampleRate));
+          const srcGlobalFrameIdx = rawSrcStartSample + phraseSampleOffsetStart;
+          const srcStartByte = srcGlobalFrameIdx * bytesPerSampleFrame;
 
           if (srcStartByte >= srcFdInfo.size) continue;
-          const actualBytesToRead = Math.min(bytesToRead, srcFdInfo.size - srcStartByte);
+          const bytesToRead = samplesToProcess * bytesPerSampleFrame;
+          const availableBytes = srcFdInfo.size - srcStartByte;
+          const safeFramesToRead = Math.min(samplesToProcess, Math.floor(availableBytes / bytesPerSampleFrame));
+          if (safeFramesToRead <= 0) continue;
+          const actualBytesToRead = safeFramesToRead * bytesPerSampleFrame;
 
-          // Временный буфер для одной обрабатываемой фразы (обычно 10-100 КБ)
+          // Временный буфер для одной обрабатываемой фразы
           const phraseTempBuf = Buffer.alloc(actualBytesToRead);
           fs.readSync(srcFdInfo.fd, phraseTempBuf, 0, actualBytesToRead, srcStartByte);
 
           // Определение множителя громкости
-          let volPct = p.volumePercent;
-          if (volPct === undefined || volPct === null) {
-            if (p.id && volumeMap[p.id] !== undefined) {
-              volPct = volumeMap[p.id];
-            } else if (p.characterName && rolesMap[p.characterName] !== undefined) {
-              volPct = rolesMap[p.characterName];
-            } else if (p.dubberNick && rolesMap[p.dubberNick] !== undefined) {
-              volPct = rolesMap[p.dubberNick];
-            } else {
-              volPct = 100;
+          // При экспорте из тайминга строго сохраняем исходный 100% уровень дорожек без нормализаций и изменений
+          let volScale = 1.0;
+          if (!isExactTimingExport && !options.timingExport) {
+            let volPct = p.volumePercent;
+            if (volPct === undefined || volPct === null) {
+              if (p.id && volumeMap[p.id] !== undefined) {
+                volPct = volumeMap[p.id];
+              } else if (p.characterName && rolesMap[p.characterName] !== undefined) {
+                volPct = rolesMap[p.characterName];
+              } else if (p.dubberNick && rolesMap[p.dubberNick] !== undefined) {
+                volPct = rolesMap[p.dubberNick];
+              } else {
+                volPct = 100;
+              }
             }
+            volScale = Math.max(0, (volPct ?? 100) / 100.0);
           }
-          const volScale = Math.max(0, (volPct ?? 100) / 100.0);
 
           const curFadeIn = Math.min(fadeSamplesIn, Math.floor(totalPhraseSamples / 8));
           const curFadeOut = Math.min(fadeSamplesOut, Math.floor(totalPhraseSamples / 6));
 
-          const chunkLocalStartSample = Math.max(0, Math.floor((overlapStartSec - chunkStartSec) * sampleRate));
+          const chunkLocalStartSample = Math.max(0, Math.round((overlapStartSec - chunkStartSec) * sampleRate));
 
-          for (let s = 0; s < samplesToProcess; s++) {
+          for (let s = 0; s < safeFramesToRead; s++) {
             const globalPhraseSampleIdx = phraseSampleOffsetStart + s;
             const srcOffset = s * bytesPerSampleFrame;
             const dstSampleIdx = chunkLocalStartSample + s;
@@ -1369,6 +1428,10 @@ class AutoTimingService {
 
             const dstOffset = dstSampleIdx * 2;
             if (isTimelineTrack) {
+              floatChunk[dstOffset] = fLeft;
+              floatChunk[dstOffset + 1] = fRight;
+            } else if (isExactTimingExport || options.timingExport) {
+              // Внутри отдельной дорожки не суммируем амплитуды, чтобы избежать клиппинга и искажений
               floatChunk[dstOffset] = fLeft;
               floatChunk[dstOffset + 1] = fRight;
             } else {

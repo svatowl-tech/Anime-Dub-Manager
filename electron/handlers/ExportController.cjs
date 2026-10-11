@@ -350,16 +350,66 @@ function registerExportHandlers(getData, mainWindow) {
     const actorEntries = Array.from(actorTracksMap.values());
     for (let aIdx = 0; aIdx < actorEntries.length; aIdx++) {
       const { nick, characterName, tracks: actorTrs } = actorEntries[aIdx];
-      const outFilename = `00_timed_${nick}.wav`;
-      const outFilePath = path.join(exportDir, outFilename);
-      const outRawFilePath = path.join(rawDir, outFilename);
 
-      // Collect all phrases for this actor across main tracks and fix layers
-      const phrases = [];
-      let primarySourceFile = null;
+      // Разделение основных дорожек и слоев фиксов по правилам пользователя:
+      // 1. Дорожка + фикс -> фикс встраивается в дорожку (1 итоговая дорожка).
+      // 2. Две дорожки без фиксов -> жестко две дорожки в тайминг и сведение.
+      // 3. Две дорожки + фиксы (3 суммарно) -> фиксы встраиваются в ту дорожку, где эта фраза, и дальше идут 2 дорожки.
+      const isFixTr = (t) => t.id.includes('_fix_') || (t.participant || '').toLowerCase().includes('фикс') || (t.filePath || '').toLowerCase().includes('fix');
+      const mainTrs = actorTrs.filter(t => !isFixTr(t));
+      const fixTrs = actorTrs.filter(t => isFixTr(t));
+      const effectiveMainTrs = mainTrs.length > 0 ? mainTrs : actorTrs;
+      const isMultiTrack = effectiveMainTrs.length > 1;
 
-      for (const tr of actorTrs) {
-        let sourceFile = tr.filePath;
+      // Классификация фиксов по типу:
+      // 1. Цельный фикс (плюс-минус как оригинал по размеру/весу, >= 70% или разница <= 3 МБ):
+      //    полностью заменяет черновую дорожку, вшивание отдельных фраз НЕ ТРЕБУЕТСЯ!
+      // 2. Фрагментарные фиксы (отдельные фразы, гораздо легче оригинала):
+      //    вшиваются в соответствующую дорожку оригинала.
+      const snippetFixClips = [];
+      const fullReplacementFixes = new Map();
+
+      for (const fTr of fixTrs) {
+        let fSize = 0;
+        try { if (fTr.filePath && require('fs').existsSync(fTr.filePath)) fSize = require('fs').statSync(fTr.filePath).size; } catch (e) {}
+
+        let bestMainTr = effectiveMainTrs[0];
+        if (effectiveMainTrs.length > 1) {
+          const fName = (fTr.filePath || fTr.participant || '').toLowerCase();
+          const matched = effectiveMainTrs.find((mt, idx) => {
+            const trNum = idx + 1;
+            return fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`);
+          });
+          if (matched) bestMainTr = matched;
+        }
+
+        let mSize = 0;
+        try { if (bestMainTr?.filePath && require('fs').existsSync(bestMainTr.filePath)) mSize = require('fs').statSync(bestMainTr.filePath).size; } catch (e) {}
+
+        const ratio = (mSize > 0 && fSize > 0) ? (fSize / mSize) : 0;
+        const sizeDiffMb = Math.abs(fSize - mSize) / (1024 * 1024);
+        const isFullReplacement = (ratio >= 0.70 || sizeDiffMb <= 3.0) && fSize > 0;
+
+        if (isFullReplacement && bestMainTr) {
+          fullReplacementFixes.set(bestMainTr.id, fTr);
+          log.info(`[ExportController] Даббер «${nick}»: фикс «${path.basename(fTr.filePath || '')}» является цельным (${(ratio * 100).toFixed(0)}% размера, разница ${sizeDiffMb.toFixed(1)} МБ) — заменяет дорожку целиком, вшивание не требуется.`);
+        } else {
+          const fClips = (clipsMap[fTr.id] || []).filter(c => !c.isDeleted);
+          for (const c of fClips) {
+            snippetFixClips.push({ ...c, trackFilePath: fTr.filePath });
+          }
+        }
+      }
+
+      for (let mIdx = 0; mIdx < effectiveMainTrs.length; mIdx++) {
+        const tr = effectiveMainTrs[mIdx];
+        const trackNum = mIdx + 1;
+        const outFilename = isMultiTrack ? `00_timed_${nick}_дорожка${trackNum}.wav` : `00_timed_${nick}.wav`;
+        const outFilePath = path.join(exportDir, outFilename);
+        const outRawFilePath = path.join(rawDir, outFilename);
+
+        const fullFixTrack = fullReplacementFixes.get(tr.id);
+        let sourceFile = fullFixTrack?.filePath || tr.filePath;
         if ((!sourceFile || !require('fs').existsSync(sourceFile)) && episode.uploads) {
           const matchingUpload = episode.uploads.find(u => 
             (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && 
@@ -370,12 +420,16 @@ function registerExportHandlers(getData, mainWindow) {
           }
         }
 
-        if (sourceFile && require('fs').existsSync(sourceFile) && !primarySourceFile) {
-          primarySourceFile = sourceFile;
-        }
+        let primarySourceFile = sourceFile;
 
-        const clips = (clipsMap[tr.id] || []).filter(c => !c.isDeleted);
-        for (const c of clips) {
+        // Собираем фразы: если был цельный фикс, берем клипы из него, иначе из основной дорожки
+        const rawClips = (fullFixTrack && clipsMap[fullFixTrack.id]?.length > 0)
+          ? clipsMap[fullFixTrack.id]
+          : (clipsMap[tr.id] || []);
+        const trackClips = rawClips.filter(c => !c.isDeleted);
+        const phrases = [];
+
+        for (const c of trackClips) {
           const phraseSrc = (c.sourceAudioPath && require('fs').existsSync(c.sourceAudioPath))
             ? c.sourceAudioPath
             : (sourceFile || primarySourceFile);
@@ -396,47 +450,137 @@ function registerExportHandlers(getData, mainWindow) {
             targetStartSec,
             targetEndSec,
             durationSec: phraseDuration,
-            volumePercent: c.volumePercent ?? Math.round((volsMap[tr.id] ?? 1.0) * 100),
-            isFix: c.isFix || tr.id.includes('_fix_')
+            volumePercent: 100, // Строго сохраняем 100% исходный уровень без нормализации и изменения громкости в тайминге!
+            isFix: Boolean(fullFixTrack)
           });
         }
-      }
 
-      // If primarySourceFile was not found on tracks, check phrases
-      if (!primarySourceFile || !require('fs').existsSync(primarySourceFile)) {
-        const foundFromClip = phrases.find(p => p.sourceAudioPath && require('fs').existsSync(p.sourceAudioPath));
-        if (foundFromClip) {
-          primarySourceFile = foundFromClip.sourceAudioPath;
+        // Вшивание фрагментарных фиксов ТОЛЬКО если дорожка НЕ заменена цельным фиксом
+        if (!fullFixTrack && snippetFixClips.length > 0) {
+          for (const fClip of snippetFixClips) {
+            const fixTargetStart = Number((fClip.clipStartSec + (fClip.offsetSec || 0)).toFixed(3));
+            const fixDur = Number((fClip.durationSec || Math.max(0.1, (fClip.sourceEndSec - fClip.sourceStartSec))).toFixed(3));
+            const fixTargetEnd = Number((fixTargetStart + fixDur).toFixed(3));
+
+            let matchesThisTrack = false;
+            let matchedPhraseIdx = -1;
+
+            for (let pIdx = 0; pIdx < phrases.length; pIdx++) {
+              const p = phrases[pIdx];
+              const overlap = Math.max(0, Math.min(p.targetEndSec, fixTargetEnd) - Math.max(p.targetStartSec, fixTargetStart));
+              if (overlap > 0.2 || Math.abs(p.targetStartSec - fixTargetStart) < 2.5) {
+                matchesThisTrack = true;
+                matchedPhraseIdx = pIdx;
+                break;
+              }
+            }
+
+            if (!isMultiTrack) {
+              matchesThisTrack = true;
+            } else if (!matchesThisTrack && mIdx === 0) {
+              const otherTracksHaveMatch = effectiveMainTrs.some((otherTr, oIdx) => {
+                if (oIdx === mIdx) return false;
+                const oClips = (clipsMap[otherTr.id] || []).filter(c => !c.isDeleted);
+                return oClips.some(oc => {
+                  const oStart = oc.clipStartSec + (oc.offsetSec || 0);
+                  const oEnd = oStart + oc.durationSec;
+                  return Math.max(0, Math.min(oEnd, fixTargetEnd) - Math.max(oStart, fixTargetStart)) > 0.2 || Math.abs(oStart - fixTargetStart) < 2.5;
+                });
+              });
+              if (!otherTracksHaveMatch) {
+                matchesThisTrack = true;
+              }
+            }
+
+            if (matchesThisTrack) {
+              const fixSrc = (fClip.sourceAudioPath && require('fs').existsSync(fClip.sourceAudioPath))
+                ? fClip.sourceAudioPath
+                : (fClip.trackFilePath || primarySourceFile);
+
+              const fixPhraseObj = {
+                id: fClip.id,
+                sourceAudioPath: fixSrc,
+                sourceStartSec: fClip.sourceStartSec ?? 0,
+                sourceEndSec: fClip.sourceEndSec ?? fixDur,
+                targetStartSec: fixTargetStart,
+                targetEndSec: fixTargetEnd,
+                durationSec: fixDur,
+                volumePercent: 100,
+                isFix: true
+              };
+
+              if (matchedPhraseIdx >= 0) {
+                phrases[matchedPhraseIdx] = fixPhraseObj;
+              } else {
+                phrases.push(fixPhraseObj);
+              }
+            }
+          }
         }
-      }
 
-      // Sort phrases chronologically
-      phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
+        // If primarySourceFile was not found on tracks, check phrases
+        if (!primarySourceFile || !require('fs').existsSync(primarySourceFile)) {
+          const foundFromClip = phrases.find(p => p.sourceAudioPath && require('fs').existsSync(p.sourceAudioPath));
+          if (foundFromClip) {
+            primarySourceFile = foundFromClip.sourceAudioPath;
+          }
+        }
 
-      if (phrases.length > 0 && primarySourceFile && require('fs').existsSync(primarySourceFile)) {
-        log.info(`[ExportController] Рендеринг оттаймленной дорожки для даббера «${nick}» (${phrases.length} фраз)...`);
-        await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, phrases, outFilePath, { 
-          targetDir: exportDir, 
-          timingMetadata,
-          renderFromClips: true,
-          exactTimelineRender: true
+        // Sort phrases chronologically
+        phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
+
+        // Deduplicate phrases strictly within this single track
+        const cleanPhrases = [];
+        for (const p of phrases) {
+          if (cleanPhrases.length === 0) {
+            cleanPhrases.push(p);
+            continue;
+          }
+          const last = cleanPhrases[cleanPhrases.length - 1];
+          const overlapStart = Math.max(last.targetStartSec, p.targetStartSec);
+          const overlapEnd = Math.min(last.targetEndSec, p.targetEndSec);
+          const overlapSec = Math.max(0, overlapEnd - overlapStart);
+
+          if (overlapSec > 0.35 && overlapSec > Math.min(last.durationSec, p.durationSec) * 0.4) {
+            if (p.isFix && !last.isFix) {
+              cleanPhrases[cleanPhrases.length - 1] = p;
+            } else if (!last.isFix && p.durationSec > last.durationSec) {
+              cleanPhrases[cleanPhrases.length - 1] = p;
+            }
+            continue;
+          }
+          cleanPhrases.push(p);
+        }
+
+        if (cleanPhrases.length > 0 && primarySourceFile && require('fs').existsSync(primarySourceFile)) {
+          const trackTitle = isMultiTrack ? `«${nick}» (дорожка ${trackNum})` : `«${nick}»`;
+          log.info(`[ExportController] Рендеринг оттаймленной дорожки для даббера ${trackTitle} (${cleanPhrases.length} фраз, без нормализаций и искажений)...`);
+          await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, cleanPhrases, outFilePath, { 
+            targetDir: exportDir, 
+            timingMetadata,
+            renderFromClips: true,
+            exactTimelineRender: true,
+            timingExport: true
+          });
+        } else if (primarySourceFile && require('fs').existsSync(primarySourceFile)) {
+          await fs.copyFile(primarySourceFile, outFilePath);
+        }
+
+        if (require('fs').existsSync(outFilePath)) {
+          try {
+            await fs.copyFile(outFilePath, outRawFilePath);
+          } catch (e) {}
+        }
+
+        renderedTracks.push({
+          dubberNick: isMultiTrack ? `${nick} (Дорожка ${trackNum})` : nick,
+          baseNick: nick,
+          trackIndex: trackNum,
+          characterName,
+          outputPath: outFilePath,
+          phrasesCount: cleanPhrases.length
         });
-      } else if (primarySourceFile && require('fs').existsSync(primarySourceFile)) {
-        await fs.copyFile(primarySourceFile, outFilePath);
       }
-
-      if (require('fs').existsSync(outFilePath)) {
-        try {
-          await fs.copyFile(outFilePath, outRawFilePath);
-        } catch (e) {}
-      }
-
-      renderedTracks.push({
-        dubberNick: nick,
-        characterName,
-        outputPath: outFilePath,
-        phrasesCount: phrases.length
-      });
 
       onProgress({ percent: Math.round(((aIdx + 1) / Math.max(1, actorEntries.length)) * 100) });
     }

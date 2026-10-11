@@ -2324,10 +2324,13 @@ class MixingPipelineService {
     }
 
     await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    const timingMeta = await this.getTimingMetadata(workingDir);
     return {
       success: true,
       workingDir,
-      manifest
+      manifest,
+      timingMeta,
+      rolesVolumeMap: timingMeta?.rolesVolumeMap || {}
     };
   }
 
@@ -2487,6 +2490,9 @@ class MixingPipelineService {
         
         let dubberNick = f;
         const bracketMatch = f.match(/\[(.*?)\]/);
+        const trackMatch = f.match(/_дорожка(\d+)/i) || f.match(/_layer(\d+)/i) || f.match(/_take(\d+)/i);
+        const trackNum = trackMatch ? trackMatch[1] : null;
+
         if (f.startsWith('00_timed_')) {
           dubberNick = f.replace(/^00_timed_/, '').replace(audioExts, '');
         } else if (bracketMatch && bracketMatch[1]) {
@@ -2495,7 +2501,7 @@ class MixingPipelineService {
           dubberNick = baseNoExt.replace(/^dub_/i, '').replace(/^.*?_/, '');
         }
 
-        // Clean out track/layer/fix suffixes from nickname
+        // Clean out track/layer/fix suffixes from base nickname
         dubberNick = dubberNick
           .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
           .replace(/_дорожка\d+/gi, '')
@@ -2535,6 +2541,8 @@ class MixingPipelineService {
           dubberNick = baseNoExt || 'Даббер';
         }
 
+        const displayNick = trackNum ? `${dubberNick} (Дорожка ${trackNum})` : dubberNick;
+
         if (foundDubberTracks.some(t => t.path === fullP || (t.name === f && t.size === st.size))) {
           continue;
         }
@@ -2542,7 +2550,9 @@ class MixingPipelineService {
         foundDubberTracks.push({
           id: f,
           name: f,
-          dubberNick: dubberNick.trim(),
+          dubberNick: displayNick.trim(),
+          baseDubberNick: dubberNick.trim(),
+          trackNumber: trackNum ? parseInt(trackNum, 10) : 1,
           path: fullP,
           size: st.size,
           exists: true,
@@ -2564,7 +2574,15 @@ class MixingPipelineService {
       for (const u of qaUploads) {
         const f = path.basename(u.path);
         const st = fsSync.statSync(u.path);
-        const dubberNick = (u.dubberNick || u.dubberName || u.name || f).replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').trim();
+        const trackMatch = f.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
+        const baseNick = (u.dubberNick || u.dubberName || u.name || f)
+          .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+          .replace(/^00_timed_/i, '')
+          .replace(/\.wav$/i, '')
+          .trim();
+        const dubberNick = trackMatch 
+          ? `${baseNick || 'Даббер'} (${trackMatch[1].replace('дорожка', 'Дорожка ')})` 
+          : (baseNick || 'Даббер');
         foundDubberTracks.push({
           id: f,
           name: f,
@@ -2584,15 +2602,12 @@ class MixingPipelineService {
       filteredDubberTracks = timedMasters;
     }
 
-    // Deduplicate so each unique actor/dubber appears EXACTLY ONCE (or preserve unique files if nickname is generic)
+    // Deduplicate so each unique audio track appears once (preserving multiple tracks for the same actor)
     const uniqueNickMap = new Map();
     for (const tr of filteredDubberTracks) {
-      let normNick = tr.dubberNick.toLowerCase();
-      if (normNick === 'даббер' || normNick === 'unknown' || !normNick) {
-        normNick = `${normNick}_${tr.id || tr.name}`;
-      }
-      if (!uniqueNickMap.has(normNick)) {
-        uniqueNickMap.set(normNick, tr);
+      const key = tr.path || tr.name;
+      if (!uniqueNickMap.has(key)) {
+        uniqueNickMap.set(key, tr);
       }
     }
 
@@ -2798,6 +2813,83 @@ class MixingPipelineService {
       if (logFn) logFn(errMsg, 'warn');
       throw new Error(errMsg);
     }
+  }
+
+  _resolveTrackOutName(track, inputFiles, index, prefix) {
+    const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
+    const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
+    const nick = (track.dubberNick || `dubber_${index + 1}`).replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim() || `dubber_${index + 1}`;
+    
+    if (trMatch) {
+      return `${prefix}${nick}_${trMatch[1].toLowerCase()}.wav`;
+    }
+    
+    const sameNickTracks = inputFiles.filter(f => {
+      const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+      return fNick.toLowerCase() === nick.toLowerCase();
+    });
+    
+    if (sameNickTracks.length > 1) {
+      const occ = inputFiles.slice(0, index + 1).filter(f => {
+        const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+        return fNick.toLowerCase() === nick.toLowerCase();
+      }).length;
+      return `${prefix}${nick}_дорожка${occ}.wav`;
+    }
+    
+    return `${prefix}${nick}.wav`;
+  }
+
+  _resolveTrackNick(track, inputFiles, index) {
+    const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
+    const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
+    const nick = (track.dubberNick || `dubber_${index + 1}`).replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim() || `dubber_${index + 1}`;
+    
+    if (trMatch) {
+      return `${nick} (${trMatch[1].replace('дорожка', 'Дорожка ')})`;
+    }
+    
+    const sameNickTracks = inputFiles.filter(f => {
+      const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+      return fNick.toLowerCase() === nick.toLowerCase();
+    });
+    
+    if (sameNickTracks.length > 1) {
+      const occ = inputFiles.slice(0, index + 1).filter(f => {
+        const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+        return fNick.toLowerCase() === nick.toLowerCase();
+      }).length;
+      return `${nick} (Дорожка ${occ})`;
+    }
+    
+    return nick;
+  }
+
+  _resolveTrackVolumePercent(track, timingMeta) {
+    if (!timingMeta || !timingMeta.rolesVolumeMap) return 100;
+    const tName = (track.name || path.basename(track.path || '')).toLowerCase();
+    const tNick = (track.dubberNick || '').toLowerCase();
+    
+    // 1. Direct match with track name or role (e.g. "Анна (Дорожка 1)")
+    for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
+      const rLower = role.toLowerCase();
+      if (tName.includes(rLower) || rLower.includes(tName)) {
+        return Number(vol) || 100;
+      }
+      if (tNick && rLower.includes(tNick)) {
+        if (tName.includes('дорожка1') && rLower.includes('дорожка 1')) return Number(vol) || 100;
+        if (tName.includes('дорожка2') && rLower.includes('дорожка 2')) return Number(vol) || 100;
+      }
+    }
+    
+    // 2. Nickname match
+    for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
+      const rLower = role.toLowerCase();
+      if (tNick && (rLower.includes(tNick) || tNick.includes(rLower))) {
+        return Number(vol) || 100;
+      }
+    }
+    return 100;
   }
 
   /**
@@ -3708,20 +3800,12 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       // Check if role or phrases have custom volume multiplier in timingMeta
-      let roleVolPct = 100;
-      if (timingMeta && timingMeta.rolesVolumeMap) {
-        for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
-          if (role.toLowerCase().includes(nick.toLowerCase()) || nick.toLowerCase().includes(role.toLowerCase())) {
-            roleVolPct = Number(vol) || 100;
-            break;
-          }
-        }
-      }
+      const roleVolPct = this._resolveTrackVolumePercent(track, timingMeta);
 
       let trackTargetLufs = targetLufs;
       if (roleVolPct !== 100) {
@@ -3835,8 +3919,8 @@ class MixingPipelineService {
     const results = [];
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
       const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
@@ -4021,8 +4105,8 @@ class MixingPipelineService {
     const results = [];
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
       const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
@@ -4406,8 +4490,8 @@ class MixingPipelineService {
     const results = [];
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
@@ -4508,8 +4592,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] Обработка гейта для «${nick}»...`);
@@ -4573,19 +4657,11 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
-      let roleVolPct = 100;
-      if (timingMeta && timingMeta.rolesVolumeMap) {
-        for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
-          if (role.toLowerCase().includes(nick.toLowerCase()) || nick.toLowerCase().includes(role.toLowerCase())) {
-            roleVolPct = Number(vol) || 100;
-            break;
-          }
-        }
-      }
+      const roleVolPct = this._resolveTrackVolumePercent(track, timingMeta);
 
       let trackTargetLufs = targetLufs;
       if (roleVolPct !== 100) {
@@ -4686,8 +4762,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const file = inputFiles[i];
-      const nick = file.dubberNick || `track_${i + 1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(file, inputFiles, i);
+      const outName = this._resolveTrackOutName(file, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i + 1}/${inputFiles.length}] EBU R128 обработка «${nick}» -> ${outName}`);
@@ -4756,8 +4832,8 @@ class MixingPipelineService {
     const results = [];
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] Деэссинг для «${nick}» (${rawFreq} Hz -> normF=${normF}, intensity: ${rawIntensity} -> normI=${normI})...`);
@@ -4808,8 +4884,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] De-Plosive для «${nick}»...`);
@@ -4859,8 +4935,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] Vocal Thickener для «${nick}»...`);
@@ -4913,8 +4989,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] De-Reverb для «${nick}»...`);
@@ -4966,8 +5042,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       const stats = trackAnalysis[track.path] || trackAnalysis[track.name] || {};
@@ -5023,8 +5099,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       const stats = trackAnalysis[track.path] || trackAnalysis[track.name] || {};
@@ -5078,8 +5154,8 @@ class MixingPipelineService {
     const results = [];
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       logFn(`[${i+1}/${inputFiles.length}] Параметрический EQ для «${nick}»...`);
@@ -5134,8 +5210,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
@@ -5246,8 +5322,8 @@ class MixingPipelineService {
 
     for (let i = 0; i < inputFiles.length; i++) {
       const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
@@ -5352,6 +5428,7 @@ class MixingPipelineService {
     const outPath = path.join(stepFolder, outName);
 
     const trackAnalysis = await this.ensureTracksAnalysis(inputFiles, workingDir, logFn);
+    const timingMeta = await this.getTimingMetadata(workingDir);
 
     logFn(`Склеивание и вокальная шинная компрессия ${inputFiles.length} дорожек в «${outName}» (Ratio ${ratio}:1, Thresh ${thresholdDb}dB, Knee ${kneeDb}dB, Makeup +${makeupDb}dB)...`);
 
@@ -5370,9 +5447,12 @@ class MixingPipelineService {
         const rms = typeof st.speechRmsDb === 'number' ? st.speechRmsDb : -24.0;
         // Equalize energy into the glue compressor bus at nominal -20 dB RMS
         const balGain = Math.max(-14, Math.min(18, -20.0 - rms));
-        filterParts.push(`[${i}:a]volume=${balGain.toFixed(1)}dB[bal_${i}]`);
+        const roleVolPct = this._resolveTrackVolumePercent(tr, timingMeta);
+        const userVolGainDb = roleVolPct !== 100 ? (20 * Math.log10(Math.max(10, roleVolPct) / 100)) : 0;
+        const totalGain = Math.max(-24, Math.min(24, balGain + userVolGainDb));
+        filterParts.push(`[${i}:a]volume=${totalGain.toFixed(1)}dB[bal_${i}]`);
         mixInputs.push(`[bal_${i}]`);
-        logFn(`  • Дорожка «${tr.dubberNick || tr.name}» (RMS ${rms} dB) -> пред-баланс шины: ${balGain >= 0 ? '+' : ''}${balGain.toFixed(1)} dB`, 'debug');
+        logFn(`  • Дорожка «${tr.dubberNick || tr.name}» (RMS ${rms} dB, громкость роли ${roleVolPct}%) -> пред-баланс шины: ${totalGain >= 0 ? '+' : ''}${totalGain.toFixed(1)} dB`, 'debug');
       }
       filterParts.push(`${mixInputs.join('')}amix=inputs=${n}:dropout_transition=0:normalize=0[mixed]`);
       filterParts.push(`[mixed]acompressor=threshold=${thresholdDb}dB:ratio=${ratio}:attack=${attackMs}:release=${releaseMs}:knee=${kneeDb}dB:makeup=${makeupDb}dB,alimiter=limit=${peakLimitDb}dB:attack=2:release=40:level=true[out]`);
@@ -5380,7 +5460,10 @@ class MixingPipelineService {
 
       command.complexFilter(filter, ['out']);
     } else {
-      filter = `acompressor=threshold=${thresholdDb}dB:ratio=${ratio}:attack=${attackMs}:release=${releaseMs}:knee=${kneeDb}dB:makeup=${makeupDb}dB,alimiter=limit=${peakLimitDb}dB:attack=2:release=40:level=true`;
+      const roleVolPct = this._resolveTrackVolumePercent(inputFiles[0], timingMeta);
+      const userVolGainDb = roleVolPct !== 100 ? (20 * Math.log10(Math.max(10, roleVolPct) / 100)) : 0;
+      const volFilter = userVolGainDb !== 0 ? `volume=${userVolGainDb.toFixed(1)}dB,` : '';
+      filter = `${volFilter}acompressor=threshold=${thresholdDb}dB:ratio=${ratio}:attack=${attackMs}:release=${releaseMs}:knee=${kneeDb}dB:makeup=${makeupDb}dB,alimiter=limit=${peakLimitDb}dB:attack=2:release=40:level=true`;
       command.audioFilters(filter);
     }
 

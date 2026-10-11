@@ -54,7 +54,8 @@ import {
 import { AudioArtifactType } from '../../lib/qa/artifactDetector';
 import { ArtifactWaveformMarker } from './ArtifactWaveformMarker';
 import { generateSoundEngineerQAReport } from '../../lib/templates';
-import { Episode, Participant, SubtitleLine } from '../../types';
+import { Episode, Participant, SubtitleLine, Track } from '../../types';
+import { saveQAGapsToTimingProject } from '../../lib/qa/timingSyncService';
 
 interface MissingLinesModalProps {
   isOpen: boolean;
@@ -68,6 +69,8 @@ interface MissingLinesModalProps {
   currentThreshold?: number;
   episode?: Episode | null;
   participants?: Participant[];
+  tracks?: Track[];
+  onOpenTimingPanel?: () => void;
   onGenerateSoundEngineerMessage?: () => void;
   onOpenScanConfig?: () => void;
   scanReport?: QAScanReport;
@@ -90,6 +93,8 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   currentThreshold = 3.0,
   episode,
   participants,
+  tracks = [],
+  onOpenTimingPanel,
   onGenerateSoundEngineerMessage,
   onOpenScanConfig,
   scanReport,
@@ -598,6 +603,30 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
     }
   };
 
+  const [isSavingToTiming, setIsSavingToTiming] = useState(false);
+
+  const handleSaveToTiming = async (navigateToTiming: boolean = false) => {
+    if (!episode) return;
+    setIsSavingToTiming(true);
+    try {
+      const res = await saveQAGapsToTimingProject(episode, gaps, tracks || []);
+      toast.success(
+        `✓ Записано в файл тайминга! (Наездов: ${res.summary.overlapsCount}, коллизий: ${res.summary.collisionsCount}, рассинхронов: ${res.summary.desyncCount})`
+      );
+      if (navigateToTiming) {
+        SnippetAudioPlayer.stop();
+        onClose();
+        if (onOpenTimingPanel) {
+          onOpenTimingPanel();
+        }
+      }
+    } catch (err: any) {
+      toast.error('Ошибка записи в тайминг: ' + (err?.message || String(err)));
+    } finally {
+      setIsSavingToTiming(false);
+    }
+  };
+
   const handleSubmit = async () => {
     const selected = gaps.filter(g => g.selected);
     if (selected.length === 0) return;
@@ -660,10 +689,21 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
             <button
               onClick={handleGenerateReportForSE}
               className="px-3 py-1.5 rounded-lg text-xs font-bold bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 transition-all flex items-center gap-1.5 shadow-sm hover:shadow-indigo-500/20"
-              title="Сформировать подробный отчет для звукорежиссера по наездам, конфликтам и рассинхрону"
+              title="Выписать звукорежиссеру подробный отчет по наездам, конфликтам и рассинхрону"
             >
               <Headphones className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Сообщение звукарю</span>
+              <span>Выписать звукорежиссеру</span>
+            </button>
+
+            {/* Record to Timing Video Button */}
+            <button
+              onClick={() => handleSaveToTiming(false)}
+              disabled={isSavingToTiming}
+              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-600/25 hover:bg-amber-600/40 text-amber-300 border border-amber-500/40 transition-all flex items-center gap-1.5 shadow-sm hover:shadow-amber-500/20"
+              title="Записать все обнаруженные наезды, коллизии и проблемы в файл тайминга серии (timing_project.analysis.json)"
+            >
+              <Clock className="w-3.5 h-3.5 text-amber-400" />
+              <span>{isSavingToTiming ? 'Запись...' : 'Записать в тайминг'}</span>
             </button>
 
             {/* QA Scan Log Button */}
@@ -3131,6 +3171,19 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
           </div>
 
           <div className="flex items-center gap-3">
+            {onOpenTimingPanel && (
+              <button
+                type="button"
+                onClick={() => handleSaveToTiming(true)}
+                disabled={isSavingToTiming}
+                className="px-4 py-2.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/35 text-amber-300 border border-amber-500/30 text-xs font-bold transition-all flex items-center gap-2 shadow-sm"
+                title="Записать найденные коллизии, наезды и тайминги в файл проекта и перейти в студию Тайминг видео"
+              >
+                <Clock className="w-4 h-4 text-amber-400" />
+                <span>Записать и в Тайминг ➔</span>
+              </button>
+            )}
+
             <button
               onClick={() => {
                 SnippetAudioPlayer.stop();
@@ -3201,7 +3254,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
             {/* Footer */}
             <div className="p-4 border-t border-neutral-800 bg-neutral-900/90 flex items-center justify-between shrink-0 gap-3">
               <div className="text-[11px] text-neutral-400 truncate">
-                Готово для вставки в Telegram, Discord или рабочий трекер
+                Готово для отправки звукарю или записи в тайминг серии
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <button
@@ -3211,11 +3264,22 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                   Закрыть
                 </button>
                 <button
+                  onClick={async () => {
+                    await handleSaveToTiming(true);
+                    setSoundEngineerModalOpen(false);
+                  }}
+                  className="px-4 py-2 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-amber-600/20"
+                  title="Записать найденные коллизии и наезды в файл тайминга и открыть Тайминг видео для сведения своими руками"
+                >
+                  <Clock className="w-4 h-4 text-white" />
+                  <span>Записать в тайминг (свожу сам)</span>
+                </button>
+                <button
                   onClick={handleCopyReport}
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-lg shadow-indigo-600/20"
                 >
                   {hasCopiedReport ? <CheckCircle2 className="w-4 h-4 text-emerald-300" /> : <Copy className="w-4 h-4" />}
-                  <span>{hasCopiedReport ? 'Скопировано!' : 'Скопировать сообщение'}</span>
+                  <span>{hasCopiedReport ? 'Скопировано!' : 'Скопировать звукарю'}</span>
                 </button>
               </div>
             </div>

@@ -55,6 +55,7 @@ import { TimingSettingsModal, TimingSettings, DEFAULT_TIMING_SETTINGS } from './
 import { normalizeSpeechText } from '../lib/qa/whisperTextChecker';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
+import { loadTimingProjectForEpisode, applyTimingPassportToClips, TimingProjectData } from '../lib/qa/timingSyncService';
 
 /**
  * Calculates text similarity for Whisper speech vs. Subtitle text
@@ -641,6 +642,12 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
   const [audioClips, setAudioClips] = useState<Record<string, AudioClip[]>>({}); // trackId -> AudioClip[]
   const [stitchedFixes, setStitchedFixes] = useState<StitchedFixMarker[]>([]);
   const [collisions, setCollisions] = useState<VoiceCollisionMarker[]>([]);
+  const [qaPassportLoaded, setQaPassportLoaded] = useState<{
+    loaded: boolean;
+    summary: TimingProjectData['summary'];
+    savedAt: string;
+  } | null>(null);
+  const savedPassportRef = useRef<TimingProjectData | null>(null);
   
   // Pipeline status flags
   const [isSilenceRemoved, setIsSilenceRemoved] = useState<boolean>(false);
@@ -1614,6 +1621,40 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setTrackSubLinesMap(trackSubMap);
       setAudioClips(initialClips);
 
+      // Check for saved QA Timing Project Passport (connects QA and Timing into a unified system)
+      try {
+        const savedProject = await loadTimingProjectForEpisode(currentEpisode, fetchedTracks);
+        if (savedProject && (
+          (savedProject.collisions && savedProject.collisions.length > 0) ||
+          (savedProject.timingIssues && savedProject.timingIssues.length > 0) ||
+          (savedProject.missingSubtitles && savedProject.missingSubtitles.length > 0)
+        )) {
+          savedPassportRef.current = savedProject;
+          setCollisions(savedProject.collisions || []);
+          setTimingIssues(savedProject.timingIssues || []);
+          setMissingSubtitles(savedProject.missingSubtitles || []);
+          setIsTimingAnalyzed(true);
+          setIsIssuesDrawerOpen((savedProject.timingIssues?.length || 0) > 0);
+
+          // Mark audioClips directly so collisions and overlaps are visually tagged on timeline
+          const markedClips = applyTimingPassportToClips(initialClips, savedProject);
+          setAudioClips(markedClips);
+
+          setQaPassportLoaded({
+            loaded: true,
+            summary: savedProject.summary,
+            savedAt: savedProject.savedAt
+          });
+
+          addLog(
+            `📋 Подхвачен паспорт QA проверки! Замечаний: ${savedProject.summary.totalGaps} (наездов: ${savedProject.summary.overlapsCount}, коллизий: ${savedProject.summary.collisionsCount}, рассинхронов: ${savedProject.summary.desyncCount}, пропусков: ${savedProject.summary.missingCount}). Повторная перепроверка не требуется!`,
+            'success'
+          );
+        }
+      } catch (passportErr) {
+        console.warn('Failed to auto-load QA timing passport:', passportErr);
+      }
+
       if (fetchedTracks.length > 0) {
         toast.success(`Загружено ${fetchedTracks.length} дорожек дабберов с реальными аудиоволнами!`);
       }
@@ -1625,6 +1666,48 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setStatusMessage('');
     }
   }, [currentEpisode, addLog]);
+
+  const handleSyncFromQA = async () => {
+    if (!currentEpisode) return;
+    try {
+      setIsLoading(true);
+      setStatusMessage('Загрузка паспорта QA проверки...');
+      const savedProject = await loadTimingProjectForEpisode(currentEpisode, tracks);
+      if (savedProject && (
+        (savedProject.collisions && savedProject.collisions.length > 0) ||
+        (savedProject.timingIssues && savedProject.timingIssues.length > 0) ||
+        (savedProject.missingSubtitles && savedProject.missingSubtitles.length > 0)
+      )) {
+        savedPassportRef.current = savedProject;
+        setCollisions(savedProject.collisions || []);
+        setTimingIssues(savedProject.timingIssues || []);
+        setMissingSubtitles(savedProject.missingSubtitles || []);
+        setIsTimingAnalyzed(true);
+        setIsIssuesDrawerOpen((savedProject.timingIssues?.length || 0) > 0);
+
+        setAudioClips(prev => applyTimingPassportToClips(prev, savedProject));
+
+        setQaPassportLoaded({
+          loaded: true,
+          summary: savedProject.summary,
+          savedAt: savedProject.savedAt
+        });
+
+        addLog(
+          `✓ Синхронизация с QA завершена: загружено замечаний — ${savedProject.summary.totalGaps} (наездов — ${savedProject.summary.overlapsCount}, коллизий — ${savedProject.summary.collisionsCount}, рассинхронов — ${savedProject.summary.desyncCount}).`,
+          'success'
+        );
+        toast.success(`Синхронизировано с QA! Загружено замечаний: ${savedProject.summary.totalGaps}`);
+      } else {
+        toast.info('В QA проверке пока нет сохраненных замечаний или проверка еще не запускалась.');
+      }
+    } catch (err: any) {
+      toast.error('Ошибка синхронизации с QA: ' + (err?.message || String(err)));
+    } finally {
+      setIsLoading(false);
+      setStatusMessage('');
+    }
+  };
 
   useEffect(() => {
     loadEpisodeData();
@@ -1839,7 +1922,10 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       }
 
       setCalibrationsByTrack(newCalibrations);
-      setAudioClips(updatedClips);
+      const finalClips = savedPassportRef.current
+        ? applyTimingPassportToClips(updatedClips, savedPassportRef.current)
+        : updatedClips;
+      setAudioClips(finalClips);
       setIsSilenceRemoved(true);
       addLog(`✓ Удаление тишины со всех дорожек завершено! Сформировано ${totalClips} фраз (от тишины до тишины). Границы фраз защищены от обрезания.`, 'success');
       toast.success(`Тишина удалена из всех дорожек! Сформировано ${totalClips} фраз от тишины до тишины.`);
@@ -1879,11 +1965,6 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
         if (mainTracks.length === 0 || fixTracks.length === 0) continue;
 
-        const mainTrack = mainTracks[0];
-        let mainClips = [...(updatedClips[mainTrack.id] || [])];
-        const mainBuf = audioBuffersRef.current[mainTrack.id];
-        const mainDuration = mainBuf ? mainBuf.duration : (mainClips[mainClips.length - 1]?.clipStartSec || 100);
-
         for (const fixTrack of fixTracks) {
           let fixClips = updatedClips[fixTrack.id] || [];
           const fixBuf = audioBuffersRef.current[fixTrack.id];
@@ -1915,34 +1996,57 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
           if (fixClips.length === 0) continue;
 
+          // Check if this fix track is a full replacement of one of the main tracks
           const fixDuration = fixBuf ? fixBuf.duration : (fixClips[fixClips.length - 1]?.clipStartSec || 0);
-          const ratio = (fixDuration && mainDuration) ? fixDuration / mainDuration : (fixClips.length / Math.max(1, mainClips.length));
-          const isFullReplacement = ratio >= 0.85 || (mainClips.length > 0 && fixClips.length >= mainClips.length * 0.8 && fixClips.length >= 3);
+
+          let bestMainTrackForFull = mainTracks[0];
+          let bestDurDiff = Infinity;
+          for (const mt of mainTracks) {
+            const buf = audioBuffersRef.current[mt.id];
+            const mtClips = updatedClips[mt.id] || [];
+            const dur = buf ? buf.duration : (mtClips[mtClips.length - 1]?.clipStartSec || 0);
+            const diff = Math.abs(dur - fixDuration);
+            if (diff < bestDurDiff) {
+              bestDurDiff = diff;
+              bestMainTrackForFull = mt;
+            }
+          }
+
+          const targetMainBuf = audioBuffersRef.current[bestMainTrackForFull.id];
+          const targetMainDur = targetMainBuf ? targetMainBuf.duration : 0;
+          const ratio = (fixDuration && targetMainDur) ? fixDuration / targetMainDur : 0;
+          const durDiffSec = Math.abs(fixDuration - targetMainDur);
+          const targetClips = updatedClips[bestMainTrackForFull.id] || [];
+
+          // Тип 1: Цельный фикс (плюс-минус как оригинал по длине, >= 70% или разница <= 15с)
+          // Даббер переписал реплики и отрендерил полную готовую дорожку серии.
+          // В этом случае вшивать отдельные фразы не нужно — чистовик полностью заменяет черновик.
+          const isFullReplacement = ratio >= 0.70 || durDiffSec <= 15.0 || (targetClips.length > 0 && fixClips.length >= targetClips.length * 0.7 && fixClips.length >= 3);
 
           if (isFullReplacement) {
-            // Case 1: Полный фикс — полностью заменяет оригинальную дорожку
-            addLog(`⚡ Полный фикс (${(ratio * 100).toFixed(0)}% длины) для «${actorNick}». Оригинальная дорожка полностью заменена на чистовой дубль от тишины до тишины.`, 'success');
+            // Case 1: Цельный фикс — полностью заменяет оригинальную дорожку, вшивание отдельных фраз НЕ ТРЕБУЕТСЯ!
+            addLog(`⚡ Цельный фикс (${(ratio * 100).toFixed(0)}% длины) для «${actorNick}». Дорожка «${bestMainTrackForFull.participant}» полностью заменена на чистовик без пофразового вшивания.`, 'success');
             if (fixBuf) {
-              audioBuffersRef.current[mainTrack.id] = fixBuf;
+              audioBuffersRef.current[bestMainTrackForFull.id] = fixBuf;
             }
             if (audioElementsRef.current[fixTrack.id]) {
-              audioElementsRef.current[mainTrack.id] = audioElementsRef.current[fixTrack.id];
+              audioElementsRef.current[bestMainTrackForFull.id] = audioElementsRef.current[fixTrack.id];
             }
-            mainClips = fixClips.map((fc, idx) => ({
+            const replacedClips = fixClips.map((fc, idx) => ({
               ...fc,
-              id: `clip_${mainTrack.id}_fullfix_${idx}`,
-              trackId: mainTrack.id,
+              id: `clip_${bestMainTrackForFull.id}_fullfix_${idx}`,
+              trackId: bestMainTrackForFull.id,
               sourceAudioTrackId: fixTrack.id,
               isFix: true,
-              text: mainClips[idx]?.text || fc.text
+              text: targetClips[idx]?.text || fc.text
             }));
-            updatedClips[mainTrack.id] = mainClips;
+            updatedClips[bestMainTrackForFull.id] = replacedClips;
             updatedClips[fixTrack.id] = []; // Cleared from standalone lane because full track replaced
             newFixMarkers.push({
               id: `fix_marker_full_${fixTrack.id}`,
-              trackId: mainTrack.id,
-              dubberName: mainTrack.dubberName,
-              characterName: mainTrack.characterName,
+              trackId: bestMainTrackForFull.id,
+              dubberName: bestMainTrackForFull.dubberName,
+              characterName: bestMainTrackForFull.characterName,
               startSec: 0,
               endSec: fixDuration,
               filename: fixTrack.filePath?.split(/[/\\]/).pop() || 'fix_full.wav'
@@ -1950,39 +2054,47 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             appliedCount += fixClips.length;
           } else {
             // Case 2: Фрагментарные фиксы (отдельные фразы)
-            // "заменять фразы из оригинальной дорожки на фразы из фиксов. Причём внимательно надо следить, чтобы дорожка не просто перетаскивалась, а эта фраза удалялась из оригинальной дорожки и вставлялась из дорожки фиксов. Но надо внимательно следить за таймингом этих фраз для того, чтобы не оставалось никаких хвостов и удалений, то есть всегда фраза от тишины до тишины."
+            // Ищем, в КАКОЙ именно из основных дорожек даббера находится эта фраза,
+            // и встраиваем фикс именно в ту дорожку, где эта фраза присутствует!
             let fixAppliedOnTrack = 0;
 
             for (const fixClip of fixClips) {
+              let bestTrackId = '';
               let bestIdx = -1;
               let bestScore = -1;
 
-              mainClips.forEach((mc, mIdx) => {
-                let score = 0;
-                // Text match
-                if (fixClip.text && mc.text && fixClip.text === mc.text) {
-                  score += 10.0;
-                }
-                const diff = Math.abs(mc.clipStartSec - fixClip.clipStartSec);
-                if (diff < 20.0) {
-                  score += Math.max(0, 5.0 - (diff / 4.0));
-                }
-                if (score > bestScore) {
-                  bestScore = score;
-                  bestIdx = mIdx;
-                }
-              });
+              for (const mTrk of mainTracks) {
+                const mClips = updatedClips[mTrk.id] || [];
+                mClips.forEach((mc, mIdx) => {
+                  let score = 0;
+                  // Точное совпадение текста
+                  if (fixClip.text && mc.text && fixClip.text.trim().toLowerCase() === mc.text.trim().toLowerCase()) {
+                    score += 20.0;
+                  } else if (fixClip.text && mc.text && (fixClip.text.includes(mc.text) || mc.text.includes(fixClip.text))) {
+                    score += 10.0;
+                  }
+                  // Близость по таймингу
+                  const diff = Math.abs(mc.clipStartSec - fixClip.clipStartSec);
+                  if (diff < 30.0) {
+                    score += Math.max(0, 8.0 - (diff / 3.0));
+                  }
+                  if (score > bestScore) {
+                    bestScore = score;
+                    bestTrackId = mTrk.id;
+                    bestIdx = mIdx;
+                  }
+                });
+              }
 
-              if (bestIdx !== -1) {
-                const origClip = mainClips[bestIdx];
+              if (bestTrackId && bestIdx !== -1) {
+                const targetMainTrack = mainTracks.find(t => t.id === bestTrackId)!;
+                const mClips = updatedClips[bestTrackId] || [];
+                const origClip = mClips[bestIdx];
 
-                // Spliced fix phrase:
-                // Original phrase at bestIdx is REMOVED from mainClips, and fix phrase is INSERTED!
-                // Exact timing: "всегда фраза от тишины до тишины"
                 const splicedClip: AudioClip = {
                   ...fixClip,
-                  id: `clip_${mainTrack.id}_spliced_${fixClip.id}`,
-                  trackId: mainTrack.id,
+                  id: `clip_${targetMainTrack.id}_spliced_${fixClip.id}`,
+                  trackId: targetMainTrack.id,
                   sourceAudioTrackId: fixTrack.id,
                   clipStartSec: origClip.clipStartSec,
                   durationSec: fixClip.durationSec,    // Exact duration from silence to silence
@@ -1995,27 +2107,27 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                   offsetSec: 0
                 };
 
-                // Replace the original phrase
-                mainClips[bestIdx] = splicedClip;
+                // Заменяем оригинальную фразу в той конкретной дорожке, где она была
+                mClips[bestIdx] = splicedClip;
+                updatedClips[bestTrackId] = [...mClips];
 
                 newFixMarkers.push({
                   id: `fix_marker_${Date.now()}_${fixClip.id}`,
-                  trackId: mainTrack.id,
-                  dubberName: mainTrack.dubberName,
-                  characterName: mainTrack.characterName,
+                  trackId: targetMainTrack.id,
+                  dubberName: targetMainTrack.dubberName,
+                  characterName: targetMainTrack.characterName,
                   startSec: splicedClip.clipStartSec,
                   endSec: splicedClip.clipStartSec + splicedClip.durationSec,
                   filename: fixTrack.filePath?.split(/[/\\]/).pop() || 'fix_snippet.wav'
                 });
                 appliedCount++;
                 fixAppliedOnTrack++;
-                addLog(`⚡ Замена фразы «${splicedClip.text}» на ${formatSeconds(splicedClip.clipStartSec)} для «${actorNick}»: оригинальная фраза удалена, вставлен фикс от тишины до тишины (${splicedClip.durationSec.toFixed(2)}с)`, 'info');
+                addLog(`⚡ Замена фразы «${splicedClip.text}» на ${formatSeconds(splicedClip.clipStartSec)} в дорожку «${targetMainTrack.participant}»: фикс вшит в свою дорожку от тишины до тишины (${splicedClip.durationSec.toFixed(2)}с)`, 'info');
               }
             }
 
-            updatedClips[mainTrack.id] = [...mainClips];
-            updatedClips[fixTrack.id] = []; // Cleared because spliced into main track
-            addLog(`⚡ Вшито ${fixAppliedOnTrack} фраз фикса в дорожку «${mainTrack.participant}» (оригинал удален, вставлен фикс)`, 'success');
+            updatedClips[fixTrack.id] = []; // Cleared because spliced into main tracks
+            addLog(`⚡ Вшито ${fixAppliedOnTrack} фраз фикса для даббера «${actorNick}» в соответствующие дорожки`, 'success');
           }
         }
       }
@@ -2942,13 +3054,14 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       setStatusMessage('Рендеринг оттаймленных мастер-дорожек по дабберам для Сведения...');
       addLog('🎬 Старт экспорта в Сведение: рендеринг всех готовых дорожек каждого даббера...', 'info');
 
-      // Ensure every clip has sourceAudioPath resolved from its track if not already set
+      // Ensure every clip has sourceAudioPath resolved and volume strictly 100% (no normalization at timing stage)
       const enrichedAudioClips: Record<string, AudioClip[]> = {};
       for (const trId of Object.keys(audioClips)) {
         const tr = tracks.find(t => t.id === trId);
         const clips = audioClips[trId] || [];
         enrichedAudioClips[trId] = clips.map(c => ({
           ...c,
+          volumePercent: 100,
           sourceAudioPath: c.sourceAudioPath || tr?.filePath
         }));
       }
@@ -2973,7 +3086,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         }
       }
 
-      // Save updated timing metadata (with all deleted phrases excluded)
+      // Save updated timing metadata (with all deleted phrases excluded and 100% original levels preserved)
       const timingMetadata = {
         version: '1.0',
         updatedAt: new Date().toISOString(),
@@ -2982,15 +3095,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         rolesVolumeMap: tracks.reduce((acc, tr) => {
           const roleName = tr.character || tr.characterName || tr.participant || 'Персонаж';
           const dubberNick = tr.participant || tr.dubberName || 'Даббер';
-          const volPct = Math.round((volumes[tr.id] ?? 1.0) * 100);
-          acc[roleName] = volPct;
-          acc[dubberNick] = volPct;
+          acc[roleName] = 100;
+          acc[dubberNick] = 100;
           return acc;
         }, {} as Record<string, number>),
         phrases: Object.keys(audioClips).flatMap(trId => {
           const clips = audioClips[trId] || [];
           return clips.map(b => {
-            const volPct = b.volumePercent ?? Math.round((volumes[trId] ?? 1.0) * 100);
             return {
               id: b.id,
               dubberNick: b.dubberName,
@@ -2999,8 +3110,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               endSec: Number((b.clipStartSec + (b.offsetSec || 0) + b.durationSec).toFixed(2)),
               durationSec: Number(b.durationSec.toFixed(2)),
               text: b.text,
-              volumePercent: volPct,
-              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2)),
+              volumePercent: 100,
+              volumeGainDb: 0,
               pan: 0,
               timeStretch: 1.0,
               headTrimSec: 0,
@@ -3074,15 +3185,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         rolesVolumeMap: tracks.reduce((acc, tr) => {
           const roleName = tr.character || tr.characterName || tr.participant || 'Персонаж';
           const dubberNick = tr.participant || tr.dubberName || 'Даббер';
-          const volPct = Math.round((volumes[tr.id] ?? 1.0) * 100);
-          acc[roleName] = volPct;
-          acc[dubberNick] = volPct;
+          acc[roleName] = 100;
+          acc[dubberNick] = 100;
           return acc;
         }, {} as Record<string, number>),
         phrases: Object.keys(audioClips).flatMap(trId => {
           const clips = audioClips[trId] || [];
           return clips.map(b => {
-            const volPct = b.volumePercent ?? Math.round((volumes[trId] ?? 1.0) * 100);
             return {
               id: b.id,
               dubberNick: b.dubberName,
@@ -3091,8 +3200,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               endSec: Number((b.clipStartSec + (b.offsetSec || 0) + b.durationSec).toFixed(2)),
               durationSec: Number(b.durationSec.toFixed(2)),
               text: b.text,
-              volumePercent: volPct,
-              volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2)),
+              volumePercent: 100,
+              volumeGainDb: 0,
               pan: 0,
               timeStretch: 1.0,
               headTrimSec: 0,
@@ -3290,6 +3399,26 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
             </button>
           </div>
 
+          {/* QA Passport Sync Button */}
+          <button
+            onClick={handleSyncFromQA}
+            disabled={isLoading || tracks.length === 0}
+            className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition ${
+              qaPassportLoaded
+                ? 'bg-amber-950/70 text-amber-300 border-amber-600/60 shadow-sm'
+                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
+            }`}
+            title="Синхронизировать данные тайминга с результатами QA проверки косяков серии"
+          >
+            <Clock className="w-3.5 h-3.5 text-amber-400" />
+            <span>Паспорт QA</span>
+            {qaPassportLoaded && (
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                {qaPassportLoaded.summary.totalGaps}
+              </span>
+            )}
+          </button>
+
           {timingIssues.length > 0 && (
             <button
               onClick={() => setIsIssuesDrawerOpen(!isIssuesDrawerOpen)}
@@ -3332,6 +3461,44 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           </button>
         </div>
       </header>
+
+      {/* Unified QA Passport Sync Notification Banner */}
+      {qaPassportLoaded && (
+        <div className="bg-gradient-to-r from-amber-950/80 via-indigo-950/70 to-neutral-900 border-b border-amber-500/40 px-4 py-2 flex items-center justify-between text-xs text-amber-200 shrink-0 shadow-lg">
+          <div className="flex items-center gap-2.5">
+            <div className="w-6 h-6 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-300 shrink-0">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+            </div>
+            <div>
+              <span className="font-bold text-white">Паспорт QA проверки подхвачен:</span>{' '}
+              <span>
+                Всего замечаний: <strong className="text-white">{qaPassportLoaded.summary.totalGaps}</strong>{' '}
+                (Наездов: <strong>{qaPassportLoaded.summary.overlapsCount}</strong>, Коллизий: <strong>{qaPassportLoaded.summary.collisionsCount}</strong>, Рассинхронов: <strong>{qaPassportLoaded.summary.desyncCount}</strong>, Пропусков: <strong>{qaPassportLoaded.summary.missingCount}</strong>).
+              </span>{' '}
+              <span className="text-amber-400 font-medium hidden md:inline">
+                Повторная перепроверка не требуется — данные сразу готовы к точечной правке на таймлайне!
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => setIsIssuesDrawerOpen(true)}
+              className="px-2.5 py-1 bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/40 rounded-lg text-[11px] font-bold transition flex items-center gap-1 shadow-sm"
+            >
+              <AlertTriangle className="w-3 h-3 text-amber-400" />
+              <span>Показать замечания ({timingIssues.length})</span>
+            </button>
+            <button
+              onClick={handleSyncFromQA}
+              className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-[11px] font-medium transition flex items-center gap-1"
+              title="Повторно синхронизировать данные с QA проверкой"
+            >
+              <RefreshCw className="w-3 h-3 text-neutral-400" />
+              <span>Обновить из QA</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Two-Stage Auto-Timing Diagnostic & Targeted Fixes Panel */}
       {isIssuesDrawerOpen && timingIssues.length > 0 && (

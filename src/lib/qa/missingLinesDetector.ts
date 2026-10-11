@@ -1024,27 +1024,56 @@ export async function detectEpisodeGaps(
   // =========================================================================
   onProgress?.(totalTracks, totalTracks, 'Анализ пропусков и тайминга реплик...');
 
-  for (const trackCtx of decodedTracks) {
-    const { track, audioBuffer, audioUrl, assignedCharacters } = trackCtx;
+  for (let lineIdx = 0; lineIdx < validSubLines.length; lineIdx++) {
+    const line = validSubLines[lineIdx];
+    const rawCharName = (line.name || '').trim();
+    const resolvedCharName = (aliases[rawCharName] || rawCharName).trim();
+    const rawCharLower = rawCharName.toLowerCase();
+    const resolvedCharLower = resolvedCharName.toLowerCase();
 
-    for (let lineIdx = 0; lineIdx < validSubLines.length; lineIdx++) {
-      const line = validSubLines[lineIdx];
-      const rawCharName = (line.name || '').trim();
-      const resolvedCharName = (aliases[rawCharName] || rawCharName).trim();
+    // Find all candidate tracks that belong to this character or to the assigned dubber
+    const assignmentForLine = (episode.assignments || []).find(a => {
+      const char = (a.characterName || '').toLowerCase().trim();
+      return char === rawCharLower || char === resolvedCharLower;
+    });
 
-      const isMatch = assignedCharacters.has(rawCharName.toLowerCase()) || 
-                      assignedCharacters.has(resolvedCharName.toLowerCase());
+    const matchingTracks = decodedTracks.filter(ctx => {
+      if (ctx.assignedCharacters.has(rawCharLower) || ctx.assignedCharacters.has(resolvedCharLower)) {
+        return true;
+      }
+      if (assignmentForLine) {
+        const targetDubberId = assignmentForLine.substituteId || assignmentForLine.dubberId;
+        if (targetDubberId && ctx.track.id === targetDubberId) return true;
 
-      if (!isMatch) continue;
+        const dubberParticipant = assignmentForLine.substitute?.nickname || assignmentForLine.dubber?.nickname;
+        if (dubberParticipant && ctx.track.participant && ctx.track.participant.toLowerCase().trim() === dubberParticipant.toLowerCase().trim()) {
+          return true;
+        }
+      }
+      return false;
+    });
 
-      const startSec = Math.max(0, line.startSec);
+    if (matchingTracks.length === 0) continue;
+
+    const startSec = Math.max(0, line.startSec);
+    const cleanedText = line.text
+      .replace(/\{[^}]+\}/g, '')
+      .replace(/\\N/gi, ' ')
+      .replace(/\\n/gi, ' ')
+      .replace(/\\h/gi, ' ')
+      .trim();
+
+    // Analyze each candidate track for speech in this subtitle window
+    const trackAnalyses = matchingTracks.map(ctx => {
+      const { track, audioBuffer } = ctx;
       const endSec = Math.min(audioBuffer.duration, line.endSec);
       const durationSec = endSec - startSec;
-      if (durationSec < minDurationSec) continue;
 
-      // Analyze dynamic range inside this subtitle line
+      if (durationSec < minDurationSec) {
+        return { ctx, isVoiced: false, isAbsoluteSilence: true, isStationaryNoise: false, metrics: null, durationSec, startSec, endSec };
+      }
+
       const metrics = analyzeSegmentDynamics(audioBuffer, startSec, endSec);
-
       const isAbsoluteSilence = metrics.peakDb <= silencePeakThresholdDb || metrics.rmsDb <= silenceRmsThresholdDb;
       const isStationaryNoise = 
         metrics.dynamicRangeDb < speechDynamicThresholdDb &&
@@ -1052,184 +1081,203 @@ export async function detectEpisodeGaps(
         metrics.stdDevDb < 1.0 &&
         metrics.peakDb < -24;
 
-      const cleanedText = line.text
-        .replace(/\{[^}]+\}/g, '')
-        .replace(/\\N/gi, ' ')
-        .replace(/\\n/gi, ' ')
-        .replace(/\\h/gi, ' ')
-        .trim();
+      const isVoiced = !isAbsoluteSilence && !isStationaryNoise;
+      return { ctx, isVoiced, isAbsoluteSilence, isStationaryNoise, metrics, durationSec, startSec, endSec };
+    });
 
-      const matchingAssignment = (episode.assignments || []).find(a => {
+    const validAnalyses = trackAnalyses.filter(a => a.durationSec >= minDurationSec);
+    if (validAnalyses.length === 0) continue;
+
+    const voicedAnalyses = validAnalyses.filter(a => a.isVoiced);
+
+    if (voicedAnalyses.length > 0) {
+      // Line is voiced in AT LEAST ONE candidate track for this character/dubber!
+      // Select the best voiced track (highest peakDb or dynamic range)
+      voicedAnalyses.sort((a, b) => (b.metrics?.peakDb || -100) - (a.metrics?.peakDb || -100));
+      const bestAnalysis = voicedAnalyses[0];
+      const { ctx, metrics, durationSec, startSec: calcStart, endSec: calcEnd } = bestAnalysis;
+      const { track, audioBuffer, audioUrl } = ctx;
+
+      const matchingAssignment = assignmentForLine || (episode.assignments || []).find(a => {
         const assignedId = a.substituteId || a.dubberId;
-        const char = (a.characterName || '').toLowerCase();
-        return assignedId === track.id && (char === rawCharName.toLowerCase() || char === resolvedCharName.toLowerCase());
+        const char = (a.characterName || '').toLowerCase().trim();
+        return assignedId === track.id && (char === rawCharLower || char === resolvedCharLower);
       });
 
-      if (isAbsoluteSilence || isStationaryNoise) {
-        if (!scanMissingLines) continue;
-        const gapType: 'silence' | 'noise' = isAbsoluteSilence ? 'silence' : 'noise';
-        const typeLabel = isAbsoluteSilence 
-          ? '🔇 Тишина' 
-          : `〰 Статичный фон (разбег ${metrics.dynamicRangeDb} дБ)`;
+      // Run Voice Activity Detection around this subtitle on the best voiced track
+      const searchStart = Math.max(0, calcStart - 0.4);
+      const searchEnd = Math.min(audioBuffer.duration, calcEnd + 1.5);
+      const boundaries = findVoicedBoundaries(audioBuffer, searchStart, searchEnd, speechDynamicThresholdDb - 0.2);
 
-        const detectionId = `gap_${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`;
-
-        results.push({
-          id: detectionId,
-          defectCategory: 'missing_line',
-          trackId: track.id,
-          dubberName: track.participant,
-          characterName: resolvedCharName || track.character,
-          assignmentId: matchingAssignment?.id,
+      if (boundaries.isVoiced) {
+        const voicedRecord: VoicedLineRecord = {
+          track,
+          audioBuffer,
+          audioUrl,
+          line,
           lineIndex: line.rawLineIndex ?? lineIdx,
           subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
-          startSec,
-          endSec,
-          startFormatted: formatTimecode(startSec),
-          endFormatted: formatTimecode(endSec),
-          durationSec: Math.round(durationSec * 10) / 10,
-          text: cleanedText,
-          peakDb: metrics.peakDb,
-          rmsDb: metrics.rmsDb,
-          dynamicRangeDb: metrics.dynamicRangeDb,
-          type: gapType,
-          typeLabel,
-          selected: true,
-          comment: `Пропуск реплики [${formatTimecode(startSec)}]: "${cleanedText}"`,
-          audioUrl,
-          audioBuffer,
-          originalAudioBuffer,
-          resolutionAction: 'keep'
-        });
-      } else {
-        // Line is voiced. Run Voice Activity Detection around this subtitle
-        const searchStart = Math.max(0, startSec - 0.4);
-        const searchEnd = Math.min(audioBuffer.duration, endSec + 1.5);
-        const boundaries = findVoicedBoundaries(audioBuffer, searchStart, searchEnd, speechDynamicThresholdDb - 0.2);
+          rawCharName,
+          resolvedCharName: resolvedCharName || track.character,
+          matchingAssignmentId: matchingAssignment?.id,
+          subStartSec: calcStart,
+          subEndSec: calcEnd,
+          subDurationSec: durationSec,
+          speechStartSec: boundaries.speechStartSec,
+          speechEndSec: boundaries.speechEndSec,
+          speechDurationSec: boundaries.speechDurationSec,
+          metrics: metrics!,
+          cleanedText
+        };
+        voicedLines.push(voicedRecord);
 
-        if (boundaries.isVoiced) {
-          const voicedRecord: VoicedLineRecord = {
-            track,
-            audioBuffer,
-            audioUrl,
-            line,
-            lineIndex: line.rawLineIndex ?? lineIdx,
-            subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
-            rawCharName,
-            resolvedCharName: resolvedCharName || track.character,
-            matchingAssignmentId: matchingAssignment?.id,
-            subStartSec: startSec,
-            subEndSec: endSec,
-            subDurationSec: durationSec,
-            speechStartSec: boundaries.speechStartSec,
-            speechEndSec: boundaries.speechEndSec,
-            speechDurationSec: boundaries.speechDurationSec,
-            metrics,
-            cleanedText
-          };
-          voicedLines.push(voicedRecord);
+        // Check timing mismatches if enabled
+        if (scanTimingMismatches) {
+          const speechDur = boundaries.speechDurationSec;
+          const subDur = durationSec;
 
-          // Check timing mismatches if enabled
-          if (scanTimingMismatches) {
-            const speechDur = boundaries.speechDurationSec;
-            const subDur = durationSec;
+          // 1. Line is significantly shorter than subtitle (> 30%)
+          const shortRatio = (subDur - speechDur) / subDur;
+          const shortThreshold = (shortLineThresholdPercent || 30) / 100;
+          const tailSec = Math.max(0, calcEnd - boundaries.speechEndSec);
 
-            // 1. Line is significantly shorter than subtitle (> 30%)
-            // Leads to the original Japanese dialogue sticking out ("японский хвост остаётся")
-            const shortRatio = (subDur - speechDur) / subDur;
-            const shortThreshold = (shortLineThresholdPercent || 30) / 100;
-            const tailSec = Math.max(0, endSec - boundaries.speechEndSec);
+          if (shortRatio > shortThreshold && (subDur - speechDur) >= 0.35 && (tailSec >= 0.28 || shortRatio >= 0.30)) {
+            const timingDeltaPercent = -Math.round(shortRatio * 100);
+            const tailDurationSec = Math.round(tailSec * 10) / 10;
 
-            if (shortRatio > shortThreshold && (subDur - speechDur) >= 0.35 && (tailSec >= 0.28 || shortRatio >= 0.30)) {
-              const timingDeltaPercent = -Math.round(shortRatio * 100);
-              const tailDurationSec = Math.round(tailSec * 10) / 10;
+            results.push({
+              id: `timing_short_${track.id}_${line.rawLineIndex ?? lineIdx}_${calcStart.toFixed(2)}`,
+              defectCategory: 'timing_too_short',
+              trackId: track.id,
+              dubberName: track.participant,
+              characterName: resolvedCharName || track.character,
+              assignmentId: matchingAssignment?.id,
+              lineIndex: line.rawLineIndex ?? lineIdx,
+              subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
+              startSec: calcStart,
+              endSec: calcEnd,
+              startFormatted: formatTimecode(calcStart),
+              endFormatted: formatTimecode(calcEnd),
+              durationSec: Math.round(durationSec * 10) / 10,
+              text: cleanedText,
+              peakDb: boundaries.peakDb,
+              rmsDb: boundaries.rmsDb,
+              dynamicRangeDb: metrics!.dynamicRangeDb,
+              type: 'timing_too_short',
+              typeLabel: `⏱ Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (>30%)`,
+              selected: true,
+              actualSpeechStartSec: boundaries.speechStartSec,
+              actualSpeechEndSec: boundaries.speechEndSec,
+              actualDurationSec: boundaries.speechDurationSec,
+              speechDurationSec: boundaries.speechDurationSec,
+              subDurationSec: Math.round(durationSec * 10) / 10,
+              timingDeltaPercent,
+              tailDurationSec,
+              comment: `Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (речь ${boundaries.speechDurationSec}с при сабе ${durationSec.toFixed(1)}с). Японский хвост оригинала: ~${tailDurationSec}с`,
+              audioUrl,
+              audioBuffer,
+              originalAudioBuffer,
+              resolutionAction: 'note_sound_engineer'
+            });
+          }
 
-              results.push({
-                id: `timing_short_${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`,
-                defectCategory: 'timing_too_short',
-                trackId: track.id,
-                dubberName: track.participant,
-                characterName: resolvedCharName || track.character,
-                assignmentId: matchingAssignment?.id,
-                lineIndex: line.rawLineIndex ?? lineIdx,
-                subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
-                startSec,
-                endSec,
-                startFormatted: formatTimecode(startSec),
-                endFormatted: formatTimecode(endSec),
-                durationSec: Math.round(durationSec * 10) / 10,
-                text: cleanedText,
-                peakDb: boundaries.peakDb,
-                rmsDb: boundaries.rmsDb,
-                dynamicRangeDb: metrics.dynamicRangeDb,
-                type: 'timing_too_short',
-                typeLabel: `⏱ Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (>30%)`,
-                selected: true,
-                actualSpeechStartSec: boundaries.speechStartSec,
-                actualSpeechEndSec: boundaries.speechEndSec,
-                actualDurationSec: boundaries.speechDurationSec,
-                speechDurationSec: boundaries.speechDurationSec,
-                subDurationSec: Math.round(durationSec * 10) / 10,
-                timingDeltaPercent,
-                tailDurationSec,
-                comment: `Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (речь ${boundaries.speechDurationSec}с при сабе ${durationSec.toFixed(1)}с). Японский хвост оригинала: ~${tailDurationSec}с`,
-                audioUrl,
-                audioBuffer,
-                originalAudioBuffer,
-                resolutionAction: 'note_sound_engineer'
-              });
-            }
+          // 2. Line is significantly longer than subtitle (> 40%)
+          const longRatio = (speechDur - subDur) / subDur;
+          const longThreshold = (longLineThresholdPercent || 40) / 100;
+          const overflowSec = Math.max(0, boundaries.speechEndSec - calcEnd);
 
-            // 2. Line is significantly longer than subtitle (> 40%)
-            // Must be compressed or trimmed so it does not collide with neighboring lines
-            const longRatio = (speechDur - subDur) / subDur;
-            const longThreshold = (longLineThresholdPercent || 40) / 100;
-            const overflowSec = Math.max(0, boundaries.speechEndSec - endSec);
+          if (longRatio > longThreshold && (speechDur - subDur) >= 0.35) {
+            const timingDeltaPercent = Math.round(longRatio * 100);
+            const overflowDurationSec = Math.round(overflowSec * 10) / 10;
+            const expandedEnd = Math.max(calcEnd, boundaries.speechEndSec);
 
-            if (longRatio > longThreshold && (speechDur - subDur) >= 0.35) {
-              const timingDeltaPercent = Math.round(longRatio * 100);
-              const overflowDurationSec = Math.round(overflowSec * 10) / 10;
-              const expandedEnd = Math.max(endSec, boundaries.speechEndSec);
-
-              const lineKey = `${track.id}_${line.rawLineIndex ?? lineIdx}`;
-              longTimingDetections.set(lineKey, {
-                id: `timing_long_${track.id}_${line.rawLineIndex ?? lineIdx}_${startSec.toFixed(2)}`,
-                defectCategory: 'timing_too_long',
-                trackId: track.id,
-                dubberName: track.participant,
-                characterName: resolvedCharName || track.character,
-                assignmentId: matchingAssignment?.id,
-                lineIndex: line.rawLineIndex ?? lineIdx,
-                subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
-                startSec,
-                endSec: expandedEnd,
-                startFormatted: formatTimecode(startSec),
-                endFormatted: formatTimecode(expandedEnd),
-                durationSec: Math.round(boundaries.speechDurationSec * 10) / 10,
-                text: cleanedText,
-                peakDb: boundaries.peakDb,
-                rmsDb: boundaries.rmsDb,
-                dynamicRangeDb: metrics.dynamicRangeDb,
-                type: 'timing_too_long',
-                typeLabel: `⏱ Фраза длиннее саба на +${timingDeltaPercent}% (>40%)`,
-                selected: true,
-                actualSpeechStartSec: boundaries.speechStartSec,
-                actualSpeechEndSec: boundaries.speechEndSec,
-                actualDurationSec: boundaries.speechDurationSec,
-                speechDurationSec: boundaries.speechDurationSec,
-                subDurationSec: Math.round(durationSec * 10) / 10,
-                timingDeltaPercent,
-                overflowDurationSec,
-                comment: `Фраза длиннее саба на +${timingDeltaPercent}% (речь ${boundaries.speechDurationSec}с при сабе ${durationSec.toFixed(1)}с, вылет на +${overflowDurationSec}с). Рекомендуется поджать тайминг звукорежиссеру`,
-                audioUrl,
-                audioBuffer,
-                originalAudioBuffer,
-                resolutionAction: 'note_sound_engineer'
-              });
-            }
+            const lineKey = `${track.id}_${line.rawLineIndex ?? lineIdx}`;
+            longTimingDetections.set(lineKey, {
+              id: `timing_long_${track.id}_${line.rawLineIndex ?? lineIdx}_${calcStart.toFixed(2)}`,
+              defectCategory: 'timing_too_long',
+              trackId: track.id,
+              dubberName: track.participant,
+              characterName: resolvedCharName || track.character,
+              assignmentId: matchingAssignment?.id,
+              lineIndex: line.rawLineIndex ?? lineIdx,
+              subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
+              startSec: calcStart,
+              endSec: expandedEnd,
+              startFormatted: formatTimecode(calcStart),
+              endFormatted: formatTimecode(expandedEnd),
+              durationSec: Math.round(boundaries.speechDurationSec * 10) / 10,
+              text: cleanedText,
+              peakDb: boundaries.peakDb,
+              rmsDb: boundaries.rmsDb,
+              dynamicRangeDb: metrics!.dynamicRangeDb,
+              type: 'timing_too_long',
+              typeLabel: `⏱ Фраза длиннее саба на +${timingDeltaPercent}% (>40%)`,
+              selected: true,
+              actualSpeechStartSec: boundaries.speechStartSec,
+              actualSpeechEndSec: boundaries.speechEndSec,
+              actualDurationSec: boundaries.speechDurationSec,
+              speechDurationSec: boundaries.speechDurationSec,
+              subDurationSec: Math.round(durationSec * 10) / 10,
+              timingDeltaPercent,
+              overflowDurationSec,
+              comment: `Фраза длиннее саба на +${timingDeltaPercent}% (речь ${boundaries.speechDurationSec}с при сабе ${durationSec.toFixed(1)}с, вылет на +${overflowDurationSec}с). Рекомендуется поджать тайминг звукорежиссеру`,
+              audioUrl,
+              audioBuffer,
+              originalAudioBuffer,
+              resolutionAction: 'note_sound_engineer'
+            });
           }
         }
       }
+    } else {
+      // ALL candidate tracks for this character/dubber are silent! Truly missing phrase.
+      if (!scanMissingLines) continue;
+
+      const primaryAnalysis = validAnalyses[0];
+      const { ctx, metrics, durationSec, startSec: calcStart, endSec: calcEnd } = primaryAnalysis;
+      const { track, audioBuffer, audioUrl } = ctx;
+
+      const isAbsSilence = validAnalyses.every(a => a.isAbsoluteSilence);
+      const gapType: 'silence' | 'noise' = isAbsSilence ? 'silence' : 'noise';
+      const typeLabel = isAbsSilence 
+        ? '🔇 Тишина' 
+        : `〰 Статичный фон (разбег ${metrics?.dynamicRangeDb || 0} дБ)`;
+
+      const matchingAssignment = assignmentForLine || (episode.assignments || []).find(a => {
+        const assignedId = a.substituteId || a.dubberId;
+        const char = (a.characterName || '').toLowerCase().trim();
+        return assignedId === track.id && (char === rawCharLower || char === resolvedCharLower);
+      });
+
+      const detectionId = `gap_${track.id}_${line.rawLineIndex ?? lineIdx}_${calcStart.toFixed(2)}`;
+
+      results.push({
+        id: detectionId,
+        defectCategory: 'missing_line',
+        trackId: track.id,
+        dubberName: track.participant,
+        characterName: resolvedCharName || track.character,
+        assignmentId: matchingAssignment?.id,
+        lineIndex: line.rawLineIndex ?? lineIdx,
+        subId: line.id ? String(line.id) : String(line.rawLineIndex ?? lineIdx),
+        startSec: calcStart,
+        endSec: calcEnd,
+        startFormatted: formatTimecode(calcStart),
+        endFormatted: formatTimecode(calcEnd),
+        durationSec: Math.round(durationSec * 10) / 10,
+        text: cleanedText,
+        peakDb: metrics?.peakDb || -60,
+        rmsDb: metrics?.rmsDb || -60,
+        dynamicRangeDb: metrics?.dynamicRangeDb || 0,
+        type: gapType,
+        typeLabel,
+        selected: true,
+        comment: `Пропуск реплики [${formatTimecode(calcStart)}]: "${cleanedText}"`,
+        audioUrl,
+        audioBuffer,
+        originalAudioBuffer,
+        resolutionAction: 'keep'
+      });
     }
   }
 
@@ -1468,6 +1516,9 @@ export async function detectEpisodeGaps(
 
       // If 2 or more distinct dubbers have active voice on this exact subtitle line
       if (collidingActors.length >= 2) {
+        const distinctDubbers = new Set(collidingActors.map(a => a.track.participant?.trim().toLowerCase() || a.track.id));
+        if (distinctDubbers.size < 2) continue;
+
         // Place the officially assigned dubber first (or the louder one if neither/both)
         collidingActors.sort((a, b) => (b.isAssigned ? 1 : 0) - (a.isAssigned ? 1 : 0));
 

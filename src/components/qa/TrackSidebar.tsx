@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, CheckCircle, Check, MessageSquare, Clock, Mic, Trash2, Sliders, Scissors, AlertTriangle, Headphones, Layers } from 'lucide-react';
+import { Activity, CheckCircle, Check, MessageSquare, Clock, Mic, Trash2, Sliders, Scissors, AlertTriangle, Headphones, Layers, Save } from 'lucide-react';
 import { STATUS_MAP } from '../../constants';
 import { Track } from '../../types';
 import { NormalizationMetrics } from '../../lib/qa/audioNormalizer';
@@ -17,6 +17,7 @@ interface TrackSidebarProps {
   onGenerateReminderMessage?: () => void;
   onExportSoundEngineer?: () => void;
   onOpenTimingPanel?: () => void;
+  onSaveToTiming?: () => void;
   onGenerateSoundEngineerReport?: () => void;
   onBakeSubtitles?: () => void;
   isBaking?: boolean;
@@ -46,6 +47,7 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
   onGenerateReminderMessage,
   onExportSoundEngineer,
   onOpenTimingPanel,
+  onSaveToTiming,
   onGenerateSoundEngineerReport,
   onBakeSubtitles,
   isBaking,
@@ -310,15 +312,25 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
         <button 
           onClick={onGenerateSoundEngineerReport}
           className="w-full py-2 bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2"
-          title="Сформировать текстовое сообщение звукорежиссеру о найденных наездах и проблемах тайминга"
+          title="Выписать звукорежиссеру подробный текстовый отчет о найденных наездах, конфликтах и рассинхроне"
         >
           <Headphones className="w-3.5 h-3.5 text-indigo-400" />
-          Отчет для звукаря
+          Выписать звукорежиссеру
         </button>
+        {onSaveToTiming && (detectedGapsCount || 0) > 0 && (
+          <button 
+            onClick={onSaveToTiming}
+            className="w-full py-2 bg-amber-600/20 hover:bg-amber-600/35 text-amber-300 border border-amber-500/30 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
+            title="Записать все найденные наезды, коллизии и проблемы в файл тайминга серии (timing_project.analysis.json)"
+          >
+            <Save className="w-3.5 h-3.5 text-amber-400" />
+            Записать в тайминг
+          </button>
+        )}
         <button 
           onClick={onOpenTimingPanel}
           className="w-full py-2 bg-gradient-to-r from-amber-600/30 to-amber-500/20 hover:from-amber-600/50 hover:to-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
-          title="Открыть интерактивную студию точного многодорожечного тайминга"
+          title="Открыть интерактивную студию точного многодорожечного тайминга (автоматически синхронизирует замечания)"
         >
           <Clock className="w-3.5 h-3.5 text-amber-400" />
           Перейти в Тайминг видео

@@ -18,6 +18,8 @@ import { analyzeAudioForPreview, NormalizationMetrics, getCachedNormalization } 
 import { detectEpisodeGaps, MissingLineDetection, silenceAudioBufferInterval, transferAudioBufferPhrase, findFullPhraseSilenceBoundaries, GapDetectionOptions, QAScanReport } from '../lib/qa/missingLinesDetector';
 import { QAScanConfigModal } from './qa/QAScanConfigModal';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
+import { saveQAGapsToTimingProject } from '../lib/qa/timingSyncService';
+import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
 
@@ -700,27 +702,16 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       }
     });
     
-    const splitMultiTracks = localStorage.getItem('qa_split_multi_tracks') !== 'false';
-    const mappedTracks: Track[] = [];
+    let mappedTracks: Track[] = [];
+    try {
+      mappedTracks = prepareQATracksForTiming(currentEpisode);
+    } catch (e) {
+      console.warn('Fallback to basic dubberTracks mapping', e);
+    }
 
-    Object.values(dubberTracks).forEach(track => {
-      if (splitMultiTracks && track.files.length > 1) {
-        // If dubber has multiple files (e.g. 2 original takes/layers with overlap, or versions)
-        track.files.forEach((file, fIdx) => {
-          const isFix = file.type === 'FIXES';
-          const fileLabel = isFix ? 'Фикс' : `Дорожка ${fIdx + 1}`;
-          mappedTracks.push({
-            ...track,
-            id: `${track.id}__layer_${fIdx + 1}`,
-            participant: `${track.participant} [${fileLabel}]`,
-            files: [file],
-            selectedFileId: file.id
-          });
-        });
-      } else {
-        mappedTracks.push(track);
-      }
-    });
+    if (mappedTracks.length === 0) {
+      mappedTracks = Object.values(dubberTracks);
+    }
     
     // Add original track
     const originalTrack: Track = {
@@ -1193,6 +1184,10 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           if ((gaps as any)?.scanReport) {
             localStorage.setItem(`qa_scan_report_${currentEpisode.id}`, JSON.stringify((gaps as any).scanReport));
           }
+          // Automatically synchronize with Timing Video passport on disk and state
+          saveQAGapsToTimingProject(currentEpisode, gaps, tracks).catch(err => {
+            console.warn('Auto-save to timing project error:', err);
+          });
         } catch (storageErr) {
           console.warn('Failed to persist QA gaps to localStorage:', storageErr);
         }
@@ -1661,13 +1656,22 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         }
       }
 
-      // Update local tracks state
+      // Update local tracks state with deduplication
       const updatedTracks = tracks.map(t => {
         const newComments = commentsByTrackId[t.id];
         if (newComments && newComments.length > 0) {
+          const existingKeys = new Set(t.comments.map(c => c.subId ? `sub_${c.subId}_${c.text.trim()}` : `${c.text.trim()}_${Math.round(c.timestamp || 0)}`));
+          const uniqueToAdd = newComments.filter(c => {
+            const key = c.subId ? `sub_${c.subId}_${c.text.trim()}` : `${c.text.trim()}_${Math.round(c.timestamp || 0)}`;
+            if (!existingKeys.has(key)) {
+              existingKeys.add(key);
+              return true;
+            }
+            return false;
+          });
           return {
             ...t,
-            comments: [...t.comments, ...newComments],
+            comments: [...t.comments, ...uniqueToAdd],
             status: 'fixes_needed' as const
           };
         }
@@ -1675,28 +1679,57 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       });
       setTracks(updatedTracks);
 
-      // Update assignments in DB
+      // Update assignments in DB with cross-assignment deduplication per dubber
+      const seenCommentsByDubber = new Set<string>();
+
+      const getCommentKey = (c: Comment) => {
+        if (c.subId !== undefined && c.subId !== null) {
+          return `sub_${c.subId}_${c.text.trim()}`;
+        }
+        return `${c.text.trim()}_${Math.round(c.timestamp || 0)}`;
+      };
+
       const updatedAssignments = (currentEpisode.assignments || []).map(a => {
         const assignedId = a.substituteId || a.dubberId;
-        const newAssComments = commentsByAssignmentId[a.id] || (
+        const rawNewComments = commentsByAssignmentId[a.id] || (
           commentsByTrackId[assignedId || '']?.filter(c => {
             const gap = selectedGaps.find(g => g.subId === c.subId);
             if (gap?.isSubtitleError || gap?.resolutionAction === 'reassign_character') {
               return (gap.reassignedCharacterName || gap.selectedCharacterForSub || '').toLowerCase() === a.characterName.toLowerCase();
             }
-            return gap && gap.characterName.toLowerCase() === a.characterName.toLowerCase();
+            return gap && gap.characterName?.toLowerCase() === a.characterName.toLowerCase();
           })
         ) || [];
 
-        if (newAssComments.length > 0) {
-          let existingComments: Comment[] = [];
-          try {
-            existingComments = JSON.parse(a.comments || '[]');
-          } catch (e) {}
+        let existingComments: Comment[] = [];
+        try {
+          existingComments = JSON.parse(a.comments || '[]');
+        } catch (e) {}
 
+        if (assignedId) {
+          existingComments.forEach(c => {
+            seenCommentsByDubber.add(`${assignedId}_${getCommentKey(c)}`);
+          });
+        }
+
+        const uniqueNewComments: Comment[] = [];
+        for (const c of rawNewComments) {
+          const dubberKey = assignedId ? `${assignedId}_${getCommentKey(c)}` : getCommentKey(c);
+          if (!seenCommentsByDubber.has(dubberKey)) {
+            const existsInThisAss = existingComments.some(e => getCommentKey(e) === getCommentKey(c));
+            if (!existsInThisAss) {
+              uniqueNewComments.push(c);
+            }
+            seenCommentsByDubber.add(dubberKey);
+          }
+        }
+
+        const mergedComments = [...existingComments, ...uniqueNewComments];
+
+        if (mergedComments.length > existingComments.length) {
           return {
             ...a,
-            comments: JSON.stringify([...existingComments, ...newAssComments]),
+            comments: JSON.stringify(mergedComments),
             status: 'FIXES_NEEDED' as const
           };
         }
@@ -2132,7 +2165,23 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           onGenerateFixesMessage={handleGenerateFixesMessage}
           onGenerateReminderMessage={handleGenerateReminderMessage}
           onExportSoundEngineer={() => setIsExportModalOpen(true)}
-          onOpenTimingPanel={() => onNavigate?.('timing')}
+          onOpenTimingPanel={async () => {
+            if (currentEpisode && detectedGaps.length > 0) {
+              await saveQAGapsToTimingProject(currentEpisode, detectedGaps, tracks).catch(() => {});
+            }
+            onNavigate?.('timing');
+          }}
+          onSaveToTiming={async () => {
+            if (!currentEpisode) return;
+            try {
+              const res = await saveQAGapsToTimingProject(currentEpisode, detectedGaps, tracks);
+              toast.success(
+                `✓ Записано в файл тайминга! (Наездов: ${res.summary.overlapsCount}, коллизий: ${res.summary.collisionsCount}, рассинхронов: ${res.summary.desyncCount})`
+              );
+            } catch (err: any) {
+              toast.error('Ошибка записи в тайминг: ' + (err?.message || String(err)));
+            }
+          }}
           onGenerateSoundEngineerReport={handleGenerateSoundEngineerReport}
           onBakeSubtitles={handleBakeSubtitles}
           isBaking={isBaking}
@@ -2562,7 +2611,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
                       Правки и комментарии
                     </h3>
                     <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-hide">
-                      {selectedTrack.comments.map(comment => (
+                      {[...selectedTrack.comments].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).map(comment => (
                         <div key={comment.id} className="bg-neutral-800/50 rounded-lg p-3 border border-neutral-700/50 group/comment">
                           <div className="flex justify-between items-start mb-1">
                             <div className="flex items-center gap-2">
@@ -2683,6 +2732,11 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           gaps={detectedGaps}
           episode={currentEpisode}
           participants={participants}
+          tracks={tracks}
+          onOpenTimingPanel={() => {
+            setIsGapModalOpen(false);
+            onNavigate?.('timing');
+          }}
           onApplyFixes={handleApplyGapFixes}
           onSeekMainPlayer={(timeSec) => {
             handleSeekToTime(timeSec);
@@ -2755,6 +2809,26 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
                 >
                   {isMessageCopied ? <Check className="w-5 h-5" /> : <Save className="w-5 h-5" />}
                   {isMessageCopied ? 'Скопировано!' : 'Скопировать текст'}
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!currentEpisode) return;
+                    try {
+                      const res = await saveQAGapsToTimingProject(currentEpisode, detectedGaps, tracks);
+                      toast.success(
+                        `✓ Записано в файл тайминга! (Наездов: ${res.summary.overlapsCount}, коллизий: ${res.summary.collisionsCount}, рассинхронов: ${res.summary.desyncCount})`
+                      );
+                      setIsMessageModalOpen(false);
+                      onNavigate?.('timing');
+                    } catch (e: any) {
+                      toast.error('Ошибка записи в тайминг: ' + (e?.message || String(e)));
+                    }
+                  }}
+                  className="px-6 py-3 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-lg shadow-amber-600/25"
+                  title="Записать найденные замечания в файл тайминга серии и сразу открыть Тайминг видео (если сводите серию сами)"
+                >
+                  <Clock className="w-5 h-5 text-white" />
+                  <span>Записать в тайминг (свожу сам)</span>
                 </button>
                 <button 
                   onClick={() => setIsMessageModalOpen(false)}

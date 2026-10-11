@@ -541,8 +541,14 @@ class ExportService {
               const origStat = await fs.stat(latestOriginal.path);
               const fixStat = await fs.stat(latestFix.path);
 
-              if (fixStat.size < origStat.size) {
-                await logStep(`[Фикс] Даббер «${nick}»: фрагментарный фикс (${(fixStat.size / (1024*1024)).toFixed(2)} МБ < ${(origStat.size / (1024*1024)).toFixed(2)} МБ). Сведение с оригиналом...`, 'info', dubberPercent);
+              const mainSize = origStat.size || 1;
+              const fixSize = fixStat.size || 0;
+              const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
+              const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
+              const isFullReplacement = (ratio >= 0.70 || sizeDiffMb <= 3.0) && fixSize > 0;
+
+              if (!isFullReplacement) {
+                await logStep(`[Фикс] Даббер «${nick}»: фрагментарный фикс отдельными фразами (${(fixStat.size / (1024*1024)).toFixed(2)} МБ < ${(origStat.size / (1024*1024)).toFixed(2)} МБ). Сведение с оригиналом...`, 'info', dubberPercent);
                 const backupDir = path.join(targetDir, 'бэкап');
                 await fs.mkdir(backupDir, { recursive: true });
 
@@ -580,10 +586,10 @@ class ExportService {
 
                 await logStep(`[Фикс] Успешно сведен фикс даббера «${nick}» -> ${path.basename(mainOutPath)}`, 'success', dubberPercent);
               } else {
-                await logStep(`[Фикс] Даббер «${nick}»: фикс заменяет всю дорожку целиком. Экспорт дорожки фикса.`, 'info', dubberPercent);
+                await logStep(`[Фикс] Даббер «${nick}»: цельный фикс (${(fixStat.size / (1024*1024)).toFixed(2)} МБ, разница ${sizeDiffMb.toFixed(1)} МБ) заменяет всю дорожку целиком. Вшивание не требуется.`, 'info', dubberPercent);
                 const targetFixPath = path.join(targetDir, getExportName(latestFix, true));
                 await fs.copyFile(latestFix.path, targetFixPath);
-                await logStep(`[Экспорт] Скопирован фикс: ${path.basename(targetFixPath)}`, 'success', dubberPercent);
+                await logStep(`[Экспорт] Скопирован чистовой фикс: ${path.basename(targetFixPath)}`, 'success', dubberPercent);
               }
             } catch (e) {
               await logStep(`[Ошибка] Сбой авто-сведения фикса даббера «${nick}»: ${e.message}. Выполняется резервное копирование обоих файлов.`, 'warn', dubberPercent);
@@ -598,15 +604,21 @@ class ExportService {
               const origStat = await fs.stat(latestOriginal.path);
               const fixStat = await fs.stat(latestFix.path);
 
-              if (fixStat.size < origStat.size) {
+              const mainSize = origStat.size || 1;
+              const fixSize = fixStat.size || 0;
+              const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
+              const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
+              const isFullReplacement = (ratio >= 0.70 || sizeDiffMb <= 3.0) && fixSize > 0;
+
+              if (!isFullReplacement) {
                 const origOut = path.join(targetDir, getExportName(latestOriginal, false));
                 await fs.copyFile(latestOriginal.path, origOut);
                 await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
-                await logStep(`[Умный экспорт] Даббер «${nick}»: экспортированы оригинал и фикс.`, 'info', dubberPercent);
+                await logStep(`[Умный экспорт] Даббер «${nick}»: экспортированы оригинал и фрагментарный фикс.`, 'info', dubberPercent);
               } else {
                 const fixOut = path.join(targetDir, getExportName(latestFix, true));
                 await fs.copyFile(latestFix.path, fixOut);
-                await logStep(`[Умный экспорт] Даббер «${nick}»: фикс заменяет оригинал (экспортирован только фикс).`, 'info', dubberPercent);
+                await logStep(`[Умный экспорт] Даббер «${nick}»: цельный фикс заменяет оригинал (экспортирован только чистовик).`, 'info', dubberPercent);
               }
             } catch (e) {
               await logStep(`[Умный экспорт] Ошибка оценки файлов «${nick}»: ${e.message}`, 'warn', dubberPercent);

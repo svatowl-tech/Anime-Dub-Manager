@@ -47,7 +47,20 @@ export const useTracks = (currentEpisode: Episode | null) => {
             dubberTracks[dubberId].files.push(f);
           }
         });
-        dubberTracks[dubberId].comments = [...dubberTracks[dubberId].comments, ...comments];
+        // Merge comments without duplicates and sort chronologically
+        const getCommentKey = (c: any) => {
+          if (c.subId !== undefined && c.subId !== null) {
+            return `sub_${c.subId}_${(c.text || '').trim()}`;
+          }
+          return `${(c.text || '').trim()}_${Math.round(c.timestamp || 0)}`;
+        };
+        comments.forEach(c => {
+          const key = getCommentKey(c);
+          if (!dubberTracks[dubberId].comments.some(existing => existing.id === c.id || getCommentKey(existing) === key)) {
+            dubberTracks[dubberId].comments.push(c);
+          }
+        });
+        dubberTracks[dubberId].comments.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         
         // Upgrade track status if a more critical status is found
         const currentStatus = dubberTracks[dubberId].status;
