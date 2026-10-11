@@ -20,6 +20,7 @@ import { QAScanConfigModal } from './qa/QAScanConfigModal';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../lib/qa/sharedAudioContext';
 import { saveQAGapsToTimingProject } from '../lib/qa/timingSyncService';
 import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
+import { resolveLocalPath } from '../lib/webFileSystem';
 import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.js';
 
@@ -242,7 +243,6 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           return;
         }
         try {
-          const { resolveLocalPath } = await import('../lib/webFileSystem');
           const resolved = await resolveLocalPath(currentEpisode.rawPath);
           if (active) setVideoUrl(resolved);
         } catch (e) {
@@ -704,7 +704,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     
     let mappedTracks: Track[] = [];
     try {
-      mappedTracks = prepareQATracksForTiming(currentEpisode);
+      mappedTracks = prepareQATracksForTiming(currentEpisode, [], isSplitMultiTracks);
     } catch (e) {
       console.warn('Fallback to basic dubberTracks mapping', e);
     }

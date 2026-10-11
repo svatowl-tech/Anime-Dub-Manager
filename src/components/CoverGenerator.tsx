@@ -18,6 +18,7 @@ import { CoverTabText } from './cover/CoverTabText';
 import { CoverTabEffects } from './cover/CoverTabEffects';
 import { CoverTabBacking } from './cover/CoverTabBacking';
 import { CoverTabLogo } from './cover/CoverTabLogo';
+import { resolveLocalPath } from '../lib/webFileSystem';
 
 interface CoverGeneratorProps {
   currentEpisode: Episode | null;
@@ -204,7 +205,6 @@ export default function CoverGenerator({ currentEpisode, onRefresh }: CoverGener
             src = URL.createObjectURL(cached);
           } else {
             try {
-              const { resolveLocalPath } = await import('../lib/webFileSystem');
               const resolved = await resolveLocalPath(videoPath);
               if (resolved) src = resolved;
             } catch (err) {}

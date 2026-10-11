@@ -57,7 +57,8 @@ export function normalizeKey(str: string): string {
  */
 export function prepareQATracksForTiming(
   episode: Episode,
-  manifestTracks: Array<{ id?: string; name?: string; path: string; size?: number; dubberNick?: string }> = []
+  manifestTracks: Array<{ id?: string; name?: string; path: string; size?: number; dubberNick?: string }> = [],
+  splitMultiTracks: boolean = true
 ): Track[] {
   if (!episode) return [];
 
@@ -212,9 +213,9 @@ export function prepareQATracksForTiming(
       return false;
     };
 
-    // СЦЕНАРИЙ 1: У даббера ровно 1 основная дорожка (или только фикс)
-    if (mainCandidates.length <= 1) {
-      const newestMain = mainCandidates[0] || null;
+    // СЦЕНАРИЙ 1: У даббера ровно 1 основная дорожка (или группировка в выпадающий список)
+    if (mainCandidates.length <= 1 || !splitMultiTracks) {
+      const newestMain = mainCandidates.length > 0 ? mainCandidates[mainCandidates.length - 1] : null;
       const newestFix = fixCandidates.length > 0 ? fixCandidates[fixCandidates.length - 1] : null;
 
       let selectedFile: typeof newestMain | typeof newestFix = null;
@@ -226,15 +227,10 @@ export function prepareQATracksForTiming(
         const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
         const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
 
-        // Тип 1: Цельный фикс (плюс-минус как оригинал по размеру/весу, >= 70% или разница <= 3 МБ)
-        // Даббер переписал реплики и отрендерил полную готовую дорожку всей серии.
-        // В этом случае вшивать фиксы не нужно — чистовик заменяет черновик целиком.
         if (ratio >= 0.70 || sizeDiffMb <= 3.0 || fixSize === 0) {
           selectedFile = newestFix;
           patchSnippet = null;
         } else {
-          // Тип 2: Фиксы частями (отдельные фразы, гораздо легче оригинальной дорожки)
-          // В этом случае оригинальная дорожка остается основной, а фиксы вшиваются на места фраз.
           selectedFile = newestMain;
           patchSnippet = newestFix;
         }
@@ -245,6 +241,8 @@ export function prepareQATracksForTiming(
       }
 
       if (!selectedFile) return;
+
+      const allFiles = [...mainCandidates, ...fixCandidates];
 
       finalTracks.push({
         id: `track_${normKey}`,
@@ -257,7 +255,7 @@ export function prepareQATracksForTiming(
         filePath: selectedFile.path,
         role: 'dubber',
         status: (actor.assignmentStatus?.toLowerCase() || (selectedFile.type === 'FIXES' ? 'fixes_needed' : 'recorded')) as Track['status'],
-        files: [selectedFile] as any,
+        files: (allFiles.length > 0 ? allFiles : [selectedFile]) as any,
         selectedFileId: selectedFile.id,
         comments: actor.comments || [],
         patchSnippet: patchSnippet ? {

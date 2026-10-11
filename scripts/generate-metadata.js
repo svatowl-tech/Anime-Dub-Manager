@@ -6,7 +6,7 @@ const metadataPath = path.join(process.cwd(), 'src', 'build-metadata.json');
 
 let commitHash = 'unknown';
 try {
-  commitHash = execSync('git rev-parse --short HEAD').toString().trim();
+  commitHash = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
 } catch (e) {
   console.warn('Could not get commit hash, using "unknown"');
 }

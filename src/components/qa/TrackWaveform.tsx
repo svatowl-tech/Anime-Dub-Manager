@@ -3,6 +3,7 @@ import WaveSurfer from 'wavesurfer.js';
 import RegionsPlugin from 'wavesurfer.js/dist/plugins/regions.esm.js';
 import { Track, SubtitleLine } from '../../types';
 import { getSharedAudioContext, ensureAudioContextResumed } from '../../lib/qa/sharedAudioContext';
+import { resolveLocalPath } from '../../lib/webFileSystem';
 
 function generateSyntheticPeaks(lines: SubtitleLine[], duration: number) {
   const pointsPerSecond = 10;
@@ -128,7 +129,6 @@ export const TrackWaveform = ({ track, currentTime, isPlaying, subLines, onTimeU
             audioUrl = URL.createObjectURL(cached);
           } else {
             try {
-              const { resolveLocalPath } = await import('../../lib/webFileSystem');
               const resolved = await resolveLocalPath(selectedFile.path);
               if (resolved) audioUrl = resolved;
             } catch (err) {}

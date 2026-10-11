@@ -6,6 +6,7 @@
 import { ipcSafe } from '../ipcSafe';
 import { CharacterDialogueLine } from './characterPreviewTypes';
 import { parseAssTimeToSeconds, cleanDialogueText } from './timeUtils';
+import { resolveLocalPath } from '../webFileSystem';
 
 // Frame cache by `${videoPath}_${timeSec}`
 const frameCache = new Map<string, string>();
@@ -27,7 +28,6 @@ export async function resolveVideoUrl(videoPath: string): Promise<string> {
       return URL.createObjectURL(cached);
     }
     try {
-      const { resolveLocalPath } = await import('../webFileSystem');
       const resolved = await resolveLocalPath(videoPath);
       if (resolved) return resolved;
     } catch (err) {

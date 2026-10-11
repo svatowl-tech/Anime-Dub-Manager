@@ -56,6 +56,7 @@ import { normalizeSpeechText } from '../lib/qa/whisperTextChecker';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
 import { loadTimingProjectForEpisode, applyTimingPassportToClips, TimingProjectData } from '../lib/qa/timingSyncService';
+import { resolveLocalPath } from '../lib/webFileSystem';
 
 /**
  * Calculates text similarity for Whisper speech vs. Subtitle text
@@ -87,6 +88,15 @@ function calculateTextSimilarity(text1: string, text2: string): number {
   const dice = (2 * common) / (words1.length + words2.length);
   return Math.min(1.0, Math.max(0, dice));
 }
+
+export const isFixTrack = (t: any): boolean => {
+  if (!t) return false;
+  if (t.id && (t.id.includes('_fix_') || t.id.includes('_fix') || t.id.startsWith('fix_'))) return true;
+  if (t.isFix || t.role === 'fix' || t.type === 'FIXES') return true;
+  if (t.filePath && (/(?:_fix|фикс|\[fix\]|\[фикс\])/i.test(t.filePath))) return true;
+  if (Array.isArray(t.files) && t.files.some((f: any) => f.type === 'FIXES' || /(?:_fix|фикс)/i.test(f.name || f.path || ''))) return true;
+  return false;
+};
 
 function parseTimeToSeconds(timeStr: string | number): number {
   if (typeof timeStr === 'number') return isNaN(timeStr) ? 0 : timeStr;
@@ -245,7 +255,6 @@ async function getPlayableAudioUrl(filePath: string): Promise<string | null> {
     return URL.createObjectURL(cached);
   }
   try {
-    const { resolveLocalPath } = await import('../lib/webFileSystem');
     const resolved = await resolveLocalPath(filePath);
     if (resolved) return resolved;
   } catch (err) {}
@@ -1383,7 +1392,29 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       // - If a full FIXES file exists (>= 70% duration/size), draft DUBBER_FILE is COMPLETELY EXCLUDED.
       // - If multiple takes of same type exist, strictly selects the newest by createdAt.
       // - Returns EXACTLY ONE master track per unique actor/role.
-      const fetchedTracks = prepareQATracksForTiming(currentEpisode, cleanManifestTracks);
+      const rawFetched = prepareQATracksForTiming(currentEpisode, cleanManifestTracks);
+      const fetchedTracks: Track[] = [];
+      for (const tr of rawFetched) {
+        fetchedTracks.push(tr);
+        if ((tr as any).patchSnippet && (tr as any).patchSnippet.path) {
+          const snip = (tr as any).patchSnippet;
+          fetchedTracks.push({
+            id: `${tr.id}_fix`,
+            projectId: tr.projectId,
+            episodeId: tr.episodeId,
+            participant: `${tr.participant} (Фикс)`,
+            character: tr.character,
+            dubberName: tr.dubberName,
+            characterName: tr.characterName,
+            filePath: snip.path,
+            role: 'fix',
+            status: 'fixes_needed',
+            files: [{ id: snip.id || `${tr.id}_fix_file`, path: snip.path, createdAt: '', type: 'FIXES' }],
+            selectedFileId: snip.id || `${tr.id}_fix_file`,
+            comments: tr.comments || []
+          } as any);
+        }
+      }
 
       setTracks(fetchedTracks);
       addLog(`Загружено ${fetchedTracks.length} уникальных мастер-дорожек дабберов (без дублирования и с приоритетом чистовых фиксов).`, fetchedTracks.length > 0 ? 'success' : 'warn');
@@ -1490,8 +1521,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
         matchedLines.forEach(l => allMappedSubIds.add(String(l.id)));
 
-        const mainTracks = actorTrks.filter(t => !t.id.includes('_fix_'));
-        const fixTracks = actorTrks.filter(t => t.id.includes('_fix_'));
+        const mainTracks = actorTrks.filter(t => !isFixTrack(t));
+        const fixTracks = actorTrks.filter(t => isFixTrack(t));
 
         // If actor has 2 main tracks (second track specifically for overlapping phrases)
         if (mainTracks.length >= 2) {
@@ -1612,7 +1643,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
           sourceEndSec: trackDur,
           text: `Полная запись: ${dubberName}`,
           volumePercent: 100,
-          isFix: tr.id.includes('_fix_'),
+          isFix: isFixTrack(tr),
           hasCollision: false,
           offsetSec: 0
         }];
@@ -1826,7 +1857,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               rawSourceEndSec: phrase.endSec,
               text: phrase.text || matchingSub?.text || `${characterName}: Фраза #${idx + 1}`,
               volumePercent: 100,
-              isFix: phrase.isFix ?? ((track as any).type === 'FIXES' || track.id.includes('_fix_')),
+              isFix: phrase.isFix ?? isFixTrack(track),
               hasCollision: false,
               offsetSec: 0
             };
@@ -1891,7 +1922,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               rawSourceEndSec: iv.endSec,
               text: matchingSub?.text || `Фраза ${idx + 1}`,
               volumePercent: 100,
-              isFix: track.id.includes('_fix_'),
+              isFix: isFixTrack(track),
               hasCollision: false,
               offsetSec: 0
             };
@@ -1913,7 +1944,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               rawSourceEndSec: sub.endSec,
               text: sub.text,
               volumePercent: 100,
-              isFix: track.id.includes('_fix_'),
+              isFix: isFixTrack(track),
               hasCollision: false,
               offsetSec: 0
             };
@@ -1960,8 +1991,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       });
 
       for (const [actorNick, actorTrks] of Object.entries(tracksByActor)) {
-        const mainTracks = actorTrks.filter(t => !t.id.includes('_fix_'));
-        const fixTracks = actorTrks.filter(t => t.id.includes('_fix_'));
+        const mainTracks = actorTrks.filter(t => !isFixTrack(t));
+        const fixTracks = actorTrks.filter(t => isFixTrack(t));
 
         if (mainTracks.length === 0 || fixTracks.length === 0) continue;
 
@@ -2221,7 +2252,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
                 rawSourceEndSec: iv.endSec,
                 text: sub?.text || `Фраза ${idx + 1}`,
                 volumePercent: 100,
-                isFix: track.id.includes('_fix_'),
+                isFix: isFixTrack(track),
                 hasCollision: false,
                 offsetSec: 0
               };
@@ -4028,7 +4059,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
 
                         {/* Track Type Badge & File Info */}
                         <div className="mt-0.5 flex items-center gap-1.5 overflow-hidden">
-                          {track.id.includes('_fix_') ? (
+                          {isFixTrack(track) ? (
                             <span className="px-1.5 py-0.5 rounded text-[8px] font-bold bg-amber-950/80 text-amber-300 border border-amber-800/60 uppercase shrink-0">
                               Фикс
                             </span>

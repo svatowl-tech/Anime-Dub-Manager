@@ -2228,10 +2228,15 @@ class MixingPipelineService {
 
     await this._refreshManifestFiles(manifest, workingDir, episode);
 
+    const timingMeta = await this.getTimingMetadata(workingDir).catch(() => null);
+    const rolesVolumeMap = (timingMeta && timingMeta.rolesVolumeMap) ? timingMeta.rolesVolumeMap : {};
+
     return {
       success: true,
       workingDir,
       manifest,
+      rolesVolumeMap,
+      timingMetadata: timingMeta,
       moduleDatabase: this.getModuleDatabase()
     };
   }
@@ -2818,20 +2823,23 @@ class MixingPipelineService {
   _resolveTrackOutName(track, inputFiles, index, prefix) {
     const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
     const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
-    const nick = (track.dubberNick || `dubber_${index + 1}`).replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim() || `dubber_${index + 1}`;
+    const rawNick = track.baseDubberNick || track.dubberNick || `dubber_${index + 1}`;
+    const nick = rawNick.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim() || `dubber_${index + 1}`;
     
     if (trMatch) {
       return `${prefix}${nick}_${trMatch[1].toLowerCase()}.wav`;
     }
     
     const sameNickTracks = inputFiles.filter(f => {
-      const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+      const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+      const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
       return fNick.toLowerCase() === nick.toLowerCase();
     });
     
     if (sameNickTracks.length > 1) {
       const occ = inputFiles.slice(0, index + 1).filter(f => {
-        const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+        const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+        const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
         return fNick.toLowerCase() === nick.toLowerCase();
       }).length;
       return `${prefix}${nick}_дорожка${occ}.wav`;
@@ -2843,20 +2851,24 @@ class MixingPipelineService {
   _resolveTrackNick(track, inputFiles, index) {
     const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
     const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
-    const nick = (track.dubberNick || `dubber_${index + 1}`).replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim() || `dubber_${index + 1}`;
+    const rawNick = track.baseDubberNick || track.dubberNick || `dubber_${index + 1}`;
+    const nick = rawNick.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim() || `dubber_${index + 1}`;
     
     if (trMatch) {
-      return `${nick} (${trMatch[1].replace('дорожка', 'Дорожка ')})`;
+      const trLabel = trMatch[1].replace(/дорожка/i, 'Дорожка ').replace(/track/i, 'Дорожка ');
+      return `${nick} (${trLabel.trim()})`;
     }
     
     const sameNickTracks = inputFiles.filter(f => {
-      const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+      const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+      const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
       return fNick.toLowerCase() === nick.toLowerCase();
     });
     
     if (sameNickTracks.length > 1) {
       const occ = inputFiles.slice(0, index + 1).filter(f => {
-        const fNick = (f.dubberNick || 'dubber').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').trim();
+        const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+        const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
         return fNick.toLowerCase() === nick.toLowerCase();
       }).length;
       return `${nick} (Дорожка ${occ})`;
@@ -2867,28 +2879,55 @@ class MixingPipelineService {
 
   _resolveTrackVolumePercent(track, timingMeta) {
     if (!timingMeta || !timingMeta.rolesVolumeMap) return 100;
+    const volMap = timingMeta.rolesVolumeMap;
     const tName = (track.name || path.basename(track.path || '')).toLowerCase();
     const tNick = (track.dubberNick || '').toLowerCase();
-    
-    // 1. Direct match with track name or role (e.g. "Анна (Дорожка 1)")
-    for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
-      const rLower = role.toLowerCase();
-      if (tName.includes(rLower) || rLower.includes(tName)) {
-        return Number(vol) || 100;
-      }
-      if (tNick && rLower.includes(tNick)) {
-        if (tName.includes('дорожка1') && rLower.includes('дорожка 1')) return Number(vol) || 100;
-        if (tName.includes('дорожка2') && rLower.includes('дорожка 2')) return Number(vol) || 100;
+    const baseNick = (track.baseDubberNick || tNick.replace(/\s*\([^)]*\)/g, '')).toLowerCase().replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
+
+    // 0. Direct key match in rolesVolumeMap
+    if (track.dubberNick && volMap[track.dubberNick] !== undefined) {
+      return Number(volMap[track.dubberNick]) || 100;
+    }
+    if (track.name && volMap[track.name] !== undefined) {
+      return Number(volMap[track.name]) || 100;
+    }
+
+    // Extract track number from name or dubberNick
+    const trMatch = tName.match(/_(?:дорожка|track|layer|take)(\d+)/i) || 
+                   tNick.match(/(?:дорожка|track|layer|take)\s*(\d+)/i);
+    const trNum = trMatch ? parseInt(trMatch[1], 10) : null;
+
+    // 1. Precise match with track number if multi-track
+    if (trNum !== null) {
+      for (const [role, vol] of Object.entries(volMap)) {
+        const rLower = role.toLowerCase();
+        const rTrMatch = rLower.match(/(?:дорожка|track|layer|take)\s*(\d+)/i);
+        const rTrNum = rTrMatch ? parseInt(rTrMatch[1], 10) : null;
+        if (rTrNum === trNum && (rLower.includes(baseNick) || baseNick.includes(rLower.replace(/\s*\([^)]*\)/g, '').trim()))) {
+          return Number(vol) || 100;
+        }
       }
     }
-    
-    // 2. Nickname match
-    for (const [role, vol] of Object.entries(timingMeta.rolesVolumeMap)) {
+
+    // 2. Exact match case-insensitive
+    for (const [role, vol] of Object.entries(volMap)) {
       const rLower = role.toLowerCase();
-      if (tNick && (rLower.includes(tNick) || tNick.includes(rLower))) {
+      if (rLower === tNick || rLower === tName) {
         return Number(vol) || 100;
       }
     }
+
+    // 3. Single track actor fallback
+    if (trNum === null) {
+      for (const [role, vol] of Object.entries(volMap)) {
+        const rLower = role.toLowerCase();
+        if (/(?:дорожка|track)\s*\d+/i.test(rLower)) continue;
+        if (rLower.includes(baseNick) || baseNick.includes(rLower)) {
+          return Number(vol) || 100;
+        }
+      }
+    }
+
     return 100;
   }
 
@@ -5711,25 +5750,34 @@ class MixingPipelineService {
       }
     }
 
-    // Если всё ещё нет, проверяем inputFiles (исключая фоновый файл даккинга)
-    if (!voicePath && inputFiles.length > 0) {
-      const validVoiceInput = inputFiles.find(f => f.path && fsSync.existsSync(f.path) && f.path !== duckedAudioPath && !f.name.includes('ducked'));
-      if (validVoiceInput) {
-        voicePath = validVoiceInput.path;
-      }
-    }
-
-    // Если на входе несколько отдельных дорожек дабберов, склеиваем их в лету
+    // Если на входе отдельные дорожки дабберов (например, если шаг glue_compress пропущен)
     if (!voicePath && inputFiles.length > 0) {
       const dubberInputs = inputFiles.filter(f => f.path && fsSync.existsSync(f.path) && f.path !== duckedAudioPath && !f.name.includes('ducked'));
-      if (dubberInputs.length > 0) {
-        logFn(`Склейка ${dubberInputs.length} дорожек дабберов для мастер-микса...`);
+      if (dubberInputs.length === 1) {
+        voicePath = dubberInputs[0].path;
+      } else if (dubberInputs.length > 1) {
+        logFn(`Склейка ${dubberInputs.length} дорожек дабберов с учетом персональной громкости роли для мастер-микса...`);
         const tempVoicePath = path.join(stepFolder, 'temp_combined_voices.wav');
         let joinCmd = ffmpeg();
         dubberInputs.forEach(t => { joinCmd = joinCmd.input(t.path); });
-        const mixFilter = dubberInputs.length > 1 ? `amix=inputs=${dubberInputs.length}:dropout_transition=0:normalize=0` : 'anull';
+        
+        const filterParts = [];
+        const mixInputs = [];
+        for (let i = 0; i < dubberInputs.length; i++) {
+          const tr = dubberInputs[i];
+          const roleVolPct = this._resolveTrackVolumePercent(tr, timingMeta);
+          const userVolGainDb = roleVolPct !== 100 ? (20 * Math.log10(Math.max(10, roleVolPct) / 100)) : 0;
+          if (userVolGainDb !== 0) {
+            filterParts.push(`[${i}:a]volume=${userVolGainDb.toFixed(1)}dB[vol_${i}]`);
+            mixInputs.push(`[vol_${i}]`);
+          } else {
+            mixInputs.push(`[${i}:a]`);
+          }
+        }
+        filterParts.push(`${mixInputs.join('')}amix=inputs=${dubberInputs.length}:dropout_transition=0:normalize=0[mixout]`);
+
         joinCmd
-          .complexFilter([mixFilter])
+          .complexFilter(filterParts.join(';'), ['mixout'])
           .audioCodec('pcm_s16le')
           .audioChannels(2)
           .audioFrequency(48000)

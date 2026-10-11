@@ -1,3 +1,6 @@
+import { readFromLocalFolder, writeToLocalFolder, selectBrowserDirectory, selectBrowserFile } from './webFileSystem';
+import { idb } from './idb';
+
 export const ipcRenderer: {
   invoke: (channel: string, ...args: any[]) => Promise<any>;
   send: (channel: string, ...args: any[]) => void;
@@ -178,7 +181,6 @@ export let isStorageSynced = false;
 
 export async function syncAndLoadFromDir() {
   try {
-    const { readFromLocalFolder, writeToLocalFolder } = await import('./webFileSystem');
     
     // We try to read projects.json, episodes.json, participants.json, config.json from the selected folder
     const keys = ['projects', 'episodes', 'participants', 'config'];
@@ -565,7 +567,6 @@ function handleIpcMock(channel: string, args: any[]): any {
   if (channel === 'select-directory') {
     return (async () => {
       try {
-        const { selectBrowserDirectory } = await import('./webFileSystem');
         const dirName = await selectBrowserDirectory();
         return { canceled: false, filePaths: [dirName] };
       } catch (e: any) {
@@ -578,7 +579,6 @@ function handleIpcMock(channel: string, args: any[]): any {
   if (channel === 'select-folder') {
     return (async () => {
       try {
-        const { selectBrowserDirectory } = await import('./webFileSystem');
         const dirName = await selectBrowserDirectory();
         return { success: true, data: { path: dirName } };
       } catch (e: any) {
@@ -591,7 +591,6 @@ function handleIpcMock(channel: string, args: any[]): any {
   if (channel === 'select-file' || channel === 'dialog:openFile' || channel === 'dialog:showOpenDialog') {
     return (async () => {
       try {
-        const { selectBrowserFile } = await import('./webFileSystem');
         const fileInfo = await selectBrowserFile();
         return { success: true, path: fileInfo.path, filePath: fileInfo.path, data: { path: fileInfo.path } };
       } catch (e: any) {
@@ -734,7 +733,6 @@ function handleIpcMock(channel: string, args: any[]): any {
     return (async () => {
       const filePath = args[0];
       if (filePath === 'standalone.ass') {
-        const { idb } = await import('./idb');
         const text = await idb.get('standalone_sub_text');
         if (text) {
           return parseMemoryAss(text);
@@ -743,7 +741,6 @@ function handleIpcMock(channel: string, args: any[]): any {
       
       if (filePath) {
         try {
-          const { readFromLocalFolder } = await import('./webFileSystem');
           const file = await readFromLocalFolder(filePath);
           if (file instanceof File) {
             const text = await file.text();
@@ -823,7 +820,6 @@ function handleIpcMock(channel: string, args: any[]): any {
       const lines = payload.lines;
       if (filePath && Array.isArray(lines)) {
         try {
-          const { writeToLocalFolder } = await import('./webFileSystem');
           const header = `[Script Info]\nTitle: Anime Dub Manager\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
           const eventLines = lines.map(l => {
             return `Dialogue: 0,${l.start},${l.end},${l.style || 'Default'},${l.name || 'Actor'},0,0,0,,${l.text}`;
@@ -843,7 +839,6 @@ function handleIpcMock(channel: string, args: any[]): any {
       const { assFilePath, translatedLines } = args[0] || {};
       if (assFilePath && Array.isArray(translatedLines)) {
         try {
-          const { writeToLocalFolder } = await import('./webFileSystem');
           const header = `[Script Info]\nTitle: Anime Dub Manager\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n`;
           const eventLines = translatedLines.map(l => {
             return `Dialogue: 0,${l.start},${l.end},${l.style || 'Default'},${l.name || 'Actor'},0,0,0,,${l.text}`;
@@ -909,7 +904,6 @@ function handleIpcMock(channel: string, args: any[]): any {
       const { fileName, targetDir } = args[0] || {};
       const pathValue = `${targetDir}/${fileName}`;
       try {
-        const { readFromLocalFolder, writeToLocalFolder } = await import('./webFileSystem');
         const file = await readFromLocalFolder(fileName);
         if (file instanceof File) {
           await writeToLocalFolder(pathValue, file);
@@ -926,7 +920,6 @@ function handleIpcMock(channel: string, args: any[]): any {
       const { fileName, targetDir, buffer } = args[0] || {};
       const pathValue = `${targetDir}/${fileName}`;
       try {
-        const { writeToLocalFolder } = await import('./webFileSystem');
         if (buffer) {
           const blob = new Blob([buffer]);
           await writeToLocalFolder(pathValue, blob);
