@@ -552,6 +552,9 @@ export function scanTrackForArtifacts(
   subLines: SubtitleLine[],
   options: ArtifactDetectionOptions = {}
 ): AudioArtifact[] {
+  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
+    return [];
+  }
   const artifacts: AudioArtifact[] = [];
 
   const assignedCharacters = new Set<string>();

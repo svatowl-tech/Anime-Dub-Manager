@@ -7,8 +7,10 @@ import {
 import { Project, Episode, Participant, EpisodeStatus } from '../../types';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { toast } from 'sonner';
-import { formatFullDeadline } from '../../lib/templates';
+import { formatDeadline, formatFullDeadline } from '../../lib/templates';
 import { safeCopyToClipboard } from '../../lib/clipboard';
+import ProjectDeadlineModal from './ProjectDeadlineModal';
+import EpisodeDeadlineModal from './EpisodeDeadlineModal';
 
 interface GeneralHubProps {
   projects: Project[];
@@ -70,6 +72,8 @@ export default function GeneralHub({
   const [reminderProject, setReminderProject] = useState<Project | null>(null);
   const [reminderEpisode, setReminderEpisode] = useState<Episode | null>(null);
   const [copied, setCopied] = useState(false);
+  const [projectForDeadline, setProjectForDeadline] = useState<Project | null>(null);
+  const [episodeForDeadline, setEpisodeForDeadline] = useState<Episode | null>(null);
 
   // Filter only active projects for the main hub
   const activeProjects = useMemo(() => projects.filter(p => p.status !== 'COMPLETED'), [projects]);
@@ -503,12 +507,20 @@ export default function GeneralHub({
 
                     {/* Deadline and Assignments info */}
                     <div className="grid grid-cols-2 gap-4 text-xs pt-1">
-                      <div className="flex items-center gap-1.5 text-neutral-400">
-                        <Calendar className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setEpisodeForDeadline(activeEp);
+                        }}
+                        className="flex items-center gap-1.5 text-neutral-400 hover:text-amber-300 transition-colors cursor-pointer text-left group/deadline"
+                        title="Нажмите, чтобы настроить дедлайн серии вручную"
+                      >
+                        <Calendar className="w-3.5 h-3.5 text-neutral-500 group-hover/deadline:text-amber-400 shrink-0 transition-colors" />
                         <span className="truncate">
-                          Дедлайн: <strong className="text-neutral-300">{formatFullDeadline(activeEp.deadline, activeEp.fixesDeadline)}</strong>
+                          Дедлайн: <strong className="text-neutral-300 group-hover/deadline:text-amber-300 underline decoration-neutral-700 underline-offset-2">{formatFullDeadline(activeEp.deadline, activeEp.fixesDeadline)}</strong>
                         </span>
-                      </div>
+                      </button>
                       <div className="flex items-center gap-1.5 text-neutral-400 justify-end">
                         <Users className="w-3.5 h-3.5 text-neutral-500 shrink-0" />
                         <span className="truncate">
@@ -533,6 +545,19 @@ export default function GeneralHub({
                   >
                     <Play className="w-3.5 h-3.5 text-blue-400" />
                     <span>Войти</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setProjectForDeadline(project);
+                    }}
+                    className="flex items-center justify-center gap-1 px-2.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer border border-neutral-700/50"
+                    title={project.deadline ? `Общий дедлайн проекта: ${formatDeadline(project.deadline)}` : 'Задать общий дедлайн проекта вручную'}
+                  >
+                    <Clock className="w-3.5 h-3.5 text-indigo-400" />
+                    <span className="hidden sm:inline">Дедлайн</span>
                   </button>
 
                   {activeEp && (
@@ -643,6 +668,26 @@ export default function GeneralHub({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Project Deadline Modal */}
+      {projectForDeadline && (
+        <ProjectDeadlineModal
+          isOpen={Boolean(projectForDeadline)}
+          onClose={() => setProjectForDeadline(null)}
+          project={projectForDeadline}
+          onSave={onRefresh}
+        />
+      )}
+
+      {/* Episode Deadline Modal */}
+      {episodeForDeadline && (
+        <EpisodeDeadlineModal
+          isOpen={Boolean(episodeForDeadline)}
+          onClose={() => setEpisodeForDeadline(null)}
+          episode={episodeForDeadline}
+          onSave={onRefresh}
+        />
       )}
     </div>
   );

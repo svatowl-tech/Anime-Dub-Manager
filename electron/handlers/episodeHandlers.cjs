@@ -52,24 +52,30 @@ function registerEpisodeHandlers(getData, saveData) {
 
     const isTransitioningToRecording = dataToSave.status === 'RECORDING' && (!previousItem || previousItem.status !== 'RECORDING');
 
-    if (isTransitioningToRecording) {
+    if (isTransitioningToRecording && !dataToSave.deadline && (!previousItem || !previousItem.deadline)) {
       try {
         const projectList = await getData('projects.json');
         const associatedProject = projectList.find(p => p.id === dataToSave.projectId);
         if (associatedProject) {
           const now = new Date();
-          let daysToAdd = 7; // Default for offgoing (isOngoing === false)
-
-          if (associatedProject.isOngoing) {
-            if (associatedProject.releaseType === 'VOICEOVER') {
-              daysToAdd = 2;
-            } else if (associatedProject.releaseType === 'RECAST' || associatedProject.releaseType === 'REDUB') {
-              daysToAdd = 3;
+          let daysToAdd = associatedProject.defaultEpisodeDeadlineDays;
+          if (typeof daysToAdd !== 'number' || isNaN(daysToAdd) || daysToAdd < 1) {
+            daysToAdd = 7; // Default for offgoing (isOngoing === false)
+            if (associatedProject.isOngoing) {
+              if (associatedProject.releaseType === 'VOICEOVER') {
+                daysToAdd = 2;
+              } else if (associatedProject.releaseType === 'RECAST' || associatedProject.releaseType === 'REDUB') {
+                daysToAdd = 3;
+              }
             }
           }
 
+          const targetHour = typeof associatedProject.defaultEpisodeDeadlineHour === 'number' ? associatedProject.defaultEpisodeDeadlineHour : 20;
+          const targetMinute = typeof associatedProject.defaultEpisodeDeadlineMinute === 'number' ? associatedProject.defaultEpisodeDeadlineMinute : 0;
+
           const deadlineDate = new Date(now);
           deadlineDate.setDate(now.getDate() + daysToAdd);
+          deadlineDate.setHours(targetHour, targetMinute, 0, 0);
           dataToSave.deadline = deadlineDate.toISOString();
         }
       } catch (err) {

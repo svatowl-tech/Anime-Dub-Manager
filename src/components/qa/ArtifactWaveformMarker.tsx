@@ -31,8 +31,8 @@ export const ArtifactWaveformMarker: React.FC<ArtifactWaveformMarkerProps> = ({
   // Compute 50 visual amplitude bars from the actual AudioBuffer slice
   const bars = useMemo(() => {
     const numBars = 54;
-    if (!audioBuffer) {
-      // Synthetic fallback bars if buffer not yet decoded
+    if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
+      // Synthetic fallback bars if buffer not yet decoded or invalid
       return Array.from({ length: numBars }, (_, i) => {
         const centerDist = Math.abs(i - numBars / 2);
         const height = Math.max(0.15, Math.sin(i * 0.4) * 0.4 + 0.35 - (centerDist / numBars) * 0.2);

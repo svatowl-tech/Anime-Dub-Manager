@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { X, Plus, Loader2, Activity, User } from 'lucide-react';
+import { X, Plus, Loader2, Activity, User, Clock } from 'lucide-react';
 import { searchAnime, getAnimeDetails, getAnimeCharacters } from '../../services/animeService';
 import { ReleaseType } from '../../types';
 
@@ -19,6 +19,8 @@ export default function CreateProjectModal({ isOpen, onClose, onCreate }: Create
   const [newProjectPosterUrl, setNewProjectPosterUrl] = useState('');
   const [newProjectTypeAndSeason, setNewProjectTypeAndSeason] = useState('');
   const [newProjectTotalEpisodes, setNewProjectTotalEpisodes] = useState(12);
+  const [newProjectDefaultDeadlineDays, setNewProjectDefaultDeadlineDays] = useState(2);
+  const [newProjectDefaultDeadlineHour, setNewProjectDefaultDeadlineHour] = useState(20);
   const [newProjectCharacters, setNewProjectCharacters] = useState<{name: string, dubberId: string, photoUrl?: string}[]>([]);
   
   const [animeSearchQuery, setAnimeSearchQuery] = useState('');
@@ -42,6 +44,8 @@ export default function CreateProjectModal({ isOpen, onClose, onCreate }: Create
       setNewProjectPosterUrl('');
       setNewProjectTypeAndSeason('');
       setNewProjectTotalEpisodes(12);
+      setNewProjectDefaultDeadlineDays(2);
+      setNewProjectDefaultDeadlineHour(20);
       setNewProjectCharacters([]);
       setAnimeSearchQuery('');
       setAnimeSearchResults([]);
@@ -126,6 +130,8 @@ export default function CreateProjectModal({ isOpen, onClose, onCreate }: Create
       posterUrl: newProjectPosterUrl,
       typeAndSeason: newProjectTypeAndSeason,
       totalEpisodes: newProjectTotalEpisodes,
+      defaultEpisodeDeadlineDays: Math.max(1, newProjectDefaultDeadlineDays || 2),
+      defaultEpisodeDeadlineHour: Math.max(0, Math.min(23, newProjectDefaultDeadlineHour || 20)),
       characters: newProjectCharacters
     });
   };
@@ -283,11 +289,46 @@ export default function CreateProjectModal({ isOpen, onClose, onCreate }: Create
                 <input 
                   type="checkbox" 
                   checked={newProjectIsOngoing} 
-                  onChange={(e) => setNewProjectIsOngoing(e.target.checked)}
+                  onChange={(e) => {
+                    const ongoing = e.target.checked;
+                    setNewProjectIsOngoing(ongoing);
+                    setNewProjectDefaultDeadlineDays(ongoing ? (newProjectReleaseType === 'VOICEOVER' ? 2 : 3) : 7);
+                  }}
                   className="w-4 h-4 bg-neutral-950 border-neutral-800 rounded text-blue-600 focus:ring-blue-500/50"
                 />
                 <span className="text-sm text-neutral-300 group-hover:text-white transition-colors">Онгоинг (выходит сейчас)</span>
               </label>
+            </div>
+
+            {/* Standard Episode Deadline */}
+            <div className="p-3.5 bg-neutral-950/60 rounded-xl border border-neutral-800 space-y-2">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5 text-amber-400" /> Стандартный дедлайн на серию
+                </label>
+                <span className="text-xs text-amber-300 font-bold">
+                  {newProjectDefaultDeadlineDays} {newProjectDefaultDeadlineDays === 1 ? 'день' : newProjectDefaultDeadlineDays < 5 ? 'дня' : 'дней'} (в {newProjectDefaultDeadlineHour}:00)
+                </span>
+              </div>
+              <p className="text-xs text-neutral-400">
+                Сколько дней дается на сдачу каждой серии в этом проекте.
+              </p>
+              <div className="flex flex-wrap gap-1.5">
+                {[1, 2, 3, 4, 5, 7, 10, 14].map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => setNewProjectDefaultDeadlineDays(d)}
+                    className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
+                      newProjectDefaultDeadlineDays === d
+                        ? 'bg-amber-600 text-white border-amber-500 shadow-sm'
+                        : 'bg-neutral-800 text-neutral-300 border-neutral-700 hover:bg-neutral-700'
+                    }`}
+                  >
+                    {d} {d === 1 ? 'день' : d < 5 ? 'дня' : 'дней'}
+                  </button>
+                ))}
+              </div>
             </div>
 
             <div>

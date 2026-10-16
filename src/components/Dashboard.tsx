@@ -11,6 +11,9 @@ import { ExportModal } from './ExportModal';
 import { ConfirmModal } from './ui/ConfirmModal';
 import CreateProjectModal from './dashboard/CreateProjectModal';
 import ProjectSettingsModal from './dashboard/ProjectSettingsModal';
+import ProjectDeadlineModal from './dashboard/ProjectDeadlineModal';
+import EpisodeDeadlineModal from './dashboard/EpisodeDeadlineModal';
+import TrackDeadlineModal from './dashboard/TrackDeadlineModal';
 import CreateEpisodeModal from './dashboard/CreateEpisodeModal';
 import CharacterManagementModal from './dashboard/CharacterManagementModal';
 import AssignDubbersModal from './dashboard/AssignDubbersModal';
@@ -102,6 +105,20 @@ export default function Dashboard({
   const [status, setStatus] = useState<string>('');
 
   const [isProjectSettingsModalOpen, setIsProjectSettingsModalOpen] = useState(false);
+  const [isProjectDeadlineModalOpen, setIsProjectDeadlineModalOpen] = useState(false);
+  const [isEpisodeDeadlineModalOpen, setIsEpisodeDeadlineModalOpen] = useState(false);
+  const [trackDeadlineModalState, setTrackDeadlineModalState] = useState<{
+    isOpen: boolean;
+    dubberId?: string;
+    dubber?: Participant;
+    characters: string[];
+    assignmentIds: string[];
+    currentDeadline?: string;
+  }>({
+    isOpen: false,
+    characters: [],
+    assignmentIds: []
+  });
   const [projectSearch, setProjectSearch] = useState('');
 
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
@@ -1754,7 +1771,7 @@ export default function Dashboard({
     });
   };
 
-  const handleCreateEpisode = async (episodeNumber: number, customTitle?: string) => {
+  const handleCreateEpisode = async (episodeNumber: number, customTitle?: string, customDeadline?: string) => {
     if (!selectedProjectId || !selectedProject) return;
     
     // Check if episode with this number already exists
@@ -1788,13 +1805,14 @@ export default function Dashboard({
         }
       }
 
+      const initialDeadline = customDeadline || calculateDeadline(selectedProject);
       const newEpisode: Episode = {
         id: Date.now().toString(),
         projectId: selectedProjectId,
         number: episodeNumber,
         title: episodeTitle,
         status: 'UPLOAD',
-        deadline: calculateDeadline(selectedProject),
+        deadline: initialDeadline,
         assignments: [],
         uploads: [],
         createdAt: new Date().toISOString(),
@@ -2150,6 +2168,14 @@ export default function Dashboard({
                     Шаблоны уведомлений
                   </button>
                   <button
+                    onClick={() => setIsProjectDeadlineModalOpen(true)}
+                    className="px-3 py-1 bg-indigo-950/40 hover:bg-indigo-900/40 text-indigo-300 hover:text-white rounded-full text-xs font-bold border border-indigo-700/50 flex items-center gap-1.5 cursor-pointer transition-all active:scale-95 duration-100 font-sans"
+                    title="Настроить общий дедлайн релиза / проекта вручную"
+                  >
+                    <Calendar className="w-3.5 h-3.5 text-indigo-400" />
+                    {selectedProject.deadline ? `Дедлайн: ${formatDeadline(selectedProject.deadline)}` : 'Задать дедлайн проекта'}
+                  </button>
+                  <button
                     onClick={handleUpdateProjectData}
                     disabled={isUpdatingProjectData}
                     className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-300 rounded-full text-xs font-bold border border-neutral-700 flex items-center gap-1.5 cursor-pointer transition-all active:scale-95 duration-100 font-sans"
@@ -2206,7 +2232,7 @@ export default function Dashboard({
                 return null;
               })()}
               
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 pt-2">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 pt-2">
                 <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800">
                   <div className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider mb-1">Серий (Вышло / Всего)</div>
                   <div className="text-lg font-bold text-white">
@@ -2218,6 +2244,19 @@ export default function Dashboard({
                 <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800">
                   <div className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider mb-1">След. серия</div>
                   <div className="text-lg font-bold text-blue-400">{nextEpisodeDate || 'Неизвестно'}</div>
+                </div>
+                <div 
+                  onClick={() => setIsProjectDeadlineModalOpen(true)}
+                  className="bg-neutral-950 p-3 rounded-xl border border-neutral-800 hover:border-indigo-500/50 hover:bg-indigo-950/20 transition-all cursor-pointer group"
+                  title="Нажмите, чтобы настроить общий дедлайн проекта вручную"
+                >
+                  <div className="flex items-center justify-between text-[10px] text-neutral-500 group-hover:text-indigo-300 uppercase font-bold tracking-wider mb-1">
+                    <span>Общий дедлайн</span>
+                    <Clock className="w-3 h-3 text-neutral-500 group-hover:text-indigo-400 transition-colors" />
+                  </div>
+                  <div className="text-sm font-bold text-indigo-400 group-hover:text-indigo-300 truncate">
+                    {selectedProject.deadline ? formatDeadline(selectedProject.deadline) : 'Не установлен'}
+                  </div>
                 </div>
                 <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800">
                   <div className="text-[10px] text-neutral-500 uppercase font-bold tracking-wider mb-1">Звукорежиссер</div>
@@ -2317,6 +2356,14 @@ export default function Dashboard({
                       <button onClick={() => { setExportRole('DABBER'); setIsExportModalOpen(true); }} className="px-2 py-1 bg-green-600 hover:bg-green-500 text-white rounded text-xs transition-colors">Экспорт Даберам</button>
                       <button onClick={() => { setExportRole('SOUND_ENGINEER'); setIsExportModalOpen(true); }} className="px-2 py-1 bg-purple-600 hover:bg-purple-500 text-white rounded text-xs transition-colors">Экспорт Звукарю</button>
                       <button 
+                        onClick={() => setIsEpisodeDeadlineModalOpen(true)}
+                        className="px-2.5 py-1 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 rounded text-xs transition-colors flex items-center gap-1.5 font-bold cursor-pointer"
+                        title="Настроить дедлайн серии и правок вручную"
+                      >
+                        <Clock className="w-3.5 h-3.5 text-amber-400" />
+                        Дедлайн серии
+                      </button>
+                      <button 
                         onClick={handleFinishEpisode}
                         disabled={currentEpisode.status === 'FINISHED'}
                         className="flex items-center gap-1.5 px-3 py-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:hover:bg-indigo-600 text-white rounded text-xs font-bold transition-colors"
@@ -2339,10 +2386,16 @@ export default function Dashboard({
                       <Users className="w-4 h-4" />
                       <span>Даберы: <span className="text-emerald-400 font-medium">{Array.isArray(selectedProject?.assignedDubberIds) && selectedProject.assignedDubberIds.length > 0 ? selectedProject.assignedDubberIds.map(id => participants.find(p => p.id === id)?.nickname).filter(Boolean).join(', ') : 'Не назначены'}</span></span>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <Calendar className="w-4 h-4" />
-                      <span>Дедлайн: <span className="text-red-400 font-medium">{formatFullDeadline(currentEpisode.deadline, currentEpisode.fixesDeadline)}</span></span>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsEpisodeDeadlineModalOpen(true)}
+                      className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-neutral-950/60 hover:bg-neutral-800 border border-neutral-800 hover:border-red-500/40 text-neutral-300 transition-all cursor-pointer group text-left"
+                      title="Нажмите, чтобы вручную настроить дедлайн серии и правок"
+                    >
+                      <Calendar className="w-4 h-4 text-red-400 group-hover:scale-110 transition-transform" />
+                      <span>Дедлайн: <span className="text-red-400 font-medium underline decoration-red-500/30 underline-offset-2">{formatFullDeadline(currentEpisode.deadline, currentEpisode.fixesDeadline)}</span></span>
+                      <Clock className="w-3 h-3 text-neutral-500 group-hover:text-red-400 transition-colors ml-0.5" />
+                    </button>
                     {currentEpisode.airingDate && (
                       <div className="flex items-center gap-2">
                         <Calendar className="w-4 h-4 text-emerald-500" />
@@ -2565,10 +2618,18 @@ export default function Dashboard({
                   <h3 className="text-lg font-semibold text-white">Распределение ролей</h3>
                   <div className="flex items-center gap-4">
                     <button 
+                      onClick={() => setIsEpisodeDeadlineModalOpen(true)}
+                      className="flex items-center gap-1.5 text-sm text-amber-400 hover:text-amber-300 transition-colors cursor-pointer"
+                      title="Настроить дедлайн серии и синхронизировать с дабберами"
+                    >
+                      <Clock className="w-4 h-4" />
+                      Дедлайн серии
+                    </button>
+                    <button 
                       onClick={handleGenerateReminderMessage}
                       className="flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300 transition-colors"
                     >
-                      <Clock className="w-4 h-4" />
+                      <MessageSquare className="w-4 h-4" />
                       Напомнить о сдаче
                     </button>
                     <button 
@@ -2587,6 +2648,7 @@ export default function Dashboard({
                         <th className="px-6 py-4 font-semibold">Даббер</th>
                         <th className="px-6 py-4 font-semibold">Персонажи</th>
                         <th className="px-6 py-4 font-semibold">Статус</th>
+                        <th className="px-6 py-4 font-semibold">Срок сдачи дорожки</th>
                         <th className="px-6 py-4 font-semibold text-right">Действия</th>
                       </tr>
                     </thead>
@@ -2594,13 +2656,16 @@ export default function Dashboard({
                       {(() => {
                         const grouped: Record<string, any> = {};
                         currentEpisode?.assignments?.forEach(as => {
-                          const dubberId = as.substituteId || as.dubberId;
+                          const dubberId = as.substituteId || as.dubberId || as.characterName;
                           if (!grouped[dubberId]) {
                             grouped[dubberId] = {
+                              dubberId: as.substituteId || as.dubberId,
                               dubber: as.substitute || as.dubber,
                               characters: [as.characterName],
                               statuses: [as.status],
-                              lineCount: as.lineCount || 0
+                              lineCount: as.lineCount || 0,
+                              assignmentIds: [as.id],
+                              deadlines: as.deadline ? [as.deadline] : []
                             };
                           } else {
                             if (!grouped[dubberId].characters.includes(as.characterName)) {
@@ -2608,6 +2673,10 @@ export default function Dashboard({
                             }
                             grouped[dubberId].statuses.push(as.status);
                             grouped[dubberId].lineCount += (as.lineCount || 0);
+                            grouped[dubberId].assignmentIds.push(as.id);
+                            if (as.deadline && !grouped[dubberId].deadlines.includes(as.deadline)) {
+                              grouped[dubberId].deadlines.push(as.deadline);
+                            }
                           }
                         });
 
@@ -2616,6 +2685,9 @@ export default function Dashboard({
                           const allApproved = data.statuses.every((s: string) => s === 'APPROVED');
                           const anyFixes = data.statuses.some((s: string) => s === 'FIXES_NEEDED' || s === 'REJECTED');
                           const displayStatus = allApproved ? 'APPROVED' : anyFixes ? 'FIXES_NEEDED' : data.statuses[0];
+                          const customDeadline = data.deadlines?.[0];
+                          const hasCustom = Boolean(customDeadline);
+                          const effectiveDeadline = customDeadline || currentEpisode.deadline;
 
                           return (
                             <tr key={(dubberId || 'dubber') + idx} className="hover:bg-neutral-800/30 transition-colors group">
@@ -2640,14 +2712,59 @@ export default function Dashboard({
                                   {ROLE_STATUS_LABELS[displayStatus] || displayStatus || 'Ожидает'}
                                 </span>
                               </td>
-                              <td className="px-6 py-4 text-right">
-                                <button 
-                                  onClick={() => onNavigate?.('QA')}
-                                  className="text-neutral-500 hover:text-blue-400 transition-colors p-2 hover:bg-blue-500/10 rounded-lg"
-                                  title="Проверить в QA"
+                              <td className="px-6 py-4">
+                                <button
+                                  type="button"
+                                  onClick={() => setTrackDeadlineModalState({
+                                    isOpen: true,
+                                    dubberId: data.dubberId,
+                                    dubber: data.dubber,
+                                    characters: data.characters,
+                                    assignmentIds: data.assignmentIds,
+                                    currentDeadline: customDeadline
+                                  })}
+                                  className={`flex items-center gap-2 px-2.5 py-1 rounded-lg border text-xs transition-all cursor-pointer text-left group/btn ${
+                                    hasCustom 
+                                      ? 'bg-amber-500/10 border-amber-500/30 hover:border-amber-500/60 text-amber-300' 
+                                      : 'bg-neutral-950/60 border-neutral-800 hover:border-neutral-700 text-neutral-300'
+                                  }`}
+                                  title="Нажмите, чтобы настроить индивидуальное время сдачи дорожки даббера"
                                 >
-                                  <Activity className="w-4 h-4" />
+                                  <Clock className={`w-3.5 h-3.5 shrink-0 ${hasCustom ? 'text-amber-400' : 'text-neutral-500 group-hover/btn:text-amber-400'}`} />
+                                  <div className="flex flex-col min-w-0">
+                                    <span className="font-medium truncate">
+                                      {effectiveDeadline ? formatDeadline(effectiveDeadline) : 'Не установлен'}
+                                    </span>
+                                    <span className={`text-[10px] ${hasCustom ? 'text-amber-400/80 font-bold' : 'text-neutral-500'}`}>
+                                      {hasCustom ? 'Индивидуально' : currentEpisode.deadline ? 'По серии' : 'Нажмите для настройки'}
+                                    </span>
+                                  </div>
                                 </button>
+                              </td>
+                              <td className="px-6 py-4 text-right">
+                                <div className="flex items-center justify-end gap-1">
+                                  <button 
+                                    onClick={() => setTrackDeadlineModalState({
+                                      isOpen: true,
+                                      dubberId: data.dubberId,
+                                      dubber: data.dubber,
+                                      characters: data.characters,
+                                      assignmentIds: data.assignmentIds,
+                                      currentDeadline: customDeadline
+                                    })}
+                                    className="text-neutral-500 hover:text-amber-400 transition-colors p-2 hover:bg-amber-500/10 rounded-lg cursor-pointer"
+                                    title="Подстроить время сдачи дорожки"
+                                  >
+                                    <Clock className="w-4 h-4" />
+                                  </button>
+                                  <button 
+                                    onClick={() => onNavigate?.('QA')}
+                                    className="text-neutral-500 hover:text-blue-400 transition-colors p-2 hover:bg-blue-500/10 rounded-lg cursor-pointer"
+                                    title="Проверить в QA"
+                                  >
+                                    <Activity className="w-4 h-4" />
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           );
@@ -2655,7 +2772,7 @@ export default function Dashboard({
                       })()}
                       {(!currentEpisode?.assignments || currentEpisode.assignments?.length === 0) && (
                         <tr>
-                          <td colSpan={4} className="px-6 py-12 text-center text-neutral-500 italic">
+                          <td colSpan={5} className="px-6 py-12 text-center text-neutral-500 italic">
                             Роли еще не распределены. Используйте утилиту ASS или назначьте вручную.
                           </td>
                         </tr>
@@ -2685,6 +2802,7 @@ export default function Dashboard({
         onClose={() => setIsNewEpisodeModalOpen(false)}
         onCreate={handleCreateEpisode}
         defaultEpisodeNumber={(selectedProject?.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0) + 1}
+        project={selectedProject}
       />
 
       {/* Assign Dubbers Modal */}
@@ -2777,6 +2895,41 @@ export default function Dashboard({
           onClose={() => setIsProjectSettingsModalOpen(false)}
           project={selectedProject}
           currentEpisode={currentEpisode}
+          onSave={onRefresh}
+        />
+      )}
+
+      {/* Project Deadline Modal */}
+      {isProjectDeadlineModalOpen && selectedProject && (
+        <ProjectDeadlineModal
+          isOpen={isProjectDeadlineModalOpen}
+          onClose={() => setIsProjectDeadlineModalOpen(false)}
+          project={selectedProject}
+          onSave={onRefresh}
+        />
+      )}
+
+      {/* Episode Deadline Modal */}
+      {isEpisodeDeadlineModalOpen && currentEpisode && (
+        <EpisodeDeadlineModal
+          isOpen={isEpisodeDeadlineModalOpen}
+          onClose={() => setIsEpisodeDeadlineModalOpen(false)}
+          episode={currentEpisode}
+          onSave={onRefresh}
+        />
+      )}
+
+      {/* Dubber Track Deadline Modal */}
+      {trackDeadlineModalState.isOpen && currentEpisode && (
+        <TrackDeadlineModal
+          isOpen={trackDeadlineModalState.isOpen}
+          onClose={() => setTrackDeadlineModalState(prev => ({ ...prev, isOpen: false }))}
+          episode={currentEpisode}
+          dubberId={trackDeadlineModalState.dubberId}
+          dubber={trackDeadlineModalState.dubber}
+          characters={trackDeadlineModalState.characters}
+          assignmentIds={trackDeadlineModalState.assignmentIds}
+          currentDeadline={trackDeadlineModalState.currentDeadline}
           onSave={onRefresh}
         />
       )}

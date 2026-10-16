@@ -1,7 +1,7 @@
 import { Episode, Participant } from '../types';
 import { MissingLineDetection } from './qa/missingLinesDetector';
 
-export const formatDeadline = (dateStr?: string) => {
+export const formatDeadline = (dateStr?: string, includeTime: boolean = true) => {
   if (!dateStr) return 'не указан';
   const date = dateStr.includes('T') ? new Date(dateStr) : new Date(dateStr + 'T12:00:00');
   if (isNaN(date.getTime())) return 'не указан';
@@ -9,7 +9,50 @@ export const formatDeadline = (dateStr?: string) => {
   const day = days[date.getDay()];
   const dayOfMonth = date.getDate().toString().padStart(2, '0');
   const month = (date.getMonth() + 1).toString().padStart(2, '0');
+  
+  if (includeTime && dateStr.includes('T')) {
+    const hours = date.getHours().toString().padStart(2, '0');
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    if (date.getHours() !== 0 || date.getMinutes() !== 0) {
+      return `${day} ${dayOfMonth}.${month} в ${hours}:${minutes}`;
+    }
+  }
   return `${day} ${dayOfMonth}.${month}`;
+};
+
+export const formatDeadlineRelative = (dateStr?: string): { text: string; isOverdue: boolean; hoursLeft: number } => {
+  if (!dateStr) return { text: 'не указан', isOverdue: false, hoursLeft: 9999 };
+  const date = dateStr.includes('T') ? new Date(dateStr) : new Date(dateStr + 'T12:00:00');
+  if (isNaN(date.getTime())) return { text: 'не указан', isOverdue: false, hoursLeft: 9999 };
+
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  const hoursLeft = Math.round(diffMs / (1000 * 60 * 60));
+  const isOverdue = diffMs < 0;
+
+  if (isOverdue) {
+    const overdueHours = Math.abs(hoursLeft);
+    if (overdueHours < 24) {
+      return { text: `Просрочено на ${overdueHours} ч`, isOverdue: true, hoursLeft };
+    }
+    const overdueDays = Math.floor(overdueHours / 24);
+    return { text: `Просрочено на ${overdueDays} дн`, isOverdue: true, hoursLeft };
+  }
+
+  if (hoursLeft <= 1) {
+    const minutesLeft = Math.max(1, Math.round(diffMs / (1000 * 60)));
+    return { text: `Осталось ${minutesLeft} мин`, isOverdue: false, hoursLeft };
+  }
+  if (hoursLeft < 24) {
+    return { text: `Осталось ${hoursLeft} ч`, isOverdue: false, hoursLeft };
+  }
+  const daysLeft = Math.floor(hoursLeft / 24);
+  const remHours = hoursLeft % 24;
+  return { 
+    text: remHours > 0 ? `Осталось ${daysLeft} д ${remHours} ч` : `Осталось ${daysLeft} д`, 
+    isOverdue: false, 
+    hoursLeft 
+  };
 };
 
 export const getFixesDeadlineDate = (deadlineStr?: string, fixesDeadlineStr?: string): Date | null => {
@@ -37,7 +80,7 @@ export const formatFullDeadline = (deadlineStr?: string, fixesDeadlineStr?: stri
   if (mainStr === 'не указан') {
     return `с фиксами ${fixesStr}`;
   }
-  return `${mainStr} с фиксами ${fixesStr}`;
+  return `${mainStr} (с фиксами ${fixesStr})`;
 };
 
 export const generateStartEpisodeMessage = (episode: Episode, participants: Participant[], yandexUrl?: string) => {

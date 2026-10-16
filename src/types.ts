@@ -142,6 +142,7 @@ export interface RoleAssignment {
   comments?: string; // JSON string
   lineCount?: number;
   isMain?: boolean;
+  deadline?: string; // Custom deadline for this specific dubber / role
 }
 
 export interface UploadedFile {
@@ -196,6 +197,10 @@ export interface Project {
   fixesMessageTemplate?: string;
   statusMessageTemplate?: string;
   nextEpisodeDate?: string;
+  deadline?: string; // Overall project deadline / final release target date
+  defaultEpisodeDeadlineDays?: number; // Standard days allocated for episode completion in this project (e.g. 2, 3, 5, 7)
+  defaultEpisodeDeadlineHour?: number; // Target hour of the day (e.g. 20 for 20:00)
+  defaultEpisodeDeadlineMinute?: number; // Target minute of the day (e.g. 0)
   soundEngineer?: Participant;
   assignedDubbers?: Participant[];
   episodes: Episode[];

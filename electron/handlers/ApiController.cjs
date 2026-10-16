@@ -140,13 +140,19 @@ function registerApiHandlers(getData, saveData, mainWindow, taskQueue) {
                 const year = parseInt(parts[2]);
                 const airDateObj = new Date(year, month, day, 18, 0, 0);
                 if (!isNaN(airDateObj.getTime())) {
-                  let offset = 7;
-                  if (project.isOngoing) {
-                    if (project.releaseType === 'VOICEOVER') offset = 2;
-                    else if (project.releaseType === 'RECAST' || project.releaseType === 'REDUB') offset = 3;
+                  let offset = project.defaultEpisodeDeadlineDays;
+                  if (typeof offset !== 'number' || isNaN(offset) || offset < 1) {
+                    offset = 7;
+                    if (project.isOngoing) {
+                      if (project.releaseType === 'VOICEOVER') offset = 2;
+                      else if (project.releaseType === 'RECAST' || project.releaseType === 'REDUB') offset = 3;
+                    }
                   }
                   const deadlineDate = new Date(airDateObj.getTime());
                   deadlineDate.setDate(airDateObj.getDate() + offset);
+                  const targetHour = typeof project.defaultEpisodeDeadlineHour === 'number' ? project.defaultEpisodeDeadlineHour : 20;
+                  const targetMinute = typeof project.defaultEpisodeDeadlineMinute === 'number' ? project.defaultEpisodeDeadlineMinute : 0;
+                  deadlineDate.setHours(targetHour, targetMinute, 0, 0);
                   ep.deadline = deadlineDate.toISOString();
                 }
               }

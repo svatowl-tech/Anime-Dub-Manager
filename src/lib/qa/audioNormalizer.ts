@@ -118,6 +118,18 @@ export async function analyzeAudioForPreview(
       }
     }
 
+    if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
+      return {
+        gain: 1.0,
+        gainDb: 0,
+        peak: 0.5,
+        peakDb: -6,
+        rms: 0.1,
+        rmsDb: -20,
+        status: 'ready'
+      };
+    }
+
     const numChannels = audioBuffer.numberOfChannels;
     const length = audioBuffer.length;
     

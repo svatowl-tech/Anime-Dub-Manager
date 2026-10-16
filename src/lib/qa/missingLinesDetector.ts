@@ -335,6 +335,17 @@ export function findFullPhraseSilenceBoundaries(
   peakDb: number;
   rmsDb: number;
 } {
+  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
+    return {
+      naturalStartSec: approxStartSec,
+      naturalEndSec: approxEndSec,
+      speechStartSec: approxStartSec,
+      speechEndSec: approxEndSec,
+      isVoiced: false,
+      peakDb: -60,
+      rmsDb: -60
+    };
+  }
   const sampleRate = audioBuffer.sampleRate;
   const totalDuration = audioBuffer.duration;
   const channelData = audioBuffer.getChannelData(0);

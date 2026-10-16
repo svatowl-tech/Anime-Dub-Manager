@@ -1,34 +1,72 @@
 import React, { useState, useEffect } from 'react';
-import { X, Plus, Loader2 } from 'lucide-react';
+import { X, Plus, Loader2, Calendar, Clock, RotateCcw } from 'lucide-react';
+import { Project } from '../../types';
+import { calculateDeadline, getDefaultDaysForProject, getDefaultHourForProject } from '../../lib/dateUtils';
+import { formatDeadline } from '../../lib/templates';
 
 interface CreateEpisodeModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onCreate: (episodeNumber: number, title?: string) => Promise<void> | void;
+  onCreate: (episodeNumber: number, title?: string, deadline?: string) => Promise<void> | void;
   defaultEpisodeNumber: number;
+  project?: Project | null;
 }
 
-export default function CreateEpisodeModal({ isOpen, onClose, onCreate, defaultEpisodeNumber }: CreateEpisodeModalProps) {
+export default function CreateEpisodeModal({ isOpen, onClose, onCreate, defaultEpisodeNumber, project }: CreateEpisodeModalProps) {
   const [episodeNumber, setEpisodeNumber] = useState(defaultEpisodeNumber);
   const [episodeTitle, setEpisodeTitle] = useState('');
+  const [deadline, setDeadline] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const toLocalInputValue = (isoStr?: string) => {
+    if (!isoStr) return '';
+    try {
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return '';
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch {
+      return '';
+    }
+  };
 
   useEffect(() => {
     if (isOpen) {
       setEpisodeNumber(defaultEpisodeNumber);
       setEpisodeTitle('');
+      if (project) {
+        setDeadline(toLocalInputValue(calculateDeadline(project)));
+      } else {
+        const d = new Date();
+        d.setDate(d.getDate() + 7);
+        d.setHours(20, 0, 0, 0);
+        setDeadline(toLocalInputValue(d.toISOString()));
+      }
       setIsSubmitting(false);
     }
-  }, [isOpen, defaultEpisodeNumber]);
+  }, [isOpen, defaultEpisodeNumber, project]);
 
   if (!isOpen) return null;
+
+  const resetToProjectStandard = () => {
+    if (project) {
+      setDeadline(toLocalInputValue(calculateDeadline(project)));
+    }
+  };
+
+  const addDays = (days: number) => {
+    const base = deadline ? new Date(deadline) : new Date();
+    base.setDate(base.getDate() + days);
+    setDeadline(toLocalInputValue(base.toISOString()));
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isNaN(episodeNumber) || episodeNumber < 1) return;
     setIsSubmitting(true);
     try {
-      await onCreate(episodeNumber, episodeTitle.trim() || undefined);
+      const finalDeadlineIso = deadline ? new Date(deadline).toISOString() : undefined;
+      await onCreate(episodeNumber, episodeTitle.trim() || undefined, finalDeadlineIso);
     } finally {
       setIsSubmitting(false);
     }
@@ -82,6 +120,77 @@ export default function CreateEpisodeModal({ isOpen, onClose, onCreate, defaultE
             <p className="text-xs text-neutral-500 mt-1.5">
               Если оставить пустым, система попытается автоматически определить название или оставить стандартный номер.
             </p>
+          </div>
+
+          {/* Deadline Field */}
+          <div className="p-3.5 bg-neutral-950/60 rounded-xl border border-neutral-800 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-bold text-neutral-300 flex items-center gap-1.5">
+                <Calendar className="w-4 h-4 text-amber-400" /> Дедлайн сдачи серии
+              </label>
+              {project && (
+                <button
+                  type="button"
+                  onClick={resetToProjectStandard}
+                  className="text-[10px] text-amber-400 hover:text-amber-300 flex items-center gap-1 transition-colors cursor-pointer"
+                  title="Вернуть стандартный расчет дедлайна проекта"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  По стандарту проекта ({getDefaultDaysForProject(project)} дн.)
+                </button>
+              )}
+            </div>
+
+            <input
+              type="datetime-local"
+              value={deadline}
+              onChange={(e) => setDeadline(e.target.value)}
+              disabled={isSubmitting}
+              className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500 font-mono"
+            />
+
+            <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">
+              <div className="flex flex-wrap gap-1">
+                <button
+                  type="button"
+                  onClick={() => addDays(1)}
+                  disabled={isSubmitting}
+                  className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-[11px] font-medium transition-colors cursor-pointer"
+                >
+                  +1 день
+                </button>
+                <button
+                  type="button"
+                  onClick={() => addDays(2)}
+                  disabled={isSubmitting}
+                  className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-[11px] font-medium transition-colors cursor-pointer"
+                >
+                  +2 дня
+                </button>
+                <button
+                  type="button"
+                  onClick={() => addDays(3)}
+                  disabled={isSubmitting}
+                  className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-[11px] font-medium transition-colors cursor-pointer"
+                >
+                  +3 дня
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDeadline('')}
+                  disabled={isSubmitting}
+                  className="px-2 py-0.5 bg-neutral-800 hover:bg-red-500/20 text-neutral-400 hover:text-red-400 rounded text-[11px] font-medium transition-colors cursor-pointer"
+                >
+                  Без срока
+                </button>
+              </div>
+
+              {deadline && (
+                <span className="text-[11px] text-neutral-400">
+                  <strong className="text-amber-300">{formatDeadline(new Date(deadline).toISOString())}</strong>
+                </span>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-3 pt-2">
             <button 

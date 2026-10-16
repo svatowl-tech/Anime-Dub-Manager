@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X, Save, Search, Loader2, Check, Folder, Globe, Hash, Calendar, MessageSquare, Sparkles, Image as ImageIcon } from 'lucide-react';
+import { X, Save, Search, Loader2, Check, Folder, Globe, Hash, Calendar, Clock, MessageSquare, Sparkles, Image as ImageIcon } from 'lucide-react';
 import { Project, Episode } from '../../types';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { searchAnime, getAnimeDetails } from '../../services/animeService';
@@ -30,6 +30,26 @@ export default function ProjectSettingsModal({
   const [tgReleaseChannelId, setTgReleaseChannelId] = useState(project.tgReleaseChannelId || '');
   const [tgWorkGroupId, setTgWorkGroupId] = useState(project.tgWorkGroupId || '');
 
+  const toLocalInputValue = (isoStr?: string) => {
+    if (!isoStr) return '';
+    try {
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return '';
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    } catch {
+      return '';
+    }
+  };
+
+  const [deadline, setDeadline] = useState<string>(toLocalInputValue(project.deadline));
+
+  const fallbackDefaultDays = project.defaultEpisodeDeadlineDays || (project.isOngoing ? (project.releaseType === 'VOICEOVER' ? 2 : 3) : 7);
+  const [defaultEpisodeDeadlineDays, setDefaultEpisodeDeadlineDays] = useState<number>(fallbackDefaultDays);
+  const [defaultEpisodeDeadlineHour, setDefaultEpisodeDeadlineHour] = useState<number>(
+    typeof project.defaultEpisodeDeadlineHour === 'number' ? project.defaultEpisodeDeadlineHour : 20
+  );
+
   // Links JSON state
   const defaultLinks = { anime365: '', tg: '', kodik: '', vk: '', shikimori: '' };
   const initialParsedLinks = (() => {
@@ -59,6 +79,10 @@ export default function ProjectSettingsModal({
       setTgReleaseChannelId(project.tgReleaseChannelId || '');
       setTgWorkGroupId(project.tgWorkGroupId || '');
       setAnimeSearchQuery(project.title || '');
+      setDeadline(toLocalInputValue(project.deadline));
+      const days = project.defaultEpisodeDeadlineDays || (project.isOngoing ? (project.releaseType === 'VOICEOVER' ? 2 : 3) : 7);
+      setDefaultEpisodeDeadlineDays(days);
+      setDefaultEpisodeDeadlineHour(typeof project.defaultEpisodeDeadlineHour === 'number' ? project.defaultEpisodeDeadlineHour : 20);
       try {
         setLinks({ ...defaultLinks, ...JSON.parse(project.links || '{}') });
       } catch (e) {
@@ -142,6 +166,9 @@ export default function ProjectSettingsModal({
         totalEpisodes: Number(totalEpisodes) || 12,
         emoji: emoji.trim() || '❤️',
         typeAndSeason: typeAndSeason.trim() || undefined,
+        deadline: deadline ? new Date(deadline).toISOString() : (null as any),
+        defaultEpisodeDeadlineDays: Math.max(1, Number(defaultEpisodeDeadlineDays) || 7),
+        defaultEpisodeDeadlineHour: Math.max(0, Math.min(23, Number(defaultEpisodeDeadlineHour) || 20)),
         tgReleaseChannelId: tgReleaseChannelId.trim() || undefined,
         tgWorkGroupId: tgWorkGroupId.trim() || undefined,
         links: JSON.stringify(links),
@@ -149,7 +176,7 @@ export default function ProjectSettingsModal({
       };
 
       await ipcSafe.invoke('save-project', updatedProject);
-      toast.success(`Название релиза обновлено: "${trimmedTitle}"`);
+      toast.success(`Настройки проекта "${trimmedTitle}" сохранены!`);
       onSave();
       onClose();
     } catch (err) {
@@ -322,6 +349,160 @@ export default function ProjectSettingsModal({
                 onChange={(e) => setTotalEpisodes(parseInt(e.target.value) || 1)}
                 className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
               />
+            </div>
+          </div>
+
+          {/* Project Overall Deadline Section */}
+          <div className="p-4 rounded-xl bg-indigo-950/20 border border-indigo-500/30 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Calendar className="w-4 h-4 text-indigo-400" /> Общий дедлайн проекта / Дата релиза
+              </label>
+              {deadline && (
+                <button
+                  type="button"
+                  onClick={() => setDeadline('')}
+                  className="text-[11px] text-neutral-500 hover:text-red-400 transition-colors"
+                >
+                  Очистить
+                </button>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+              <input
+                type="datetime-local"
+                value={deadline}
+                onChange={(e) => setDeadline(e.target.value)}
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500 font-mono"
+              />
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() + 14);
+                    d.setHours(20, 0, 0, 0);
+                    setDeadline(toLocalInputValue(d.toISOString()));
+                  }}
+                  className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-xs transition-colors"
+                >
+                  +2 недели
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() + 30);
+                    d.setHours(20, 0, 0, 0);
+                    setDeadline(toLocalInputValue(d.toISOString()));
+                  }}
+                  className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-xs transition-colors"
+                >
+                  +1 месяц
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const d = new Date();
+                    d.setDate(d.getDate() + 90);
+                    d.setHours(20, 0, 0, 0);
+                    setDeadline(toLocalInputValue(d.toISOString()));
+                  }}
+                  className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-xs transition-colors"
+                >
+                  Конец сезона
+                </button>
+              </div>
+            </div>
+            <p className="text-[11px] text-neutral-400">
+              {deadline 
+                ? `Установленный дедлайн релиза: ${new Date(deadline).toLocaleString('ru-RU')}` 
+                : 'Ориентировочная дата завершения и выпуска всего релиза (отображается в карточке проекта и дашборде).'}
+            </p>
+          </div>
+
+          {/* Default Episode Deadline for this Project */}
+          <div className="p-4 rounded-xl bg-amber-950/20 border border-amber-500/30 space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-amber-400 uppercase tracking-wider flex items-center gap-1.5">
+                <Clock className="w-4 h-4 text-amber-400" /> Стандартный дедлайн для серий в проекте
+              </label>
+              <span className="text-[11px] text-amber-300 font-bold bg-amber-500/10 px-2 py-0.5 rounded border border-amber-500/20">
+                {defaultEpisodeDeadlineDays} {defaultEpisodeDeadlineDays === 1 ? 'день' : defaultEpisodeDeadlineDays < 5 ? 'дня' : 'дней'} к {defaultEpisodeDeadlineHour}:00
+              </span>
+            </div>
+
+            <p className="text-xs text-neutral-400">
+              При создании каждой новой серии в этом проекте автоматически будет ставиться дедлайн через указанное число дней.
+            </p>
+
+            {/* Quick days presets */}
+            <div className="space-y-1.5">
+              <div className="text-[11px] text-neutral-400 font-medium">Быстрый выбор количества дней на серию:</div>
+              <div className="flex flex-wrap gap-1.5">
+                {[1, 2, 3, 4, 5, 7, 10, 14].map((d) => (
+                  <button
+                    key={d}
+                    type="button"
+                    onClick={() => setDefaultEpisodeDeadlineDays(d)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium transition-colors cursor-pointer border ${
+                      defaultEpisodeDeadlineDays === d
+                        ? 'bg-amber-600 text-white border-amber-500 shadow-sm'
+                        : 'bg-neutral-800 text-neutral-300 border-neutral-700 hover:bg-neutral-700'
+                    }`}
+                  >
+                    {d} {d === 1 ? 'день' : d < 5 ? 'дня' : 'дней'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div>
+                <label className="block text-[11px] text-neutral-400 font-medium mb-1">
+                  Точное количество дней:
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  max="60"
+                  value={defaultEpisodeDeadlineDays}
+                  onChange={(e) => setDefaultEpisodeDeadlineDays(Math.max(1, parseInt(e.target.value) || 1))}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500 font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-neutral-400 font-medium mb-1">
+                  Время сдачи по умолчанию:
+                </label>
+                <select
+                  value={defaultEpisodeDeadlineHour}
+                  onChange={(e) => setDefaultEpisodeDeadlineHour(parseInt(e.target.value))}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-amber-500"
+                >
+                  <option value={12}>12:00 (Полдень)</option>
+                  <option value={15}>15:00 (День)</option>
+                  <option value={18}>18:00 (Вечер)</option>
+                  <option value={20}>20:00 (Стандартное время)</option>
+                  <option value={21}>21:00 (Поздний вечер)</option>
+                  <option value={22}>22:00</option>
+                  <option value={23}>23:59 (Конец дня)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Live calculation example */}
+            <div className="text-[11px] text-neutral-400 bg-neutral-950/60 p-2.5 rounded-lg border border-neutral-800 flex items-center justify-between">
+              <span>Пример для серии, созданной прямо сейчас:</span>
+              <strong className="text-amber-400 font-mono">
+                {(() => {
+                  const d = new Date();
+                  d.setDate(d.getDate() + (defaultEpisodeDeadlineDays || 2));
+                  d.setHours(defaultEpisodeDeadlineHour, 0, 0, 0);
+                  return d.toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+                })()}
+              </strong>
             </div>
           </div>
 
