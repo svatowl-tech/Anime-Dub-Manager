@@ -245,6 +245,18 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     return { path: targetPath };
   }));
 
+  ipcMain.handle('read-file-buffer', wrapIpcHandler(async (event, { filePath }) => {
+    if (!filePath) throw new Error('Missing filePath parameter');
+    const cleanPath = filePath.replace(/^file:\/\//, '').replace(/^custom-media:\/\//, '');
+    let targetPath = decodeURIComponent(cleanPath);
+    if (/^\/[a-zA-Z]:/.test(targetPath)) {
+      targetPath = targetPath.slice(1);
+    }
+    const buf = await fs.readFile(targetPath);
+    // Return standard ArrayBuffer
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  }));
+
   ipcMain.handle('create-dir', wrapIpcHandler(async (event, dirPath) => {
     if (!dirPath) throw new Error('Missing directory path');
     const config = await getData('config.json');

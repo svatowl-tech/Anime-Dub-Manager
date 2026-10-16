@@ -672,8 +672,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     let resolvedSrc = origPath;
     if (window.electronAPI) {
       if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
-        const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
-        resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
+        resolvedSrc = formatMediaUrl(resolvedSrc);
       }
     } else {
       try {
@@ -779,8 +778,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     let resolvedSrc = item.path;
     if (window.electronAPI) {
       if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
-        const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
-        resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
+        resolvedSrc = formatMediaUrl(resolvedSrc);
       }
     } else {
       try {
@@ -836,8 +834,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       let resolvedSrc = file.path;
       if (window.electronAPI) {
         if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
-          const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
-          resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
+          resolvedSrc = formatMediaUrl(resolvedSrc);
         }
       } else {
         try {

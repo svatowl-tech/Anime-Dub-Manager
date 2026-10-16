@@ -29,6 +29,11 @@ function isIgnorableError(msg: string, stack?: string, filename?: string): boole
 
 // Global uncaught exception listener with rich diagnostic trace
 window.addEventListener('error', (event) => {
+  // Ignore resource loading errors on DOM elements (e.g. <video>, <audio>, <img>, <script>)
+  if (event.target && event.target !== window && (event.target as HTMLElement).tagName) {
+    return;
+  }
+
   const msg = event.message || '';
   const stack = event.error ? event.error.stack : '';
   const filename = event.filename || '';

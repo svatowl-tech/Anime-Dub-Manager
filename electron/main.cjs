@@ -384,23 +384,56 @@ app.whenReady().then(async () => {
   try {
     protocol.handle('custom-media', (request) => {
       try {
-        let uri = request.url.replace(/^custom-media:\/\//, '');
-        // Strip out host dummy if any (e.g. custom-media://localhost/...)
-        uri = uri.replace(/^localhost\//, '');
-        let decodedPath = decodeURIComponent(uri);
-        // Fix leading slash on Windows drives (e.g. /I:/... -> I:/...)
-        if (/^\/[a-zA-Z]:/.test(decodedPath)) {
-          decodedPath = decodedPath.slice(1);
-        }
-        decodedPath = decodedPath.replace(/\//g, path.sep);
-        let targetFile = decodedPath;
-        if (/\.(mkv|avi|flv|ts|wmv|hevc)$/i.test(decodedPath)) {
-          const proxyPath = `${decodedPath}.preview_proxy.mp4`;
-          if (fs.existsSync(proxyPath)) {
-            targetFile = proxyPath;
+        let reqUrl = request.url;
+        let decodedPath = '';
+
+        try {
+          const parsedUrl = new URL(reqUrl);
+          const host = parsedUrl.host || '';
+          const pathname = decodeURIComponent(parsedUrl.pathname || '');
+
+          if (/^[a-zA-Z]$/.test(host)) {
+            // Chromium normalized drive letter 'I:' into host 'i' or 'I'
+            decodedPath = host.toUpperCase() + ':' + (pathname.startsWith('/') ? pathname : '/' + pathname);
+          } else if (!host || host.toLowerCase() === 'localhost') {
+            if (/^\/[a-zA-Z]:/.test(pathname)) {
+              decodedPath = pathname.slice(1);
+            } else if (/^\/[a-zA-Z]\//.test(pathname)) {
+              decodedPath = pathname[1].toUpperCase() + ':' + pathname.slice(2);
+            } else {
+              decodedPath = pathname;
+            }
+          } else {
+            decodedPath = '//' + host + pathname;
+          }
+        } catch (e) {
+          let uri = reqUrl.replace(/^custom-media:\/{1,3}/i, '');
+          uri = uri.replace(/^localhost[\/\\]/i, '');
+          decodedPath = decodeURIComponent(uri);
+          if (/^[a-zA-Z][\/\\]/.test(decodedPath)) {
+            decodedPath = decodedPath[0].toUpperCase() + ':' + decodedPath.slice(1);
+          } else if (/^\/[a-zA-Z]:/i.test(decodedPath)) {
+            decodedPath = decodedPath.slice(1);
+          } else if (/^\/[a-zA-Z][\/\\]/.test(decodedPath)) {
+            decodedPath = decodedPath[1].toUpperCase() + ':' + decodedPath.slice(2);
           }
         }
-        return net.fetch(require('url').pathToFileURL(targetFile).toString());
+
+        // Standardize path separators
+        if (process.platform === 'win32' || /^[a-zA-Z]:/.test(decodedPath)) {
+          decodedPath = decodedPath.replace(/\//g, '\\');
+        } else {
+          decodedPath = decodedPath.replace(/\\/g, '/');
+        }
+
+        let targetFile = decodedPath;
+        const proxyPath = `${decodedPath}.preview_proxy.mp4`;
+        if (fsSync.existsSync(proxyPath)) {
+          targetFile = proxyPath;
+        }
+
+        const fileUrl = require('url').pathToFileURL(targetFile).toString();
+        return net.fetch(fileUrl);
       } catch (err) {
         log.error('[custom-media] protocol error:', err);
         return new Response('Media file not found or invalid', { status: 404 });
