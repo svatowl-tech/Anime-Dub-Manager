@@ -170,11 +170,19 @@ export const TimingWaveformCanvas: React.FC<TimingWaveformCanvasProps> = ({
             ctx.fillRect(barX, centerY - barH, barWidth, barH * 2);
           }
         } else {
-          // Fallback line
-          ctx.beginPath();
-          ctx.moveTo(clipX + 2, centerY);
-          ctx.lineTo(clipX + clipW - 2, centerY);
-          ctx.stroke();
+          // Synthetic speech envelope preview while audio buffer is decoding/loading
+          const barWidth = 2;
+          const barGap = 1;
+          const step = barWidth + barGap;
+          const numBars = Math.max(2, Math.floor(clipW / step));
+          for (let i = 0; i < numBars; i++) {
+            const progress = i / numBars;
+            const envelope = Math.sin(progress * Math.PI);
+            const variation = 0.3 + 0.7 * Math.abs(Math.sin(i * 0.7) * Math.cos(i * 1.3));
+            const barH = Math.max(2, (clipH / 2 - 4) * envelope * variation);
+            const barX = clipX + i * step;
+            ctx.fillRect(barX, centerY - barH, barWidth, barH * 2);
+          }
         }
 
         // Subtitle text label on top of clip

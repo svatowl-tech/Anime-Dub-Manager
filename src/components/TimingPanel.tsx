@@ -14,7 +14,7 @@ import {
 import { ipcSafe } from '../lib/ipcSafe';
 import { resolveLocalPath } from '../lib/webFileSystem';
 import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
-import { loadTimingProjectForEpisode, TimingProjectData } from '../lib/qa/timingSyncService';
+import { loadTimingProjectForEpisode, applyTimingPassportToClips, TimingProjectData } from '../lib/qa/timingSyncService';
 
 // Timing Services & Engines
 import { detectSpeechIntervals } from '../services/timing/AudioVADEngine';
@@ -98,7 +98,8 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     setTrackVolume,
     toggleTrackMute,
     toggleTrackSolo,
-    loadAudioBuffer
+    loadAudioBuffer,
+    setDuration
   } = useTimingAudioEngine();
 
   // Clips Management Hook
@@ -144,16 +145,21 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
       const epTracks = await prepareQATracksForTiming(currentEpisode);
       setTracks(epTracks);
 
-      if (epTracks.length > 0 && !selectedTrackId) {
-        setSelectedTrackId(epTracks[0].id);
+      if (epTracks.length > 0) {
+        setSelectedTrackId(prev => prev || epTracks[0].id);
       }
 
-      // 2. Load subtitles
+      // 2. Load subtitles using correct IPC handler (get-raw-subtitles)
+      let parsedSubs: SubtitleLine[] = [];
       if (currentEpisode.subPath) {
         try {
-          const subData: any = await ipcSafe.invoke('get-subtitles', currentEpisode.subPath);
+          let subData: any = await ipcSafe.invoke('get-raw-subtitles', currentEpisode.subPath);
+          if (!subData) {
+            try { subData = await ipcSafe.invoke('get-subtitles', currentEpisode.subPath); } catch (e) {}
+          }
+
           if (subData && Array.isArray(subData.lines)) {
-            const parsed = subData.lines.map((l: any, idx: number) => ({
+            parsedSubs = subData.lines.map((l: any, idx: number) => ({
               id: l.id || idx,
               start: l.start || '00:00:00.00',
               end: l.end || '00:00:00.00',
@@ -164,20 +170,73 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
               text: l.text || '',
               rawLineIndex: l.rawLineIndex || idx
             }));
-            setSubLines(parsed);
+            setSubLines(parsedSubs);
+
+            // Expand timeline duration to encompass all subtitles
+            let maxSubEnd = 0;
+            parsedSubs.forEach(l => { if (l.endSec > maxSubEnd) maxSubEnd = l.endSec; });
+            if (maxSubEnd > 0) {
+              setDuration(prev => Math.max(prev, maxSubEnd + 10));
+            }
           }
         } catch (subErr) {
           console.warn('Subtitles could not be loaded via IPC:', subErr);
         }
       }
 
-      // 3. Load Audio Buffers for tracks
+      // 3. Populate initial clips from subtitles immediately so user sees tracks right away
+      if (epTracks.length > 0 && parsedSubs.length > 0) {
+        const initialClips: Record<string, AudioClip[]> = {};
+
+        epTracks.forEach(track => {
+          const trackDubber = cleanDubberNick(track.participant || track.dubberName || '');
+          const trackChar = track.character || track.characterName || '';
+
+          const matchedSubs = parsedSubs.filter(sub =>
+            isSubtitleForCharacter(sub.name, trackChar, trackDubber, currentEpisode?.assignments)
+          );
+
+          initialClips[track.id] = matchedSubs.map((sub, idx) => ({
+            id: `clip_${track.id}_sub_${sub.id || idx}`,
+            trackId: track.id,
+            dubberName: trackDubber,
+            characterName: trackChar,
+            clipStartSec: sub.startSec,
+            durationSec: Math.max(0.1, Number((sub.endSec - sub.startSec).toFixed(3))),
+            sourceStartSec: sub.startSec,
+            sourceEndSec: sub.endSec,
+            rawSourceStartSec: sub.startSec,
+            rawSourceEndSec: sub.endSec,
+            text: sub.text,
+            targetSubStartSec: sub.startSec,
+            targetSubEndSec: sub.endSec,
+            volumePercent: 100,
+            offsetSec: 0,
+            timingIssue: null
+          }));
+        });
+
+        // 4. Try loading existing saved timing project / QA gaps
+        try {
+          const passport = await loadTimingProjectForEpisode(currentEpisode, epTracks);
+          if (passport) {
+            const enriched = applyTimingPassportToClips(initialClips, passport);
+            setAllClips(enriched);
+          } else {
+            setAllClips(initialClips);
+          }
+        } catch (e) {
+          setAllClips(initialClips);
+        }
+      }
+
+      // 5. Load Audio Buffers for tracks asynchronously
       for (const t of epTracks) {
         const filePath = t.files?.[0]?.path || t.filePath;
         if (filePath) {
           const resolvedUrl = await resolveLocalPath(filePath);
           if (resolvedUrl) {
-            await loadAudioBuffer(t.id, resolvedUrl);
+            loadAudioBuffer(t.id, resolvedUrl);
           }
         }
       }
@@ -187,26 +246,26 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
     } finally {
       setIsLoading(false);
     }
-  }, [currentEpisode, selectedTrackId, loadAudioBuffer]);
+  }, [currentEpisode, setDuration, setAllClips, loadAudioBuffer]);
 
   useEffect(() => {
     loadEpisodeData();
   }, [loadEpisodeData]);
 
-  // Auto-detect speech intervals when audio buffers are loaded
+  // When audio buffers arrive, refine clips with exact audio waveform boundaries
   useEffect(() => {
     if (tracks.length === 0 || Object.keys(audioBuffers).length === 0) return;
-
-    // Check if clips are already populated
-    const hasExistingClips = Object.values(clipsByTrack).some(arr => arr.length > 0);
-    if (hasExistingClips) return;
-
-    const initialClips: Record<string, AudioClip[]> = {};
 
     tracks.forEach(track => {
       const buf = audioBuffers[track.id];
       if (!buf) return;
 
+      // Update duration if audio is longer than current timeline
+      if (buf.duration > 0) {
+        setDuration(prev => Math.max(prev, buf.duration));
+      }
+
+      // If track has audio buffer, detect speech intervals
       const intervals = detectSpeechIntervals(buf, {
         minSilenceDurationSec: timingSettings.minSilenceDurationSec,
         leadInPaddingSec: timingSettings.leadInPaddingSec,
@@ -214,21 +273,22 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         manualThresholdDb: timingSettings.silenceThresholdDb
       });
 
+      if (intervals.length === 0) return;
+
       const trackDubber = cleanDubberNick(track.participant || track.dubberName || '');
       const trackChar = track.character || track.characterName || '';
 
-      const clips: AudioClip[] = intervals.map((interval, idx) => {
-        // Try to match with subtitle line
+      const refinedClips: AudioClip[] = intervals.map((interval, idx) => {
         const matchedSub = subLines.find(sub => {
           return (
-            sub.startSec <= interval.endSec &&
-            sub.endSec >= interval.startSec &&
+            sub.startSec <= interval.endSec + 0.3 &&
+            sub.endSec >= interval.startSec - 0.3 &&
             isSubtitleForCharacter(sub.name, trackChar, trackDubber, currentEpisode?.assignments)
           );
         });
 
         return {
-          id: `clip_${track.id}_${idx}`,
+          id: `clip_${track.id}_vad_${idx}`,
           trackId: track.id,
           dubberName: trackDubber,
           characterName: trackChar,
@@ -247,13 +307,13 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         };
       });
 
-      initialClips[track.id] = clips;
+      // Update clips for this track
+      setAllClips({
+        ...clipsByTrack,
+        [track.id]: refinedClips
+      });
     });
-
-    if (Object.keys(initialClips).length > 0) {
-      setAllClips(initialClips);
-    }
-  }, [tracks, audioBuffers, clipsByTrack, timingSettings, subLines, currentEpisode, setAllClips]);
+  }, [audioBuffers, tracks, timingSettings, subLines, currentEpisode, setDuration, setAllClips]);
 
   // Keyboard Shortcuts Integration
   useTimingShortcuts({

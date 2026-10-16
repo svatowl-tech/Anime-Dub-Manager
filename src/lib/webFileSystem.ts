@@ -245,11 +245,17 @@ function downloadFallback(fileName: string, content: string | Blob) {
 
 export async function resolveLocalPath(filePath: string): Promise<string> {
   if (!filePath) return '';
-  if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('data:')) {
+  if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('data:') || filePath.startsWith('custom-media://')) {
     return filePath;
   }
   
   const cleanPath = filePath.replace(/^file:\/\//, '');
+
+  // 0. Если запущен в Electron — используем нативный протокол custom-media:// для прямого стриминга и поддержки Windows-дисков
+  if (typeof window !== 'undefined' && (window as any).electronAPI) {
+    const cleanP = cleanPath.replace(/^custom-media:\/\//, '').replace(/\\/g, '/');
+    return cleanP.startsWith('/') ? `custom-media://${cleanP}` : `custom-media:///${cleanP}`;
+  }
 
   // 1. Поиск по имени файла или пути в in-memory кэше сессии
   const nameOnly = cleanPath.replace(/\\/g, '/').split('/').pop() || cleanPath;

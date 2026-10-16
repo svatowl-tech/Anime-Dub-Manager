@@ -197,10 +197,34 @@ export function useTimingAudioEngine() {
       const ctx = getSharedAudioContext();
       if (!ctx) throw new Error('AudioContext not available');
 
-      const resp = await fetch(url);
-      const arrayBuf = await resp.arrayBuffer();
-      const audioBuf = await ctx.decodeAudioData(arrayBuf);
+      let arrayBuf: ArrayBuffer | null = null;
 
+      // 1. If in Electron, read directly via native IPC buffer (fastest, supports Windows drive letters & cyrillic)
+      if (typeof window !== 'undefined' && (window as any).electronAPI) {
+        try {
+          const res = await (window as any).electronAPI.invoke('read-file-buffer', { filePath: url });
+          if (res instanceof ArrayBuffer) {
+            arrayBuf = res;
+          } else if (res && res.buffer instanceof ArrayBuffer) {
+            arrayBuf = res.buffer;
+          } else if (res && Array.isArray(res)) {
+            arrayBuf = new Uint8Array(res).buffer;
+          }
+        } catch (ipcErr) {
+          console.warn(`IPC read-file-buffer failed for ${url}, trying fetch fallback:`, ipcErr);
+        }
+      }
+
+      // 2. Browser / streaming protocol fetch fallback
+      if (!arrayBuf) {
+        const resp = await fetch(url);
+        if (!resp.ok) {
+          throw new Error(`HTTP error ${resp.status} fetching audio from ${url}`);
+        }
+        arrayBuf = await resp.arrayBuffer();
+      }
+
+      const audioBuf = await ctx.decodeAudioData(arrayBuf);
       setAudioBuffers(prev => ({ ...prev, [trackId]: audioBuf }));
     } catch (err) {
       console.error(`Failed to decode audio for track ${trackId}:`, err);
@@ -235,6 +259,7 @@ export function useTimingAudioEngine() {
     toggleTrackSolo,
     setPlaybackRate,
     loadAudioBuffer,
-    setAudioBuffers
+    setAudioBuffers,
+    setDuration
   };
 }
