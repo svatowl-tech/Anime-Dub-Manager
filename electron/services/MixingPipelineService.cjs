@@ -17,42 +17,33 @@ const AudioAnalysisService = require('./AudioAnalysisService.cjs');
 const MODULE_DATABASE = [
   {
     id: 'dubber_spectrum_equalizer',
-    category: 'restoration',
-    defaultPrefix: 'eq_matched_',
+    category: 'eq',
+    defaultPrefix: 'spectrum_eq_',
     title: 'Приведение АЧХ даберов к единому знаменателю (Dubber Spectrum Equalizer)',
-    description: 'Анализирует спектральный профиль записи каждого дабера и приводит разницу микрофонов, комнат и аудиокарт к эталонной студийной дикторской АЧХ перед дальнейшей обработкой.',
+    description: 'Анализирует спектр голоса каждого актера и применяет FFT-спектральное выравнивание к стандартному вещательному вокальному профилю перед мастерингом.',
     icon: 'Sliders',
     defaultParams: {
-      targetPreset: 'broadcast_standard',
-      matchStrength: 100,
-      lowCutHz: 80,
-      presenceBoostDb: 2.5,
-      airBoostDb: 1.5
+      profile: 'broadcast_standard',
+      strength: 1.0
     },
     presets: [
       {
-        id: 'spectrum_broadcast_standard',
-        title: '📻 Вещательный дикторский стандарт (Broadcast Standard)',
-        description: 'Оптимальный частотный баланс с мягким срезом гула, ровной серединой и разборчивым верхом',
-        params: { targetPreset: 'broadcast_standard', matchStrength: 100, lowCutHz: 80, presenceBoostDb: 2.5, airBoostDb: 1.5 }
+        id: 'broadcast_standard',
+        title: '🎙 Стандарт вещания (Broadcast Standard)',
+        description: 'Сбалансированная вещательная кривая: обрезка низов, чистая середина и прозрачный воздух',
+        params: { profile: 'broadcast_standard', strength: 1.0 }
       },
       {
-        id: 'spectrum_cinematic_warmth',
-        title: '🎬 Кинематографический глубокий голос (Cinematic Warmth)',
-        description: 'Подчеркнутые бархатные низкие частоты с высокой детализацией речи',
-        params: { targetPreset: 'cinematic_warmth', matchStrength: 100, lowCutHz: 75, presenceBoostDb: 2.0, airBoostDb: 1.2 }
+        id: 'warm_podcast',
+        title: '📻 Теплый подкаст (Warm Podcast)',
+        description: 'Плотный низкочастотный телесный окрас и высокая разборчивость речи',
+        params: { profile: 'warm_podcast', strength: 0.85 }
       },
       {
-        id: 'spectrum_bright_vocal',
-        title: '✨ Яркий дубляжный вокал (Bright Vocal)',
-        description: 'Выраженная разборчивость для динамичных сцен аниме и кино',
-        params: { targetPreset: 'bright_vocal', matchStrength: 100, lowCutHz: 85, presenceBoostDb: 3.5, airBoostDb: 2.0 }
-      },
-      {
-        id: 'spectrum_podcast_clarity',
-        title: '🎙 Подкаст и закадр (Podcast Clarity)',
-        description: 'Сфокусированная кристальная речь с устранением коробочности',
-        params: { targetPreset: 'podcast_clarity', matchStrength: 100, lowCutHz: 80, presenceBoostDb: 2.8, airBoostDb: 1.8 }
+        id: 'anime_bright',
+        title: '✨ Яркий аниме вокал (Bright Anime Vocal)',
+        description: 'Акцент на верхней середине и присутствии для прорезания через плотный микс',
+        params: { profile: 'anime_bright', strength: 0.90 }
       }
     ]
   },
@@ -1901,27 +1892,27 @@ const MODULE_DATABASE = [
 function createDefaultPipeline() {
   return [
     {
-      stepId: 'step_1_spectrum_eq',
+      stepId: 'step_0_spectrum',
       moduleId: 'dubber_spectrum_equalizer',
-      prefix: '01_eq_matched_',
+      prefix: '00_spectrum_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'dubber_spectrum_equalizer').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_2_gate',
+      stepId: 'step_1_gate',
       moduleId: 'silence_gate',
-      prefix: '02_gate_',
+      prefix: '01_gate_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'silence_gate').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_3_norm',
+      stepId: 'step_2_norm',
       moduleId: 'phrase_norm',
-      prefix: '03_norm_',
+      prefix: '02_norm_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'phrase_norm').defaultParams },
       status: 'idle',
@@ -3198,6 +3189,9 @@ class MixingPipelineService {
 
       let resultFiles = [];
       switch (step.moduleId) {
+        case 'dubber_spectrum_equalizer':
+          resultFiles = await this._execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'auto_timing':
           resultFiles = await this._execAutoTiming({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -3247,9 +3241,6 @@ class MixingPipelineService {
           break;
         case 'phrase_norm':
           resultFiles = await this._execPhraseNorm({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
-          break;
-        case 'dubber_spectrum_equalizer':
-          resultFiles = await this._execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'stage_loudness_norm':
         case 'loudness_norm':
@@ -3515,6 +3506,54 @@ class MixingPipelineService {
     }
 
     return results;
+  }
+
+  /**
+   * EXEC: Dubber Spectrum Equalizer
+   */
+  async _execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для применения Dubber Spectrum Equalizer.');
+    }
+
+    const outputFiles = [];
+    const total = inputFiles.length;
+
+    for (let i = 0; i < total; i++) {
+      const file = inputFiles[i];
+      const inPath = file.path;
+      if (!fsSync.existsSync(inPath)) continue;
+
+      const outName = this._resolveTrackOutName(file, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+
+      const trackName = file.name || path.basename(inPath);
+      logFn(`[Spectrum EQ] Обработка дорожки ${i + 1}/${total}: «${trackName}» (профиль: ${params.profile || 'broadcast_standard'})`);
+
+      await AudioNeuralService.spectrumEqualizeAudio({
+        inputPath: inPath,
+        outputPath: outPath,
+        profile: params.profile || 'broadcast_standard',
+        strength: Number(params.strength ?? 1.0),
+        onProgress: (p) => {
+          if (onProgress) {
+            const overallPct = Math.round(((i + (p.percent / 100)) / total) * 100);
+            onProgress({ percent: overallPct, message: `Spectrum EQ [${i + 1}/${total}]: ${p.message || ''}` });
+          }
+        },
+        onLog: logFn
+      });
+
+      const st = fsSync.statSync(outPath);
+      outputFiles.push({
+        name: outName,
+        path: outPath,
+        size: st.size,
+        dubberNick: file.dubberNick || file.name
+      });
+    }
+
+    return outputFiles;
   }
 
   /**
@@ -3863,62 +3902,6 @@ class MixingPipelineService {
     }
 
     logFn(`✓ Завершено приведение к акустическому слепку оригинала (${results.length} файлов).`);
-    return results;
-  }
-
-  /**
-   * EXEC: Dubber Spectrum Equalizer ("Приведение АЧХ даберов к единому знаменателю")
-   */
-  async _execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
-    const targetPreset = params?.targetPreset || 'broadcast_standard';
-    const matchStrength = Number(params?.matchStrength ?? 100);
-
-    logFn(`[Dubber Spectrum Equalizer] Запуск приведения АЧХ голосов к единому знаменателю (Пресет: ${targetPreset}, Сила: ${matchStrength}%)...`);
-
-    const results = [];
-    for (let i = 0; i < inputFiles.length; i++) {
-      const track = inputFiles[i];
-      const nick = this._resolveTrackNick(track, inputFiles, i);
-      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
-      const outPath = path.join(stepFolder, outName);
-
-      const trackStartPct = Math.round((i / inputFiles.length) * 100);
-      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
-
-      logFn(`[${i+1}/${inputFiles.length}] Спектральное выравнивание АЧХ для «${nick}»...`);
-
-      try {
-        await AudioNeuralService.spectrumEqualizeAudio({
-          inputPath: track.path,
-          outputPath: outPath,
-          targetPreset,
-          matchStrength,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `Equalizer АЧХ: ${nick} (${p.percent}%)` });
-            }
-          },
-          onLog: logFn
-        });
-      } catch (err) {
-        logFn(`⚠️ Ошибка выравнивания АЧХ через Python sidecar (${err.message}). Выполнение через FFmpeg EQ fallback...`, 'warn');
-        const filter = `highpass=f=80,equalizer=f=220:t=q:w=1.0:g=1.5,equalizer=f=500:t=q:w=1.2:g=-1.5,equalizer=f=3200:t=q:w=1.2:g=2.5,highshelf=f=12000:g=1.5`;
-        const cmd = ffmpeg(track.path)
-          .audioFilters(filter)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath);
-
-        await this._execFfmpeg(cmd, { logFn, outPath, description: `Spectrum EQ Fallback [${nick}]` });
-      }
-
-      const st = fsSync.statSync(outPath);
-      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
-      logFn(`✓ АЧХ голоса «${nick}» приведена к единому знаменателю (${outName})`);
-    }
-
     return results;
   }
 

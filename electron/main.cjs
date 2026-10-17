@@ -74,10 +74,6 @@ process.on('unhandledRejection', (error) => {
 });
 
 ipcMain.on('log-error', (event, error) => {
-  if (error && (typeof error === 'string' && (error.includes('custom-media') || error.includes('MEDIA_ELEMENT_ERROR') || error.includes('net::ERR_')))) {
-    log.warn('Renderer Media/Network Notice:', error);
-    return;
-  }
   log.error('Renderer Error:', error);
 });
 
@@ -388,44 +384,34 @@ app.whenReady().then(async () => {
   try {
     protocol.handle('custom-media', (request) => {
       try {
-        let uri = request.url.replace(/^custom-media:\/\//, '');
-        // Strip out host dummy if any (e.g. custom-media://localhost/...)
-        uri = uri.replace(/^localhost\//i, '');
-        let decodedPath = decodeURIComponent(uri);
-        
-        // Fix Chromium Windows drive normalization:
-        // 1. /I:/path -> I:/path
-        if (/^\/[a-zA-Z]:/.test(decodedPath)) {
-          decodedPath = decodedPath.slice(1);
+        let rawUrl = request.url;
+        // Handle Windows single-letter drive host like custom-media://i/YandexDisk/... -> I:\YandexDisk\...
+        const singleDriveMatch = rawUrl.match(/^custom-media:\/\/([a-zA-Z])\/(.+)$/);
+        let decodedPath = '';
+        if (singleDriveMatch) {
+          const driveLetter = singleDriveMatch[1].toUpperCase();
+          const restPath = decodeURIComponent(singleDriveMatch[2]);
+          decodedPath = `${driveLetter}:/${restPath}`;
+        } else {
+          let uri = rawUrl.replace(/^custom-media:\/\//, '');
+          uri = uri.replace(/^localhost\//, '');
+          decodedPath = decodeURIComponent(uri);
+          if (/^\/[a-zA-Z]:/.test(decodedPath)) {
+            decodedPath = decodedPath.slice(1);
+          }
         }
-        // 2. i/YandexDisk/path -> I:/YandexDisk/path (where single letter drive letter 'i' became host)
-        else if (/^[a-zA-Z]\//.test(decodedPath) && process.platform === 'win32') {
-          decodedPath = decodedPath[0].toUpperCase() + ':/' + decodedPath.slice(2);
-        }
-        // 3. i:\YandexDisk\path -> I:\YandexDisk\path
-        else if (/^[a-zA-Z]:/.test(decodedPath)) {
-          decodedPath = decodedPath[0].toUpperCase() + decodedPath.slice(1);
-        }
-
         decodedPath = decodedPath.replace(/\//g, path.sep);
         let targetFile = decodedPath;
-
         if (/\.(mkv|avi|flv|ts|wmv|hevc)$/i.test(decodedPath)) {
           const proxyPath = `${decodedPath}.preview_proxy.mp4`;
           if (fsSync.existsSync(proxyPath)) {
             targetFile = proxyPath;
           }
         }
-
-        if (!fsSync.existsSync(targetFile)) {
-          log.warn(`[custom-media] File not found: ${targetFile}`);
-          return new Response(`Media file not found: ${targetFile}`, { status: 404 });
-        }
-
         return net.fetch(require('url').pathToFileURL(targetFile).toString());
       } catch (err) {
         log.error('[custom-media] protocol error:', err);
-        return new Response('Media file error', { status: 500 });
+        return new Response('Media file not found or invalid', { status: 404 });
       }
     });
     log.info('[custom-media] protocol registered successfully.');

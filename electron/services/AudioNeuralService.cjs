@@ -25,14 +25,11 @@ class AudioNeuralService {
     // 1. Look for the application's latest bundled sidecar script
     const appBundledCandidates = [
       path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
-      path.join(__dirname, 'audio_ai_processor.py'),
       path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
-      path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py'),
     ];
 
     if (process.resourcesPath) {
       appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
-      appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'services', 'audio_ai_processor.py'));
       appBundledCandidates.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
       appBundledCandidates.push(path.join(process.resourcesPath, 'audio_ai_processor.py'));
     }
@@ -93,9 +90,7 @@ class AudioNeuralService {
       if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim') || !code.includes('airwindows_restore') || !code.includes('loudness_norm') || code.includes('choices=[')) {
         const bundledCandidates = [
           path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
-          path.join(__dirname, 'audio_ai_processor.py'),
-          path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
-          path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py')
+          path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py')
         ];
         if (process.resourcesPath) {
           bundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
@@ -442,36 +437,6 @@ class AudioNeuralService {
   }
 
   /**
-   * Dubber Voice Spectrum Equalizer ("Приведение к единому знаменателю АЧХ")
-   */
-  async spectrumEqualizeAudio({ inputPath, outputPath, targetPreset = 'broadcast_standard', matchStrength = 100.0, onProgress, onLog, abortSignal }) {
-    if (!fs.existsSync(inputPath)) {
-      throw new Error(`Входной файл не существует: ${inputPath}`);
-    }
-
-    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
-
-    const args = [
-      '--mode', 'spectrum_equalize',
-      '--input', inputPath,
-      '--output', outputPath,
-      '--params_json', JSON.stringify({
-        targetPreset,
-        matchStrength: Number(matchStrength)
-      })
-    ];
-
-    await this._runPythonSidecar(args, {
-      onProgress,
-      onLog,
-      abortSignal,
-      operationName: `Dubber Spectrum Equalizer [${targetPreset}]`
-    });
-
-    return outputPath;
-  }
-
-  /**
    * VoiceFixer Neural Harmonic Restorer (High-frequency harmonic synthesizer & formant presence)
    */
   async voiceFixer({ inputPath, outputPath, modelPath = null, airBandBoostDb = 3.5, harmonicSaturation = 0.45, formantClarity = 0.65, warmTubeEmulation = true, subBassProtect = true, onProgress, onLog, abortSignal }) {
@@ -654,6 +619,34 @@ class AudioNeuralService {
     });
 
     return res;
+  }
+
+  /**
+   * Dubber Spectrum Equalizer (FFT-based spectral matching to standard broadcast curve)
+   */
+  async spectrumEqualizeAudio({ inputPath, outputPath, profile = 'broadcast_standard', strength = 1.0, onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'spectrum_equalize',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--profile', String(profile),
+      '--strength', String(strength)
+    ];
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Dubber Spectrum Equalizer [${profile}]`
+    });
+
+    return outputPath;
   }
 }
 

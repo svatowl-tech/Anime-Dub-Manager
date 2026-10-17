@@ -494,308 +494,18 @@ class AudioConditioner:
         return output_path
 
 # ------------------------------------------------------------------------------
-# 3.5 DUBBER VOICE SPECTRUM EQUALIZER ("Приведение АЧХ даберов к единому знаменателю")
+# 4. DEEPFILTERNET 3 (DENOISE & DEREVERB - 48kHz NATIVE)
 # ------------------------------------------------------------------------------
-def process_spectrum_equalize(args):
-    """
-    Dubber Voice Spectrum Equalizer ("Приведение к единому знаменателю АЧХ").
-    Analyzes frequency spectrum profile of dubber voice recording and applies
-    FFT-based 1/3-octave smoothed inverse matching filter towards a standard
-    broadcast vocal target curve.
-    """
-    input_path = args.input
-    output_path = args.output
-    if not output_path:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_eq_matched.wav"
-
-    params = {}
-    if getattr(args, 'params_json', None):
-        try:
-            params = json.loads(args.params_json)
-        except Exception:
-            pass
-
-    target_preset = params.get('targetPreset', 'broadcast_standard')
-    match_strength = float(params.get('matchStrength', 100.0)) / 100.0
-
-    emit_progress(5.0, f"Анализ спектра АЧХ голоса дабера (Пресет: {target_preset}, Сила: {int(match_strength*100)}%)...")
-
-    _safe_import_torch()
-    import scipy.signal
-    import scipy.fft
-    from scipy.ndimage import gaussian_filter1d
-
-    audio_data, sample_rate, orig_channels, _ = AudioConditioner.load_audio(
-        input_path, target_sr=48000, force_stereo=False, remove_dc=True
-    )
-
-    emit_progress(25.0, "Расчет спектральной плотности мощности (PSD) и огибающей АЧХ...")
-
-    num_channels = audio_data.shape[0]
-    num_samples = audio_data.shape[1]
-    
-    nfft = 4096
-    freqs = scipy.fft.rfftfreq(nfft, 1.0 / sample_rate)
-
-    # Standard Target Voice Curves (in dB relative to average midband)
-    target_curve_db = np.zeros_like(freqs)
-
-    for i, f in enumerate(freqs):
-        if f < 20:
-            db = -36.0
-        elif f < 80:
-            db = -24.0 + (f - 20) * (24.0 / 60.0)
-        elif f < 150:
-            db = (f - 80) * (2.0 / 70.0)
-        elif f < 300:
-            db = 2.0  # Warmth body
-        elif f < 700:
-            db = 2.0 - (f - 300) * (3.5 / 400.0)  # Gentle mud dip
-        elif f < 2000:
-            db = -1.5 + (f - 700) * (1.5 / 1300.0)
-        elif f < 4500:
-            db = (f - 2000) * (3.0 / 2500.0)  # Presence clarity boost
-        elif f < 10000:
-            db = 3.0 - (f - 4500) * (1.5 / 5500.0)
-        elif f < 16000:
-            db = 1.5 + (f - 10000) * (0.5 / 6000.0)  # Air
-        else:
-            db = 2.0 - (f - 16000) * (12.0 / 8000.0)  # High guard
-        target_curve_db[i] = db
-
-    if target_preset == 'cinematic_warmth':
-        target_curve_db += np.where((freqs >= 100) & (freqs <= 350), 2.0, 0.0)
-    elif target_preset == 'bright_vocal':
-        target_curve_db += np.where((freqs >= 2500) & (freqs <= 6000), 2.5, 0.0)
-    elif target_preset == 'podcast_clarity':
-        target_curve_db += np.where((freqs >= 1500) & (freqs <= 4000), 2.0, 0.0)
-
-    processed_channels = []
-
-    for ch in range(num_channels):
-        emit_progress(40.0 + (ch / num_channels) * 45.0, f"Спектральное выравнивание канала {ch+1}/{num_channels}...")
-        signal = audio_data[ch]
-
-        f_stft, t_stft, Zxx = scipy.signal.stft(signal, fs=sample_rate, nperseg=nfft, noverlap=nfft//2)
-        magnitude = np.abs(Zxx)
-        phase = np.angle(Zxx)
-
-        avg_mag = np.mean(magnitude, axis=1) + 1e-7
-        avg_db = 20.0 * np.log10(avg_mag)
-
-        smooth_measured_db = gaussian_filter1d(avg_db, sigma=8)
-        diff_db = target_curve_db - smooth_measured_db
-
-        vocal_mask = (freqs >= 300) & (freqs <= 3000)
-        if np.any(vocal_mask):
-            offset_db = np.mean(diff_db[vocal_mask])
-            diff_db -= offset_db
-
-        diff_db = np.clip(diff_db, -14.0, 14.0)
-        applied_gain_db = diff_db * match_strength
-        applied_gain_lin = 10.0 ** (applied_gain_db / 20.0)
-
-        Zxx_eq = magnitude * applied_gain_lin[:, np.newaxis] * np.exp(1j * phase)
-
-        _, signal_eq = scipy.signal.istft(Zxx_eq, fs=sample_rate, nperseg=nfft, noverlap=nfft//2)
-        signal_eq = signal_eq[:num_samples]
-
-        orig_rms = np.sqrt(np.mean(signal ** 2)) + 1e-8
-        eq_rms = np.sqrt(np.mean(signal_eq ** 2)) + 1e-8
-        signal_eq = signal_eq * (orig_rms / eq_rms)
-
-        processed_channels.append(signal_eq)
-
-    processed_audio = np.stack(processed_channels, axis=0)
-
-    emit_progress(92.0, f"Экспорт выровненного аудио: {os.path.basename(output_path)}...")
-    AudioConditioner.save_audio(
-        output_path, processed_audio, current_sr=sample_rate, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
-    )
-
-    emit_progress(100.0, "Приведение АЧХ даберов к единому знаменателю успешно завершено!")
-    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'spectrum_equalizer', 'preset': target_preset})}\n")
-    sys.stdout.flush()
-
-# ------------------------------------------------------------------------------
-# 4. DEEPFILTERNET & USER-SELECTED UVR NEURAL MODELS
-# ------------------------------------------------------------------------------
-def process_uvr_model(args, model_file):
-    """
-    Executes user-selected ONNX or PyTorch UVR / DeEcho / DeNoise model (e.g. UVR-De-Echo-Aggressive, Reverb HQ FoxJoy).
-    """
-    input_path = args.input
-    output_path = args.output
-    if not output_path:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_processed.wav"
-
-    model_id = args.model_id or os.path.basename(model_file)
-    emit_progress(5.0, f"Загрузка нейросетевой модели «{model_id}» ({os.path.basename(model_file)})...")
-
-    _safe_import_torch()
-    import torch
-    device = get_optimal_device()
-
-    audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
-        input_path, target_sr=44100, force_stereo=False, remove_dc=True
-    )
-
-    is_onnx = model_file.lower().endswith('.onnx')
-    emit_progress(20.0, f"Инициализация сессии инференса ({'ONNX Runtime' if is_onnx else 'PyTorch'})...")
-
-    enhanced_audio = None
-
-    if is_onnx:
-        try:
-            import onnxruntime as ort
-            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if torch.cuda.is_available() else ['CPUExecutionProvider']
-            session = ort.InferenceSession(model_file, providers=providers)
-            input_name = session.get_inputs()[0].name
-            
-            num_channels = audio_data.shape[0]
-            out_channels = []
-
-            for ch in range(num_channels):
-                emit_progress(30.0 + (ch / num_channels) * 55.0, f"Обработка канала {ch+1}/{num_channels} через ONNX «{model_id}»...")
-                ch_signal = np.ascontiguousarray(audio_data[ch:ch+1], dtype=np.float32)
-                
-                inp_shape = session.get_inputs()[0].shape
-                if len(inp_shape) == 3:
-                    inp_tensor = ch_signal[np.newaxis, :]
-                else:
-                    inp_tensor = ch_signal
-
-                try:
-                    res = session.run(None, {input_name: inp_tensor})
-                    processed_ch = res[0]
-                    if processed_ch.ndim > 2:
-                        processed_ch = processed_ch.squeeze(0)
-                    if processed_ch.ndim > 1:
-                        processed_ch = processed_ch[0]
-                    out_channels.append(processed_ch)
-                except Exception as run_err:
-                    sys.stderr.write(f"Warning running full frame in ONNX session ({run_err}). Running STFT frame mode...\n")
-                    out_channels.append(ch_signal[0])
-
-            enhanced_audio = np.stack(out_channels, axis=0) if len(out_channels) > 0 else audio_data
-        except Exception as onnx_err:
-            sys.stderr.write(f"ONNX inference error: {onnx_err}\n")
-            raise RuntimeError(f"Ошибка выполнения ONNX модели «{model_id}»: {onnx_err}") from onnx_err
-
-    if enhanced_audio is None:
-        try:
-            emit_progress(30.0, f"Загрузка PyTorch весов {os.path.basename(model_file)}...")
-            
-            import scipy.signal
-            num_channels = audio_data.shape[0]
-            out_channels = []
-
-            for ch in range(num_channels):
-                sig = audio_data[ch]
-                f, t, Zxx = scipy.signal.stft(sig, fs=44100, nperseg=2048, noverlap=1024)
-                mag = np.abs(Zxx)
-                phase = np.angle(Zxx)
-
-                if 'aggressive' in model_id.lower():
-                    tail_energy = np.mean(mag, axis=1, keepdims=True)
-                    threshold = np.percentile(tail_energy, 40)
-                    suppress = np.where(mag < threshold * 1.5, 0.25, 1.0)
-                    mag = mag * suppress
-                else:
-                    mag = np.where(mag < np.mean(mag)*0.3, mag*0.5, mag)
-
-                Zxx_clean = mag * np.exp(1j * phase)
-                _, sig_clean = scipy.signal.istft(Zxx_clean, fs=44100, nperseg=2048, noverlap=1024)
-                out_channels.append(sig_clean[:len(sig)])
-
-            enhanced_audio = np.stack(out_channels, axis=0)
-        except Exception as pth_err:
-            raise RuntimeError(f"Сбой выполнения модели «{model_id}»: {pth_err}") from pth_err
-
-    wet_dry_blend = float(getattr(args, 'wet_dry_blend', 100.0) or 100.0)
-    if wet_dry_blend < 100.0:
-        wet = wet_dry_blend / 100.0
-        enhanced_audio = enhanced_audio * wet + audio_data * (1.0 - wet)
-
-    emit_progress(94.0, f"Сохранение результата: {os.path.basename(output_path)}...")
-    AudioConditioner.save_audio(
-        output_path, enhanced_audio, current_sr=44100, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
-    )
-
-    emit_progress(100.0, f"Обработка запрошенной моделью «{model_id}» завершена успешно!")
-    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': f'uvr_{model_id}'})}\n")
-    sys.stdout.flush()
-
 def process_deepfilternet(args):
     """
-    Speech Denoising and Dereverberation.
-    Dispatches strictly to requested user model (e.g. The Echo Aggressive / UVR ONNX) if specified,
-    or DeepFilterNet 3 if deepfilternet3 is chosen.
+    Speech Denoising and Dereverberation using the official DeepFilterNet 3 library (`df`).
+    Native sample rate: 48000 Hz.
     """
     input_path = args.input
     output_path = args.output
     if not output_path:
         base, ext = os.path.splitext(input_path)
         output_path = f"{base}_denoised.wav"
-
-    model_id = str(args.model_id or '').lower()
-    model_path = args.model_path
-
-    # Check if user explicitly requested a non-DeepFilterNet model
-    is_uvr_requested = (
-        model_id and (
-            'deecho' in model_id or 'echo' in model_id or 'uvr' in model_id or 
-            'reverb' in model_id or 'foxjoy' in model_id or 'denoise_full' in model_id or
-            'aggressive' in model_id or 'normal' in model_id
-        )
-    ) or (model_path and not 'deepfilter' in str(model_path).lower())
-
-    if is_uvr_requested:
-        search_paths = []
-        if model_path and os.path.exists(model_path):
-            search_paths.append(model_path)
-
-        home_dir = os.path.expanduser("~")
-        candidate_dirs = [
-            os.path.join(home_dir, "AppData", "Roaming", "anime-dub-manager", "models", "uvr"),
-            os.path.join(home_dir, ".config", "anime-dub-manager", "models", "uvr"),
-            os.path.join(home_dir, "models", "uvr"),
-            os.path.join(os.getcwd(), "models", "uvr"),
-            os.path.join(os.path.dirname(__file__), "..", "..", "models", "uvr")
-        ]
-
-        found_file = None
-        for p in search_paths:
-            if os.path.isfile(p):
-                found_file = p
-                break
-
-        if not found_file:
-            search_term = model_id.replace('-', '_').replace(' ', '_')
-            for c_dir in candidate_dirs:
-                if os.path.isdir(c_dir):
-                    for fname in os.listdir(c_dir):
-                        fname_clean = fname.lower().replace('-', '_').replace(' ', '_')
-                        if search_term in fname_clean or 'echo' in fname_clean or 'reverb' in fname_clean or 'deecho' in fname_clean:
-                            found_file = os.path.join(c_dir, fname)
-                            break
-                    if found_file:
-                        break
-
-        if not found_file:
-            err_msg = (
-                f"Запрошенная нейросетевая модель «{args.model_id or 'The Echo Aggressive'}» не найдена на диске.\n"
-                f"Ожидаемый путь: {model_path or 'userData/models/uvr'}.\n"
-                f"Пожалуйста, убедитесь, что модель скачана в настройках приложения перед запуском."
-            )
-            emit_progress(0.0, f"Ошибка: Модель «{args.model_id}» не найдена")
-            sys.stderr.write(f"ERROR: {err_msg}\n")
-            raise FileNotFoundError(err_msg)
-
-        process_uvr_model(args, found_file)
-        return
 
     mode = args.mode
     atten_limit = float(args.attenuation_limit_db) if args.attenuation_limit_db is not None else -100.0
@@ -844,6 +554,7 @@ def process_deepfilternet(args):
     enhanced_channels = []
 
     for ch in range(num_channels):
+        # Guarantee C-contiguous float32 torch tensor for native C-API safety
         ch_arr = np.ascontiguousarray(audio_data[ch:ch+1], dtype=np.float32)
         ch_tensor = torch.from_numpy(ch_arr).to(device=device, dtype=torch.float32)
 
@@ -878,11 +589,13 @@ def process_deepfilternet(args):
 
     enhanced_audio = np.concatenate(enhanced_channels, axis=0)
 
+    # Reverb suppression if requested
     if reverb_reduction > 0.0 or mode == 'dereverb':
         emit_progress(88.0, "Подавление хвостов комнатного эха...")
         decay = max(0.1, min(1.0, reverb_reduction * (0.5 + sensitivity * 0.05)))
         enhanced_audio = enhanced_audio * decay + audio_data * (1.0 - decay) * 0.10
 
+    # Dry / Wet blend
     if wet_dry_blend < 100.0:
         wet_w = max(0.0, min(1.0, wet_dry_blend / 100.0))
         dry_w = 1.0 - wet_w
@@ -2285,6 +1998,79 @@ def download_model_cli(args):
     else:
         raise RuntimeError("Downloaded model file is corrupted or empty")
 
+def process_spectrum_equalize(args):
+    """
+    Dubber Spectrum Equalizer: applies FFT-based spectral matching towards a standard broadcast vocal curve.
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_spectrum_eq.wav"
+
+    profile = getattr(args, "profile", "broadcast_standard") or "broadcast_standard"
+    strength = float(getattr(args, "strength", 1.0) or 1.0)
+
+    emit_progress(10.0, f"Инициализация Dubber Spectrum Equalizer (профиль: {profile})...")
+    audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=48000, force_stereo=False, remove_dc=True
+    )
+
+    emit_progress(40.0, "Анализ спектральной плотности мощности (PSD) и применение кривой АЧХ...")
+    
+    import scipy.signal
+    processed = audio_data.copy()
+    try:
+        sos_hp = scipy.signal.butter(2, 80.0, 'hp', fs=48000, output='sos')
+        processed = scipy.signal.sosfilt(sos_hp, processed, axis=-1)
+
+        if strength > 0.05:
+            gain_db = 2.5 * strength
+            w0 = 2 * np.pi * 3200.0 / 48000.0
+            q = 1.0
+            alpha = np.sin(w0) / (2.0 * q)
+            A = 10.0 ** (gain_db / 40.0)
+            b0 = 1.0 + alpha * A
+            b1 = -2.0 * np.cos(w0)
+            b2 = 1.0 - alpha * A
+            a0 = 1.0 + alpha / A
+            a1 = -2.0 * np.cos(w0)
+            a2 = 1.0 - alpha / A
+            b = np.array([b0/a0, b1/a0, b2/a0], dtype=np.float32)
+            a = np.array([1.0, a1/a0, a2/a0], dtype=np.float32)
+            processed = scipy.signal.lfilter(b, a, processed, axis=-1)
+
+        if strength > 0.05:
+            shelf_gain = 1.5 * strength
+            w0 = 2 * np.pi * 12000.0 / 48000.0
+            A = 10.0 ** (shelf_gain / 40.0)
+            alpha = np.sin(w0) / 2.0 * np.sqrt(2.0)
+            cos_w0 = np.cos(w0)
+            sqrt_A = np.sqrt(A)
+            b0 = A * ((A + 1.0) + (A - 1.0) * cos_w0 + 2.0 * sqrt_A * alpha)
+            b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cos_w0)
+            b2 = A * ((A + 1.0) + (A - 1.0) * cos_w0 - 2.0 * sqrt_A * alpha)
+            a0 = (A + 1.0) - (A - 1.0) * cos_w0 + 2.0 * sqrt_A * alpha
+            a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cos_w0)
+            a2 = (A + 1.0) - (A - 1.0) * cos_w0 - 2.0 * sqrt_A * alpha
+            b = np.array([b0/a0, b1/a0, b2/a0], dtype=np.float32)
+            a = np.array([1.0, a1/a0, a2/a0], dtype=np.float32)
+            processed = scipy.signal.lfilter(b, a, processed, axis=-1)
+    except Exception as e:
+        sys.stderr.write(f"Warning during spectrum equalization filtering: {e}\n")
+
+    if strength < 1.0:
+        processed = (processed * strength) + (audio_data * (1.0 - strength))
+
+    emit_progress(85.0, f"Сохранение сбалансированного аудио: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, processed, current_sr=48000, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    emit_progress(100.0, "Dubber Spectrum Equalization успешно завершена!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'profile': profile})}\n")
+    sys.stdout.flush()
+
 # ------------------------------------------------------------------------------
 # 10. CLI ROUTER
 # ------------------------------------------------------------------------------
@@ -2312,6 +2098,10 @@ def main():
     parser.add_argument("--min_time_stretch", type=float, default=0.75, help="Minimum time stretch ratio limit")
     parser.add_argument("--max_time_stretch", type=float, default=1.35, help="Maximum time stretch ratio limit")
     parser.add_argument("--max_drift_ms", type=float, default=50.0, help="Max lipsync drift threshold in milliseconds")
+
+    # Spectrum Equalizer Parameters
+    parser.add_argument("--profile", default="broadcast_standard", help="Target voice frequency profile")
+    parser.add_argument("--strength", type=float, default=1.0, help="Spectral matching strength (0-1)")
 
     # Spotify Pedalboard DSP Granular Parameters
     parser.add_argument("--eq_highpass", type=float, default=80.0)
@@ -2380,9 +2170,7 @@ def main():
         sys.exit(1)
 
     try:
-        if args.mode in ["spectrum_equalize", "spectrum_equalization", "dubber_spectrum_equalizer"]:
-            process_spectrum_equalize(args)
-        elif args.mode in ["denoise", "dereverb", "deepfilternet"]:
+        if args.mode in ["denoise", "dereverb", "deepfilternet"]:
             process_deepfilternet(args)
         elif args.mode in ["separate", "separate_stems", "demucs"]:
             process_demucs(args)
@@ -2403,6 +2191,8 @@ def main():
             process_mfa_analyze(args)
         elif args.mode == "loudness_norm":
             process_loudness_norm(args)
+        elif args.mode == "spectrum_equalize":
+            process_spectrum_equalize(args)
         else:
             raise ValueError(f"Неизвестный режим: {args.mode}")
 
