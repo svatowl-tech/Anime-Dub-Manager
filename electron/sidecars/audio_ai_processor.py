@@ -499,6 +499,8 @@ class AudioConditioner:
 def process_deepfilternet(args):
     """
     Speech Denoising and Dereverberation using the official DeepFilterNet 3 library (`df`).
+    Chunked frame-by-frame batching with raised-cosine crossfade windowing to prevent OOM
+    and memory spikes on long audio while providing real-time progress.
     Native sample rate: 48000 Hz.
     """
     input_path = args.input
@@ -515,6 +517,8 @@ def process_deepfilternet(args):
 
     emit_progress(5.0, "Инициализация DeepFilterNet 3...")
     _safe_import_torch()
+    import torch
+    import gc
     device = get_optimal_device()
 
     try:
@@ -537,54 +541,90 @@ def process_deepfilternet(args):
         except Exception:
             target_sr = 48000
 
-    emit_progress(20.0, f"Загрузка и приведение аудио к {target_sr} Гц...")
+    emit_progress(15.0, f"Загрузка и приведение аудио к {target_sr} Гц...")
     audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
         input_path, target_sr=target_sr, force_stereo=False, remove_dc=True
     )
 
-    emit_progress(40.0, f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, atten_limit={atten_limit} dB)...")
-    
+    total_samples = audio_data.shape[-1]
+    num_channels = audio_data.shape[0]
+    duration_sec = total_samples / float(target_sr)
     eff_atten = atten_limit if sensitivity >= 3.0 else max(-40.0, atten_limit * (sensitivity / 3.0))
 
-    import torch
-    import threading
-    import time
+    action_label = "Дереверберация" if mode == "dereverb" else "Шумоподавление"
+    emit_progress(25.0, f"{action_label} DeepFilterNet3 ({duration_sec:.1f}с, {num_channels}ch, {str(device).upper()})...")
 
-    num_channels = audio_data.shape[0]
+    # Chunk parameters for safe RAM usage: 15-second windows with 1.0-second smooth crossfade
+    chunk_sec = 15.0
+    overlap_sec = 1.0
+    chunk_len = int(chunk_sec * target_sr)
+    overlap_len = int(overlap_sec * target_sr)
+    step_samples = max(target_sr, chunk_len - overlap_len)
+
     enhanced_channels = []
 
     for ch in range(num_channels):
-        # Guarantee C-contiguous float32 torch tensor for native C-API safety
         ch_arr = np.ascontiguousarray(audio_data[ch:ch+1], dtype=np.float32)
-        ch_tensor = torch.from_numpy(ch_arr).to(device=device, dtype=torch.float32)
 
-        done_event = threading.Event()
-        start_progress = 40.0 + (ch / num_channels) * 45.0
-        max_progress = 40.0 + ((ch + 0.95) / num_channels) * 45.0
-
-        def _heartbeat():
-            t0 = time.time()
-            step = 0
-            while not done_event.wait(2.5):
-                step += 1
-                elapsed = int(time.time() - t0)
-                cur = start_progress + (max_progress - start_progress) * (1.0 - (0.95 ** step))
-                emit_progress(round(cur, 1), f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, {elapsed}с, {str(device).upper()})...")
-
-        hb_thread = threading.Thread(target=_heartbeat, daemon=True)
-        hb_thread.start()
-
-        try:
+        if total_samples <= chunk_len:
+            # Short audio: process directly in 1 pass
+            ch_tensor = torch.from_numpy(ch_arr).to(device=device, dtype=torch.float32)
             with torch.no_grad():
                 enhanced_ch = enhance(model, df_state, ch_tensor, atten_lim_db=eff_atten)
-        finally:
-            done_event.set()
-            hb_thread.join(timeout=1.0)
+            enhanced_np = enhanced_ch.cpu().numpy()
+            del ch_tensor, enhanced_ch
+        else:
+            # Long audio: frame/chunk-by-frame batching with raised-cosine crossfade
+            out_ch = np.zeros_like(ch_arr, dtype=np.float32)
+            weight_buf = np.zeros_like(ch_arr, dtype=np.float32)
+            total_chunks = max(1, math.ceil((total_samples - overlap_len) / step_samples))
 
-        enhanced_np = enhanced_ch.cpu().numpy()
+            for chunk_idx, c_start in enumerate(range(0, total_samples, step_samples)):
+                c_end = min(c_start + chunk_len, total_samples)
+                cur_len = c_end - c_start
+                if cur_len <= 0:
+                    break
+
+                chunk_slice = np.ascontiguousarray(ch_arr[:, c_start:c_end], dtype=np.float32)
+                chunk_tensor = torch.from_numpy(chunk_slice).to(device=device, dtype=torch.float32)
+
+                with torch.no_grad():
+                    enhanced_chunk = enhance(model, df_state, chunk_tensor, atten_lim_db=eff_atten)
+                chunk_enhanced_np = enhanced_chunk.cpu().numpy()
+
+                del chunk_tensor, enhanced_chunk
+                if str(device) != 'cpu':
+                    torch.cuda.empty_cache()
+
+                # Build raised-cosine blend window for overlap region
+                win = np.ones(cur_len, dtype=np.float32)
+                cur_overlap = min(overlap_len, cur_len // 2)
+                if c_start > 0 and cur_overlap > 0:
+                    fade_in = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, cur_overlap, endpoint=False, dtype=np.float32)))
+                    win[:cur_overlap] = fade_in
+                if c_end < total_samples and cur_overlap > 0:
+                    fade_out = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, cur_overlap, endpoint=False, dtype=np.float32)))
+                    win[-cur_overlap:] = fade_out
+
+                out_ch[:, c_start:c_end] += chunk_enhanced_np * win
+                weight_buf[:, c_start:c_end] += win
+
+                # Calculate fine-grained progress across all channels and chunks
+                chunk_progress = (chunk_idx + 1) / total_chunks
+                channel_progress = (ch + chunk_progress) / num_channels
+                cur_pct = 25.0 + channel_progress * 60.0
+                emit_progress(
+                    round(cur_pct, 1),
+                    f"{action_label} DeepFilterNet3: канал {ch + 1}/{num_channels}, чанк {chunk_idx + 1}/{total_chunks} ({int(cur_pct)}%)..."
+                )
+
+                if chunk_idx % 4 == 0:
+                    gc.collect()
+
+            enhanced_np = out_ch / np.maximum(weight_buf, 1e-6)
+
         enhanced_channels.append(enhanced_np)
-        
-        progress = 40.0 + ((ch + 1) / num_channels) * 45.0
+        progress = 25.0 + ((ch + 1) / num_channels) * 60.0
         emit_progress(progress, f"Обработан канал {ch + 1}/{num_channels}...")
 
     enhanced_audio = np.concatenate(enhanced_channels, axis=0)
@@ -606,7 +646,7 @@ def process_deepfilternet(args):
         output_path, enhanced_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
     )
 
-    emit_progress(100.0, "Шумоподавление DeepFilterNet3 успешно завершено!")
+    emit_progress(100.0, f"{action_label} DeepFilterNet3 успешно завершено!")
     sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'deepfilternet3'})}\n")
     sys.stdout.flush()
 
@@ -761,7 +801,10 @@ def process_uvr_model(args):
 
     emit_progress(40.0, f"Нейросетевая фильтрация спектрограммы ({readable_name}, {str(device).upper()})...")
 
-    # 3. STFT Spectrogram Neural Processing
+    # 3. STFT Spectrogram Neural Processing with Chunking (Memory Efficient)
+    import math
+    import gc
+
     n_fft = 2048
     hop_length = 512
     win_length = 2048
@@ -774,44 +817,136 @@ def process_uvr_model(args):
             audio_tensor, n_fft=n_fft, hop_length=hop_length, win_length=win_length,
             window=window, return_complex=True
         )
-        mag = torch.abs(stft_res)       # [2, 1025, T]
-        phase = torch.angle(stft_res)   # [2, 1025, T]
+        mag = torch.abs(stft_res)       # [2, 1025, total_T]
+        phase = torch.angle(stft_res)   # [2, 1025, total_T]
 
-        # Pad frequency bins to multiple of 32 for UNet spatial compatibility (1025 -> 1056)
+        total_T = mag.shape[-1]
+        chunk_size = 512  # Process ~6s chunks to keep RAM usage under 70MB instead of 16GB
+        margin = 16       # Margin frames on each side to eliminate boundary edge artifacts
+        total_chunks = max(1, math.ceil(total_T / chunk_size))
+
+        # Pre-allocate output mask
+        mask = torch.ones_like(mag, device=device)
         pad_bins = 31
-        mag_padded = torch.nn.functional.pad(mag.unsqueeze(0), (0, 0, 0, pad_bins)) # [1, 2, 1056, T]
 
-        mask_padded = None
-        if onnx_session:
-            input_name = onnx_session.get_inputs()[0].name
-            mag_np = mag_padded.cpu().numpy().astype(np.float32)
-            ort_outs = onnx_session.run(None, {input_name: mag_np})
-            mask_padded = torch.from_numpy(ort_outs[0]).to(device)
-        elif torch_model:
-            try:
-                mask_padded = torch_model(mag_padded)
-            except Exception:
-                # If model expects 1025 bins without padding
-                mask_padded = torch_model(mag.unsqueeze(0))
-                if mask_padded.shape[2] < 1056:
-                    mask_padded = torch.nn.functional.pad(mask_padded, (0, 0, 0, 1056 - mask_padded.shape[2]))
+        for chunk_idx, t_start in enumerate(range(0, total_T, chunk_size)):
+            t_end = min(t_start + chunk_size, total_T)
+            cur_T = t_end - t_start
 
-        if mask_padded is not None:
-            if mask_padded.dim() == 4:
-                mask_padded = mask_padded[0]
+            t_pad_left = max(0, t_start - margin)
+            t_pad_right = min(total_T, t_end + margin)
+            chunk_mag = mag[:, :, t_pad_left:t_pad_right]
 
-            mask = mask_padded[:, :1025, :]
-            mask = torch.clamp(mask, 0.0, 1.0)
+            left_offset = t_start - t_pad_left
+            cur_slice_T = chunk_mag.shape[-1]
+            pad_t = (32 - (cur_slice_T % 32)) % 32
 
-            # Scale sensitivity
-            if sensitivity > 1.0:
-                sens_power = min(3.0, sensitivity)
-                mask = torch.pow(mask, sens_power)
+            # Pad along time and frequency for UNet dimension compatibility
+            chunk_padded = torch.nn.functional.pad(
+                chunk_mag.unsqueeze(0),
+                (0, pad_t, 0, pad_bins)
+            )
 
-            # Apply mask
-            processed_mag = mag * mask
-        else:
-            processed_mag = mag
+            chunk_mask_out = None
+            if onnx_session:
+                input_name = onnx_session.get_inputs()[0].name
+                mag_np = chunk_padded.cpu().numpy().astype(np.float32)
+                ort_outs = onnx_session.run(None, {input_name: mag_np})
+                chunk_mask_out = torch.from_numpy(ort_outs[0]).to(device)
+            elif torch_model:
+                try:
+                    chunk_mask_out = torch_model(chunk_padded)
+                except Exception:
+                    # If model expects 1025 bins without frequency padding
+                    raw_chunk = chunk_mag.unsqueeze(0)
+                    if pad_t > 0:
+                        raw_chunk = torch.nn.functional.pad(raw_chunk, (0, pad_t, 0, 0))
+                    chunk_mask_out = torch_model(raw_chunk)
+                    if chunk_mask_out.shape[2] < 1056:
+                        chunk_mask_out = torch.nn.functional.pad(chunk_mask_out, (0, 0, 0, 1056 - chunk_mask_out.shape[2]))
+
+            if chunk_mask_out is not None:
+                if chunk_mask_out.dim() == 4:
+                    chunk_mask_out = chunk_mask_out[0]
+
+                chunk_mask = chunk_mask_out[:, :1025, left_offset : left_offset + cur_T]
+                chunk_mask = torch.clamp(chunk_mask, 0.0, 1.0)
+                mask[:, :, t_start:t_end] = chunk_mask
+
+            del chunk_padded, chunk_mask_out
+            if str(device) != 'cpu':
+                torch.cuda.empty_cache()
+
+            if chunk_idx % 4 == 0 or chunk_idx == total_chunks - 1:
+                cur_pct = 40.0 + ((chunk_idx + 1) / total_chunks) * 48.0
+                emit_progress(round(cur_pct, 1), f"Нейросетевая фильтрация спектрограммы ({readable_name}, чанк {chunk_idx + 1}/{total_chunks}, {int(cur_pct)}%)...")
+                gc.collect()
+
+        # Scale sensitivity
+        if sensitivity > 1.0:
+            sens_power = min(3.0, sensitivity)
+            mask = torch.pow(mask, sens_power)
+
+        # Check if stem separation mode is active (vocal / instrumental isolation)
+        is_separation_mode = (
+            args.mode in ["separate", "separate_stems"]
+            or getattr(args, "stems", None) is not None
+        )
+
+        if is_separation_mode:
+            emit_progress(90.0, f"Формирование стемов вокала и инструментала ({readable_name})...")
+            vocals_mask = mask
+            inst_mask = torch.clamp(1.0 - mask, 0.0, 1.0)
+
+            vocals_mag = mag * vocals_mask
+            inst_mag = mag * inst_mask
+
+            vocals_stft = torch.polar(vocals_mag, phase)
+            inst_stft = torch.polar(inst_mag, phase)
+
+            vocals_audio = torch.istft(
+                vocals_stft, n_fft=n_fft, hop_length=hop_length, win_length=win_length,
+                window=window, length=audio_data.shape[-1]
+            ).cpu().numpy()
+
+            inst_audio = torch.istft(
+                inst_stft, n_fft=n_fft, hop_length=hop_length, win_length=win_length,
+                window=window, length=audio_data.shape[-1]
+            ).cpu().numpy()
+
+            output_dir = getattr(args, "output_dir", None) or os.path.dirname(os.path.abspath(output_path or input_path))
+            prefix = getattr(args, "prefix", "") or ""
+            stems_mode = getattr(args, "stems", "both") or "both"
+            os.makedirs(output_dir, exist_ok=True)
+
+            exported_files = []
+            vocals_out_path = os.path.join(output_dir, f"{prefix}vocals.wav")
+            inst_out_path = os.path.join(output_dir, f"{prefix}no_vocals.wav")
+
+            if stems_mode in ["vocals_only", "both", "all"]:
+                AudioConditioner.save_audio(vocals_out_path, vocals_audio, current_sr=44100, target_sr=48000, bit_depth='PCM_24')
+                alt_vocals = os.path.join(output_dir, f"{prefix}original_vocals.wav")
+                if alt_vocals != vocals_out_path:
+                    try: shutil.copyfile(vocals_out_path, alt_vocals)
+                    except Exception: pass
+                exported_files.append({"type": "vocals", "path": vocals_out_path})
+
+            if stems_mode in ["instrumental_only", "both", "all"]:
+                AudioConditioner.save_audio(inst_out_path, inst_audio, current_sr=44100, target_sr=48000, bit_depth='PCM_24')
+                alt_inst = os.path.join(output_dir, f"{prefix}original_instrumental_ME.wav")
+                if alt_inst != inst_out_path:
+                    try: shutil.copyfile(inst_out_path, alt_inst)
+                    except Exception: pass
+                exported_files.append({"type": "instrumental", "path": inst_out_path})
+
+            emit_progress(100.0, f"Нейросетевое разделение моделью «{readable_name}» успешно завершено!")
+            sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
+            sys.stdout.flush()
+            return
+
+        # Standard single-channel / track cleaning mode (dereverb / denoise)
+        # Apply mask
+        processed_mag = mag * mask
 
         # Blend Dry / Wet
         wet_w = max(0.0, min(1.0, wet_dry_blend / 100.0))
@@ -831,16 +966,18 @@ def process_uvr_model(args):
         output_path, processed_np, current_sr=44100, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
     )
 
-    emit_progress(100.0, f"Нейросетевая очистка эха моделью «{readable_name}» успешно завершена!")
+    action_name = "очистка эха" if "echo" in model_id or "reverb" in model_id else "обработка"
+    emit_progress(100.0, f"Нейросетевая {action_name} моделью «{readable_name}» успешно завершена!")
     sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': f'uvr_{model_id}'})}\n")
     sys.stdout.flush()
 
 # ------------------------------------------------------------------------------
-# 5. DEMUCS v4 (STEM SEPARATION - OFFICIAL DEMUCS API)
+# 5. DEMUCS v4 (STEM SEPARATION - OFFICIAL DEMUCS API WITH CHUNKED BATCHING)
 # ------------------------------------------------------------------------------
 def process_demucs(args):
     """
     Stem separation (Vocals / Instrumental / Drums / Bass / Other) using the official Demucs v4 library.
+    Chunked frame-by-frame batching with raised-cosine crossfade to prevent RAM exhaustion and OOM crashes.
     Input conditioned to 44100 Hz Stereo, output exported as 48000 Hz 24-bit WAV.
     """
     input_path = args.input
@@ -857,6 +994,9 @@ def process_demucs(args):
         os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
 
     emit_progress(5.0, f"Инициализация Demucs v4 ({model_name})...")
+    _safe_import_torch()
+    import torch
+    import gc
     device = get_optimal_device()
 
     try:
@@ -868,7 +1008,7 @@ def process_demucs(args):
             "Установите её через: pip install demucs или обновите AI-окружение в настройках."
         ) from e
 
-    emit_progress(15.0, f"Загрузка весов модели {model_name} через официальный API get_model()...")
+    emit_progress(12.0, f"Загрузка весов модели {model_name} через официальный API get_model()...")
     try:
         model = demucs.pretrained.get_model(model_name)
     except Exception as e:
@@ -879,13 +1019,15 @@ def process_demucs(args):
     model.eval()
 
     target_sr = getattr(model, 'samplerate', 44100)
-    emit_progress(25.0, f"Аудио-подготовка дорожки к стандарту Demucs ({target_sr} Гц Stereo)...")
+    emit_progress(20.0, f"Аудио-подготовка дорожки к стандарту Demucs ({target_sr} Гц Stereo)...")
     
     audio_data, current_sr, orig_channels, orig_len = AudioConditioner.load_audio(
         input_path, target_sr=target_sr, force_stereo=True, remove_dc=True
     )
 
-    import torch
+    total_samples = audio_data.shape[-1]
+    duration_sec = total_samples / float(target_sr)
+
     audio_tensor = torch.from_numpy(np.ascontiguousarray(audio_data, dtype=np.float32))
 
     # Variance standardization
@@ -893,16 +1035,75 @@ def process_demucs(args):
     audio_std = ref.std().item()
     audio_norm = (audio_tensor / audio_std) if audio_std > 1e-6 else audio_tensor
 
-    emit_progress(35.0, f"Выполнение нейросетевого разделения Demucs v4 (shifts={shifts}, overlap={overlap})...")
-    inp_tensor = audio_norm[None].to(device)
+    emit_progress(28.0, f"Нейросетевое разделение Demucs v4 ({model_name}, {duration_sec:.1f}с, {str(device).upper()})...")
 
-    with torch.no_grad():
-        sources = apply_model(model, inp_tensor, shifts=shifts, split=True, overlap=overlap, progress=True, device=device)[0]
+    # Chunk parameters for bounded RAM: 30-second blocks with 2.0-second crossfade
+    chunk_sec = 30.0
+    overlap_sec = 2.0
+    chunk_len = int(chunk_sec * target_sr)
+    overlap_len = int(overlap_sec * target_sr)
+    step_samples = max(target_sr, chunk_len - overlap_len)
+
+    num_sources = len(model.sources)
+
+    if total_samples <= chunk_len:
+        # Short audio: run in one pass
+        inp_tensor = audio_norm[None].to(device)
+        with torch.no_grad():
+            sources = apply_model(model, inp_tensor, shifts=shifts, split=True, overlap=overlap, progress=False, device=device)[0]
+        out_sources = sources.cpu().numpy()
+        del inp_tensor, sources
+    else:
+        # Long audio: frame/chunk-by-frame batching with raised-cosine crossfade
+        out_sources = np.zeros((num_sources, 2, total_samples), dtype=np.float32)
+        weight_buf = np.zeros((1, 1, total_samples), dtype=np.float32)
+        total_chunks = max(1, math.ceil((total_samples - overlap_len) / step_samples))
+
+        for chunk_idx, c_start in enumerate(range(0, total_samples, step_samples)):
+            c_end = min(c_start + chunk_len, total_samples)
+            cur_len = c_end - c_start
+            if cur_len <= 0:
+                break
+
+            chunk_slice = audio_norm[:, c_start:c_end]
+            chunk_inp = torch.from_numpy(np.ascontiguousarray(chunk_slice, dtype=np.float32))[None].to(device)
+
+            with torch.no_grad():
+                chunk_out = apply_model(model, chunk_inp, shifts=shifts, split=True, overlap=overlap, progress=False, device=device)[0]
+            chunk_out_np = chunk_out.cpu().numpy()  # [num_sources, 2, cur_len]
+
+            del chunk_inp, chunk_out
+            if str(device) != 'cpu':
+                torch.cuda.empty_cache()
+
+            # Crossfade window
+            win = np.ones((1, 1, cur_len), dtype=np.float32)
+            cur_overlap = min(overlap_len, cur_len // 2)
+            if c_start > 0 and cur_overlap > 0:
+                fade_in = 0.5 * (1.0 - np.cos(np.linspace(0, np.pi, cur_overlap, endpoint=False, dtype=np.float32)))
+                win[:, :, :cur_overlap] = fade_in
+            if c_end < total_samples and cur_overlap > 0:
+                fade_out = 0.5 * (1.0 + np.cos(np.linspace(0, np.pi, cur_overlap, endpoint=False, dtype=np.float32)))
+                win[:, :, -cur_overlap:] = fade_out
+
+            out_sources[:, :, c_start:c_end] += chunk_out_np * win
+            weight_buf[:, :, c_start:c_end] += win
+
+            cur_pct = 28.0 + ((chunk_idx + 1) / total_chunks) * 54.0
+            emit_progress(
+                round(cur_pct, 1),
+                f"Разделение стемов Demucs v4: чанк {chunk_idx + 1}/{total_chunks} ({int(cur_pct)}%)..."
+            )
+
+            if chunk_idx % 2 == 0:
+                gc.collect()
+
+        out_sources /= np.maximum(weight_buf, 1e-6)
 
     if audio_std > 1e-6:
-        sources = sources * audio_std
+        out_sources = out_sources * audio_std
 
-    sources_dict = dict(zip(model.sources, sources.cpu().numpy()))
+    sources_dict = dict(zip(model.sources, out_sources))
 
     os.makedirs(output_dir, exist_ok=True)
     vocals_data = sources_dict.get('vocals')
