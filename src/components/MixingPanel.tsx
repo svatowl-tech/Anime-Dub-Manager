@@ -129,6 +129,7 @@ const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = 
   loudnessMatchStrength: { min: 0, max: 100, step: 1 },
   reverbMatchStrength: { min: 0, max: 100, step: 1 },
   eqMatchStrength: { min: 0, max: 100, step: 1 },
+  matchAmount: { min: 0, max: 100, step: 1 },
   targetLufsOffset: { min: -10, max: 10, step: 0.5 },
   // Spotify Pedalboard DSP Granular Specs
   eqHighpass: { min: 20, max: 300, step: 5 },
@@ -1641,6 +1642,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     truePeak: { label: 'Истинный пик (True Peak)', unit: 'dBTP' },
     loudnessRange: { label: 'Динамический диапазон (LRA)', unit: 'LU' },
     maxGainDb: { label: 'Максимальное усиление (Max Gain)', unit: 'dB' },
+    targetCurve: { label: 'Целевая кривая АЧХ (Target Curve)' },
+    matchAmount: { label: 'Глубина сопоставления АЧХ (Match Depth)', unit: '%' },
+    smoothingOctaves: { label: 'Октавное сглаживание фильтра' },
     dualMono: { label: 'Обработка Dual-Mono' },
     frequencyHz: { label: 'Частота сибилянтов (Frequency)', unit: 'Гц' },
     intensity: { label: 'Интенсивность деэссера', unit: 'x' },
@@ -2402,6 +2406,44 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     <option value="loudnorm">EBU R128 (-16 LUFS Стриминг)</option>
                                     <option value="dynaudnorm">Динамический левелер (DynAudNorm)</option>
                                     <option value="leveler_pro">Двухступенчатый левелер речи (Speech Leveler Pro)</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'targetCurve') {
+                              return (
+                                <div key={paramKey} className="col-span-2">
+                                  <label className="text-[11px] text-purple-300 font-semibold block mb-1">
+                                    🎙 Целевая нормативная кривая АЧХ (Broadcast Target Curve):
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1.5 bg-neutral-900 border border-purple-800/60 rounded text-xs text-purple-200 font-medium"
+                                  >
+                                    <option value="broadcast_standard">🎙 Стандарт Broadcast Vocal (Универсальная норма радио/ТВ)</option>
+                                    <option value="warm_male">♂ Мужской плотный вокал (Теплый низ + чёткая речь)</option>
+                                    <option value="bright_female">♀ Полетный женский вокал (Прозрачный верх без гула)</option>
+                                    <option value="neutral_speech">📻 Нейтральная речевая нормализация (Аккуратный баланс)</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'smoothingOctaves') {
+                              return (
+                                <div key={paramKey}>
+                                  <label className="text-[11px] text-neutral-400 block mb-1">
+                                    Октавное сглаживание:
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
+                                  >
+                                    <option value="1/3_octave">1/3 Октавы (Стандартное плавное сглаживание)</option>
+                                    <option value="1/6_octave">1/6 Октавы (Детальная хирургическая коррекция)</option>
                                   </select>
                                 </div>
                               );

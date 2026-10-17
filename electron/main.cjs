@@ -432,8 +432,68 @@ app.whenReady().then(async () => {
           targetFile = proxyPath;
         }
 
-        const fileUrl = require('url').pathToFileURL(targetFile).toString();
-        return net.fetch(fileUrl);
+        if (!fsSync.existsSync(targetFile)) {
+          return new Response('File not found', { status: 404 });
+        }
+
+        const stat = fsSync.statSync(targetFile);
+        const fileSize = stat.size;
+        const rangeHeader = request.headers.get('range');
+
+        // Infer MIME type for smooth seeking & playback
+        const ext = path.extname(targetFile).toLowerCase();
+        let mimeType = 'video/mp4';
+        if (ext === '.mkv') mimeType = 'video/x-matroska';
+        else if (ext === '.webm') mimeType = 'video/webm';
+        else if (ext === '.avi') mimeType = 'video/x-msvideo';
+        else if (ext === '.mov') mimeType = 'video/quicktime';
+        else if (ext === '.mp3') mimeType = 'audio/mpeg';
+        else if (ext === '.wav') mimeType = 'audio/wav';
+        else if (ext === '.aac') mimeType = 'audio/aac';
+        else if (ext === '.ogg') mimeType = 'audio/ogg';
+        else if (ext === '.flac') mimeType = 'audio/flac';
+        else if (ext === '.ass' || ext === '.srt' || ext === '.vtt') mimeType = 'text/plain';
+
+        if (rangeHeader) {
+          const parts = rangeHeader.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10) || 0;
+          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+
+          if (start >= fileSize || end >= fileSize) {
+            return new Response('Requested Range Not Satisfiable', {
+              status: 416,
+              headers: { 'Content-Range': `bytes */${fileSize}` }
+            });
+          }
+
+          const chunkSize = (end - start) + 1;
+          const nodeStream = fsSync.createReadStream(targetFile, { start, end });
+          const webStream = require('stream').Readable.toWeb(nodeStream);
+
+          return new Response(webStream, {
+            status: 206,
+            headers: {
+              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': String(chunkSize),
+              'Content-Type': mimeType,
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        } else {
+          const nodeStream = fsSync.createReadStream(targetFile);
+          const webStream = require('stream').Readable.toWeb(nodeStream);
+
+          return new Response(webStream, {
+            status: 200,
+            headers: {
+              'Accept-Ranges': 'bytes',
+              'Content-Length': String(fileSize),
+              'Content-Type': mimeType,
+              'Access-Control-Allow-Origin': '*'
+            }
+          });
+        }
       } catch (err) {
         log.error('[custom-media] protocol error:', err);
         return new Response('Media file not found or invalid', { status: 404 });

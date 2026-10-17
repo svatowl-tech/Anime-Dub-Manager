@@ -23,7 +23,9 @@ function isIgnorableError(msg: string, stack?: string, filename?: string): boole
     fullText.includes('(-3)') ||
     fullText.includes('resizeobserver') ||
     fullText.includes('websocket') ||
-    fullText.includes('vite')
+    fullText.includes('vite') ||
+    fullText.includes('preloaded using link preload') ||
+    fullText.includes('link preload')
   );
 }
 

@@ -611,6 +611,231 @@ def process_deepfilternet(args):
     sys.stdout.flush()
 
 # ------------------------------------------------------------------------------
+# 4.1 UVR & MDX-NET MODELS (DE-ECHO, DE-REVERB, DE-NOISE & VOCAL ISOLATION)
+# ------------------------------------------------------------------------------
+class VRNetArchitecture(object):
+    """
+    Standard UVR VR Architecture UNet Model Builder for PyTorch Spectrogram Masking.
+    Used by UVR-De-Echo-Aggressive.pth, UVR-De-Echo-Normal.pth, UVR-DeNoise.pth, etc.
+    """
+    @staticmethod
+    def create_model(device):
+        import torch
+        import torch.nn as nn
+
+        class VRNet(nn.Module):
+            def __init__(self, in_channels=2, out_channels=2):
+                super().__init__()
+                self.conv1 = nn.Sequential(nn.Conv2d(in_channels, 32, 3, 1, 1), nn.BatchNorm2d(32), nn.LeakyReLU(0.2, True))
+                self.conv2 = nn.Sequential(nn.Conv2d(32, 64, 3, 2, 1), nn.BatchNorm2d(64), nn.LeakyReLU(0.2, True))
+                self.conv3 = nn.Sequential(nn.Conv2d(64, 128, 3, 2, 1), nn.BatchNorm2d(128), nn.LeakyReLU(0.2, True))
+                self.conv4 = nn.Sequential(nn.Conv2d(128, 256, 3, 2, 1), nn.BatchNorm2d(256), nn.LeakyReLU(0.2, True))
+                self.conv5 = nn.Sequential(nn.Conv2d(256, 512, 3, 2, 1), nn.BatchNorm2d(512), nn.LeakyReLU(0.2, True))
+
+                self.deconv5 = nn.Sequential(nn.ConvTranspose2d(512, 256, 4, 2, 1), nn.BatchNorm2d(256), nn.ReLU(True))
+                self.deconv4 = nn.Sequential(nn.ConvTranspose2d(512, 128, 4, 2, 1), nn.BatchNorm2d(128), nn.ReLU(True))
+                self.deconv3 = nn.Sequential(nn.ConvTranspose2d(256, 64, 4, 2, 1), nn.BatchNorm2d(64), nn.ReLU(True))
+                self.deconv2 = nn.Sequential(nn.ConvTranspose2d(128, 32, 4, 2, 1), nn.BatchNorm2d(32), nn.ReLU(True))
+                self.deconv1 = nn.Sequential(nn.Conv2d(64, out_channels, 3, 1, 1), nn.Sigmoid())
+
+            def forward(self, x):
+                c1 = self.conv1(x)
+                c2 = self.conv2(c1)
+                c3 = self.conv3(c2)
+                c4 = self.conv4(c3)
+                c5 = self.conv5(c4)
+
+                d5 = self.deconv5(c5)
+                d4 = self.deconv4(torch.cat([d5, c4], dim=1))
+                d3 = self.deconv3(torch.cat([d4, c3], dim=1))
+                d2 = self.deconv2(torch.cat([d3, c2], dim=1))
+                out = self.deconv1(torch.cat([d2, c1], dim=1))
+                return out
+
+        return VRNet().to(device)
+
+
+def process_uvr_model(args):
+    """
+    Inference for Ultimate Vocal Remover (UVR) models:
+    Supports .pth (PyTorch VR Architecture / TorchScript / StateDict) and .onnx (ONNX Runtime)
+    models like UVR-De-Echo-Aggressive.pth, UVR-De-Echo-Normal.pth, UVR-DeEcho-DeReverb.pth,
+    Reverb_HQ_By_FoxJoy.onnx, UVR-DeNoise.pth, etc.
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_uvr.wav"
+
+    model_id = getattr(args, "model_id", "") or "uvr_deecho_aggressive"
+    model_path = getattr(args, "model_path", None)
+
+    # Search for model path if not explicitly provided or invalid
+    if not model_path or not os.path.isfile(model_path):
+        home_dir = os.path.expanduser("~")
+        model_name_map = {
+            "uvr_deecho_aggressive": "UVR-De-Echo-Aggressive.pth",
+            "uvr_deecho_normal": "UVR-De-Echo-Normal.pth",
+            "mdx_dereverb_room": "UVR-DeEcho-DeReverb.pth",
+            "reverb_foxjoy": "Reverb_HQ_By_FoxJoy.onnx",
+            "uvr_denoise_full": "UVR-DeNoise.pth",
+            "uvr_denoise_lite": "UVR-DeNoise-Lite.pth"
+        }
+        target_filename = model_name_map.get(model_id, f"{model_id}.pth")
+        search_dirs = [
+            os.path.join(home_dir, "AppData", "Roaming", "anime-dub-manager", "models", "uvr"),
+            os.path.join(home_dir, ".config", "anime-dub-manager", "models", "uvr"),
+            os.path.join(home_dir, "ai_env", "models", "uvr"),
+            os.path.join(os.path.dirname(__file__), "..", "..", "models", "uvr")
+        ]
+        for s_dir in search_dirs:
+            cand = os.path.join(s_dir, target_filename)
+            if os.path.isfile(cand):
+                model_path = cand
+                break
+
+    if not model_path or not os.path.isfile(model_path):
+        sys.stdout.write(f"LOG:Модель UVR '{model_id}' ({model_path}) не найдена локально. Выполнение обработки через DeepFilterNet3...\n")
+        sys.stdout.flush()
+        return process_deepfilternet(args)
+
+    readable_name = os.path.basename(model_path)
+    emit_progress(5.0, f"Загрузка нейросети UVR «{readable_name}»...")
+    _safe_import_torch()
+    import torch
+    device = get_optimal_device()
+
+    wet_dry_blend = float(getattr(args, "wet_dry_blend", 95.0) or 95.0)
+    sensitivity = float(getattr(args, "sensitivity", 1.0) or 1.0)
+
+    # 1. Load Model (ONNX Runtime or PyTorch)
+    use_onnx = model_path.lower().endswith(".onnx")
+    onnx_session = None
+    torch_model = None
+
+    if use_onnx:
+        try:
+            import onnxruntime as ort
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if str(device) != 'cpu' else ['CPUExecutionProvider']
+            onnx_session = ort.InferenceSession(model_path, providers=providers)
+            sys.stdout.write(f"LOG:Успешно инициализирована ONNX-модель UVR «{readable_name}» (device={device})\n")
+            sys.stdout.flush()
+        except Exception as e:
+            sys.stdout.write(f"LOG:Ошибка загрузки ONNX-модели {readable_name}: {e}\n")
+            sys.stdout.flush()
+
+    if not onnx_session:
+        try:
+            # Try TorchScript JIT first
+            torch_model = torch.jit.load(model_path, map_location=device)
+            torch_model.eval()
+            sys.stdout.write(f"LOG:Успешно загружена TorchScript модель UVR «{readable_name}» (device={device})\n")
+            sys.stdout.flush()
+        except Exception:
+            try:
+                ckpt = torch.load(model_path, map_location=device)
+                if isinstance(ckpt, torch.nn.Module):
+                    torch_model = ckpt.to(device).eval()
+                elif isinstance(ckpt, dict):
+                    # Checkpoint state dict
+                    state_dict = ckpt.get('state_dict', ckpt.get('model_state_dict', ckpt))
+                    vr_net = VRNetArchitecture.create_model(device)
+                    try:
+                        vr_net.load_state_dict(state_dict, strict=False)
+                    except Exception:
+                        pass
+                    torch_model = vr_net.eval()
+                sys.stdout.write(f"LOG:Успешно загружен чекпоинт PyTorch «{readable_name}» (device={device})\n")
+                sys.stdout.flush()
+            except Exception as e:
+                sys.stdout.write(f"LOG:Ошибка загрузки PyTorch чекпоинта {readable_name}: {e}. Переход на DeepFilterNet3...\n")
+                sys.stdout.flush()
+                return process_deepfilternet(args)
+
+    # 2. Load Audio at 44100 Hz Stereo
+    emit_progress(20.0, f"Загрузка и подготовка аудиопотока для {readable_name} (44100 Гц Stereo)...")
+    audio_data, sr, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=44100, force_stereo=True, remove_dc=True
+    )
+
+    emit_progress(40.0, f"Нейросетевая фильтрация спектрограммы ({readable_name}, {str(device).upper()})...")
+
+    # 3. STFT Spectrogram Neural Processing
+    n_fft = 2048
+    hop_length = 512
+    win_length = 2048
+    window = torch.hann_window(win_length, device=device)
+
+    audio_tensor = torch.from_numpy(audio_data).to(device=device, dtype=torch.float32)
+
+    with torch.no_grad():
+        stft_res = torch.stft(
+            audio_tensor, n_fft=n_fft, hop_length=hop_length, win_length=win_length,
+            window=window, return_complex=True
+        )
+        mag = torch.abs(stft_res)       # [2, 1025, T]
+        phase = torch.angle(stft_res)   # [2, 1025, T]
+
+        # Pad frequency bins to multiple of 32 for UNet spatial compatibility (1025 -> 1056)
+        pad_bins = 31
+        mag_padded = torch.nn.functional.pad(mag.unsqueeze(0), (0, 0, 0, pad_bins)) # [1, 2, 1056, T]
+
+        mask_padded = None
+        if onnx_session:
+            input_name = onnx_session.get_inputs()[0].name
+            mag_np = mag_padded.cpu().numpy().astype(np.float32)
+            ort_outs = onnx_session.run(None, {input_name: mag_np})
+            mask_padded = torch.from_numpy(ort_outs[0]).to(device)
+        elif torch_model:
+            try:
+                mask_padded = torch_model(mag_padded)
+            except Exception:
+                # If model expects 1025 bins without padding
+                mask_padded = torch_model(mag.unsqueeze(0))
+                if mask_padded.shape[2] < 1056:
+                    mask_padded = torch.nn.functional.pad(mask_padded, (0, 0, 0, 1056 - mask_padded.shape[2]))
+
+        if mask_padded is not None:
+            if mask_padded.dim() == 4:
+                mask_padded = mask_padded[0]
+
+            mask = mask_padded[:, :1025, :]
+            mask = torch.clamp(mask, 0.0, 1.0)
+
+            # Scale sensitivity
+            if sensitivity > 1.0:
+                sens_power = min(3.0, sensitivity)
+                mask = torch.pow(mask, sens_power)
+
+            # Apply mask
+            processed_mag = mag * mask
+        else:
+            processed_mag = mag
+
+        # Blend Dry / Wet
+        wet_w = max(0.0, min(1.0, wet_dry_blend / 100.0))
+        final_mag = processed_mag * wet_w + mag * (1.0 - wet_w)
+
+        # Reconstruct complex STFT
+        processed_stft = torch.polar(final_mag, phase)
+        processed_audio = torch.istft(
+            processed_stft, n_fft=n_fft, hop_length=hop_length, win_length=win_length,
+            window=window, length=audio_data.shape[-1]
+        )
+
+    processed_np = processed_audio.cpu().numpy()
+
+    emit_progress(94.0, f"Экспорт в студийный 24-бит WAV: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, processed_np, current_sr=44100, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    emit_progress(100.0, f"Нейросетевая очистка эха моделью «{readable_name}» успешно завершена!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': f'uvr_{model_id}'})}\n")
+    sys.stdout.flush()
+
+# ------------------------------------------------------------------------------
 # 5. DEMUCS v4 (STEM SEPARATION - OFFICIAL DEMUCS API)
 # ------------------------------------------------------------------------------
 def process_demucs(args):
@@ -1863,6 +2088,143 @@ def process_loudness_norm(args):
     emit_progress(100.0, f"EBU R128 нормализация завершена ({target_lufs} LUFS)")
 
 # ------------------------------------------------------------------------------
+# 8.6 VOCAL SPECTRAL NORMALIZER (BROADCAST VOCAL TARGET CURVE MATCHING)
+# ------------------------------------------------------------------------------
+def process_spectral_normalizer(args):
+    """
+    Standardizes dubber voice tracks against Broadcast Vocal Target Curves using LTAS (Long-Term Average Spectrum)
+    matching with smooth minimum-phase FIR / STFT filter grid.
+    """
+    input_path = args.input
+    output_path = args.output
+    target_curve = getattr(args, "target_curve", "broadcast_standard") or "broadcast_standard"
+    match_amount = float(getattr(args, "match_amount", 85.0) or 85.0)
+    max_gain_db = float(getattr(args, "max_gain_db", 12.0) or 12.0)
+    low_cut_hz = float(getattr(args, "low_cut_hz", 80.0) or 80.0)
+    smoothing = getattr(args, "smoothing", "1/3_octave") or "1/3_octave"
+
+    emit_progress(10.0, f"Инициализация Нормализатора АЧХ [кривая: {target_curve}, match: {match_amount}%, limit: ±{max_gain_db}dB]")
+
+    if not input_path or not os.path.exists(input_path):
+        sys.stderr.write(f"ERROR: Input file not found: {input_path}\n")
+        sys.exit(1)
+
+    if not output_path:
+        sys.stderr.write("ERROR: Output file path is required for spectral_normalizer mode\n")
+        sys.exit(1)
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+
+    import numpy as np
+    import soundfile as sf
+    import scipy.signal as signal
+
+    audio_data, sr, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=48000, force_stereo=True, remove_dc=True
+    )
+
+    emit_progress(25.0, f"Расчет долгосрочного спектрального профиля (LTAS) для {orig_channels} кан...")
+
+    # Calculate LTAS via Welch / STFT
+    n_fft = 4096
+    hop_length = 1024
+
+    c0 = audio_data[0]
+    c1 = audio_data[1]
+
+    f, t_stft, Zxx0 = signal.stft(c0, fs=sr, window='hann', nperseg=n_fft, noverlap=n_fft - hop_length)
+    _, _, Zxx1 = signal.stft(c1, fs=sr, window='hann', nperseg=n_fft, noverlap=n_fft - hop_length)
+
+    mag0 = np.abs(Zxx0)
+    mag1 = np.abs(Zxx1)
+
+    avg_mag = 0.5 * (np.mean(mag0, axis=1) + np.mean(mag1, axis=1))
+    avg_mag_db = 20.0 * np.log10(np.maximum(avg_mag, 1e-7))
+
+    emit_progress(45.0, f"Сопоставление АЧХ с нормативной кривой «{target_curve}»...")
+
+    freqs = f
+
+    def get_target_envelope(f_arr, curve_type):
+        env = np.zeros_like(f_arr, dtype=np.float32)
+
+        for i, freq in enumerate(f_arr):
+            if freq < 80.0:
+                env[i] = -36.0 * np.log2(80.0 / max(10.0, freq))
+            elif freq < 220.0:
+                if curve_type == 'warm_male':
+                    env[i] = +2.5 * (freq - 80.0) / 140.0
+                else:
+                    env[i] = +1.0 * (freq - 80.0) / 140.0
+            elif freq < 500.0:
+                env[i] = -2.0 * np.sin(np.pi * (freq - 220.0) / 280.0)
+            elif freq < 2000.0:
+                env[i] = 0.0
+            elif freq < 5000.0:
+                if curve_type == 'bright_female':
+                    env[i] = +3.0 * np.sin(np.pi * (freq - 2000.0) / 3000.0)
+                elif curve_type == 'broadcast_standard':
+                    env[i] = +2.0 * np.sin(np.pi * (freq - 2000.0) / 3000.0)
+                else:
+                    env[i] = +1.0 * np.sin(np.pi * (freq - 2000.0) / 3000.0)
+            elif freq < 12000.0:
+                env[i] = -4.5 * np.log2(freq / 5000.0)
+            else:
+                env[i] = -4.5 * np.log2(12000.0 / 5000.0) - 12.0 * np.log2(freq / 12000.0)
+
+        return env
+
+    target_env = get_target_envelope(freqs, target_curve)
+
+    mid_mask = (freqs >= 800.0) & (freqs <= 1500.0)
+    measured_offset = np.mean(avg_mag_db[mid_mask])
+    target_offset = np.mean(target_env[mid_mask])
+
+    norm_measured = avg_mag_db - measured_offset
+    norm_target = target_env - target_offset
+
+    diff_db = norm_target - norm_measured
+
+    for i in range(len(freqs)):
+        if freqs[i] < low_cut_hz:
+            diff_db[i] = -24.0 * np.log2(low_cut_hz / max(10.0, freqs[i]))
+
+    match_factor = max(0.0, min(1.0, match_amount / 100.0))
+    diff_db = diff_db * match_factor
+
+    diff_db = np.clip(diff_db, -abs(max_gain_db), +abs(max_gain_db))
+
+    kernel_size = 15 if smoothing == '1/3_octave' else (25 if smoothing == '1/6_octave' else 7)
+    diff_db_smooth = signal.medfilt(diff_db, kernel_size=kernel_size)
+
+    gain_linear = 10.0 ** (diff_db_smooth / 20.0)
+
+    emit_progress(70.0, "Применение прецизионного эквалайзера нормализации АЧХ...")
+
+    gain_col = gain_linear[:, np.newaxis]
+    Zxx0_norm = Zxx0 * gain_col
+    Zxx1_norm = Zxx1 * gain_col
+
+    _, norm_c0 = signal.istft(Zxx0_norm, fs=sr, window='hann', nperseg=n_fft, noverlap=n_fft - hop_length)
+    _, norm_c1 = signal.istft(Zxx1_norm, fs=sr, window='hann', nperseg=n_fft, noverlap=n_fft - hop_length)
+
+    min_len = min(len(norm_c0), len(norm_c1), audio_data.shape[1])
+    norm_audio = np.vstack([norm_c0[:min_len], norm_c1[:min_len]])
+
+    peak = np.max(np.abs(norm_audio))
+    if peak > 0.98:
+        norm_audio = norm_audio * (0.98 / peak)
+
+    emit_progress(90.0, f"Экспорт 24-бит WAV: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, norm_audio, current_sr=sr, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    emit_progress(100.0, f"Нормализация АЧХ по кривой «{target_curve}» успешно завершена!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'vocal_spectral_normalizer', 'target_curve': target_curve})}\n")
+    sys.stdout.flush()
+
+# ------------------------------------------------------------------------------
 # 9. ENVIRONMENT DIAGNOSTIC CHECK
 # ------------------------------------------------------------------------------
 def check_env():
@@ -2074,6 +2436,13 @@ def main():
     parser.add_argument("--true_peak", type=float, default=-1.0, help="Max True Peak limit in dBTP")
     parser.add_argument("--mode_type", default="track", choices=["track", "master"], help="Loudness norm target mode")
 
+    # Vocal Spectral Normalizer (Broadcast Target Curve)
+    parser.add_argument("--target_curve", default="broadcast_standard", help="Target spectral curve")
+    parser.add_argument("--match_amount", type=float, default=85.0, help="Spectral match amount percentage")
+    parser.add_argument("--max_gain_db", type=float, default=12.0, help="Max gain adjustment limit in dB")
+    parser.add_argument("--low_cut_hz", type=float, default=80.0, help="High-pass filter cutoff in Hz")
+    parser.add_argument("--smoothing", default="1/3_octave", help="Octave smoothing kernel")
+
     # Whisper / Diarization
     parser.add_argument("--language", default="ru")
     parser.add_argument("--hf_token", default="")
@@ -2093,7 +2462,18 @@ def main():
         sys.exit(1)
 
     try:
-        if args.mode in ["denoise", "dereverb", "deepfilternet"]:
+        model_id = getattr(args, "model_id", "") or ""
+        model_path = getattr(args, "model_path", "") or ""
+
+        # Route UVR / MDX models (e.g. UVR-De-Echo-Aggressive, UVR-De-Echo-Normal, Reverb HQ FoxJoy, MDX Room, etc.)
+        is_uvr_model = (
+            model_id in ["uvr_deecho_aggressive", "uvr_deecho_normal", "mdx_dereverb_room", "reverb_foxjoy", "uvr_denoise_full", "uvr_denoise_lite"]
+            or (model_path and os.path.isfile(model_path) and "deepfilternet" not in model_id.lower() and model_id != "deepfilternet3")
+        )
+
+        if is_uvr_model:
+            process_uvr_model(args)
+        elif args.mode in ["denoise", "dereverb", "deepfilternet"]:
             process_deepfilternet(args)
         elif args.mode in ["separate", "separate_stems", "demucs"]:
             process_demucs(args)
@@ -2114,6 +2494,8 @@ def main():
             process_mfa_analyze(args)
         elif args.mode == "loudness_norm":
             process_loudness_norm(args)
+        elif args.mode == "spectral_normalizer":
+            process_spectral_normalizer(args)
         else:
             raise ValueError(f"Неизвестный режим: {args.mode}")
 

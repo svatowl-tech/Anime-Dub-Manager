@@ -609,6 +609,57 @@ const MODULE_DATABASE = [
     ]
   },
   {
+    id: 'vocal_spectral_normalizer',
+    name: 'Нормализатор АЧХ вокала (Broadcast Curve)',
+    title: 'Нормализатор АЧХ вокала (Broadcast Curve)',
+    filename: null,
+    category: 'equalization',
+    description: 'Стандартизация АЧХ голосов всех дабберов к единому студийному эталону Broadcast Vocal.',
+    size_mb: 0.0,
+    recommended_for: 'Устранение частотного разброса записей дабберов (разные микрофоны, помещения и карты)',
+    urls: [],
+    is_installed: true,
+    installed_bytes: null,
+    local_path: null,
+    format: 'dsp',
+    engineArchitecture: 'LTAS Minimum-Phase Spectral Normalizer Grid',
+    defaultPrefix: 'norm_ach_',
+    icon: 'Sliders',
+    defaultParams: {
+      targetCurve: 'broadcast_standard',
+      matchAmount: 85.0,
+      maxGainDb: 12.0,
+      lowCutHz: 80.0,
+      smoothingOctaves: '1/3_octave'
+    },
+    presets: [
+      {
+        id: 'broadcast_vocal_preset',
+        title: '🎙 Стандарт Broadcast Vocal',
+        description: 'Универсальная нормализация речевого спектра для радио, ТВ и дубляжа',
+        params: { targetCurve: 'broadcast_standard', matchAmount: 85.0, maxGainDb: 12.0, lowCutHz: 80.0, smoothingOctaves: '1/3_octave' }
+      },
+      {
+        id: 'warm_male_preset',
+        title: '♂ Мужской плотный вокал',
+        description: 'Сбалансированный теплый низ и четкая разборчивость речи',
+        params: { targetCurve: 'warm_male', matchAmount: 90.0, maxGainDb: 14.0, lowCutHz: 75.0, smoothingOctaves: '1/3_octave' }
+      },
+      {
+        id: 'bright_female_preset',
+        title: '♀ Полетный женский вокал',
+        description: 'Чистый прозрачный верх без резкостей и гудящего низа',
+        params: { targetCurve: 'bright_female', matchAmount: 85.0, maxGainDb: 12.0, lowCutHz: 90.0, smoothingOctaves: '1/3_octave' }
+      },
+      {
+        id: 'neutral_speech_preset',
+        title: '📻 Нейтральная речевая нормализация',
+        description: 'Аккуратное устранение экстремальных всплесков и провалов АЧХ',
+        params: { targetCurve: 'neutral_speech', matchAmount: 70.0, maxGainDb: 9.0, lowCutHz: 80.0, smoothingOctaves: '1/6_octave' }
+      }
+    ]
+  },
+  {
     id: 'uvr_mdx_inst_hq3',
     name: 'UVR-MDX-NET Inst_HQ_3',
     title: 'UVR-MDX-NET Inst_HQ_3 (Изоляция инструментала)',
@@ -3220,6 +3271,9 @@ class MixingPipelineService {
         case 'speech_leveler':
           resultFiles = await this._execSpeechLeveler({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'vocal_spectral_normalizer':
+          resultFiles = await this._execVocalSpectralNormalizer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'vocal_eq':
           resultFiles = await this._execVocalEq({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -4455,6 +4509,62 @@ class MixingPipelineService {
     results.push({ name: instName, path: instPath, size: instSt.size, type: 'instrumental' });
 
     logFn(`✓ Разделение оригинала завершено моделью ${modelName}! Сформировано стемов: ${results.length}`);
+    return results;
+  }
+
+  /**
+   * EXEC: Vocal Spectral Normalizer (Broadcast Vocal Target Curve Matching)
+   */
+  async _execVocalSpectralNormalizer({ workingDir, stepFolder, prefix = 'norm_ach_', inputFiles, params = {}, logFn, onProgress }) {
+    logFn('🎙 Запуск нормализатора АЧХ вокала (Broadcast Vocal Target Curve)...');
+    fsSync.mkdirSync(stepFolder, { recursive: true });
+
+    const targetCurve = params.targetCurve || 'broadcast_standard';
+    const matchAmount = Number(params.matchAmount ?? 85.0);
+    const maxGainDb = Number(params.maxGainDb ?? 12.0);
+    const lowCutHz = Number(params.lowCutHz ?? 80.0);
+    const smoothingOctaves = params.smoothingOctaves || '1/3_octave';
+
+    logFn(`Параметры: Кривая «${targetCurve}», Глубина сопоставления: ${matchAmount}%, Лимит коррекции: ±${maxGainDb} дБ, НЧ-фильтр: ${lowCutHz} Гц`);
+
+    const results = [];
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      logFn(`[${i+1}/${inputFiles.length}] Нормализация АЧХ для дорожки «${nick}»...`);
+
+      try {
+        await AudioNeuralService.normalizeVocalSpectrum({
+          inputPath: track.path,
+          outputPath: outPath,
+          targetCurve,
+          matchAmount,
+          maxGainDb,
+          lowCutHz,
+          smoothing: smoothingOctaves,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `Нормализатор АЧХ [${nick}]: ${p.percent}%` });
+            }
+          },
+          onLog: logFn
+        });
+        if (fsSync.existsSync(outPath)) {
+          logFn(`✓ АЧХ дорожки «${nick}» успешно приведена к стандарту Broadcast Vocal`);
+          results.push({ name: outName, path: outPath, nick });
+        }
+      } catch (err) {
+        logFn(`⚠️ Ошибка нормализации АЧХ для «${nick}»: ${err.message}. Копирование оригинала.`, 'warn');
+        fsSync.copyFileSync(track.path, outPath);
+        results.push({ name: outName, path: outPath, nick });
+      }
+    }
     return results;
   }
 
