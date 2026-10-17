@@ -4,6 +4,7 @@ import { Toaster, toast } from 'sonner';
 import Dashboard from './components/Dashboard';
 import QAPanel from './components/QAPanel';
 import TimingPanel from './components/TimingPanel';
+import RawSubtitleEditor from './components/RawSubtitleEditor';
 import MixingPanel from './components/MixingPanel';
 import ReleasePanel from './components/ReleasePanel';
 import AssEditor from './contexts/AssEditor';
@@ -26,6 +27,13 @@ import { useGlobalKeyboard } from './hooks/useGlobalKeyboard';
 function AppContent() {
   type TabType = 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+  const [timingVersion, setTimingVersion] = useState<'old' | 'new'>(() => {
+    try {
+      return (localStorage.getItem('timing_version') as 'old' | 'new') || 'old';
+    } catch {
+      return 'old';
+    }
+  });
   const [savedAudioUrl, setSavedAudioUrl] = useState<string | null>(null);
   const [logEventCount, setLogEventCount] = useState<number>(0);
 
@@ -348,15 +356,20 @@ function AppContent() {
           <button
             id="step-timing"
             onClick={() => handleNavigate('timing')}
-            title="Точный многодорожечный тайминг голосов, зачистка тишины и устранение коллизий"
+            title="Тайминг субтитров и дорожек — доступен выбор старой (ASS) и новой (VAD) версии"
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
               activeTab === 'timing' 
                 ? 'bg-amber-600/10 text-amber-400' 
                 : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
             }`}
           >
-            <Clock className="w-5 h-5 text-amber-400" />
-            <span>Тайминг видео</span>
+            <Clock className="w-5 h-5 text-amber-400 shrink-0" />
+            <div className="flex flex-col min-w-0">
+              <span className="truncate">Тайминг видео</span>
+              <span className="text-[10px] text-amber-500/80 font-normal truncate">
+                {timingVersion === 'old' ? 'Старая версия (ASS)' : 'Новая версия (VAD)'}
+              </span>
+            </div>
           </button>
 
           <button
@@ -507,7 +520,66 @@ function AppContent() {
         {activeTab === 'stats' && <StatsPanel />}
         {activeTab === 'settings' && <SettingsPanel />}
         {activeTab === 'qa' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="QA Проверка" onApply={setStandaloneEpisode} /> : <QAPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} onNavigate={handleNavigate} />)}
-        {activeTab === 'timing' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Тайминг видео" onApply={setStandaloneEpisode} /> : <TimingPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} onNavigate={handleNavigate} />)}
+        {activeTab === 'timing' && (!activeEpisodeToPass ? (
+          <StandaloneMediaSelector title="Тайминг видео" onApply={setStandaloneEpisode} />
+        ) : (
+          <div className="flex flex-col h-full overflow-hidden">
+            {/* Version Switcher Bar */}
+            <div className="bg-amber-950/80 border-b border-amber-800/60 px-4 py-2 flex items-center justify-between text-xs shrink-0 select-none z-10 shadow-sm">
+              <div className="flex items-center gap-2 text-amber-200 font-medium">
+                <Clock className="w-4 h-4 text-amber-400" />
+                <span>Режим тайминга: <strong className="text-white">{timingVersion === 'old' ? 'Старая версия (Классический ASS редактор)' : 'Новая версия (Мультитрековый VAD Waveform)'}</strong></span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setTimingVersion('old');
+                    localStorage.setItem('timing_version', 'old');
+                    toast.info('Переключено на старую версию тайминга (ASS)');
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                    timingVersion === 'old'
+                      ? 'bg-amber-600 text-white shadow-md ring-1 ring-amber-400'
+                      : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                  }`}
+                >
+                  <span>⏪ Старая версия (ASS)</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setTimingVersion('new');
+                    localStorage.setItem('timing_version', 'new');
+                    toast.info('Переключено на новую версию тайминга (VAD Waveform)');
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-semibold transition-all flex items-center gap-1.5 ${
+                    timingVersion === 'new'
+                      ? 'bg-amber-600 text-white shadow-md ring-1 ring-amber-400'
+                      : 'bg-neutral-800 text-neutral-300 hover:bg-neutral-700'
+                  }`}
+                >
+                  <span>⚡ Новая версия (VAD)</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Timing Component View */}
+            <div className="flex-1 overflow-hidden">
+              {timingVersion === 'old' ? (
+                <RawSubtitleEditor currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />
+              ) : (
+                <TimingPanel
+                  currentEpisode={activeEpisodeToPass}
+                  onRefresh={loadProjects}
+                  onNavigate={handleNavigate}
+                  onSwitchToOldVersion={() => {
+                    setTimingVersion('old');
+                    localStorage.setItem('timing_version', 'old');
+                  }}
+                />
+              )}
+            </div>
+          </div>
+        ))}
         {activeTab === 'mixing' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Сведение видео" onApply={setStandaloneEpisode} /> : <MixingPanel currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {activeTab === 'cover' && (!activeEpisodeToPass ? <StandaloneMediaSelector title="Обложки серии" onApply={setStandaloneEpisode} /> : <CoverGenerator currentEpisode={activeEpisodeToPass} onRefresh={loadProjects} />)}
         {!isWeb && <TaskQueuePanel />}

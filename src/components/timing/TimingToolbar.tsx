@@ -38,6 +38,7 @@ interface TimingToolbarProps {
   onOpenSmartPause: () => void;
   onExportPassport: () => void;
   onExportAudio: () => void;
+  onSwitchToOldVersion?: () => void;
 }
 
 export const TimingToolbar: React.FC<TimingToolbarProps> = ({
@@ -59,7 +60,8 @@ export const TimingToolbar: React.FC<TimingToolbarProps> = ({
   onDelete,
   onOpenSmartPause,
   onExportPassport,
-  onExportAudio
+  onExportAudio,
+  onSwitchToOldVersion
 }) => {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-2.5 bg-neutral-900 border-b border-neutral-800 text-neutral-200 select-none">
@@ -209,6 +211,17 @@ export const TimingToolbar: React.FC<TimingToolbarProps> = ({
           <Layers className="w-3.5 h-3.5" />
           <span>Экспорт</span>
         </button>
+
+        {onSwitchToOldVersion && (
+          <button
+            onClick={onSwitchToOldVersion}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-950/80 hover:bg-amber-900/90 text-amber-200 border border-amber-700/60 rounded-md text-xs font-semibold transition-colors"
+            title="Переключиться на классический/старый тайминг субтитров (ASS)"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+            <span>Старый тайминг (ASS)</span>
+          </button>
+        )}
       </div>
     </div>
   );

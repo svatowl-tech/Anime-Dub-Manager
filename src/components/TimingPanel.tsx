@@ -59,7 +59,7 @@ const TRACK_PALETTE = [
   '#8b5cf6', '#14b8a6', '#f97316', '#06b6d4', '#e11d48'
 ];
 
-export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: TimingPanelProps) {
+export default function TimingPanel({ currentEpisode, onRefresh, onNavigate, onSwitchToOldVersion }: TimingPanelProps) {
   // Core Data
   const [tracks, setTracks] = useState<Track[]>([]);
   const [subLines, setSubLines] = useState<SubtitleLine[]>([]);
@@ -400,6 +400,7 @@ export default function TimingPanel({ currentEpisode, onRefresh, onNavigate }: T
         onOpenSmartPause={() => setIsSmartPauseModalOpen(true)}
         onExportPassport={handleExportPassport}
         onExportAudio={() => setIsExportModalOpen(true)}
+        onSwitchToOldVersion={onSwitchToOldVersion || (() => onNavigate?.('subtitles'))}
       />
 
       {/* Main Studio Viewport */}

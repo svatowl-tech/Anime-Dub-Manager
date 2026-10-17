@@ -141,4 +141,5 @@ export interface TimingPanelProps {
   currentEpisode: Episode | null;
   onRefresh: () => void;
   onNavigate?: (tab: 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive') => void;
+  onSwitchToOldVersion?: () => void;
 }

@@ -1,6 +1,6 @@
 {
-  "summary": "План реализации модуля нормализации АЧХ вокала дабберов (Broadcast Vocal Normalizer) в конвейере сведения. Позволяет приводить разнородные записи дабберов к единому универсальному частотному балансу.",
-  "updatedAt": "2026-10-17T08:27:17.007676849Z",
+  "summary": "Implementation plan for Dubber Voice Spectrum Equalization module, user-selected neural AI model execution fix, Electron custom-media protocol Windows drive path resolution, and enhanced video transport controls.",
+  "updatedAt": "2026-10-17T13:49:01.040248144Z",
   "requestFeedback": true,
   "userFacing": true
 }

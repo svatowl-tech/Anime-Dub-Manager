@@ -16,6 +16,47 @@ const AudioAnalysisService = require('./AudioAnalysisService.cjs');
  */
 const MODULE_DATABASE = [
   {
+    id: 'dubber_spectrum_equalizer',
+    category: 'restoration',
+    defaultPrefix: 'eq_matched_',
+    title: 'Приведение АЧХ даберов к единому знаменателю (Dubber Spectrum Equalizer)',
+    description: 'Анализирует спектральный профиль записи каждого дабера и приводит разницу микрофонов, комнат и аудиокарт к эталонной студийной дикторской АЧХ перед дальнейшей обработкой.',
+    icon: 'Sliders',
+    defaultParams: {
+      targetPreset: 'broadcast_standard',
+      matchStrength: 100,
+      lowCutHz: 80,
+      presenceBoostDb: 2.5,
+      airBoostDb: 1.5
+    },
+    presets: [
+      {
+        id: 'spectrum_broadcast_standard',
+        title: '📻 Вещательный дикторский стандарт (Broadcast Standard)',
+        description: 'Оптимальный частотный баланс с мягким срезом гула, ровной серединой и разборчивым верхом',
+        params: { targetPreset: 'broadcast_standard', matchStrength: 100, lowCutHz: 80, presenceBoostDb: 2.5, airBoostDb: 1.5 }
+      },
+      {
+        id: 'spectrum_cinematic_warmth',
+        title: '🎬 Кинематографический глубокий голос (Cinematic Warmth)',
+        description: 'Подчеркнутые бархатные низкие частоты с высокой детализацией речи',
+        params: { targetPreset: 'cinematic_warmth', matchStrength: 100, lowCutHz: 75, presenceBoostDb: 2.0, airBoostDb: 1.2 }
+      },
+      {
+        id: 'spectrum_bright_vocal',
+        title: '✨ Яркий дубляжный вокал (Bright Vocal)',
+        description: 'Выраженная разборчивость для динамичных сцен аниме и кино',
+        params: { targetPreset: 'bright_vocal', matchStrength: 100, lowCutHz: 85, presenceBoostDb: 3.5, airBoostDb: 2.0 }
+      },
+      {
+        id: 'spectrum_podcast_clarity',
+        title: '🎙 Подкаст и закадр (Podcast Clarity)',
+        description: 'Сфокусированная кристальная речь с устранением коробочности',
+        params: { targetPreset: 'podcast_clarity', matchStrength: 100, lowCutHz: 80, presenceBoostDb: 2.8, airBoostDb: 1.8 }
+      }
+    ]
+  },
+  {
     id: 'acoustic_original_match',
     category: 'analysis',
     defaultPrefix: 'acoustic_matched_',
@@ -605,57 +646,6 @@ const MODULE_DATABASE = [
         title: '🎤 Voc_FT Извлечение вокала',
         description: 'Золотой стандарт сепарации диалогов и вокала',
         params: { autoDownloadModel: true, extractVocals: true, extractInstrumental: true }
-      }
-    ]
-  },
-  {
-    id: 'vocal_spectral_normalizer',
-    name: 'Нормализатор АЧХ вокала (Broadcast Curve)',
-    title: 'Нормализатор АЧХ вокала (Broadcast Curve)',
-    filename: null,
-    category: 'equalization',
-    description: 'Стандартизация АЧХ голосов всех дабберов к единому студийному эталону Broadcast Vocal.',
-    size_mb: 0.0,
-    recommended_for: 'Устранение частотного разброса записей дабберов (разные микрофоны, помещения и карты)',
-    urls: [],
-    is_installed: true,
-    installed_bytes: null,
-    local_path: null,
-    format: 'dsp',
-    engineArchitecture: 'LTAS Minimum-Phase Spectral Normalizer Grid',
-    defaultPrefix: 'norm_ach_',
-    icon: 'Sliders',
-    defaultParams: {
-      targetCurve: 'broadcast_standard',
-      matchAmount: 85.0,
-      maxGainDb: 12.0,
-      lowCutHz: 80.0,
-      smoothingOctaves: '1/3_octave'
-    },
-    presets: [
-      {
-        id: 'broadcast_vocal_preset',
-        title: '🎙 Стандарт Broadcast Vocal',
-        description: 'Универсальная нормализация речевого спектра для радио, ТВ и дубляжа',
-        params: { targetCurve: 'broadcast_standard', matchAmount: 85.0, maxGainDb: 12.0, lowCutHz: 80.0, smoothingOctaves: '1/3_octave' }
-      },
-      {
-        id: 'warm_male_preset',
-        title: '♂ Мужской плотный вокал',
-        description: 'Сбалансированный теплый низ и четкая разборчивость речи',
-        params: { targetCurve: 'warm_male', matchAmount: 90.0, maxGainDb: 14.0, lowCutHz: 75.0, smoothingOctaves: '1/3_octave' }
-      },
-      {
-        id: 'bright_female_preset',
-        title: '♀ Полетный женский вокал',
-        description: 'Чистый прозрачный верх без резкостей и гудящего низа',
-        params: { targetCurve: 'bright_female', matchAmount: 85.0, maxGainDb: 12.0, lowCutHz: 90.0, smoothingOctaves: '1/3_octave' }
-      },
-      {
-        id: 'neutral_speech_preset',
-        title: '📻 Нейтральная речевая нормализация',
-        description: 'Аккуратное устранение экстремальных всплесков и провалов АЧХ',
-        params: { targetCurve: 'neutral_speech', matchAmount: 70.0, maxGainDb: 9.0, lowCutHz: 80.0, smoothingOctaves: '1/6_octave' }
       }
     ]
   },
@@ -1911,18 +1901,27 @@ const MODULE_DATABASE = [
 function createDefaultPipeline() {
   return [
     {
-      stepId: 'step_1_gate',
+      stepId: 'step_1_spectrum_eq',
+      moduleId: 'dubber_spectrum_equalizer',
+      prefix: '01_eq_matched_',
+      enabled: true,
+      params: { ...MODULE_DATABASE.find(m => m.id === 'dubber_spectrum_equalizer').defaultParams },
+      status: 'idle',
+      outputFiles: []
+    },
+    {
+      stepId: 'step_2_gate',
       moduleId: 'silence_gate',
-      prefix: '01_gate_',
+      prefix: '02_gate_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'silence_gate').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_2_norm',
+      stepId: 'step_3_norm',
       moduleId: 'phrase_norm',
-      prefix: '02_norm_',
+      prefix: '03_norm_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'phrase_norm').defaultParams },
       status: 'idle',
@@ -3249,6 +3248,9 @@ class MixingPipelineService {
         case 'phrase_norm':
           resultFiles = await this._execPhraseNorm({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'dubber_spectrum_equalizer':
+          resultFiles = await this._execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'stage_loudness_norm':
         case 'loudness_norm':
           resultFiles = await this._execLoudnessNorm({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -3270,9 +3272,6 @@ class MixingPipelineService {
           break;
         case 'speech_leveler':
           resultFiles = await this._execSpeechLeveler({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
-          break;
-        case 'vocal_spectral_normalizer':
-          resultFiles = await this._execVocalSpectralNormalizer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'vocal_eq':
           resultFiles = await this._execVocalEq({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -3363,7 +3362,7 @@ class MixingPipelineService {
 
     // List of modules that expect dubber tracks on input
     const isDubberStep = [
-      'auto_timing', 'stage_mfa_lipsync', 'mfa_lipsync', 'acoustic_original_match',
+      'dubber_spectrum_equalizer', 'auto_timing', 'stage_mfa_lipsync', 'mfa_lipsync', 'acoustic_original_match',
       'acoustic_match_full', 'acoustic_match_soft_reverb', 'acoustic_match_dry_focus', 'vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm',
       'auto_norm_phrases', 'silence_gate', 'apply_fixes', 'stage_loudness_norm',
       'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'deepfilternet3', 'uvr_denoise_full',
@@ -3864,6 +3863,62 @@ class MixingPipelineService {
     }
 
     logFn(`✓ Завершено приведение к акустическому слепку оригинала (${results.length} файлов).`);
+    return results;
+  }
+
+  /**
+   * EXEC: Dubber Spectrum Equalizer ("Приведение АЧХ даберов к единому знаменателю")
+   */
+  async _execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const targetPreset = params?.targetPreset || 'broadcast_standard';
+    const matchStrength = Number(params?.matchStrength ?? 100);
+
+    logFn(`[Dubber Spectrum Equalizer] Запуск приведения АЧХ голосов к единому знаменателю (Пресет: ${targetPreset}, Сила: ${matchStrength}%)...`);
+
+    const results = [];
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      logFn(`[${i+1}/${inputFiles.length}] Спектральное выравнивание АЧХ для «${nick}»...`);
+
+      try {
+        await AudioNeuralService.spectrumEqualizeAudio({
+          inputPath: track.path,
+          outputPath: outPath,
+          targetPreset,
+          matchStrength,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `Equalizer АЧХ: ${nick} (${p.percent}%)` });
+            }
+          },
+          onLog: logFn
+        });
+      } catch (err) {
+        logFn(`⚠️ Ошибка выравнивания АЧХ через Python sidecar (${err.message}). Выполнение через FFmpeg EQ fallback...`, 'warn');
+        const filter = `highpass=f=80,equalizer=f=220:t=q:w=1.0:g=1.5,equalizer=f=500:t=q:w=1.2:g=-1.5,equalizer=f=3200:t=q:w=1.2:g=2.5,highshelf=f=12000:g=1.5`;
+        const cmd = ffmpeg(track.path)
+          .audioFilters(filter)
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(outPath);
+
+        await this._execFfmpeg(cmd, { logFn, outPath, description: `Spectrum EQ Fallback [${nick}]` });
+      }
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ АЧХ голоса «${nick}» приведена к единому знаменателю (${outName})`);
+    }
+
     return results;
   }
 
@@ -4509,62 +4564,6 @@ class MixingPipelineService {
     results.push({ name: instName, path: instPath, size: instSt.size, type: 'instrumental' });
 
     logFn(`✓ Разделение оригинала завершено моделью ${modelName}! Сформировано стемов: ${results.length}`);
-    return results;
-  }
-
-  /**
-   * EXEC: Vocal Spectral Normalizer (Broadcast Vocal Target Curve Matching)
-   */
-  async _execVocalSpectralNormalizer({ workingDir, stepFolder, prefix = 'norm_ach_', inputFiles, params = {}, logFn, onProgress }) {
-    logFn('🎙 Запуск нормализатора АЧХ вокала (Broadcast Vocal Target Curve)...');
-    fsSync.mkdirSync(stepFolder, { recursive: true });
-
-    const targetCurve = params.targetCurve || 'broadcast_standard';
-    const matchAmount = Number(params.matchAmount ?? 85.0);
-    const maxGainDb = Number(params.maxGainDb ?? 12.0);
-    const lowCutHz = Number(params.lowCutHz ?? 80.0);
-    const smoothingOctaves = params.smoothingOctaves || '1/3_octave';
-
-    logFn(`Параметры: Кривая «${targetCurve}», Глубина сопоставления: ${matchAmount}%, Лимит коррекции: ±${maxGainDb} дБ, НЧ-фильтр: ${lowCutHz} Гц`);
-
-    const results = [];
-    for (let i = 0; i < inputFiles.length; i++) {
-      const track = inputFiles[i];
-      const nick = this._resolveTrackNick(track, inputFiles, i);
-      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
-      const outPath = path.join(stepFolder, outName);
-      const trackStartPct = Math.round((i / inputFiles.length) * 100);
-      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
-
-      logFn(`[${i+1}/${inputFiles.length}] Нормализация АЧХ для дорожки «${nick}»...`);
-
-      try {
-        await AudioNeuralService.normalizeVocalSpectrum({
-          inputPath: track.path,
-          outputPath: outPath,
-          targetCurve,
-          matchAmount,
-          maxGainDb,
-          lowCutHz,
-          smoothing: smoothingOctaves,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `Нормализатор АЧХ [${nick}]: ${p.percent}%` });
-            }
-          },
-          onLog: logFn
-        });
-        if (fsSync.existsSync(outPath)) {
-          logFn(`✓ АЧХ дорожки «${nick}» успешно приведена к стандарту Broadcast Vocal`);
-          results.push({ name: outName, path: outPath, nick });
-        }
-      } catch (err) {
-        logFn(`⚠️ Ошибка нормализации АЧХ для «${nick}»: ${err.message}. Копирование оригинала.`, 'warn');
-        fsSync.copyFileSync(track.path, outPath);
-        results.push({ name: outName, path: outPath, nick });
-      }
-    }
     return results;
   }
 

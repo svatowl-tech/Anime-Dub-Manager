@@ -405,37 +405,6 @@ class AudioNeuralService {
   }
 
   /**
-   * Vocal Spectral Normalization (Broadcast Vocal Target Curve Matching)
-   */
-  async normalizeVocalSpectrum({ inputPath, outputPath, targetCurve = 'broadcast_standard', matchAmount = 85.0, maxGainDb = 12.0, lowCutHz = 80.0, smoothing = '1/3_octave', onProgress, onLog, abortSignal }) {
-    if (!fs.existsSync(inputPath)) {
-      throw new Error(`Входной файл не существует: ${inputPath}`);
-    }
-
-    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
-
-    const args = [
-      '--mode', 'spectral_normalizer',
-      '--input', inputPath,
-      '--output', outputPath,
-      '--target_curve', String(targetCurve),
-      '--match_amount', String(matchAmount),
-      '--max_gain_db', String(maxGainDb),
-      '--low_cut_hz', String(lowCutHz),
-      '--smoothing', String(smoothing)
-    ];
-
-    await this._runPythonSidecar(args, {
-      onProgress,
-      onLog,
-      abortSignal,
-      operationName: `Spectral Normalizer [${targetCurve}]`
-    });
-
-    return outputPath;
-  }
-
-  /**
    * Neural AI Stem Separation (Demucs v4, MDX-Net ONNX, RoFormer, Kim, Karaoke)
    */
   async separateStems({ inputPath, outputDir, model = 'htdemucs', modelName, modelPath = null, modelId = 'htdemucs', shifts = 1, overlap = 0.25, stems = 'both', prefix = '', onProgress, onLog, abortSignal }) {
@@ -470,6 +439,36 @@ class AudioNeuralService {
     });
 
     return result;
+  }
+
+  /**
+   * Dubber Voice Spectrum Equalizer ("Приведение к единому знаменателю АЧХ")
+   */
+  async spectrumEqualizeAudio({ inputPath, outputPath, targetPreset = 'broadcast_standard', matchStrength = 100.0, onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'spectrum_equalize',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--params_json', JSON.stringify({
+        targetPreset,
+        matchStrength: Number(matchStrength)
+      })
+    ];
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Dubber Spectrum Equalizer [${targetPreset}]`
+    });
+
+    return outputPath;
   }
 
   /**

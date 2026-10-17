@@ -245,17 +245,11 @@ function downloadFallback(fileName: string, content: string | Blob) {
 
 export async function resolveLocalPath(filePath: string): Promise<string> {
   if (!filePath) return '';
-  if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('data:') || filePath.startsWith('custom-media://')) {
+  if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('data:')) {
     return filePath;
   }
   
   const cleanPath = filePath.replace(/^file:\/\//, '');
-
-  // 0. Если запущен в Electron — используем нативный протокол custom-media:// для прямого стриминга и поддержки Windows-дисков
-  if (typeof window !== 'undefined' && (window as any).electronAPI) {
-    const cleanP = cleanPath.replace(/^custom-media:\/\//, '').replace(/\\/g, '/');
-    return cleanP.startsWith('/') ? `custom-media://${cleanP}` : `custom-media:///${cleanP}`;
-  }
 
   // 1. Поиск по имени файла или пути в in-memory кэше сессии
   const nameOnly = cleanPath.replace(/\\/g, '/').split('/').pop() || cleanPath;
@@ -287,9 +281,13 @@ export async function resolveLocalPath(filePath: string): Promise<string> {
     }
   }
 
-  // 4. Если это локальный путь Windows (например C:\...) или недостижимый путь в браузере,
-  // возвращаем пустую строку, чтобы предотвратить сбой fetch("C:\...")
-  if (/^[a-zA-Z]:[/\\]/.test(cleanPath)) {
+  // 4. Если мы находимся в Electron, форматируем абсолютный путь через протокол custom-media://
+  if (/^[a-zA-Z]:[/\\]/.test(cleanPath) || cleanPath.startsWith('/')) {
+    if (typeof window !== 'undefined' && ((window as any).electronAPI || (window as any).isElectron || window.navigator?.userAgent?.includes('Electron'))) {
+      const normalized = cleanPath.replace(/\\/g, '/');
+      const formatted = normalized.startsWith('/') ? normalized : `/${normalized}`;
+      return `custom-media://${formatted}`;
+    }
     return '';
   }
 

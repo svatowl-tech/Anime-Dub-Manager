@@ -74,6 +74,10 @@ process.on('unhandledRejection', (error) => {
 });
 
 ipcMain.on('log-error', (event, error) => {
+  if (error && (typeof error === 'string' && (error.includes('custom-media') || error.includes('MEDIA_ELEMENT_ERROR') || error.includes('net::ERR_')))) {
+    log.warn('Renderer Media/Network Notice:', error);
+    return;
+  }
   log.error('Renderer Error:', error);
 });
 
@@ -384,119 +388,44 @@ app.whenReady().then(async () => {
   try {
     protocol.handle('custom-media', (request) => {
       try {
-        let reqUrl = request.url;
-        let decodedPath = '';
-
-        try {
-          const parsedUrl = new URL(reqUrl);
-          const host = parsedUrl.host || '';
-          const pathname = decodeURIComponent(parsedUrl.pathname || '');
-
-          if (/^[a-zA-Z]$/.test(host)) {
-            // Chromium normalized drive letter 'I:' into host 'i' or 'I'
-            decodedPath = host.toUpperCase() + ':' + (pathname.startsWith('/') ? pathname : '/' + pathname);
-          } else if (!host || host.toLowerCase() === 'localhost') {
-            if (/^\/[a-zA-Z]:/.test(pathname)) {
-              decodedPath = pathname.slice(1);
-            } else if (/^\/[a-zA-Z]\//.test(pathname)) {
-              decodedPath = pathname[1].toUpperCase() + ':' + pathname.slice(2);
-            } else {
-              decodedPath = pathname;
-            }
-          } else {
-            decodedPath = '//' + host + pathname;
-          }
-        } catch (e) {
-          let uri = reqUrl.replace(/^custom-media:\/{1,3}/i, '');
-          uri = uri.replace(/^localhost[\/\\]/i, '');
-          decodedPath = decodeURIComponent(uri);
-          if (/^[a-zA-Z][\/\\]/.test(decodedPath)) {
-            decodedPath = decodedPath[0].toUpperCase() + ':' + decodedPath.slice(1);
-          } else if (/^\/[a-zA-Z]:/i.test(decodedPath)) {
-            decodedPath = decodedPath.slice(1);
-          } else if (/^\/[a-zA-Z][\/\\]/.test(decodedPath)) {
-            decodedPath = decodedPath[1].toUpperCase() + ':' + decodedPath.slice(2);
-          }
+        let uri = request.url.replace(/^custom-media:\/\//, '');
+        // Strip out host dummy if any (e.g. custom-media://localhost/...)
+        uri = uri.replace(/^localhost\//i, '');
+        let decodedPath = decodeURIComponent(uri);
+        
+        // Fix Chromium Windows drive normalization:
+        // 1. /I:/path -> I:/path
+        if (/^\/[a-zA-Z]:/.test(decodedPath)) {
+          decodedPath = decodedPath.slice(1);
+        }
+        // 2. i/YandexDisk/path -> I:/YandexDisk/path (where single letter drive letter 'i' became host)
+        else if (/^[a-zA-Z]\//.test(decodedPath) && process.platform === 'win32') {
+          decodedPath = decodedPath[0].toUpperCase() + ':/' + decodedPath.slice(2);
+        }
+        // 3. i:\YandexDisk\path -> I:\YandexDisk\path
+        else if (/^[a-zA-Z]:/.test(decodedPath)) {
+          decodedPath = decodedPath[0].toUpperCase() + decodedPath.slice(1);
         }
 
-        // Standardize path separators
-        if (process.platform === 'win32' || /^[a-zA-Z]:/.test(decodedPath)) {
-          decodedPath = decodedPath.replace(/\//g, '\\');
-        } else {
-          decodedPath = decodedPath.replace(/\\/g, '/');
-        }
-
+        decodedPath = decodedPath.replace(/\//g, path.sep);
         let targetFile = decodedPath;
-        const proxyPath = `${decodedPath}.preview_proxy.mp4`;
-        if (fsSync.existsSync(proxyPath)) {
-          targetFile = proxyPath;
+
+        if (/\.(mkv|avi|flv|ts|wmv|hevc)$/i.test(decodedPath)) {
+          const proxyPath = `${decodedPath}.preview_proxy.mp4`;
+          if (fsSync.existsSync(proxyPath)) {
+            targetFile = proxyPath;
+          }
         }
 
         if (!fsSync.existsSync(targetFile)) {
-          return new Response('File not found', { status: 404 });
+          log.warn(`[custom-media] File not found: ${targetFile}`);
+          return new Response(`Media file not found: ${targetFile}`, { status: 404 });
         }
 
-        const stat = fsSync.statSync(targetFile);
-        const fileSize = stat.size;
-        const rangeHeader = request.headers.get('range');
-
-        // Infer MIME type for smooth seeking & playback
-        const ext = path.extname(targetFile).toLowerCase();
-        let mimeType = 'video/mp4';
-        if (ext === '.mkv') mimeType = 'video/x-matroska';
-        else if (ext === '.webm') mimeType = 'video/webm';
-        else if (ext === '.avi') mimeType = 'video/x-msvideo';
-        else if (ext === '.mov') mimeType = 'video/quicktime';
-        else if (ext === '.mp3') mimeType = 'audio/mpeg';
-        else if (ext === '.wav') mimeType = 'audio/wav';
-        else if (ext === '.aac') mimeType = 'audio/aac';
-        else if (ext === '.ogg') mimeType = 'audio/ogg';
-        else if (ext === '.flac') mimeType = 'audio/flac';
-        else if (ext === '.ass' || ext === '.srt' || ext === '.vtt') mimeType = 'text/plain';
-
-        if (rangeHeader) {
-          const parts = rangeHeader.replace(/bytes=/, '').split('-');
-          const start = parseInt(parts[0], 10) || 0;
-          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-          if (start >= fileSize || end >= fileSize) {
-            return new Response('Requested Range Not Satisfiable', {
-              status: 416,
-              headers: { 'Content-Range': `bytes */${fileSize}` }
-            });
-          }
-
-          const chunkSize = (end - start) + 1;
-          const nodeStream = fsSync.createReadStream(targetFile, { start, end });
-          const webStream = require('stream').Readable.toWeb(nodeStream);
-
-          return new Response(webStream, {
-            status: 206,
-            headers: {
-              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-              'Accept-Ranges': 'bytes',
-              'Content-Length': String(chunkSize),
-              'Content-Type': mimeType,
-              'Access-Control-Allow-Origin': '*'
-            }
-          });
-        } else {
-          const nodeStream = fsSync.createReadStream(targetFile);
-          const webStream = require('stream').Readable.toWeb(nodeStream);
-
-          return new Response(webStream, {
-            status: 200,
-            headers: {
-              'Accept-Ranges': 'bytes',
-              'Content-Length': String(fileSize),
-              'Content-Type': mimeType,
-              'Access-Control-Allow-Origin': '*'
-            }
-          });
-        }
+        return net.fetch(require('url').pathToFileURL(targetFile).toString());
       } catch (err) {
         log.error('[custom-media] protocol error:', err);
-        return new Response('Media file not found or invalid', { status: 404 });
+        return new Response('Media file error', { status: 500 });
       }
     });
     log.info('[custom-media] protocol registered successfully.');
