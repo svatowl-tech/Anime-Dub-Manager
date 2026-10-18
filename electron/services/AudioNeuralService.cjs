@@ -25,11 +25,14 @@ class AudioNeuralService {
     // 1. Look for the application's latest bundled sidecar script
     const appBundledCandidates = [
       path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
+      path.join(__dirname, 'audio_ai_processor.py'),
       path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
+      path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py'),
     ];
 
     if (process.resourcesPath) {
       appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
+      appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'services', 'audio_ai_processor.py'));
       appBundledCandidates.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
       appBundledCandidates.push(path.join(process.resourcesPath, 'audio_ai_processor.py'));
     }
@@ -90,7 +93,9 @@ class AudioNeuralService {
       if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim') || !code.includes('airwindows_restore') || !code.includes('loudness_norm') || code.includes('choices=[')) {
         const bundledCandidates = [
           path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
-          path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py')
+          path.join(__dirname, 'audio_ai_processor.py'),
+          path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
+          path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py')
         ];
         if (process.resourcesPath) {
           bundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
@@ -366,6 +371,37 @@ class AudioNeuralService {
   }
 
   /**
+   * Universal Voice Timbre & Frequency Response Harmonization (Match EQ to Studio Standard)
+   */
+  async matchVoiceTimbre({ inputPath, outputPath, matchIntensity = 75, targetProfile = 'studio_neutral', subBassCutoff = 75, airLimitDb = 3.0, smoothness = 3, onProgress, onLog, abortSignal }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'voice_timbre_match',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--match_intensity', String(matchIntensity),
+      '--target_profile', String(targetProfile),
+      '--sub_bass_cutoff', String(subBassCutoff),
+      '--air_limit_db', String(airLimitDb),
+      '--smoothness', String(smoothness)
+    ];
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Voice Timbre Match EQ [${targetProfile}]`
+    });
+
+    return outputPath;
+  }
+
+  /**
    * Neural AI Room & Flutter Echo Dereverberation (DeepFilterNet3 / Reverb HQ FoxJoy ONNX / UVR De-Echo Normal / Aggressive)
    */
   async dereverbAudio({ inputPath, outputPath, modelPath = null, modelId = 'uvr_deecho_normal', reverbReduction = 0.8, sensitivity = 1.0, wetDryBlend = 100.0, onProgress, onLog, abortSignal }) {
@@ -619,34 +655,6 @@ class AudioNeuralService {
     });
 
     return res;
-  }
-
-  /**
-   * Dubber Spectrum Equalizer (FFT-based spectral matching to standard broadcast curve)
-   */
-  async spectrumEqualizeAudio({ inputPath, outputPath, profile = 'broadcast_standard', strength = 1.0, onProgress, onLog, abortSignal }) {
-    if (!fs.existsSync(inputPath)) {
-      throw new Error(`Входной файл не существует: ${inputPath}`);
-    }
-
-    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
-
-    const args = [
-      '--mode', 'spectrum_equalize',
-      '--input', inputPath,
-      '--output', outputPath,
-      '--profile', String(profile),
-      '--strength', String(strength)
-    ];
-
-    await this._runPythonSidecar(args, {
-      onProgress,
-      onLog,
-      abortSignal,
-      operationName: `Dubber Spectrum Equalizer [${profile}]`
-    });
-
-    return outputPath;
   }
 }
 

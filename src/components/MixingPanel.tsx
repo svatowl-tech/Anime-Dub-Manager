@@ -84,6 +84,10 @@ interface MixingPanelProps {
 }
 
 const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = {
+  matchIntensity: { min: 0, max: 100, step: 1 },
+  subBassCutoff: { min: 20, max: 150, step: 1 },
+  airLimitDb: { min: 0.0, max: 8.0, step: 0.5 },
+  smoothness: { min: 1, max: 6, step: 1 },
   sensitivity: { min: 0.1, max: 10.0, step: 0.1 },
   wetDryBlend: { min: 10, max: 100, step: 1 },
   attenuationLimitDb: { min: -100, max: 0, step: 1 },
@@ -130,7 +134,6 @@ const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = 
   reverbMatchStrength: { min: 0, max: 100, step: 1 },
   eqMatchStrength: { min: 0, max: 100, step: 1 },
   targetLufsOffset: { min: -10, max: 10, step: 0.5 },
-  matchStrength: { min: 0, max: 100, step: 1 },
   // Spotify Pedalboard DSP Granular Specs
   eqHighpass: { min: 20, max: 300, step: 5 },
   eqPresenceFreq: { min: 1000, max: 8000, step: 50 },
@@ -1607,6 +1610,11 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   };
 
   const PARAM_LABELS: Record<string, { label: string; unit?: string }> = {
+    matchIntensity: { label: 'Сила выравнивания АЧХ (Match Intensity)', unit: '%' },
+    targetProfile: { label: 'Целевой студийный профиль (Target Profile)' },
+    subBassCutoff: { label: 'Срез инфра-низа / гула (Sub-Bass Cutoff)', unit: 'Гц' },
+    airLimitDb: { label: 'Лимит сибилянтов / воздуха (Air Limit)', unit: 'dB' },
+    smoothness: { label: 'Сглаживание кривой формант (Smoothness)', unit: 'x' },
     sensitivity: { label: 'Чувствительность (Sensitivity)', unit: 'x' },
     wetDryBlend: { label: 'Смешивание Dry/Wet (Blend)', unit: '%' },
     attenuationLimitDb: { label: 'Предел шумоподавления (Attenuation Limit)', unit: 'dB' },
@@ -2159,7 +2167,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           {idx + 1}
                         </div>
                         <div>
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <h3 className="text-xs font-semibold text-neutral-100">
                               {meta?.title || step.moduleId}
                             </h3>
@@ -2169,6 +2177,38 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                             {meta?.filename && (
                               <span className="text-[10px] px-1.5 py-0.2 bg-purple-950/60 text-purple-300 font-mono rounded border border-purple-800/40">
                                 {meta.filename}
+                              </span>
+                            )}
+                            {/* Active model badge for neural dereverb / denoise / separation */}
+                            {(step.params?.modelId || step.params?.modelName || step.moduleId === 'uvr_deecho_normal' || step.moduleId === 'uvr_deecho_aggressive' || step.moduleId === 'deepfilternet3') && (
+                              <span className="text-[10px] px-2 py-0.5 bg-indigo-950/80 text-indigo-300 font-mono font-semibold rounded-md border border-indigo-700/60 flex items-center gap-1 shadow-sm">
+                                <Radio className="w-2.5 h-2.5 text-indigo-400" />
+                                <span>
+                                  {step.params?.modelId === 'uvr_deecho_aggressive' || step.moduleId === 'uvr_deecho_aggressive'
+                                    ? 'UVR De-Echo Aggressive'
+                                    : step.params?.modelId === 'uvr_deecho_normal' || step.moduleId === 'uvr_deecho_normal'
+                                      ? 'UVR De-Echo Normal'
+                                      : step.params?.modelId === 'deepfilternet3' || step.moduleId === 'deepfilternet3'
+                                        ? 'DeepFilterNet 3'
+                                        : step.params?.modelId === 'reverb_foxjoy'
+                                          ? 'Reverb HQ FoxJoy'
+                                          : step.params?.modelName || step.params?.modelId || meta?.name || meta?.title}
+                                </span>
+                              </span>
+                            )}
+                            {/* Active target profile for voice timbre match */}
+                            {step.moduleId === 'voice_timbre_match' && (
+                              <span className="text-[10px] px-2 py-0.5 bg-emerald-950/80 text-emerald-300 font-medium rounded-full border border-emerald-700/60 flex items-center gap-1 shadow-sm">
+                                <Sparkles className="w-2.5 h-2.5 text-emerald-400" />
+                                <span>
+                                  {step.params?.targetProfile === 'warm_broadcast'
+                                    ? 'Тёплый бродкаст'
+                                    : step.params?.targetProfile === 'crisp_anime'
+                                      ? 'Прозрачный аниме'
+                                      : step.params?.targetProfile === 'gentle_balance'
+                                        ? 'Мягкий баланс'
+                                        : 'Студийный дубляж'} ({step.params?.matchIntensity ?? 75}%)
+                                </span>
                               </span>
                             )}
                           </div>
@@ -2272,6 +2312,58 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                     {/* Settings & Presets Accordion */}
                     {isExpanded && (
                       <div className="p-3 bg-neutral-950/80 rounded-lg border border-neutral-800 text-xs space-y-3">
+                        {/* Voice Timbre Match Visual Equalizer Card */}
+                        {step.moduleId === 'voice_timbre_match' && (
+                          <div className="p-3 bg-gradient-to-r from-emerald-950/40 via-neutral-900 to-teal-950/30 border border-emerald-800/50 rounded-xl space-y-2.5 shadow-sm">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex items-start gap-2.5">
+                                <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-lg mt-0.5">
+                                  <Sparkles className="w-4 h-4" />
+                                </div>
+                                <div className="space-y-0.5">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-semibold text-xs text-neutral-100">
+                                      Калибровка АЧХ всех дабберов к единому студийному эталону
+                                    </span>
+                                    <span className="text-[10px] font-mono px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 rounded border border-emerald-700/50">
+                                      LTAS 32-Band Match EQ
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-neutral-400 leading-snug">
+                                    Автоматически анализирует долговременный спектр речи каждого даббера и приводит амплитудно-частотную характеристику к общему эталону, убирая различия микрофонов и комнат.
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Spectrum Frequency Bands Map */}
+                            <div className="bg-neutral-950/80 p-2.5 rounded-lg border border-neutral-800 space-y-1.5">
+                              <div className="flex items-center justify-between text-[10px] text-neutral-400">
+                                <span className="font-semibold text-emerald-400">Полосы спектральной калибровки:</span>
+                                <span className="font-mono text-neutral-500">Минимально-фазовый 1/3-октавный фильтр</span>
+                              </div>
+                              <div className="grid grid-cols-4 gap-2 text-[10px] font-mono pt-1">
+                                <div className="p-1.5 bg-neutral-900/90 rounded border border-neutral-800 text-center">
+                                  <div className="text-neutral-500">&lt; {step.params?.subBassCutoff ?? 75} Гц</div>
+                                  <div className="text-emerald-400 font-semibold">Срез инфра-гула</div>
+                                </div>
+                                <div className="p-1.5 bg-neutral-900/90 rounded border border-neutral-800 text-center">
+                                  <div className="text-neutral-500">100 - 400 Гц</div>
+                                  <div className="text-emerald-400 font-semibold">Баланс тела голоса</div>
+                                </div>
+                                <div className="p-1.5 bg-neutral-900/90 rounded border border-neutral-800 text-center">
+                                  <div className="text-neutral-500">1.2 - 4.5 кГц</div>
+                                  <div className="text-emerald-400 font-semibold">Форманты речи</div>
+                                </div>
+                                <div className="p-1.5 bg-neutral-900/90 rounded border border-neutral-800 text-center">
+                                  <div className="text-neutral-500">&gt; 5 кГц (макс +{step.params?.airLimitDb ?? 3} дБ)</div>
+                                  <div className="text-emerald-400 font-semibold">Защита сибилянтов</div>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {/* UVR Model Card */}
                         {Boolean(meta?.engineArchitecture) && (
                           <div className="p-3 bg-neutral-900 border border-purple-800/40 rounded-xl space-y-2.5">
@@ -2406,6 +2498,27 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     <option value="loudnorm">EBU R128 (-16 LUFS Стриминг)</option>
                                     <option value="dynaudnorm">Динамический левелер (DynAudNorm)</option>
                                     <option value="leveler_pro">Двухступенчатый левелер речи (Speech Leveler Pro)</option>
+                                  </select>
+                                </div>
+                              );
+                            }
+
+                            if (paramKey === 'targetProfile') {
+                              return (
+                                <div key={paramKey} className="col-span-2 space-y-1">
+                                  <label className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1.5">
+                                    <Sparkles className="w-3.5 h-3.5" />
+                                    Целевой студийный профиль АЧХ (Universal Studio Reference):
+                                  </label>
+                                  <select
+                                    value={val}
+                                    onChange={(e) => handleUpdateStepParams(step.stepId, paramKey, e.target.value)}
+                                    className="w-full px-2.5 py-1.5 bg-neutral-900 border border-emerald-800/60 rounded-lg text-xs text-emerald-200 font-medium focus:ring-1 focus:ring-emerald-500"
+                                  >
+                                    <option value="studio_neutral">🎯 Нейтральный студийный дубляж (Универсальный эталон)</option>
+                                    <option value="warm_broadcast">📻 Тёплый бродкаст (Плотный бархатный низ)</option>
+                                    <option value="crisp_anime">✨ Прозрачный аниме-дубляж (Яркая эмоциональная читаемость)</option>
+                                    <option value="gentle_balance">🍃 Мягкое выравнивание (50% интенсивности)</option>
                                   </select>
                                 </div>
                               );

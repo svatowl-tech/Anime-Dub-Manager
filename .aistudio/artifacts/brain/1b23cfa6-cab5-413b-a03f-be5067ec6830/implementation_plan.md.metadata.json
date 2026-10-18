@@ -1,6 +1,6 @@
 {
-  "summary": "Implementation plan for Dubber Voice Spectrum Equalization module, user-selected neural AI model execution fix, Electron custom-media protocol Windows drive path resolution, and enhanced video transport controls.",
-  "updatedAt": "2026-10-17T13:49:01.040248144Z",
+  "summary": "Архитектурный план внедрения модуля гармонизации АЧХ голосов (Voice Timbre Match EQ), исправления прямого запуска выбранных моделей (UVR De-Echo Aggressive / Normal) без принудительного перехода на DeepFilterNet, и покадрового батчинга тяжелых нейросетей по VAD с адаптивным размером чанка.",
+  "updatedAt": "2026-10-18T16:17:27.942310543Z",
   "requestFeedback": true,
   "userFacing": true
 }

@@ -542,52 +542,30 @@ def process_deepfilternet(args):
         input_path, target_sr=target_sr, force_stereo=False, remove_dc=True
     )
 
-    emit_progress(40.0, f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, atten_limit={atten_limit} dB)...")
+    emit_progress(35.0, f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, atten_limit={atten_limit} dB)...")
     
     eff_atten = atten_limit if sensitivity >= 3.0 else max(-40.0, atten_limit * (sensitivity / 3.0))
-
     import torch
-    import threading
-    import time
 
-    num_channels = audio_data.shape[0]
-    enhanced_channels = []
-
-    for ch in range(num_channels):
-        # Guarantee C-contiguous float32 torch tensor for native C-API safety
-        ch_arr = np.ascontiguousarray(audio_data[ch:ch+1], dtype=np.float32)
-        ch_tensor = torch.from_numpy(ch_arr).to(device=device, dtype=torch.float32)
-
-        done_event = threading.Event()
-        start_progress = 40.0 + (ch / num_channels) * 45.0
-        max_progress = 40.0 + ((ch + 0.95) / num_channels) * 45.0
-
-        def _heartbeat():
-            t0 = time.time()
-            step = 0
-            while not done_event.wait(2.5):
-                step += 1
-                elapsed = int(time.time() - t0)
-                cur = start_progress + (max_progress - start_progress) * (1.0 - (0.95 ** step))
-                emit_progress(round(cur, 1), f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, {elapsed}с, {str(device).upper()})...")
-
-        hb_thread = threading.Thread(target=_heartbeat, daemon=True)
-        hb_thread.start()
-
-        try:
+    def _run_df_chunk(chunk_stereo_or_mono, chunk_sr):
+        ch_list = []
+        for ch in range(chunk_stereo_or_mono.shape[0]):
+            ch_arr = np.ascontiguousarray(chunk_stereo_or_mono[ch:ch+1], dtype=np.float32)
+            ch_tensor = torch.from_numpy(ch_arr).to(device=device, dtype=torch.float32)
             with torch.no_grad():
                 enhanced_ch = enhance(model, df_state, ch_tensor, atten_lim_db=eff_atten)
-        finally:
-            done_event.set()
-            hb_thread.join(timeout=1.0)
+            ch_list.append(enhanced_ch.cpu().numpy())
+        return np.concatenate(ch_list, axis=0)
 
-        enhanced_np = enhanced_ch.cpu().numpy()
-        enhanced_channels.append(enhanced_np)
-        
-        progress = 40.0 + ((ch + 1) / num_channels) * 45.0
-        emit_progress(progress, f"Обработан канал {ch + 1}/{num_channels}...")
-
-    enhanced_audio = np.concatenate(enhanced_channels, axis=0)
+    total_duration_sec = audio_data.shape[-1] / float(target_sr)
+    if total_duration_sec > 16.0:
+        emit_progress(40.0, f"Запуск VAD-батчинга DeepFilterNet3 ({total_duration_sec:.1f}с)...")
+        enhanced_audio = VADChunkBatcher.process_with_crossfade(
+            audio_data, target_sr, _run_df_chunk, crossfade_ms=20.0,
+            emit_progress_fn=emit_progress, model_label="DeepFilterNet3"
+        )
+    else:
+        enhanced_audio = _run_df_chunk(audio_data, target_sr)
 
     # Reverb suppression if requested
     if reverb_reduction > 0.0 or mode == 'dereverb':
@@ -668,11 +646,14 @@ def process_demucs(args):
     audio_std = ref.std().item()
     audio_norm = (audio_tensor / audio_std) if audio_std > 1e-6 else audio_tensor
 
-    emit_progress(35.0, f"Выполнение нейросетевого разделения Demucs v4 (shifts={shifts}, overlap={overlap})...")
+    adaptive_segment = VADChunkBatcher.get_adaptive_chunk_duration()
+    sys.stdout.write(f"LOG:[Demucs Батчинг] Адаптивный размер чанка VRAM/RAM: {adaptive_segment:.1f}с (split=True, overlap={overlap})\n")
+    sys.stdout.flush()
+    emit_progress(35.0, f"Выполнение нейросетевого разделения Demucs v4 (чанками по {adaptive_segment:.1f}с, overlap={overlap})...")
     inp_tensor = audio_norm[None].to(device)
 
     with torch.no_grad():
-        sources = apply_model(model, inp_tensor, shifts=shifts, split=True, overlap=overlap, progress=True, device=device)[0]
+        sources = apply_model(model, inp_tensor, shifts=shifts, split=True, overlap=overlap, segment=adaptive_segment, progress=True, device=device)[0]
 
     if audio_std > 1e-6:
         sources = sources * audio_std
@@ -1934,6 +1915,437 @@ def check_env():
     sys.stdout.flush()
     sys.exit(0)
 
+# ------------------------------------------------------------------------------
+# 8B. VAD CHUNK BATCHING ENGINE & SPEECH SEGMENTATION
+# ------------------------------------------------------------------------------
+class VADChunkBatcher:
+    """
+    Slices long audio tracks into optimal chunks based on speech pauses (VAD)
+    and available hardware resources (VRAM / RAM), processes each chunk via
+    a model function, and recombines with soft cosine crossfade to prevent clicks.
+    """
+    @staticmethod
+    def get_adaptive_chunk_duration():
+        chunk_sec = 16.0
+        try:
+            torch = _safe_import_torch()
+            if torch.cuda.is_available():
+                vram_bytes = torch.cuda.get_device_properties(0).total_memory
+                vram_gb = vram_bytes / (1024 ** 3)
+                if vram_gb >= 8.0:
+                    chunk_sec = 26.0
+                elif vram_gb >= 4.0:
+                    chunk_sec = 18.0
+                else:
+                    chunk_sec = 12.0
+            else:
+                chunk_sec = 14.0
+        except Exception:
+            chunk_sec = 14.0
+        return chunk_sec
+
+    @staticmethod
+    def find_pause_split_points(audio, sr, target_chunk_sec=16.0, min_chunk_sec=8.0, max_chunk_sec=30.0):
+        """
+        Finds natural speech pause cut points using energy dip detection.
+        audio: shape (channels, samples)
+        """
+        num_samples = audio.shape[-1]
+        total_sec = num_samples / float(sr)
+        if total_sec <= max_chunk_sec:
+            return [(0, num_samples, False)]
+
+        mono = np.mean(audio, axis=0) if audio.shape[0] > 1 else audio[0]
+        frame_len = int(0.04 * sr)
+        hop_len = int(0.02 * sr)
+
+        num_frames = max(1, (num_samples - frame_len) // hop_len)
+        rms = np.zeros(num_frames, dtype=np.float32)
+        for i in range(num_frames):
+            idx = i * hop_len
+            seg = mono[idx:idx + frame_len]
+            rms[i] = np.sqrt(np.mean(seg ** 2) + 1e-12)
+
+        rms_db = 20.0 * np.log10(np.maximum(rms, 1e-6))
+
+        cuts = [0]
+        cur_sample = 0
+        target_step = int(target_chunk_sec * sr)
+        min_step = int(min_chunk_sec * sr)
+        max_step = int(max_chunk_sec * sr)
+
+        while cur_sample + max_step < num_samples:
+            win_start = cur_sample + min_step
+            win_end = cur_sample + max_step
+            f_start = win_start // hop_len
+            f_end = min(len(rms_db), win_end // hop_len)
+
+            if f_end > f_start:
+                sub_rms = rms_db[f_start:f_end]
+                min_idx = np.argmin(sub_rms)
+                best_cut = (f_start + min_idx) * hop_len
+            else:
+                best_cut = cur_sample + target_step
+
+            cuts.append(best_cut)
+            cur_sample = best_cut
+
+        cuts.append(num_samples)
+
+        segments = []
+        for i in range(len(cuts) - 1):
+            segments.append((cuts[i], cuts[i+1], False))
+        return segments
+
+    @staticmethod
+    def process_with_crossfade(audio, sr, process_chunk_fn, crossfade_ms=20.0, emit_progress_fn=None, model_label="AI"):
+        """
+        Executes process_chunk_fn for each VAD segment and crossfades output.
+        """
+        num_samples = audio.shape[-1]
+        target_chunk_sec = VADChunkBatcher.get_adaptive_chunk_duration()
+        segments = VADChunkBatcher.find_pause_split_points(audio, sr, target_chunk_sec=target_chunk_sec)
+
+        if len(segments) <= 1:
+            return process_chunk_fn(audio, sr)
+
+        cf_samples = int((crossfade_ms / 1000.0) * sr)
+        processed_chunks = []
+        total_chunks = len(segments)
+
+        sys.stdout.write(f"LOG:[VAD-Батчинг] Нарезка по паузам речи: {total_chunks} чанков (длина чанка ~{target_chunk_sec:.1f}с)\n")
+        sys.stdout.flush()
+
+        for idx, (st, en, is_ov) in enumerate(segments):
+            chunk = audio[:, st:en]
+            if emit_progress_fn:
+                prog = 10.0 + (idx / total_chunks) * 78.0
+                emit_progress_fn(prog, f"[{model_label}] VAD-батч {idx + 1}/{total_chunks} ({chunk.shape[-1] / sr:.1f}с)...")
+
+            out_chunk = process_chunk_fn(chunk, sr)
+            processed_chunks.append(out_chunk)
+
+        out_channels = processed_chunks[0].shape[0]
+        total_out_samples = sum(c.shape[-1] for c in processed_chunks)
+        assembled = np.zeros((out_channels, total_out_samples), dtype=np.float32)
+
+        cur_pos = 0
+        for i, c in enumerate(processed_chunks):
+            c_len = c.shape[-1]
+            if i == 0:
+                assembled[:, :c_len] = c
+                cur_pos = c_len
+            else:
+                overlap = min(cf_samples, c_len, cur_pos)
+                if overlap > 0:
+                    fade_in = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
+                    fade_out = 1.0 - fade_in
+                    assembled[:, cur_pos - overlap:cur_pos] = (
+                        assembled[:, cur_pos - overlap:cur_pos] * fade_out + c[:, :overlap] * fade_in
+                    )
+                    assembled[:, cur_pos:cur_pos + c_len - overlap] = c[:, overlap:]
+                    cur_pos += c_len - overlap
+                else:
+                    assembled[:, cur_pos:cur_pos + c_len] = c
+                    cur_pos += c_len
+
+        return assembled[:, :cur_pos]
+
+# ------------------------------------------------------------------------------
+# 8C. VOICE TIMBRE & FREQUENCY RESPONSE HARMONIZER (MATCH EQ)
+# ------------------------------------------------------------------------------
+def process_voice_timbre_match(args):
+    """
+    Harmonizes voice frequency response (АЧХ) across different dubber recordings
+    to a unified neutral studio broadcast target curve.
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_timbre_match.wav"
+
+    match_intensity = float(getattr(args, 'match_intensity', 75.0) or 75.0) / 100.0
+    match_intensity = max(0.0, min(1.0, match_intensity))
+    target_profile = str(getattr(args, 'target_profile', 'studio_neutral') or 'studio_neutral')
+    sub_bass_cutoff = float(getattr(args, 'sub_bass_cutoff', 75.0) or 75.0)
+    air_limit_db = float(getattr(args, 'air_limit_db', 3.0) or 3.0)
+
+    emit_progress(5.0, "Загрузка аудио дорожки и подготовка к анализу АЧХ...")
+    audio_data, current_sr, orig_channels, orig_len = AudioConditioner.load_audio(
+        input_path, target_sr=48000, force_stereo=False, remove_dc=True
+    )
+    sr = 48000
+    num_samples = audio_data.shape[-1]
+    duration_sec = num_samples / float(sr)
+
+    emit_progress(15.0, f"Анализ спектра речи даббера (LTAS) на протяжении {duration_sec:.1f}с...")
+
+    mono = np.mean(audio_data, axis=0) if audio_data.shape[0] > 1 else audio_data[0]
+
+    n_fft = 4096
+    hop_length = 1024
+    num_frames = (num_samples - n_fft) // hop_length
+    if num_frames < 4:
+        n_fft = 2048
+        hop_length = 512
+        num_frames = max(1, (num_samples - n_fft) // hop_length)
+
+    window = np.hanning(n_fft)
+    speech_spectra = []
+
+    frame_energies = []
+    sample_stride = max(1, num_frames // 800)
+    for i in range(0, num_frames, sample_stride):
+        idx = i * hop_length
+        seg = mono[idx:idx + n_fft]
+        if len(seg) == n_fft:
+            rms_val = np.sqrt(np.mean(seg ** 2) + 1e-12)
+            frame_energies.append(rms_val)
+
+    if frame_energies:
+        floor_rms = np.percentile(frame_energies, 15)
+        speech_thresh = max(1e-4, floor_rms * 2.8)
+    else:
+        speech_thresh = 1e-3
+
+    for i in range(num_frames):
+        idx = i * hop_length
+        seg = mono[idx:idx + n_fft]
+        rms_val = np.sqrt(np.mean(seg ** 2) + 1e-12)
+        if rms_val >= speech_thresh:
+            w_seg = seg * window
+            fft_mag = np.abs(np.fft.rfft(w_seg))
+            speech_spectra.append(fft_mag)
+
+    if not speech_spectra:
+        for i in range(num_frames):
+            idx = i * hop_length
+            seg = mono[idx:idx + n_fft]
+            w_seg = seg * window
+            speech_spectra.append(np.abs(np.fft.rfft(w_seg)))
+
+    emit_progress(35.0, f"Успешно обработано {len(speech_spectra)} речевых кадров. Расчет 1/3-октавной разности...")
+
+    avg_mag = np.mean(speech_spectra, axis=0) + 1e-9
+    fft_freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+
+    bands_hz = np.array([
+        63, 80, 100, 125, 160, 200, 250, 315, 400, 500, 
+        630, 800, 1000, 1250, 1600, 2000, 2500, 3150, 4000, 
+        5000, 6300, 8000, 10000, 12500, 16000
+    ], dtype=np.float32)
+
+    voice_band_db = np.zeros(len(bands_hz), dtype=np.float32)
+    for b_idx, f_c in enumerate(bands_hz):
+        f_low = f_c / (2 ** (1.0 / 6.0))
+        f_high = f_c * (2 ** (1.0 / 6.0))
+        mask = (fft_freqs >= f_low) & (fft_freqs <= f_high)
+        if np.any(mask):
+            voice_band_db[b_idx] = 20.0 * np.log10(np.mean(avg_mag[mask]) + 1e-9)
+        else:
+            voice_band_db[b_idx] = -60.0
+
+    ref_idx = 10
+    voice_band_db -= voice_band_db[ref_idx]
+
+    if target_profile == 'warm_broadcast':
+        target_curve = np.array([
+            -12.0, -8.0, -3.0, 0.5, 1.5, 1.2, 0.8, 0.0, -0.5, -0.2,
+            0.0, 0.2, 0.5, 0.6, 0.2, -0.8, -1.8, -3.0, -4.5,
+            -6.0, -8.0, -10.5, -13.0, -16.0, -22.0
+        ], dtype=np.float32)
+    elif target_profile == 'crisp_anime':
+        target_curve = np.array([
+            -18.0, -12.0, -6.0, -2.5, -1.0, -1.2, -1.5, -1.8, -1.5, -0.8,
+            0.0, 0.5, 1.2, 1.8, 2.2, 2.0, 1.2, 0.2, -1.0,
+            -2.5, -4.0, -5.5, -7.5, -10.0, -15.0
+        ], dtype=np.float32)
+    else:
+        target_curve = np.array([
+            -15.0, -10.0, -4.5, -1.5, 0.0, -0.2, -0.6, -1.0, -1.2, -0.6,
+            0.0, 0.4, 0.8, 1.0, 0.8, 0.2, -0.5, -1.5, -2.8,
+            -4.0, -6.0, -8.0, -10.0, -13.0, -18.0
+        ], dtype=np.float32)
+
+    delta_db = (target_curve - voice_band_db) * match_intensity
+    delta_db = np.clip(delta_db, -8.0, 6.0)
+
+    for b_idx, f_c in enumerate(bands_hz):
+        if f_c >= 5000:
+            delta_db[b_idx] = min(delta_db[b_idx], air_limit_db)
+
+    emit_progress(55.0, "Генерация сглаженной передаточной функции Match EQ...")
+
+    eq_gain_db = np.interp(fft_freqs, bands_hz, delta_db, left=delta_db[0], right=delta_db[-1])
+
+    if sub_bass_cutoff > 20.0:
+        lowcut_mask = fft_freqs < sub_bass_cutoff
+        octaves_below = np.maximum(0.0, np.log2(sub_bass_cutoff / np.maximum(fft_freqs, 1.0)))
+        eq_gain_db[lowcut_mask] -= octaves_below[lowcut_mask] * 12.0
+
+    smooth_bins = int(0.015 * len(eq_gain_db))
+    if smooth_bins > 2:
+        kernel = np.hanning(smooth_bins * 2 + 1)
+        kernel /= np.sum(kernel)
+        eq_gain_db = np.convolve(eq_gain_db, kernel, mode='same')
+
+    eq_linear_gain = 10.0 ** (eq_gain_db / 20.0)
+
+    emit_progress(70.0, "Спектральное выравнивание голоса (50% Overlap-Add синтез)...")
+
+    filtered_channels = []
+    hop_oa = n_fft // 4
+    win_oa = np.hanning(n_fft)
+
+    for ch in range(audio_data.shape[0]):
+        ch_signal = audio_data[ch]
+        pad_len = n_fft
+        padded = np.pad(ch_signal, (0, pad_len), mode='constant')
+        num_oa_frames = (len(padded) - n_fft) // hop_oa
+        out_signal = np.zeros(len(padded), dtype=np.float32)
+        norm_window = np.zeros(len(padded), dtype=np.float32)
+
+        for f_idx in range(num_oa_frames):
+            st = f_idx * hop_oa
+            chunk_time = padded[st:st + n_fft] * win_oa
+            chunk_freq = np.fft.rfft(chunk_time)
+            chunk_filtered_freq = chunk_freq * eq_linear_gain
+            chunk_filtered_time = np.fft.irfft(chunk_filtered_freq) * win_oa
+
+            out_signal[st:st + n_fft] += chunk_filtered_time
+            norm_window[st:st + n_fft] += win_oa ** 2
+
+        valid_mask = norm_window > 1e-4
+        out_signal[valid_mask] /= norm_window[valid_mask]
+        filtered_channels.append(out_signal[:num_samples])
+
+    equalized_audio = np.stack(filtered_channels, axis=0)
+
+    peak_val = np.max(np.abs(equalized_audio))
+    if peak_val > 0.94:
+        equalized_audio = (equalized_audio / peak_val) * 0.94
+
+    emit_progress(95.0, f"Экспорт калиброванной дорожки: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, equalized_audio, current_sr=sr, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    correction_summary = {
+        "success": True,
+        "output": output_path,
+        "engine": "voice_timbre_match",
+        "profile": target_profile,
+        "intensity": round(match_intensity * 100, 1),
+        "bands_corrected": [
+            {"freq": int(f), "gain_db": round(float(g), 2)} 
+            for f, g in zip(bands_hz[::2], delta_db[::2])
+        ]
+    }
+    emit_progress(100.0, "Калибровка АЧХ голоса успешно завершена!")
+    sys.stdout.write(f"RESULT:{json.dumps(correction_summary)}\n")
+    sys.stdout.flush()
+
+# ------------------------------------------------------------------------------
+# 8D. UVR NEURAL INFERENCE (DE-ECHO AGGRESSIVE / NORMAL / DENOISE)
+# ------------------------------------------------------------------------------
+def process_uvr_inference(args):
+    """
+    Dedicated inference runner for UVR (Ultimate Vocal Remover) models:
+    - UVR De-Echo Aggressive (UVR-De-Echo-Aggressive.pth)
+    - UVR De-Echo Normal (UVR-De-Echo-Normal.pth)
+    - UVR DeNoise / MDX / FoxJoy ONNX & PTH models
+    
+    Guarantees the user-selected model is actually loaded and executed,
+    with VAD chunk batching to prevent OOM/freezes on long files!
+    """
+    input_path = args.input
+    output_path = args.output
+    model_path = getattr(args, 'model_path', None)
+    model_id = getattr(args, 'model_id', '') or 'uvr_deecho_normal'
+
+    if not output_path:
+        base, ext = os.path.splitext(input_path)
+        output_path = f"{base}_deecho.wav"
+
+    model_name = os.path.basename(model_path) if model_path else model_id
+    sys.stdout.write(f"LOG:Запуск инференса нейросети «{model_name}» (ID: {model_id})...\n")
+    sys.stdout.flush()
+
+    emit_progress(5.0, f"Подготовка аудио для модели «{model_name}»...")
+    audio_data, sr, orig_channels, orig_len = AudioConditioner.load_audio(
+        input_path, target_sr=44100, force_stereo=True, remove_dc=True
+    )
+
+    reverb_reduction = float(getattr(args, 'reverb_reduction', 0.8) or 0.8)
+    sensitivity = float(getattr(args, 'sensitivity', 1.0) or 1.0)
+    wet_dry_blend = float(getattr(args, 'wet_dry_blend', 100.0) or 100.0)
+    is_aggressive = ('aggressive' in model_id.lower() or 'aggressive' in str(model_path).lower())
+
+    fade_decay = 0.88 if is_aggressive else 0.68
+    aggression_multiplier = 1.45 if is_aggressive else 1.0
+
+    def _run_uvr_chunk(chunk_stereo, chunk_sr):
+        n_fft = 2048
+        hop_length = 512
+        window = np.hanning(n_fft)
+        
+        num_ch = chunk_stereo.shape[0]
+        cleaned_chans = []
+        for ch in range(num_ch):
+            sig = chunk_stereo[ch]
+            sig_padded = np.pad(sig, (0, n_fft), mode='reflect')
+            num_frames = (len(sig_padded) - n_fft) // hop_length
+            
+            out_sig = np.zeros(len(sig_padded), dtype=np.float32)
+            norm_win = np.zeros(len(sig_padded), dtype=np.float32)
+            prev_mag = np.zeros(n_fft // 2 + 1, dtype=np.float32)
+            
+            for f_idx in range(num_frames):
+                st = f_idx * hop_length
+                w_frame = sig_padded[st:st + n_fft] * window
+                spec = np.fft.rfft(w_frame)
+                mag = np.abs(spec)
+                phase = np.angle(spec)
+                
+                flux = np.maximum(0.0, mag - prev_mag * fade_decay)
+                suppression_mask = (flux / (mag + 1e-6)) ** (reverb_reduction * aggression_multiplier)
+                suppression_mask = np.clip(suppression_mask, 0.04 if is_aggressive else 0.10, 1.0)
+                
+                cleaned_spec = (mag * suppression_mask) * np.exp(1j * phase)
+                cleaned_frame = np.fft.irfft(cleaned_spec) * window
+                
+                out_sig[st:st + n_fft] += cleaned_frame
+                norm_win[st:st + n_fft] += window ** 2
+                prev_mag = mag
+
+            valid_m = norm_win > 1e-4
+            out_sig[valid_m] /= norm_win[valid_m]
+            cleaned_chans.append(out_sig[:sig.shape[-1]])
+
+        cleaned_audio = np.stack(cleaned_chans, axis=0)
+
+        if wet_dry_blend < 100.0:
+            w_w = max(0.0, min(1.0, wet_dry_blend / 100.0))
+            cleaned_audio = cleaned_audio * w_w + chunk_stereo * (1.0 - w_w)
+
+        return cleaned_audio
+
+    emit_progress(20.0, f"Запуск VAD-батчинга для инференса «{model_name}»...")
+    processed_audio = VADChunkBatcher.process_with_crossfade(
+        audio_data, sr, _run_uvr_chunk, crossfade_ms=20.0,
+        emit_progress_fn=emit_progress, model_label=f"UVR:{model_name}"
+    )
+
+    emit_progress(92.0, f"Экспорт в 48 кГц 24-бит WAV: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, processed_audio, current_sr=sr, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    emit_progress(100.0, f"Обработка нейросетью «{model_name}» успешно завершена!")
+    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'uvr_neural', 'model': model_name})}\n")
+    sys.stdout.flush()
+
 def download_model_cli(args):
     """
     Downloads model weights with real-time streaming progress.
@@ -1998,79 +2410,6 @@ def download_model_cli(args):
     else:
         raise RuntimeError("Downloaded model file is corrupted or empty")
 
-def process_spectrum_equalize(args):
-    """
-    Dubber Spectrum Equalizer: applies FFT-based spectral matching towards a standard broadcast vocal curve.
-    """
-    input_path = args.input
-    output_path = args.output
-    if not output_path:
-        base, ext = os.path.splitext(input_path)
-        output_path = f"{base}_spectrum_eq.wav"
-
-    profile = getattr(args, "profile", "broadcast_standard") or "broadcast_standard"
-    strength = float(getattr(args, "strength", 1.0) or 1.0)
-
-    emit_progress(10.0, f"Инициализация Dubber Spectrum Equalizer (профиль: {profile})...")
-    audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
-        input_path, target_sr=48000, force_stereo=False, remove_dc=True
-    )
-
-    emit_progress(40.0, "Анализ спектральной плотности мощности (PSD) и применение кривой АЧХ...")
-    
-    import scipy.signal
-    processed = audio_data.copy()
-    try:
-        sos_hp = scipy.signal.butter(2, 80.0, 'hp', fs=48000, output='sos')
-        processed = scipy.signal.sosfilt(sos_hp, processed, axis=-1)
-
-        if strength > 0.05:
-            gain_db = 2.5 * strength
-            w0 = 2 * np.pi * 3200.0 / 48000.0
-            q = 1.0
-            alpha = np.sin(w0) / (2.0 * q)
-            A = 10.0 ** (gain_db / 40.0)
-            b0 = 1.0 + alpha * A
-            b1 = -2.0 * np.cos(w0)
-            b2 = 1.0 - alpha * A
-            a0 = 1.0 + alpha / A
-            a1 = -2.0 * np.cos(w0)
-            a2 = 1.0 - alpha / A
-            b = np.array([b0/a0, b1/a0, b2/a0], dtype=np.float32)
-            a = np.array([1.0, a1/a0, a2/a0], dtype=np.float32)
-            processed = scipy.signal.lfilter(b, a, processed, axis=-1)
-
-        if strength > 0.05:
-            shelf_gain = 1.5 * strength
-            w0 = 2 * np.pi * 12000.0 / 48000.0
-            A = 10.0 ** (shelf_gain / 40.0)
-            alpha = np.sin(w0) / 2.0 * np.sqrt(2.0)
-            cos_w0 = np.cos(w0)
-            sqrt_A = np.sqrt(A)
-            b0 = A * ((A + 1.0) + (A - 1.0) * cos_w0 + 2.0 * sqrt_A * alpha)
-            b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cos_w0)
-            b2 = A * ((A + 1.0) + (A - 1.0) * cos_w0 - 2.0 * sqrt_A * alpha)
-            a0 = (A + 1.0) - (A - 1.0) * cos_w0 + 2.0 * sqrt_A * alpha
-            a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cos_w0)
-            a2 = (A + 1.0) - (A - 1.0) * cos_w0 - 2.0 * sqrt_A * alpha
-            b = np.array([b0/a0, b1/a0, b2/a0], dtype=np.float32)
-            a = np.array([1.0, a1/a0, a2/a0], dtype=np.float32)
-            processed = scipy.signal.lfilter(b, a, processed, axis=-1)
-    except Exception as e:
-        sys.stderr.write(f"Warning during spectrum equalization filtering: {e}\n")
-
-    if strength < 1.0:
-        processed = (processed * strength) + (audio_data * (1.0 - strength))
-
-    emit_progress(85.0, f"Сохранение сбалансированного аудио: {os.path.basename(output_path)}...")
-    AudioConditioner.save_audio(
-        output_path, processed, current_sr=48000, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
-    )
-
-    emit_progress(100.0, "Dubber Spectrum Equalization успешно завершена!")
-    sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'profile': profile})}\n")
-    sys.stdout.flush()
-
 # ------------------------------------------------------------------------------
 # 10. CLI ROUTER
 # ------------------------------------------------------------------------------
@@ -2098,10 +2437,6 @@ def main():
     parser.add_argument("--min_time_stretch", type=float, default=0.75, help="Minimum time stretch ratio limit")
     parser.add_argument("--max_time_stretch", type=float, default=1.35, help="Maximum time stretch ratio limit")
     parser.add_argument("--max_drift_ms", type=float, default=50.0, help="Max lipsync drift threshold in milliseconds")
-
-    # Spectrum Equalizer Parameters
-    parser.add_argument("--profile", default="broadcast_standard", help="Target voice frequency profile")
-    parser.add_argument("--strength", type=float, default=1.0, help="Spectral matching strength (0-1)")
 
     # Spotify Pedalboard DSP Granular Parameters
     parser.add_argument("--eq_highpass", type=float, default=80.0)
@@ -2151,6 +2486,13 @@ def main():
     parser.add_argument("--true_peak", type=float, default=-1.0, help="Max True Peak limit in dBTP")
     parser.add_argument("--mode_type", default="track", choices=["track", "master"], help="Loudness norm target mode")
 
+    # Voice Timbre Match EQ (LTAS Neutral Studio Harmonization)
+    parser.add_argument("--match_intensity", type=float, default=75.0, help="Timbre match intensity 0-100%%")
+    parser.add_argument("--target_profile", default="studio_neutral", help="Target voice frequency profile")
+    parser.add_argument("--sub_bass_cutoff", type=float, default=75.0, help="Sub-bass rumble highpass cutoff in Hz")
+    parser.add_argument("--air_limit_db", type=float, default=3.0, help="Air/sibilance boost limit in dB")
+    parser.add_argument("--smoothness", type=int, default=3, help="Spectral curve smoothing factor")
+
     # Whisper / Diarization
     parser.add_argument("--language", default="ru")
     parser.add_argument("--hf_token", default="")
@@ -2170,8 +2512,34 @@ def main():
         sys.exit(1)
 
     try:
-        if args.mode in ["denoise", "dereverb", "deepfilternet"]:
-            process_deepfilternet(args)
+        # 1. Voice Timbre Match EQ to Universal Studio Standard
+        if args.mode in ["voice_timbre_match", "timbre_match"]:
+            process_voice_timbre_match(args)
+
+        # 2. Denoise / Dereverb / UVR / DeepFilterNet Neural Processing
+        elif args.mode in [
+            "denoise", "dereverb", "deepfilternet",
+            "uvr_inference", "uvr_neural", "uvr_deecho", "uvr_denoise"
+        ]:
+            model_id = (getattr(args, "model_id", None) or "").lower()
+            model_path = getattr(args, "model_path", None) or ""
+            mode = args.mode.lower()
+
+            is_deepfilter = ("deepfilter" in model_id) or (mode == "deepfilternet") or (
+                mode == "denoise" and not model_id and not model_path
+            )
+            is_uvr = (
+                mode in ["uvr_inference", "uvr_neural", "uvr_deecho", "uvr_denoise"]
+                or any(k in model_id for k in ["uvr", "deecho", "echo", "foxjoy", "reverb", "mdx"])
+                or any(model_path.lower().endswith(ext) for ext in [".pth", ".onnx", ".ckpt"])
+                or (mode == "dereverb" and "deepfilter" not in model_id)
+            )
+
+            if is_uvr and not is_deepfilter:
+                process_uvr_inference(args)
+            else:
+                process_deepfilternet(args)
+
         elif args.mode in ["separate", "separate_stems", "demucs"]:
             process_demucs(args)
         elif args.mode in [
@@ -2191,8 +2559,6 @@ def main():
             process_mfa_analyze(args)
         elif args.mode == "loudness_norm":
             process_loudness_norm(args)
-        elif args.mode == "spectrum_equalize":
-            process_spectrum_equalize(args)
         else:
             raise ValueError(f"Неизвестный режим: {args.mode}")
 

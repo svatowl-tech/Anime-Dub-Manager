@@ -1,120 +1,111 @@
-# Implementation Plan: Dubber Spectrum Equalizer, Neural AI Model Execution Fix, and Media Protocol Repair
+# Модуль гармонизации АЧХ голосов и исправление нейросетевого пайплайна (UVR De-Echo / Denoise / Separation)
 
-A unified solution to homogenize dubber voice tracks to a standard broadcast frequency response (АЧХ) prior to mixing, strictly execute user-selected neural AI models (such as The Echo Aggressive and UVR ONNX/PTH models), resolve Chromium custom-media Windows drive letter URL bugs, and provide enhanced video transport controls with precision seeking.
+План реализации модуля спектральной калибровки АЧХ всех дабберов к нейтральному студийному эталону, устранения бага принудительной подмены запрошенных моделей на DeepFilterNet3, а также внедрения покадрового батчинга по VAD и VRAM/RAM для тяжелых нейросетевых моделей.
 
-## User Review & Critical Decisions
+---
+
+## Резюме решений пользователя (User Review & Critical Decisions)
 
 > [!IMPORTANT]
-> The following decisions were confirmed by the user in Phase 1:
-> - **Dubber Frequency Equalization Strategy**: Apply a standard broadcast target EQ curve (smooth sub-cut, warm body, presence clarity, high air) to all dubber voice tracks automatically to bring diverse microphones and rooms to a single baseline.
-> - **Neural AI Model Handling**: Strictly execute the exact downloaded model selected by the user for each track (e.g., The Echo Aggressive / UVR ONNX models), raising an explicit error if the model is missing or fails instead of silently falling back to DeepFilterNet.
-> - **Video Transport & Media Player**: Implement enhanced video transport with precision time scrubbing, frame-stepping (±1 frame, ±1s, ±5s), timecode jumps (`HH:MM:SS:FF`), and silent media error handling.
+> На основе ответов в интерактивном интервью подтверждены следующие ключевые архитектурные решения:
+>
+> 1. **Целевой спектральный эталон**: Автоматическое приведение к единому нейтральному студийному эталону (Universal Studio Voice Target Curve).
+> 2. **Позиция в цепочке**: Первый настраиваемый шаг в основном пайплайне сведения (`01_timbre_match_`), предшествующий гейтам, шумоподавлению, компрессии и эквализации.
+> 3. **Покадровый батчинг**: Гибридный режим — нарезка по естественным паузам речи через VAD с мягким кроссфейдом стыков (12–25 мс) в сочетании с адаптивным расчетом длины чанка под доступную видеопамять (VRAM) и системную RAM.
+> 4. **Прямое исполнение моделей**: Устранение хардкода вызова `DeepFilterNet` в python-обработчике — если пользователь выбрал и скачал UVR De-Echo Aggressive (`UVR-De-Echo-Aggressive.pth`) или UVR De-Echo Normal, запускается именно нативный инференс UVR/PyTorch для этой модели.
 
 ---
 
-## 1. Overview & Core Concept
+## 1. Обзор и концепция (Overview & Core Concept)
 
-### What It Does
-1. **Dubber Spectrum Equalizer ("Приведение к единому знаменателю АЧХ")**: A new processing module in the Mixing Pipeline (`dubber_spectrum_equalizer`) that analyzes the frequency spectrum of each actor's recording and applies FFT-based spectral matching towards a standard broadcast vocal curve. This eliminates differences caused by varied microphones, audio cards, and acoustic environments before downstream processing.
-2. **Strict User-Selected Neural Model Execution**: Refactors `AudioNeuralService` and `audio_ai_processor.py` so that when a user selects a specific downloaded model (such as `The Echo Aggressive` / `uvr_deecho_aggressive` or UVR ONNX models), the Python sidecar loads and runs that exact ONNX/PyTorch model instead of forcibly redirecting to DeepFilterNet3.
-3. **Chromium `custom-media://` Protocol Path Fix**: Fixes Windows drive letter URL normalization in `electron/main.cjs` where `custom-media://i/YandexDisk/...` was improperly converted to relative path `i\YandexDisk\...`. Replaces broken `fs.existsSync` with synchronous `fsSync.existsSync`.
-4. **Enhanced Video Transport & Silent Error Logging**: Prevents false crash reports from `<video>` element network/decoding errors and adds precision timeline transport controls (frame-by-frame navigation, timecode input, waveform synchronization).
+### Проблема
+1. **Разнобой АЧХ микрофонов**: Дабберы записываются в разных условиях (домашние студии, динамические/конденсаторные микрофоны, разные предусилители, эффект близости / бубнеж на 150–300 Гц, глухие верха или телефонная середина). Последующая общая эквализация или компрессия звучит несбалансированно — один голос проваливается, другой режет слух.
+2. **Баг подмены модели**: Пользователь выбирает и скачивает `UVR De-Echo Aggressive`, но бэкенд игнорирует `model_id` / `model_path` и принудительно выполняет `DeepFilterNet3`.
+3. **Падения по памяти на длинных файлах**: Тяжелые модели (UVR, Demucs, De-Echo) обрабатывают дорожки целиком без батчинга, вызывая зависания или Out-Of-Memory (OOM).
 
----
-
-## 2. User Experience & Visual Design
-
-### Key User Flows
-1. **Mixing Pipeline - Dubber Spectrum Equalizer**:
-   - User navigates to **Mixing Panel** -> **Pipeline Steps**.
-   - A new step **"Приведение АЧХ даберов к единому знаменателю (Dubber Spectrum Equalizer)"** appears at the top of the chain (before EQ, noise suppression, and dynamic compression).
-   - User can select target voice profiles (*Standard Broadcast*, *Cinematic Deep Voice*, *Bright Anime Vocal*, *Podcast Warmth*) or adjust FFT spectral matching strength (0–100%).
-   - Running the step processes each dubber track independently, displaying real-time frequency analysis and curve correction feedback.
-
-2. **Neural Model Selection & Execution**:
-   - User selects an AI Dereverb or Denoise model in step settings (e.g., *The Echo Aggressive*, *Reverb HQ FoxJoy*, *UVR DeNoise*, or *DeepFilterNet 3*).
-   - When executed, the system logs the exact model name being loaded (`[Neural AI] Запуск модели: UVR-De-Echo-Aggressive (ONNX/PyTorch)...`).
-   - If the requested model is missing or fails, a clear error dialog is displayed rather than secretly running DeepFilterNet.
-
-3. **Video Player Transport**:
-   - Clean custom-media streaming without `net::ERR_UNEXPECTED` errors.
-   - Video transport bar includes:
-     - Play/Pause & Frame Stepping (`<` / `>`).
-     - Timecode display (`01:23:45:12`) with click-to-edit jump.
-     - Seek slider with hover time tooltip and audio waveform alignment.
+### Решение
+1. **Новый модуль `voice_timbre_match` (Калибровка АЧХ голосов)** в пайплайне сведения:
+   - Рассчитывает усредненный долговременный спектр (LTAS / Long-Term Average Spectrum) активных речевых сегментов каждого даббера.
+   - Вычисляет разностную передаточную функцию (Transfer Function) относительно нейтрального речевого эталона студийного дубляжа (flat warm studio voice profile с естественным спадом <80 Гц и >14 кГц).
+   - Формирует сглаженную 1/3-октавную фильтрующую кривую (parametric/FFT filter) и корректирует дорожку с настраиваемой силой выравнивания (Match Intensity 0–100%), не разрушая индивидуальный тембр актера.
+2. **Настоящий запуск запрошенных нейросетей**:
+   - В `audio_ai_processor.py` и `AudioNeuralService.cjs` разделяется логика `deepfilternet` и `uvr_deecho` / `uvr_denoise`.
+   - Загружаются веса `.pth` для UVR De-Echo / DeNoise через PyTorch architecture runner без падения в DeepFilterNet.
+3. **VAD + VRAM Адаптивный батчинг**:
+   - Чанкинг длинных файлов по границам пауз Silero VAD / RMS silence.
+   - Определение размера блока (5–20 секунд) на основе доступной VRAM/RAM.
+   - Склейка с cosine-кроссфейдом 16 мс для предотвращения кликов на стыках.
 
 ---
 
-## 3. Key Product Decisions & Trade-Offs
+## 2. Пользовательский интерфейс и опыт (User Experience & Visual Design)
 
-- **Decision 1: FFT Spectral Matching Target Engine**:
-  - *Chosen Approach*: Implement an impulse response / FFT spectral envelope normalization in `audio_ai_processor.py` that computes average 1/3-octave power spectral density (PSD) per dubber track and applies linear-phase FIR filtering to match the target curve.
-  - *Why*: Fast, deterministic, artifact-free equalization that works across all sample rates without introducing phase distortion.
+### Интерфейс шага в пайплайне сведения
+- В списке модулей сведения (`MixingPanel.tsx`) появляется новый шаг: **«Калибровка АЧХ голосов (Voice Timbre Match EQ)»**.
+- Шаг автоматически включается первым в фабричном пайплайне перед гейтом и денойзом.
+- В карточке шага и модальном окне параметров:
+  - **Сила выравнивания (Match Intensity)**: ползунок 0–100% (по умолчанию 70% для сохранения естественности).
+  - **Студийный профиль эталона**: выбор пресета (Нейтральный студийный дубляж, Теплый бродкаст, Прозрачный аниме-дубляж, Кастомный).
+  - **Защита формант (Smoothness)**: сглаживание кривой коррекции (предотвращает резонансные гребенчатые артефакты).
+  - **Срез инфра-низа (Sub-bass Cutoff)**: отсечение комнатного гула (по умолчанию 75 Гц).
+  - **Контроль сибилянтов (Air & Sibilance Limit)**: лимитирование подъема в полосе 4–8 кГц до безопасных +3 дБ.
+  - **Интерактивный предпросмотр спектра**: мини-график кривой коррекции (до/после) для каждой дорожки.
 
-- **Decision 2: Strict Model Dispatch in Python Sidecar**:
-  - *Chosen Approach*: Expand `audio_ai_processor.py` to support ONNX Runtime and PyTorch UVR model execution for `uvr_deecho_aggressive`, `reverb_foxjoy`, `uvr_denoise`, etc.
-  - *Why*: Respects user choice explicitly without silent fallbacks.
-
-- **Decision 3: Robust Windows Path Normalization for `custom-media`**:
-  - *Chosen Approach*: Support both `custom-media:///I:/...` and Chromium-normalized `custom-media://i/...` in `protocol.handle('custom-media')`. Check if the URL host is a single letter (e.g. `i`), and construct `I:\...`. Use `fsSync.existsSync` to test MP4 proxy files.
+### Индикация моделей в De-Echo / DeNoise
+- Четкое отображение активной модели в бейдже шага: `[UVR De-Echo Aggressive]`, `[DeepFilterNet 3]`, `[VR-DeNoise FoxJoy]`.
+- Прогресс-бар с показом этапов покадрового батчинга: `[Чанк 3/14 (VAD), 100% VRAM OK]`.
 
 ---
 
-## 4. Technical Architecture & Data Strategy
+## 3. Ключевые продуктовые решения (Key Product Decisions)
+
+- **Решение 1: Спектральное выравнивание по долговременному спектру (LTAS) речевых участков**:
+  - *Подход*: Анализируются только активные голосовые сегменты (без пауз и шума вдохов). Рассчитывается среднеквадратичная амплитуда по 32 спектральным полосам и строится минимально-фазовый IIR/FFT фильтр со сглаживанием 1/3 октавы.
+  - *Почему*: Это индустриальный стандарт Match EQ (iZotope Ozone Match EQ / FabFilter Pro-Q Match), гарантирующий выравнивание тонального баланса без эффекта "роботизации".
+- **Решение 2: Разделение инференс-раннеров в Python Sidecar**:
+  - *Подход*: Отдельные классы инференса для `DeepFilterNetEnhancer` (библиотека `df`) и `UVRModelRunner` (нативный PyTorch для моделей `.pth` UVR De-Echo / VR-DeNoise).
+  - *Почему*: Предотвращает нежелательный fallback на DeepFilterNet и гарантирует, что скачанный файл `UVR-De-Echo-Aggressive.pth` отрабатывает на 100%.
+- **Решение 3: VAD-ориентированный батчинг с перекрытием**:
+  - *Подход*: Аудио режется не на жесткие прямоугольные куски по времени, а в точках естественной тишины (порог <-45 дБ или метки Silero VAD). Если фраза длиннее максимального чанка (вычисленного по RAM), применяется перекрытие с кроссфейдом Equal-Power.
+  - *Почему*: Полностью исключает артефакты на стыках слов и гарантирует стабильную работу даже на 4 ГБ RAM.
+
+---
+
+## 4. Архитектура и поток данных (Technical Architecture)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                            ELECTRON RENDERER (UI)                           │
-│  ┌────────────────────────┐  ┌───────────────────────┐  ┌─────────────────┐ │
-│  │    MixingPanel.tsx     │  │ StandaloneMediaSelect │  │ VideoPlayer UI  │ │
-│  │ (Dubber Spectrum EQ)   │  │ (Custom Media Stream) │  │ (Precision Transport)│
-│  └───────────┬────────────┘  └───────────┬───────────┘  └────────┬────────┘ │
-└──────────────┼───────────────────────────┼───────────────────────┼──────────┘
-               │ IPC Calls                 │ custom-media://       │ Time / Error
-               ▼                           ▼                       ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                          ELECTRON MAIN PROCESS                              │
-│  ┌────────────────────────┐  ┌────────────────────────────────────────────┐ │
-│  │ MixingController.cjs   │  │ protocol.handle('custom-media')             │ │
-│  │ MixingPipelineService  │  │ - Fixes host drive letter 'i' -> 'I:\'     │ │
-│  │ AudioNeuralService.cjs │  │ - Fixes fsSync.existsSync for MP4 proxies  │ │
-│  └───────────┬────────────┘  └────────────────────────────────────────────┘ │
-└──────────────┼──────────────────────────────────────────────────────────────┘
-               │ CLI Spawning (Python sidecar)
-               ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                       PYTHON SIDECAR (audio_ai_processor.py)                │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │ 1. Spectrum Equalizer (--mode spectrum_equalize)                      │  │
-│  │    - 1/3 Octave PSD Analysis -> Inverse FIR Target Matching Filter    │  │
-│  ├───────────────────────────────────────────────────────────────────────┤  │
-│  │ 2. Neural Model Dispatcher (--mode dereverb / denoise)                │  │
-│  │    - uvr_deecho_aggressive (ONNX / PyTorch UVR engine)               │  │
-│  │    - reverb_foxjoy / uvr_denoise / deepfilternet3                     │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Mixing Pipeline (Сведение)                      │
+│                                                                        │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ Step 1: Voice Timbre Match (Калибровка АЧХ голосов к эталону)      │ │
+│ │  • VAD Extraction -> LTAS Voice Spectrum per Actor                │ │
+│ │  • Universal Studio Curve Difference -> 1/3 Octave Match Filter    │ │
+│ │  • Equalized Voice Master Tracks                                   │ │
+│ └────────────────────────────────┬───────────────────────────────────┘ │
+│                                  ▼                                     │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ Step 2: Denoise & De-Reverb (UVR / DeepFilterNet / Demucs)         │ │
+│ │  • Model Dispatch: UVR-De-Echo-Aggressive.pth vs DeepFilterNet     │ │
+│ │  • Chunk Batching Engine: VAD Slice + VRAM Adaptive Batch          │ │
+│ └────────────────────────────────┬───────────────────────────────────┘ │
+│                                  ▼                                     │
+│ ┌────────────────────────────────────────────────────────────────────┐ │
+│ │ Step 3-6: Gate -> Phrase Norm -> Glue Compressor -> Master Mix     │ │
+│ └────────────────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Key File Changes
-1. `electron/sidecars/audio_ai_processor.py` & `electron/services/AudioNeuralService.cjs`:
-   - Implement `process_spectrum_equalize` for dubber track equalization.
-   - Implement ONNX/PTH model inference for UVR dereverb models (`uvr_deecho_aggressive`, etc.) so requested models actually execute.
-2. `electron/services/MixingPipelineService.cjs`:
-   - Add `dubber_spectrum_equalizer` step definition to `MODULE_DATABASE`.
-   - Wire step execution handler to call `AudioNeuralService.spectrumEqualizeAudio`.
-3. `electron/main.cjs`:
-   - Fix `custom-media` protocol handler for Windows single-letter drive hosts (`i/...` -> `I:\...`).
-   - Replace `fs.existsSync` with `fsSync.existsSync`.
-   - Prevent false crash logging on media load errors.
-4. `src/components/MixingPanel.tsx` & Media Components:
-   - Add Dubber Spectrum Equalizer configuration UI and controls.
-   - Enhance video player transport controls with precision seeking and frame stepping.
-
----
-
-## Verification Plan
-
-1. **Compilation Check**: Run `compile_applet` to ensure code compiles cleanly.
-2. **Protocol & Path Test**: Verify `custom-media://i/YandexDisk/...` URLs resolve to absolute Windows drive paths without `net::ERR_UNEXPECTED`.
-3. **Neural Model Execution Test**: Verify selecting `The Echo Aggressive` executes the ONNX UVR model.
-4. **Dubber Spectrum Equalizer Test**: Verify step executes across dubber tracks and produces balanced target audio.
+### Основные компоненты реализации
+1. **`electron/services/audio_ai_processor.py` и `electron/sidecars/audio_ai_processor.py`**:
+   - Модуль `process_voice_timbre_match(args)`: расчет LTAS спектра, вычисление эталонной кривой, применение фильтрации через `scipy.signal` / `pedalboard` / FFT-фильтр.
+   - Модуль `process_uvr_inference(args)`: нативная загрузка `.pth` чекпоинтов UVR De-Echo / DeNoise через PyTorch, запрещающая подмену на `df`.
+   - Обобщенный `VADChunkProcessor`: нарезка по VAD-паузам, батчинг чанков, прогресс-колбэки, безопасный сшив с кроссфейдом.
+2. **`electron/services/MixingPipelineService.cjs`**:
+   - Регистрация модуля `voice_timbre_match` в `MODULE_DATABASE`.
+   - Включение `voice_timbre_match` первым шагом в `createDefaultPipeline()`.
+   - Маршрутизация моделей De-Echo в `AudioNeuralService` с передачей реального `modelPath` и флага движка.
+3. **`electron/services/AudioNeuralService.cjs`**:
+   - Передача параметров батчинга и точного `model_id` / `model_path` в CLI-аргументы sidecar-процесса.
+4. **`src/components/MixingPanel.tsx`**:
+   - Отображение нового шага калибровки АЧХ в интерфейсе с ползунком интенсивности (Match Intensity), выбором целевого пресета и спектральным индикатором.

@@ -16,34 +16,43 @@ const AudioAnalysisService = require('./AudioAnalysisService.cjs');
  */
 const MODULE_DATABASE = [
   {
-    id: 'dubber_spectrum_equalizer',
-    category: 'eq',
-    defaultPrefix: 'spectrum_eq_',
-    title: 'Приведение АЧХ даберов к единому знаменателю (Dubber Spectrum Equalizer)',
-    description: 'Анализирует спектр голоса каждого актера и применяет FFT-спектральное выравнивание к стандартному вещательному вокальному профилю перед мастерингом.',
-    icon: 'Sliders',
+    id: 'voice_timbre_match',
+    category: 'timbre',
+    defaultPrefix: '01_timbre_',
+    title: 'Калибровка АЧХ голосов к эталону (Voice Timbre Match EQ)',
+    description: 'Анализирует долговременный спектр речи (LTAS) каждого даббера и гармонизирует амплитудно-частотную характеристику к нейтральному студийному эталону перед эквалайзерами и денойзом.',
+    icon: 'Activity',
     defaultParams: {
-      profile: 'broadcast_standard',
-      strength: 1.0
+      matchIntensity: 75,
+      targetProfile: 'studio_neutral',
+      subBassCutoff: 75,
+      airLimitDb: 3.0,
+      smoothness: 3
     },
     presets: [
       {
-        id: 'broadcast_standard',
-        title: '🎙 Стандарт вещания (Broadcast Standard)',
-        description: 'Сбалансированная вещательная кривая: обрезка низов, чистая середина и прозрачный воздух',
-        params: { profile: 'broadcast_standard', strength: 1.0 }
+        id: 'studio_neutral',
+        title: '🎯 Нейтральный студийный дубляж (Универсальный эталон)',
+        description: 'Идеальный баланс низких, средних и высоких частот по студийному стандарту дубляжа',
+        params: { matchIntensity: 75, targetProfile: 'studio_neutral', subBassCutoff: 75, airLimitDb: 3.0, smoothness: 3 }
       },
       {
-        id: 'warm_podcast',
-        title: '📻 Теплый подкаст (Warm Podcast)',
-        description: 'Плотный низкочастотный телесный окрас и высокая разборчивость речи',
-        params: { profile: 'warm_podcast', strength: 0.85 }
+        id: 'warm_broadcast',
+        title: '📻 Тёплый бродкаст (Плотный низ и бархат)',
+        description: 'Богатая теплая нижняя середина для мужских и закадровых голосов',
+        params: { matchIntensity: 70, targetProfile: 'warm_broadcast', subBassCutoff: 70, airLimitDb: 2.5, smoothness: 3 }
       },
       {
-        id: 'anime_bright',
-        title: '✨ Яркий аниме вокал (Bright Anime Vocal)',
-        description: 'Акцент на верхней середине и присутствии для прорезания через плотный микс',
-        params: { profile: 'anime_bright', strength: 0.90 }
+        id: 'crisp_anime',
+        title: '✨ Прозрачный аниме-дубляж (Яркая читаемость)',
+        description: 'Открытый верх и высокая разборчивость для эмоциональных диалогов и криков',
+        params: { matchIntensity: 80, targetProfile: 'crisp_anime', subBassCutoff: 85, airLimitDb: 3.5, smoothness: 4 }
+      },
+      {
+        id: 'gentle_balance',
+        title: '🍃 Мягкое выравнивание (50% интенсивности)',
+        description: 'Деликатная коррекция тонального баланса с сохранением авторской окраски микрофона',
+        params: { matchIntensity: 50, targetProfile: 'studio_neutral', subBassCutoff: 75, airLimitDb: 2.0, smoothness: 3 }
       }
     ]
   },
@@ -1892,63 +1901,63 @@ const MODULE_DATABASE = [
 function createDefaultPipeline() {
   return [
     {
-      stepId: 'step_0_spectrum',
-      moduleId: 'dubber_spectrum_equalizer',
-      prefix: '00_spectrum_',
+      stepId: 'step_1_timbre_match',
+      moduleId: 'voice_timbre_match',
+      prefix: '01_timbre_',
       enabled: true,
-      params: { ...MODULE_DATABASE.find(m => m.id === 'dubber_spectrum_equalizer').defaultParams },
+      params: { ...MODULE_DATABASE.find(m => m.id === 'voice_timbre_match').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_1_gate',
+      stepId: 'step_2_gate',
       moduleId: 'silence_gate',
-      prefix: '01_gate_',
+      prefix: '02_gate_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'silence_gate').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_2_norm',
+      stepId: 'step_3_norm',
       moduleId: 'phrase_norm',
-      prefix: '02_norm_',
+      prefix: '03_norm_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'phrase_norm').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_3_glue',
+      stepId: 'step_4_glue',
       moduleId: 'glue_compress',
-      prefix: '03_glue_',
+      prefix: '04_glue_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'glue_compress').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_4_ducking',
+      stepId: 'step_5_ducking',
       moduleId: 'ducking',
-      prefix: '04_ducking_',
+      prefix: '05_ducking_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'ducking').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_5_master_mix',
+      stepId: 'step_6_master_mix',
       moduleId: 'master_audio_mix',
-      prefix: '05_master_mix_',
+      prefix: '06_master_mix_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'master_audio_mix').defaultParams },
       status: 'idle',
       outputFiles: []
     },
     {
-      stepId: 'step_6_video_mux',
+      stepId: 'step_7_video_mux',
       moduleId: 'video_mux',
-      prefix: '06_video_mux_',
+      prefix: '07_video_mux_',
       enabled: true,
       params: { ...MODULE_DATABASE.find(m => m.id === 'video_mux').defaultParams },
       status: 'idle',
@@ -3189,9 +3198,6 @@ class MixingPipelineService {
 
       let resultFiles = [];
       switch (step.moduleId) {
-        case 'dubber_spectrum_equalizer':
-          resultFiles = await this._execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
-          break;
         case 'auto_timing':
           resultFiles = await this._execAutoTiming({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -3235,6 +3241,9 @@ class MixingPipelineService {
           break;
         case 'voicefixer_fe':
           resultFiles = await this._execVoiceFixer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'voice_timbre_match':
+          resultFiles = await this._execVoiceTimbreMatch({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'silence_gate':
           resultFiles = await this._execSilenceGate({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -3353,7 +3362,7 @@ class MixingPipelineService {
 
     // List of modules that expect dubber tracks on input
     const isDubberStep = [
-      'dubber_spectrum_equalizer', 'auto_timing', 'stage_mfa_lipsync', 'mfa_lipsync', 'acoustic_original_match',
+      'auto_timing', 'stage_mfa_lipsync', 'mfa_lipsync', 'acoustic_original_match',
       'acoustic_match_full', 'acoustic_match_soft_reverb', 'acoustic_match_dry_focus', 'vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm',
       'auto_norm_phrases', 'silence_gate', 'apply_fixes', 'stage_loudness_norm',
       'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'deepfilternet3', 'uvr_denoise_full',
@@ -3506,54 +3515,6 @@ class MixingPipelineService {
     }
 
     return results;
-  }
-
-  /**
-   * EXEC: Dubber Spectrum Equalizer
-   */
-  async _execDubberSpectrumEqualizer({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
-    if (inputFiles.length === 0) {
-      throw new Error('Нет входных дорожек для применения Dubber Spectrum Equalizer.');
-    }
-
-    const outputFiles = [];
-    const total = inputFiles.length;
-
-    for (let i = 0; i < total; i++) {
-      const file = inputFiles[i];
-      const inPath = file.path;
-      if (!fsSync.existsSync(inPath)) continue;
-
-      const outName = this._resolveTrackOutName(file, inputFiles, i, prefix);
-      const outPath = path.join(stepFolder, outName);
-
-      const trackName = file.name || path.basename(inPath);
-      logFn(`[Spectrum EQ] Обработка дорожки ${i + 1}/${total}: «${trackName}» (профиль: ${params.profile || 'broadcast_standard'})`);
-
-      await AudioNeuralService.spectrumEqualizeAudio({
-        inputPath: inPath,
-        outputPath: outPath,
-        profile: params.profile || 'broadcast_standard',
-        strength: Number(params.strength ?? 1.0),
-        onProgress: (p) => {
-          if (onProgress) {
-            const overallPct = Math.round(((i + (p.percent / 100)) / total) * 100);
-            onProgress({ percent: overallPct, message: `Spectrum EQ [${i + 1}/${total}]: ${p.message || ''}` });
-          }
-        },
-        onLog: logFn
-      });
-
-      const st = fsSync.statSync(outPath);
-      outputFiles.push({
-        name: outName,
-        path: outPath,
-        size: st.size,
-        dubberNick: file.dubberNick || file.name
-      });
-    }
-
-    return outputFiles;
   }
 
   /**
@@ -4700,6 +4661,70 @@ class MixingPipelineService {
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
       logFn(`✓ Дорожка «${nick}» обработана моделью VoiceFixer -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: Voice Timbre Match (harmonizes frequency curve of all dubber voices to studio standard)
+   */
+  async _execVoiceTimbreMatch({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    await fsPromises.mkdir(stepFolder, { recursive: true });
+    const matchIntensity = Number(params.matchIntensity ?? 75);
+    const targetProfile = String(params.targetProfile ?? 'studio_neutral');
+    const subBassCutoff = Number(params.subBassCutoff ?? 75);
+    const airLimitDb = Number(params.airLimitDb ?? 3.0);
+    const smoothness = Number(params.smoothness ?? 3);
+
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для калибровки АЧХ.');
+    }
+
+    logFn(`[Калибровка АЧХ] Старт гармонизации спектра для ${inputFiles.length} дорожек к профилю «${targetProfile}» (Интенсивность: ${matchIntensity}%, Сглаживание: ${smoothness}x)...`);
+
+    const results = [];
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      logFn(`[${i+1}/${inputFiles.length}] Выравнивание АЧХ даббера «${nick}» к студийному эталону...`);
+
+      try {
+        await AudioNeuralService.matchVoiceTimbre({
+          inputPath: track.path,
+          outputPath: outPath,
+          matchIntensity,
+          targetProfile,
+          subBassCutoff,
+          airLimitDb,
+          smoothness,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `Калибровка АЧХ [${nick}]: ${p.percent}%` });
+            }
+          },
+          onLog: logFn
+        });
+
+        if (fsSync.existsSync(outPath)) {
+          const st = fsSync.statSync(outPath);
+          results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+          logFn(`✓ Дорожка «${nick}» успешно приведена к единому студийному знаменателю АЧХ -> ${outName}`);
+        } else {
+          throw new Error(`Выходной файл не создан: ${outPath}`);
+        }
+      } catch (err) {
+        logFn(`[Калибровка АЧХ Ошибка] Сбой для «${nick}»: ${err.message}. Перенос исходного аудио без искажений.`, 'warn');
+        await fsPromises.copyFile(track.path, outPath);
+        const st = fsSync.statSync(outPath);
+        results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      }
     }
 
     return results;
