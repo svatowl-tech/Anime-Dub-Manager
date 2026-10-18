@@ -166,12 +166,6 @@ export function prepareQATracksForTiming(
       return mtNick && (mtNick === normKey || mtNick.includes(normKey) || normKey.includes(mtNick));
     });
 
-    const isFixFile = (f: { name?: string; path?: string; type?: string }) => {
-      if (f.type === 'FIXES') return true;
-      const str = `${f.name || ''} ${f.path || ''}`.toLowerCase();
-      return str.includes('fix') || str.includes('фикс');
-    };
-
     // Separate files, deduplicated by file path
     const allActorFilesMap = new Map<string, { id?: string; name: string; path: string; size: number; createdAt?: string; type: 'DUBBER_FILE' | 'FIXES' }>();
 

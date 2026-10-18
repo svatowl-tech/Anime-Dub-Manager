@@ -9,8 +9,7 @@ import {
   RotateCcw, 
   Check, 
   Info,
-  Layers,
-  Volume2
+  Layers
 } from 'lucide-react';
 
 export interface TimingSettings {

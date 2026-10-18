@@ -182,10 +182,13 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
           const trackGaps = gapsByTrack[track.id] || 0;
 
           return (
-            <button
+            <div
               key={track.id}
+              role="button"
+              tabIndex={0}
               onClick={() => setSelectedTrackId(track.id)}
-              className={`w-full p-3 rounded-lg text-left transition-all border ${
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedTrackId(track.id); } }}
+              className={`w-full p-3 rounded-lg text-left transition-all border cursor-pointer ${
                 selectedTrackId === track.id 
                   ? 'bg-blue-600/10 border-blue-500/50' 
                   : 'bg-neutral-900/50 border-transparent hover:border-neutral-700'
@@ -289,7 +292,7 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
                   </label>
                 )}
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
