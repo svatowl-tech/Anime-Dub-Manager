@@ -202,6 +202,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [origVocalsPath, setOrigVocalsPath] = useState<string>('');
   const [ourVocalsPath, setOurVocalsPath] = useState<string>('');
   const [origVocalsError, setOrigVocalsError] = useState<string | null>(null);
+  const [ourVocalsError, setOurVocalsError] = useState<string | null>(null);
   const [acousticProfile, setAcousticProfile] = useState<any | null>(null);
   const [isAnalyzingAcoustics, setIsAnalyzingAcoustics] = useState<boolean>(false);
   const [isApplyingAcousticMatch, setIsApplyingAcousticMatch] = useState<boolean>(false);
@@ -210,6 +211,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [eqStrength, setEqStrength] = useState<number>(100);
   const [targetLufsOffset, setTargetLufsOffset] = useState<number>(0.0);
   const [acousticMatchResult, setAcousticMatchResult] = useState<any | null>(null);
+  const [selectedEffectFilter, setSelectedEffectFilter] = useState<string>('all');
 
   // Video Preview Proxy state
   const [isCreatingProxy, setIsCreatingProxy] = useState<boolean>(false);
@@ -248,6 +250,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [activeProcessingStepId, setActiveProcessingStepId] = useState<string | null>(null);
   const [stepProgress, setStepProgress] = useState<Record<string, number>>({});
   const [expandedSettings, setExpandedSettings] = useState<Record<string, boolean>>({});
+  const [expandedTracks, setExpandedTracks] = useState<Record<string, boolean>>({});
 
   // UVR Model Download State
   const [isDownloadingUvrModel, setIsDownloadingUvrModel] = useState<boolean>(false);
@@ -1219,55 +1222,69 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const handleOpenAcousticMatcher = async () => {
     setIsAcousticMatchModalOpen(true);
     setOrigVocalsError(null);
+    setOurVocalsError(null);
     setAcousticMatchResult(null);
-
-    let ourPath = '';
-    // Поиск сохраненных обработанных дорожек дабберов на диске в рабочей папке
-    if (workingDir) {
-      try {
-        const files: string[] = await ipcSafe.invoke('get-dir-files', workingDir);
-        if (Array.isArray(files)) {
-          const dubberWavs = files.filter(f => f.endsWith('.wav') && (f.includes('dubber') || f.includes('dub') || f.includes('voices_master') || f.includes('eq_') || f.includes('restore_') || f.includes('matched')));
-          if (dubberWavs.length > 0) {
-            // Сортировка по номеру шага / имени по убыванию
-            dubberWavs.sort((a, b) => b.localeCompare(a));
-            ourPath = `${workingDir}/${dubberWavs[0]}`.replace(/\\/g, '/');
-          }
-        }
-      } catch (e) {}
-    }
-    if (!ourPath) {
-      const dubTracks = manifest?.sourceFiles?.dubberTracks || [];
-      if (dubTracks.length > 0 && dubTracks[0].path) {
-        ourPath = dubTracks[0].path;
-      }
-    }
-    setOurVocalsPath(ourPath);
+    setSelectedEffectFilter('all');
 
     const epDir = (currentEpisode as any)?.dir || (currentEpisode?.rawPath ? currentEpisode.rawPath.replace(/[/\\][^/\\]+$/, '') : '');
     const searchDirs = [workingDir];
     if (epDir) searchDirs.push(epDir);
 
+    // 1. Строгая проверка наличия склеенной дорожки всех голосов дабберов (voices_master.wav)
+    let foundGluedVoices = '';
+    try {
+      const gluedRes = await ipcSafe.invoke('audio-find-glued-voices', {
+        searchDirs,
+        manifest,
+        options: { strict: true }
+      });
+      if (gluedRes && typeof gluedRes === 'string') {
+        foundGluedVoices = gluedRes;
+        setOurVocalsPath(gluedRes);
+        setOurVocalsError(null);
+        mixLog('info', 'АвтоматизацияЭффектов', `✓ Найдена склеенная дорожка всех голосов дабберов: ${gluedRes}`);
+      } else {
+        setOurVocalsPath('');
+        setOurVocalsError(
+          '❌ Ошибка: Голоса дабберов не склеены в единую дорожку (voices_master.wav)!\n' +
+          'Модуль повторения эффектов принимает на вход ИСКЛЮЧИТЕЛЬНО склеенную мастер-дорожку всех голосов.\n' +
+          'Сначала выполните шаг «Склеивание голосов в одну дорожку» (mix_voices).'
+        );
+      }
+    } catch (e: any) {
+      setOurVocalsPath('');
+      const msg = e.message || String(e);
+      setOurVocalsError(msg);
+      mixLog('error', 'АвтоматизацияЭффектов', msg);
+    }
+
+    // 2. Строгая проверка наличия разделенной дорожки вокала оригинала (01_vocals.wav)
     try {
       const foundOrig = await ipcSafe.invoke('audio-find-original-vocals', {
         searchDirs,
         manifest,
-        ourVocalsPath: ourPath
+        ourVocalsPath: foundGluedVoices,
+        options: { strict: true }
       });
       if (foundOrig && typeof foundOrig === 'string') {
         setOrigVocalsPath(foundOrig);
-        mixLog('info', 'Слепок', `✓ Обнаружен разделенный вокал оригинала: ${foundOrig}`);
+        setOrigVocalsError(null);
+        mixLog('info', 'АвтоматизацияЭффектов', `✓ Обнаружена разделенная вокальная дорожка оригинала: ${foundOrig}`);
         runAnalyzeOriginalAcoustics(foundOrig);
       } else {
         setOrigVocalsPath('');
-        const errMsg = "❌ Ошибка: Не найдена заранее разделенная дорожка голосов оригинала!\n" +
-          "Модуль 'Акустический слепок' анализирует ТОЛЬКО разделенный вокал оригинала (Demucs / UVR).\n" +
-          "Пожалуйста, выполните шаг 'Разделение стемов Demucs/UVR' или добавьте оригинальный вокал (original_vocals.wav).";
+        const errMsg =
+          '❌ Ошибка: Оригинальное аудио из видео не было разделено на стемы!\n' +
+          'Модуль принимает на вход ИСКЛЮЧИТЕЛЬНО разделенную вокальную дорожку оригинала (01_vocals.wav).\n' +
+          'Сначала выполните шаг разделения оригинального аудио из видео (Demucs / UVR / RoFormer / FFmpeg).';
         setOrigVocalsError(errMsg);
-        mixLog('error', 'Слепок', errMsg);
+        mixLog('error', 'АвтоматизацияЭффектов', errMsg);
       }
     } catch (e: any) {
-      setOrigVocalsError(e.message || String(e));
+      setOrigVocalsPath('');
+      const msg = e.message || String(e);
+      setOrigVocalsError(msg);
+      mixLog('error', 'АвтоматизацияЭффектов', msg);
     }
   };
 
@@ -1275,32 +1292,42 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     if (!audioPath) return;
     try {
       setIsAnalyzingAcoustics(true);
-      mixLog('info', 'Слепок', `Запуск снятия 3-х слепков (Громкость, Реверберация, EQ) для оригинала: ${audioPath}`);
-      const profile = await ipcSafe.invoke('audio-analyze-original-snapshots', { audioPath });
+      setOrigVocalsError(null);
+      mixLog('info', 'АнализЭффектов', `Запуск полного пофразового и покадрового (шаг 100 мс) анализа наложенных эффектов вокала оригинала: ${audioPath}`);
+      const profile = await ipcSafe.invoke('audio-analyze-original-snapshots', {
+        audioPath,
+        options: { strict: true }
+      });
       setAcousticProfile(profile);
       setIsAnalyzingAcoustics(false);
-      toast.success('3 Слепка оригинала успешно сформированы!');
-      mixLog('success', 'Слепок', `✓ 3 Слепка оригинала сформированы! (LUFS: ${profile.overallStats.integratedLufs} dB, Реверб: ${profile.overallStats.reverbCategory})`);
+      toast.success(`Пофразовый анализ завершен: ${profile.phrasesCount || 0} фраз, ${profile.framesCount || 0} точек автоматизации!`);
+      mixLog(
+        'success',
+        'АнализЭффектов',
+        `✓ Проанализировано фраз: ${profile.phrasesCount || 0} (с наложенными спецэффектами: ${profile.overallStats?.phrasesWithSpecialEffects || 0}, LUFS: ${profile.overallStats?.integratedLufs} dB, Реверб: ${profile.overallStats?.reverbCategory})`
+      );
     } catch (e: any) {
       setIsAnalyzingAcoustics(false);
-      toast.error(`Ошибка снятия слепков: ${e.message}`);
-      mixLog('error', 'Слепок', `Ошибка снятия слепков оригинала: ${e.message}`);
+      setAcousticProfile(null);
+      setOrigVocalsError(e.message || String(e));
+      toast.error(`Ошибка анализа вокала оригинала: ${e.message}`);
+      mixLog('error', 'АнализЭффектов', `Ошибка анализа вокала оригинала: ${e.message}`);
     }
   };
 
   const handleApplyAcousticProfileMatch = async () => {
-    if (!ourVocalsPath) {
-      toast.error('Укажите голосовую дорожку нашего дубляжа!');
+    if (!origVocalsPath) {
+      toast.error('Ошибка: отсутствует разделенная вокальная дорожка оригинала (01_vocals.wav)!');
       return;
     }
-    if (!origVocalsPath) {
-      toast.error('Не найдена разделенная дорожка вокала оригинала!');
+    if (!ourVocalsPath) {
+      toast.error('Ошибка: отсутствует склеенная дорожка всех голосов дабберов (voices_master.wav)!');
       return;
     }
 
     try {
       setIsApplyingAcousticMatch(true);
-      mixLog('info', 'Приведение', `▶ Запуск приведения нашего дубляжа к слепкам оригинала...`);
+      mixLog('info', 'АвтоматизацияЭффектов', `▶ Запуск наложения эффектов оригинала по кривой автоматизации на склеенную дорожку голосов...`);
       const epDir = (currentEpisode as any)?.dir || (currentEpisode?.rawPath ? currentEpisode.rawPath.replace(/[/\\][^/\\]+$/, '') : '');
       const searchDirs = [workingDir];
       if (epDir) searchDirs.push(epDir);
@@ -1309,23 +1336,28 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         ourVocalsPath,
         originalVocalsPath: origVocalsPath,
         searchDirs,
+        manifest,
         options: {
           loudnessMatchStrength: loudnessStrength,
           reverbMatchStrength: reverbStrength,
           eqMatchStrength: eqStrength,
-          targetLufsOffset
+          targetLufsOffset,
+          strict: true
         }
       });
 
       setAcousticMatchResult(res);
+      if (res.originalProfile) {
+        setAcousticProfile(res.originalProfile);
+      }
       setIsApplyingAcousticMatch(false);
-      toast.success('Голосовая дорожка дубляжа успешно приведена к оригиналу!');
-      mixLog('success', 'Приведение', `✓ Приведение завершено! Создан файл: ${res.outputPath}`);
+      toast.success('Эффекты оригинала успешно воспроизведены по кривой автоматизации на дорожке голосов!');
+      mixLog('success', 'АвтоматизацияЭффектов', `✓ Автоматизация эффектов завершена! Создан файл: ${res.outputPath}`);
       handleRescanSources();
     } catch (e: any) {
       setIsApplyingAcousticMatch(false);
-      toast.error(`Ошибка приведения: ${e.message}`);
-      mixLog('error', 'Приведение', `Ошибка приведения: ${e.message}`);
+      toast.error(`Ошибка наложения эффектов: ${e.message}`);
+      mixLog('error', 'АвтоматизацияЭффектов', `Ошибка наложения эффектов: ${e.message}`);
     }
   };
 
@@ -1339,7 +1371,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
           loudnessMatchStrength: loudnessStrength,
           reverbMatchStrength: reverbStrength,
           eqMatchStrength: eqStrength,
-          targetLufsOffset
+          targetLufsOffset,
+          strictOriginalVocalsRequired: true,
+          strictGluedVoicesRequired: true
         }
       });
       setIsAcousticMatchModalOpen(false);
@@ -1348,15 +1382,16 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         id: 'acoustic_original_match',
         category: 'analysis',
         defaultPrefix: 'acoustic_matched_',
-        title: 'Акустический слепок оригинала и автосопоставление (Acoustic Matcher)',
-        description: 'Принимает на вход только разделенный вокал оригинала и снимает 3 слепка (громкость, реверберация, частотный баланс). Приводит нашу голосовую дорожку к акустике оригинала.',
+        title: 'Повторение эффектов оригинала по кривой автоматизации (Acoustic Effect Matcher)',
+        description: 'Строго проверяет наличие разделенного вокала оригинала (01_vocals.wav) и склеенной дорожки всех голосов (voices_master.wav). Выполняет полный пофразовый и покадровый (100 мс) анализ наложенных эффектов оригинала и воспроизводит их на дорожке голосов в каждый момент времени.',
         icon: 'Activity',
         defaultParams: {
           loudnessMatchStrength: loudnessStrength,
           reverbMatchStrength: reverbStrength,
           eqMatchStrength: eqStrength,
           targetLufsOffset,
-          strictOriginalVocalsRequired: true
+          strictOriginalVocalsRequired: true,
+          strictGluedVoicesRequired: true
         }
       } as any);
       setIsAcousticMatchModalOpen(false);
@@ -1457,6 +1492,96 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     } finally {
       setActiveProcessingStepId(null);
       await loadStatus();
+    }
+  };
+
+  // Abort any running step or chain
+  const handleAbortProcessing = async () => {
+    try {
+      releasePlayerAudioLocks();
+      mixLog('warn', 'Остановка', '🛑 Отправка сигнала принудительной остановки (Abort) всех процессов сведения...');
+      toast.warning('Остановка процесса сведения...');
+      const res: any = await ipcSafe.invoke('mixing-abort', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir
+      });
+      setActiveProcessingStepId(null);
+      setStepProgress({});
+      if (res && res.manifest) {
+        setManifest(res.manifest);
+      } else {
+        await loadStatus();
+      }
+      toast.info('Процесс сведения остановлен пользователем 🛑');
+    } catch (e: any) {
+      setActiveProcessingStepId(null);
+      toast.error(`Ошибка при остановке: ${e.message || String(e)}`);
+      await loadStatus();
+    }
+  };
+
+  // Clear step output files (or a single output file)
+  const handleClearStep = async (stepId: string, singleFilePath?: string) => {
+    if (!currentEpisode) return;
+    releasePlayerAudioLocks();
+    try {
+      const res: any = await ipcSafe.invoke('mixing-clear-step', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir,
+        stepId,
+        filePath: singleFilePath || null
+      });
+      if (res && res.manifest) {
+        setManifest(res.manifest);
+      } else {
+        await loadStatus();
+      }
+      if (singleFilePath) {
+        toast.success(`Дорожка удалена из результатов шага`);
+      } else {
+        toast.success('Шаг очищен: все обработанные дорожки этого шага удалены 🧹');
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка очистки шага: ${e.message || String(e)}`);
+    }
+  };
+
+  // Update per-step input tracks (include/exclude or add/remove custom tracks)
+  const handleUpdateStepTracks = async (
+    stepId: string,
+    action: 'toggle_exclude' | 'clear_exclusions' | 'add_custom' | 'remove_custom',
+    trackKey?: string,
+    trackPaths?: string[]
+  ) => {
+    if (!currentEpisode) return;
+    try {
+      const res: any = await ipcSafe.invoke('mixing-update-step-tracks', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir,
+        stepId,
+        action,
+        trackKey,
+        trackPaths
+      });
+      if (res && res.manifest) {
+        setManifest(res.manifest);
+      } else {
+        await loadStatus();
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка обновления дорожек шага: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleAddCustomTrackToStep = async (stepId: string) => {
+    try {
+      const res: any = await ipcSafe.invoke('mixing-select-external-files', { type: 'audio' });
+      if (res && !res.canceled && Array.isArray(res.filePaths) && res.filePaths.length > 0) {
+        await handleUpdateStepTracks(stepId, 'add_custom', undefined, res.filePaths);
+        toast.success(`Добавлено дорожек в шаг: ${res.filePaths.length}`);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка выбора аудиофайла: ${e.message || String(e)}`);
     }
   };
 
@@ -1707,7 +1832,13 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     limiterThresholdDb: { label: 'Потолок лимитера (True-Peak)', unit: 'dBFS' },
     levelingSpeedMs: { label: 'Скорость реакции левелера', unit: 'мс' },
     modelId: { label: 'Выбор модели / Алгоритма' },
-    modelName: { label: 'Выбор нейросетевой модели' }
+    modelName: { label: 'Выбор нейросетевой модели' },
+    loudnessMatchStrength: { label: 'Автоматизация громкости и панорамы', unit: '%' },
+    reverbMatchStrength: { label: 'Автоматизация пространства (Reverb / Echo)', unit: '%' },
+    eqMatchStrength: { label: 'Автоматизация АЧХ и фильтров (Телефон / За стеной / EQ)', unit: '%' },
+    targetLufsOffset: { label: 'Смещение целевой громкости голосов', unit: 'dB' },
+    strictOriginalVocalsRequired: { label: 'Строгая проверка разделения вокала оригинала' },
+    strictGluedVoicesRequired: { label: 'Строгая проверка склеивания всех голосов (voices_master)' }
   };
 
   const formatFileSize = (bytes?: number) => {
@@ -1813,6 +1944,17 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             )}
             <span>Свести цепочку</span>
           </button>
+
+          {activeProcessingStepId !== null && (
+            <button
+              onClick={handleAbortProcessing}
+              className="px-3.5 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition shadow-md animate-pulse border border-red-400/50"
+              title="Немедленно прервать выполнение текущего шага или всей цепочки сведения"
+            >
+              <XCircle className="w-4 h-4" />
+              <span>Остановить сведение</span>
+            </button>
+          )}
 
           <button
             onClick={handleOpenAcousticMatcher}
@@ -2218,8 +2360,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                         </div>
                       </div>
 
-                      {/* Step Actions: Listen Module Mix, Up, Down, Settings, Run, Delete */}
-                      <div className="flex items-center gap-1 shrink-0">
+                      {/* Step Actions: Listen Module Mix, Tracks, Clear, Up, Down, Settings, Run/Abort, Delete */}
+                      <div className="flex items-center gap-1 shrink-0 flex-wrap justify-end">
                         {/* Listen Module Mix */}
                         {step.outputFiles && step.outputFiles.length > 0 && (
                           <button
@@ -2232,7 +2374,44 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                             title="Прослушать в плеере совместный микс всех обработанных этим модулем дорожек"
                           >
                             <Volume2 className="w-3.5 h-3.5 text-purple-300" />
-                            <span>Прослушать модуль ({step.outputFiles.length})</span>
+                            <span>Прослушать ({step.outputFiles.length})</span>
+                          </button>
+                        )}
+
+                        {/* Toggle Step Input Tracks Manager */}
+                        {(() => {
+                          const candidates = step.candidateInputs || manifest?.sourceFiles?.dubberTracks || [];
+                          const activeCount = candidates.filter(t => !t.excluded).length;
+                          const hasExclusions = candidates.some(t => t.excluded) || (step.customInputTracks && step.customInputTracks.length > 0);
+                          const isTracksOpen = expandedTracks[step.stepId] ?? (idx === 0);
+                          return (
+                            <button
+                              onClick={() => setExpandedTracks(prev => ({ ...prev, [step.stepId]: !isTracksOpen }))}
+                              className={`px-2 py-1 rounded text-[11px] font-medium flex items-center gap-1 transition border ${
+                                hasExclusions
+                                  ? 'bg-amber-950/70 text-amber-300 border-amber-700/70'
+                                  : isTracksOpen
+                                    ? 'bg-cyan-950/60 text-cyan-300 border-cyan-700/60'
+                                    : 'bg-neutral-800/80 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
+                              }`}
+                              title="Выбрать, какие дорожки обрабатывать в этом шаге (исключить или добавить дорожку)"
+                            >
+                              <Headphones className="w-3 h-3 text-cyan-400" />
+                              <span>Дорожки ({activeCount}/{candidates.length})</span>
+                            </button>
+                          );
+                        })()}
+
+                        {/* Clear Step Output Files */}
+                        {((step.outputFiles && step.outputFiles.length > 0) || step.status === 'completed' || step.status === 'error') && (
+                          <button
+                            onClick={() => handleClearStep(step.stepId)}
+                            disabled={activeProcessingStepId !== null}
+                            className="px-2 py-1 rounded text-[11px] font-medium flex items-center gap-1 bg-neutral-800/80 hover:bg-red-950/70 text-neutral-300 hover:text-red-300 border border-neutral-700 hover:border-red-800/60 transition disabled:opacity-40"
+                            title="Очистить шаг: удалить все созданные этим шагом дорожки и сбросить статус"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Очистить шаг</span>
                           </button>
                         )}
 
@@ -2283,21 +2462,47 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
 
-                        {/* Run Step */}
-                        <button
-                          onClick={() => handleRunStep(step.stepId)}
-                          disabled={!manifest?.isImported || !step.enabled || activeProcessingStepId !== null}
-                          className="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded text-xs font-medium flex items-center gap-1.5 transition ml-1"
-                        >
-                          {isProcessing ? (
-                            <RefreshCw className="w-3 h-3 animate-spin" />
-                          ) : (
+                        {/* Run Step or Abort Step */}
+                        {isProcessing ? (
+                          <button
+                            onClick={handleAbortProcessing}
+                            className="px-2.5 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-xs font-bold flex items-center gap-1.5 transition ml-1 shadow"
+                            title="Прервать выполнение шага"
+                          >
+                            <XCircle className="w-3.5 h-3.5" />
+                            <span>Стоп</span>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleRunStep(step.stepId)}
+                            disabled={!manifest?.isImported || !step.enabled || activeProcessingStepId !== null}
+                            className="px-2.5 py-1 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded text-xs font-medium flex items-center gap-1.5 transition ml-1"
+                          >
                             <Play className="w-3 h-3 fill-current" />
-                          )}
-                          <span>Шаг</span>
-                        </button>
+                            <span>Шаг</span>
+                          </button>
+                        )}
                       </div>
                     </div>
+
+                    {/* Error Banner if step failed (No Silent Fallback!) */}
+                    {step.status === 'error' && step.error && (
+                      <div className="p-2.5 bg-red-950/50 border border-red-800/80 rounded-lg text-xs text-red-200 flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                          <div>
+                            <span className="font-semibold text-red-300 block">Ошибка выполнения модуля (без скрытого фоллбэка):</span>
+                            <span className="text-[11px] font-mono break-all">{step.error}</span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => handleClearStep(step.stepId)}
+                          className="px-2 py-1 bg-red-900/60 hover:bg-red-800 text-red-200 rounded text-[10px] shrink-0 transition"
+                        >
+                          Сбросить
+                        </button>
+                      </div>
+                    )}
 
                     {/* Progress Bar */}
                     {isProcessing && (
@@ -2306,6 +2511,107 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           className="bg-purple-500 h-full transition-all duration-300"
                           style={{ width: `${stepProgress[step.stepId] || 15}%` }}
                         />
+                      </div>
+                    )}
+
+                    {/* Per-Step Input Tracks Control Panel */}
+                    {(expandedTracks[step.stepId] ?? (idx === 0)) && (
+                      <div className="p-2.5 bg-neutral-950/70 rounded-lg border border-neutral-800/90 space-y-2">
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-[10px] uppercase font-semibold tracking-wider text-cyan-400 flex items-center gap-1.5">
+                            <Headphones className="w-3 h-3" />
+                            <span>Входные дорожки для обработки в этом шаге:</span>
+                          </span>
+                          <div className="flex items-center gap-1.5">
+                            {(step.excludedTrackKeys && step.excludedTrackKeys.length > 0) && (
+                              <button
+                                onClick={() => handleUpdateStepTracks(step.stepId, 'clear_exclusions')}
+                                className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded text-[10px] font-medium transition border border-amber-700/40"
+                              >
+                                Включить все дорожки
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleAddCustomTrackToStep(step.stepId)}
+                              className="px-2 py-0.5 bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-300 rounded text-[10px] font-medium flex items-center gap-1 border border-cyan-800/60 transition"
+                              title="Добавить дополнительный аудиофайл с диска в обработку именно этого шага"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>Добавить дорожку в шаг</span>
+                            </button>
+                          </div>
+                        </div>
+
+                        {(() => {
+                          const candidates = step.candidateInputs || manifest?.sourceFiles?.dubberTracks || [];
+                          if (candidates.length === 0) {
+                            return (
+                              <div className="text-[11px] text-neutral-500 italic py-1">
+                                Нет входных дорожек. Импортируйте файлы звукорежиссера или добавьте дорожку вручную.
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-40 overflow-y-auto pr-1">
+                              {candidates.map((cand, cIdx) => {
+                                const tKey = cand.trackKey || cand.path || cand.name;
+                                const isExcluded = !!cand.excluded;
+                                const isInspecting = selectedAudioTrack?.id === cand.path;
+                                return (
+                                  <div
+                                    key={`${tKey}_${cIdx}`}
+                                    className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] transition ${
+                                      isExcluded
+                                        ? 'bg-neutral-950/40 border-neutral-800/50 text-neutral-500 opacity-60'
+                                        : isInspecting
+                                          ? 'bg-cyan-950/40 border-cyan-600/60 text-cyan-100'
+                                          : 'bg-neutral-900/80 border-neutral-800 text-neutral-200 hover:border-neutral-700'
+                                    }`}
+                                  >
+                                    <label className="flex items-center gap-2 truncate cursor-pointer flex-1">
+                                      <input
+                                        type="checkbox"
+                                        checked={!isExcluded}
+                                        onChange={() => handleUpdateStepTracks(step.stepId, 'toggle_exclude', tKey)}
+                                        className="rounded accent-cyan-500 cursor-pointer shrink-0"
+                                        title={isExcluded ? 'Включить дорожку в обработку этого шага' : 'Исключить дорожку из обработки в этом шаге'}
+                                      />
+                                      <div className="truncate">
+                                        <span className={`font-medium ${isExcluded ? 'line-through text-neutral-500' : 'text-neutral-100'}`}>
+                                          {cand.dubberNick || cand.name}
+                                        </span>
+                                        {cand.sourceLabel && (
+                                          <span className="text-[9px] text-neutral-400 ml-1.5 px-1 py-0.2 bg-neutral-800 rounded">
+                                            {cand.sourceLabel}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </label>
+
+                                    <div className="flex items-center gap-1 shrink-0">
+                                      <button
+                                        onClick={() => selectTrackForInspection(cand, `Вход шага #${idx + 1}: ${cand.dubberNick || cand.name}`, step.stepId)}
+                                        className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-emerald-400 rounded text-[10px] transition"
+                                        title={`Прослушать входную дорожку: ${cand.name}`}
+                                      >
+                                        🎧
+                                      </button>
+                                      {cand.isCustom && (
+                                        <button
+                                          onClick={() => handleUpdateStepTracks(step.stepId, 'remove_custom', cand.path || tKey)}
+                                          className="px-1.5 py-0.5 bg-neutral-800 hover:bg-red-900/70 text-neutral-400 hover:text-red-300 rounded text-[10px] transition"
+                                          title="Удалить добавленную вручную дорожку из этого шага"
+                                        >
+                                          ✕
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })()}
                       </div>
                     )}
 
@@ -2765,7 +3071,18 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                       <div className="bg-neutral-950/40 p-2.5 rounded-lg border border-neutral-800/80 space-y-1.5">
                         <div className="text-[10px] uppercase font-semibold text-neutral-400 flex items-center justify-between">
                           <span>Сохраненные результаты на диске ({step.outputFiles.length}):</span>
-                          <span className="text-emerald-400">✓ Записано на диск</span>
+                          <div className="flex items-center gap-2">
+                            <span className="text-emerald-400">✓ Записано на диск</span>
+                            <button
+                              onClick={() => handleClearStep(step.stepId)}
+                              disabled={activeProcessingStepId !== null}
+                              className="text-[10px] text-red-400 hover:text-red-300 bg-red-950/40 hover:bg-red-900/50 px-2 py-0.5 rounded border border-red-800/40 transition flex items-center gap-1 normal-case font-medium"
+                              title="Удалить все обработанные дорожки этого шага и очистить шаг"
+                            >
+                              <Trash2 className="w-2.5 h-2.5" />
+                              <span>Удалить все дорожки шага</span>
+                            </button>
+                          </div>
                         </div>
                         <div className="flex flex-wrap gap-1.5 pt-0.5">
                           {/* Full Module Mix Option */}
@@ -2788,23 +3105,39 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           {step.outputFiles.map((of, oIdx) => {
                             const isSelected = selectedAudioTrack?.id === of.path;
                             return (
-                              <button
+                              <div
                                 key={oIdx}
-                                onClick={() => selectTrackForInspection(of, `${meta?.title || step.moduleId}: ${of.name}`, step.stepId)}
-                                className={`px-2 py-1 rounded text-[11px] font-mono flex items-center gap-1 border transition ${
+                                className={`rounded text-[11px] font-mono flex items-center border transition overflow-hidden ${
                                   isSelected
                                     ? 'bg-purple-600/30 border-purple-500 text-purple-200 shadow-sm'
                                     : 'bg-neutral-800/60 border-neutral-700/60 text-neutral-300 hover:border-neutral-500'
                                 }`}
                               >
-                                {of.name.endsWith('.mp4') ? (
-                                  <Film className="w-3 h-3 text-purple-400" />
-                                ) : (
-                                  <FileAudio className="w-3 h-3 text-purple-400" />
-                                )}
-                                <span className="truncate max-w-[200px]">{of.name}</span>
-                                <span className="text-[10px] text-emerald-400 ml-1">🎧</span>
-                              </button>
+                                <button
+                                  onClick={() => selectTrackForInspection(of, `${meta?.title || step.moduleId}: ${of.name}`, step.stepId)}
+                                  className="px-2 py-1 flex items-center gap-1 text-left"
+                                  title={`Прослушать: ${of.name}`}
+                                >
+                                  {of.name.endsWith('.mp4') ? (
+                                    <Film className="w-3 h-3 text-purple-400" />
+                                  ) : (
+                                    <FileAudio className="w-3 h-3 text-purple-400" />
+                                  )}
+                                  <span className="truncate max-w-[180px]">{of.name}</span>
+                                  <span className="text-[10px] text-emerald-400 ml-1">🎧</span>
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleClearStep(step.stepId, of.path);
+                                  }}
+                                  disabled={activeProcessingStepId !== null}
+                                  className="px-1.5 py-1 text-[10px] text-neutral-500 hover:text-red-300 hover:bg-red-950/60 border-l border-neutral-700/60 transition"
+                                  title={`Удалить эту дорожку (${of.name}) из результатов шага`}
+                                >
+                                  ✕
+                                </button>
+                              </div>
                             );
                           })}
                         </div>
@@ -3553,24 +3886,33 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             <div className="space-y-2.5 max-h-[60vh] overflow-y-auto pr-1">
               {moduleDatabase.map((modDef) => {
                 const isUltimate = (modDef as any).isUltimate || ['voice_master_strip', 'ultimate_denoiser', 'ultimate_dereverb', 'ultimate_separation', 'ultimate_loudness'].includes(modDef.id);
+                const isStandaloneFfmpeg = modDef.id.startsWith('ffmpeg_');
                 return (
                   <div
                     key={modDef.id}
                     className={`p-3.5 border rounded-xl flex items-center justify-between gap-3 transition ${
                       isUltimate 
                         ? 'bg-purple-950/30 hover:bg-purple-900/40 border-purple-800/70 shadow-md'
-                        : 'bg-neutral-950/60 hover:bg-neutral-800/60 border-neutral-800'
+                        : isStandaloneFfmpeg
+                          ? 'bg-cyan-950/25 hover:bg-cyan-900/35 border-cyan-800/60'
+                          : 'bg-neutral-950/60 hover:bg-neutral-800/60 border-neutral-800'
                     }`}
                   >
                     <div className="space-y-1 truncate">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         {isUltimate && (
                           <span className="text-[9px] font-bold px-1.5 py-0.5 bg-amber-500/20 text-amber-300 rounded border border-amber-500/40 tracking-wider uppercase flex items-center gap-1">
                             <Sparkles className="w-2.5 h-2.5" />
                             <span>All-In-One</span>
                           </span>
                         )}
-                        <span className={`text-xs font-semibold ${isUltimate ? 'text-purple-200' : 'text-neutral-100'}`}>
+                        {isStandaloneFfmpeg && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 bg-cyan-500/20 text-cyan-300 rounded border border-cyan-500/40 tracking-wider uppercase flex items-center gap-1">
+                            <Zap className="w-2.5 h-2.5" />
+                            <span>FFmpeg Модуль</span>
+                          </span>
+                        )}
+                        <span className={`text-xs font-semibold ${isUltimate ? 'text-purple-200' : isStandaloneFfmpeg ? 'text-cyan-200' : 'text-neutral-100'}`}>
                           {modDef.name || modDef.title}
                         </span>
                         <span className="text-[10px] px-1.5 py-0.2 bg-neutral-800 text-purple-300 font-mono rounded border border-neutral-700">
@@ -3601,7 +3943,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                     <button
                       onClick={() => handleAddModuleFromDatabase(modDef)}
                       className={`px-3 py-1.5 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shrink-0 transition ${
-                        isUltimate ? 'bg-purple-600 hover:bg-purple-500 font-bold shadow-sm' : 'bg-neutral-800 hover:bg-neutral-700'
+                        isUltimate ? 'bg-purple-600 hover:bg-purple-500 font-bold shadow-sm' : isStandaloneFfmpeg ? 'bg-cyan-700 hover:bg-cyan-600 font-semibold' : 'bg-neutral-800 hover:bg-neutral-700'
                       }`}
                     >
                       <Plus className="w-3.5 h-3.5" />
@@ -3970,84 +4312,45 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         </div>
       )}
 
-      {/* Modal: Acoustic Original Profile & Voice Matcher */}
+      {/* Modal: Acoustic Original Effect & Automation Matcher */}
       {isAcousticMatchModalOpen && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-neutral-900 border border-sky-800/60 rounded-2xl w-full max-w-3xl p-6 space-y-5 shadow-2xl my-8">
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-neutral-800 pb-3">
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-emerald-500/40 rounded-2xl w-full max-w-5xl overflow-hidden shadow-2xl flex flex-col max-h-[94vh]">
+            <div className="px-6 py-4 border-b border-neutral-800 flex items-center justify-between bg-gradient-to-r from-emerald-950/50 via-teal-950/30 to-neutral-900">
               <div className="flex items-center gap-3">
-                <div className="p-2.5 bg-sky-600/20 text-sky-400 rounded-xl border border-sky-500/30">
-                  <Activity className="w-6 h-6" />
+                <div className="p-2.5 bg-emerald-600/20 text-emerald-400 rounded-xl border border-emerald-500/30">
+                  <Activity className="w-5 h-5" />
                 </div>
                 <div>
-                  <h2 className="text-base font-bold text-neutral-100 flex items-center gap-2">
-                    <span>3 Акустических слепка оригинала и автосопоставление</span>
-                    <span className="px-2 py-0.5 rounded-full bg-sky-950 text-sky-300 border border-sky-800/60 text-[10px] font-semibold uppercase">
-                      QA-Pro Matcher
+                  <h2 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>Повторение эффектов оригинала по кривой автоматизации</span>
+                    <span className="text-[10px] px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-full font-mono">
+                      acoustic_matched v2.0 • 100ms Automation DSP
                     </span>
                   </h2>
                   <p className="text-xs text-neutral-400">
-                    Прием чистого вокала оригинала → снятие 3-х слепков (Громкость, Реверб, EQ) → идеальное приведение нашего дубляжа
+                    Строгий контроль 2-х входов (разделенный вокал оригинала + склеенная дорожка всех голосов), пофразовый детектор эффектов и автоматизация в каждый момент времени
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setIsAcousticMatchModalOpen(false)}
-                className="text-neutral-400 hover:text-white p-1 rounded-lg hover:bg-neutral-800 transition"
+                className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 transition"
               >
-                ✕
+                <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Step 1: Pre-separated Original Vocal Detection */}
-            <div className="space-y-2">
-              <div className="text-xs font-semibold text-neutral-200 flex items-center justify-between">
-                <span>1. Исходный вокал оригинала (Demucs / UVR)</span>
-                {origVocalsPath && (
-                  <span className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" /> Файл готов
-                  </span>
-                )}
-              </div>
-
-              {origVocalsPath ? (
-                <div className="p-3 bg-emerald-950/30 border border-emerald-800/50 rounded-xl flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <FileAudio className="w-5 h-5 text-emerald-400 shrink-0" />
-                    <div className="min-w-0">
-                      <div className="text-xs font-medium text-emerald-200 truncate">
-                        {origVocalsPath.split(/[/\\]/).pop()}
-                      </div>
-                      <div className="text-[10px] text-neutral-400 font-mono truncate">
-                        {origVocalsPath}
-                      </div>
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => runAnalyzeOriginalAcoustics(origVocalsPath)}
-                    disabled={isAnalyzingAcoustics}
-                    className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition shrink-0 shadow"
-                  >
-                    {isAnalyzingAcoustics ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
-                    <span>{acousticProfile ? 'Переснять слепки' : 'Снять 3 слепка'}</span>
-                  </button>
-                </div>
-              ) : (
-                <div className="p-4 bg-red-950/60 border border-red-800/80 rounded-xl space-y-3">
-                  <div className="flex items-start gap-3 text-red-300">
-                    <AlertTriangle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-                    <div className="space-y-1">
-                      <div className="text-xs font-bold text-red-200">
-                        Ошибка: Не найдена заранее разделенная дорожка голосов оригинала!
-                      </div>
-                      <p className="text-[11px] text-red-300/90 leading-relaxed">
-                        Модуль требует предварительно разделенный вокал оригинала без музыки и шума (Demucs / UVR).
-                        Выполните шаг <span className="font-semibold text-white">«Разделение стемов Demucs/UVR»</span> в конвейере или выберите файл <code className="bg-red-900/50 px-1 py-0.5 rounded text-red-200 font-mono">original_vocals.wav</code> вручную.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-end gap-2 pt-2 border-t border-red-900/50">
+            <div className="p-6 overflow-y-auto space-y-5 flex-1">
+              {/* Блок 1: Строгая двухэтапная проверка входных дорожек */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Вход №1: Разделенная вокальная дорожка оригинала */}
+                <div className={`p-4 rounded-xl border ${origVocalsError ? 'bg-red-950/25 border-red-500/50' : 'bg-emerald-950/15 border-emerald-500/30'} space-y-2.5`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 text-emerald-300">
+                      <Volume2 className="w-4 h-4" />
+                      1. Вокальная дорожка оригинала (Stem Vocals)
+                    </span>
                     <button
                       onClick={async () => {
                         try {
@@ -4059,198 +4362,427 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           }
                         } catch (e) {}
                       }}
-                      className="px-3 py-1.5 bg-red-900/60 hover:bg-red-800 text-red-200 rounded-lg text-xs font-medium flex items-center gap-1.5 transition border border-red-700/60"
+                      className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-[11px] font-medium border border-neutral-700 transition flex items-center gap-1"
                     >
-                      <FolderOpen className="w-3.5 h-3.5" />
-                      <span>Указать файл вокала вручную...</span>
+                      <FolderOpen className="w-3 h-3" />
+                      <span>Выбрать 01_vocals.wav...</span>
                     </button>
+                  </div>
+
+                  {origVocalsError ? (
+                    <div className="text-xs text-red-300 bg-red-950/50 p-3 rounded-lg border border-red-500/30 whitespace-pre-line leading-relaxed">
+                      {origVocalsError}
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between bg-neutral-950 px-3 py-2 rounded-lg border border-emerald-500/30">
+                        <span className="text-xs font-mono text-emerald-300 truncate" title={origVocalsPath}>
+                          ✓ {origVocalsPath || 'Ожидание...'}
+                        </span>
+                        {origVocalsPath && (
+                          <button
+                            onClick={() => runAnalyzeOriginalAcoustics(origVocalsPath)}
+                            disabled={isAnalyzingAcoustics}
+                            className="ml-2 px-2 py-0.5 bg-emerald-600/20 hover:bg-emerald-600/40 text-emerald-300 rounded text-[10px] border border-emerald-500/30 shrink-0 transition"
+                          >
+                            Переанализировать
+                          </button>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-neutral-400">
+                        Проверка пройдена: исходное аудио из видео разделено на стемы, выделен чистый вокал оригинала.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Вход №2: Склеенная дорожка всех голосов дабберов */}
+                <div className={`p-4 rounded-xl border ${ourVocalsError ? 'bg-red-950/25 border-red-500/50' : 'bg-purple-950/15 border-purple-500/30'} space-y-2.5`}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 text-purple-300">
+                      <Sliders className="w-4 h-4" />
+                      2. Склеенная дорожка всех голосов (voices_master)
+                    </span>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const res = await ipcSafe.invoke('mixing-select-external-files', { type: 'audio' });
+                          if (!res.canceled && res.filePaths?.[0]) {
+                            setOurVocalsPath(res.filePaths[0]);
+                            setOurVocalsError(null);
+                          }
+                        } catch (e) {}
+                      }}
+                      className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-[11px] font-medium border border-neutral-700 transition flex items-center gap-1"
+                    >
+                      <FolderOpen className="w-3 h-3" />
+                      <span>Выбрать voices_master.wav...</span>
+                    </button>
+                  </div>
+
+                  {ourVocalsError ? (
+                    <div className="text-xs text-red-300 bg-red-950/50 p-3 rounded-lg border border-red-500/30 whitespace-pre-line leading-relaxed">
+                      {ourVocalsError}
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between bg-neutral-950 px-3 py-2 rounded-lg border border-purple-500/30">
+                        <span className="text-xs font-mono text-purple-300 truncate" title={ourVocalsPath}>
+                          ✓ {ourVocalsPath || 'Не выбрана'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-neutral-400">
+                        Проверка пройдена: все голоса дабберов склеены в единую мастер-дорожку для синхронной автоматизации.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Блок 2: Результаты полного пофразового и покадрового анализа эффектов оригинала */}
+              {isAnalyzingAcoustics ? (
+                <div className="p-8 bg-neutral-950 rounded-xl border border-neutral-800 flex flex-col items-center justify-center gap-3">
+                  <RefreshCw className="w-7 h-7 text-emerald-400 animate-spin" />
+                  <span className="text-sm text-neutral-200 font-medium">
+                    Выполняется полный физический пофразовый и покадровый (100 мс) анализ эффектов вокала оригинала...
+                  </span>
+                  <span className="text-xs text-neutral-500">
+                    Измерение телефонных/радио полосовых фильтров, эффекта «за стеной», RT60 реверберации, времени эха/дилэя, стерео-панорамы, перегруза и кривой громкости
+                  </span>
+                </div>
+              ) : acousticProfile ? (
+                <div className="space-y-4">
+                  {/* Верхние карточки сводной статистики */}
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <div className="p-3.5 bg-neutral-950 rounded-xl border border-neutral-800 space-y-1.5">
+                      <div className="text-[11px] font-bold text-amber-400 uppercase flex items-center justify-between">
+                        <span>1. Динамика и Фразы</span>
+                        <span className="font-mono text-xs bg-amber-500/10 px-1.5 py-0.5 rounded border border-amber-500/20">
+                          {acousticProfile.phrasesCount || 0} фраз
+                        </span>
+                      </div>
+                      <div className="text-xs text-neutral-300 space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Средний уровень:</span>
+                          <span className="font-mono font-semibold text-white">{acousticProfile.overallStats?.integratedLufs} LUFS</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Пик / LRA:</span>
+                          <span className="font-mono text-neutral-200">{acousticProfile.overallStats?.truePeakDb} dBTP / {acousticProfile.overallStats?.loudnessRangeLu} LU</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Точек автоматизации:</span>
+                          <span className="font-mono text-emerald-400">{acousticProfile.framesCount || 0} (шаг 100 мс)</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 bg-neutral-950 rounded-xl border border-neutral-800 space-y-1.5">
+                      <div className="text-[11px] font-bold text-cyan-400 uppercase flex items-center justify-between">
+                        <span>2. Пространство и Эхо</span>
+                        <span className="font-mono text-xs bg-cyan-500/10 px-1.5 py-0.5 rounded border border-cyan-500/20">
+                          RT60 {acousticProfile.overallStats?.avgReverbRt60}c
+                        </span>
+                      </div>
+                      <div className="text-xs text-neutral-300 space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Базовая среда:</span>
+                          <span className="font-medium text-cyan-200 truncate max-w-[130px]">{acousticProfile.overallStats?.reverbCategory}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Фраз с ревербом:</span>
+                          <span className="font-mono text-white">{acousticProfile.overallStats?.effectCounts?.reverb_space || 0} шт.</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Фраз с эхом/дилэем:</span>
+                          <span className="font-mono text-cyan-300">{acousticProfile.overallStats?.effectCounts?.echo_delay || 0} шт.</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 bg-neutral-950 rounded-xl border border-neutral-800 space-y-1.5">
+                      <div className="text-[11px] font-bold text-purple-400 uppercase flex items-center justify-between">
+                        <span>3. Фильтры и Спецэффекты</span>
+                        <span className="font-mono text-xs bg-purple-500/10 px-1.5 py-0.5 rounded border border-purple-500/20">
+                          {acousticProfile.overallStats?.phrasesWithSpecialEffects || 0} спецфраз
+                        </span>
+                      </div>
+                      <div className="text-xs text-neutral-300 space-y-1">
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Телефон / Рация:</span>
+                          <span className="font-mono text-amber-300">{acousticProfile.overallStats?.effectCounts?.telephone || 0} фраз</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">За стеной / Издали:</span>
+                          <span className="font-mono text-orange-300">{acousticProfile.overallStats?.effectCounts?.muffled_wall || 0} фраз</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-neutral-500">Панорама / Перегруз:</span>
+                          <span className="font-mono text-pink-300">
+                            {(acousticProfile.overallStats?.effectCounts?.stereo_pan || 0) + (acousticProfile.overallStats?.effectCounts?.stereo_wide || 0)} / {acousticProfile.overallStats?.effectCounts?.megaphone_dist || 0}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 bg-neutral-950 rounded-xl border border-neutral-800 space-y-1.5">
+                      <div className="text-[11px] font-bold text-emerald-400 uppercase flex items-center justify-between">
+                        <span>4. 6-Полосный Спектр</span>
+                        <span className="font-mono text-[10px] text-neutral-400">Оригинал</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px] font-mono text-neutral-300">
+                        <div>Sub: <span className="text-white">{acousticProfile.overallStats?.spectralBandsDb?.lowCut100Hz}dB</span></div>
+                        <div>Body: <span className="text-white">{acousticProfile.overallStats?.spectralBandsDb?.warmth250Hz}dB</span></div>
+                        <div>Box: <span className="text-white">{acousticProfile.overallStats?.spectralBandsDb?.boxiness500Hz}dB</span></div>
+                        <div>Mid: <span className="text-white">{acousticProfile.overallStats?.spectralBandsDb?.nasal1200Hz}dB</span></div>
+                        <div>Pres: <span className="text-emerald-300">{acousticProfile.overallStats?.spectralBandsDb?.presence3500Hz}dB</span></div>
+                        <div>Air: <span className="text-cyan-300">{acousticProfile.overallStats?.spectralBandsDb?.air10000Hz}dB</span></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Интерактивный пофразовый инспектор обнаруженных эффектов (как при ручном прослушивании) */}
+                  {Array.isArray(acousticProfile.phrases) && acousticProfile.phrases.length > 0 && (
+                    <div className="bg-neutral-950 rounded-xl border border-neutral-800 overflow-hidden">
+                      <div className="px-4 py-2.5 bg-neutral-900/90 border-b border-neutral-800 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-bold text-neutral-200">
+                            Пофразовая карта эффектов оригинала ({acousticProfile.phrases.length} фраз)
+                          </span>
+                          <span className="text-[11px] text-neutral-400">
+                            — нажмите на таймкод фразы для мгновенного прослушивания в плеере
+                          </span>
+                        </div>
+
+                        {/* Фильтры по типам обнаруженных эффектов */}
+                        <div className="flex flex-wrap items-center gap-1">
+                          {[
+                            { id: 'all', label: `Все (${acousticProfile.phrases.length})` },
+                            { id: 'special', label: `Со спецэффектами (${acousticProfile.overallStats?.phrasesWithSpecialEffects || 0})` },
+                            { id: 'telephone', label: `📞 Телефон/Рация (${acousticProfile.overallStats?.effectCounts?.telephone || 0})` },
+                            { id: 'muffled_wall', label: `🚪 За стеной (${acousticProfile.overallStats?.effectCounts?.muffled_wall || 0})` },
+                            { id: 'reverb_space', label: `🏛 Реверб (${acousticProfile.overallStats?.effectCounts?.reverb_space || 0})` },
+                            { id: 'echo_delay', label: `🌀 Эхо (${acousticProfile.overallStats?.effectCounts?.echo_delay || 0})` }
+                          ].map(tab => (
+                            <button
+                              key={tab.id}
+                              onClick={() => setSelectedEffectFilter(tab.id)}
+                              className={`px-2 py-0.5 rounded text-[10px] font-medium transition border ${
+                                selectedEffectFilter === tab.id
+                                  ? 'bg-emerald-600/30 text-emerald-200 border-emerald-500/50'
+                                  : 'bg-neutral-800/70 text-neutral-400 border-neutral-700/60 hover:text-neutral-200'
+                              }`}
+                            >
+                              {tab.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="max-h-56 overflow-y-auto divide-y divide-neutral-800/60">
+                        {acousticProfile.phrases
+                          .filter((ph: any) => {
+                            if (selectedEffectFilter === 'all') return true;
+                            if (selectedEffectFilter === 'special') {
+                              return Array.isArray(ph.detectedEffects) && ph.detectedEffects.some((e: string) => e !== 'clean_studio');
+                            }
+                            return Array.isArray(ph.detectedEffects) && ph.detectedEffects.includes(selectedEffectFilter);
+                          })
+                          .map((ph: any) => {
+                            const hasSpecial = Array.isArray(ph.detectedEffects) && ph.detectedEffects.some((e: string) => e !== 'clean_studio');
+                            return (
+                              <div
+                                key={ph.index}
+                                className={`px-4 py-2 flex flex-wrap items-center justify-between gap-2 text-xs hover:bg-neutral-900/60 transition ${
+                                  hasSpecial ? 'bg-emerald-950/10' : ''
+                                }`}
+                              >
+                                <div className="flex items-center gap-2.5 min-w-[190px]">
+                                  <span className="text-[10px] font-mono text-neutral-500 w-7">#{ph.index}</span>
+                                  <button
+                                    onClick={() => {
+                                      if (videoRef.current) {
+                                        videoRef.current.currentTime = ph.startSec;
+                                      }
+                                      if (trackAudioRef.current) {
+                                        trackAudioRef.current.currentTime = ph.startSec;
+                                      }
+                                      setCurrentTime(ph.startSec);
+                                      toast.info(`Плеер перемотан на фразу #${ph.index} (${ph.startFormatted})`);
+                                    }}
+                                    className="px-2 py-0.5 bg-neutral-800 hover:bg-emerald-700/40 text-emerald-300 rounded font-mono text-[11px] border border-neutral-700 hover:border-emerald-500/40 transition flex items-center gap-1"
+                                    title="Перемотать плеер на эту фразу"
+                                  >
+                                    <Play className="w-2.5 h-2.5 fill-current" />
+                                    <span>{ph.startFormatted} – {ph.endFormatted}</span>
+                                  </button>
+                                </div>
+
+                                {/* Бейджи обнаруженных эффектов на фразе */}
+                                <div className="flex flex-wrap items-center gap-1 flex-1">
+                                  {(ph.detectedEffectLabels || []).map((lbl: string, idx: number) => {
+                                    const code = ph.detectedEffects?.[idx] || 'clean_studio';
+                                    const badgeColor =
+                                      code === 'telephone'
+                                        ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                                        : code === 'muffled_wall'
+                                        ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
+                                        : code === 'reverb_space'
+                                        ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
+                                        : code === 'echo_delay'
+                                        ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                                        : code === 'megaphone_dist'
+                                        ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                                        : code === 'stereo_pan' || code === 'stereo_wide'
+                                        ? 'bg-pink-500/20 text-pink-300 border-pink-500/40'
+                                        : code === 'whisper_intimate' || code === 'shout_intense'
+                                        ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
+                                        : 'bg-neutral-800 text-neutral-400 border-neutral-700';
+                                    return (
+                                      <span
+                                        key={idx}
+                                        className={`px-2 py-0.5 rounded-md text-[10px] font-medium border ${badgeColor}`}
+                                      >
+                                        {lbl}
+                                      </span>
+                                    );
+                                  })}
+                                </div>
+
+                                {/* Точные физические параметры автоматизации для этой фразы */}
+                                <div className="flex flex-wrap items-center gap-3 text-[11px] font-mono text-neutral-400">
+                                  <span title="Целевая громкость фразы">
+                                    LUFS: <strong className="text-neutral-200">{ph.loudnessLufs}</strong>
+                                  </span>
+                                  <span title="Полоса пропускания динамических фильтров (HPF .. LPF)">
+                                    Фильтр: <strong className="text-amber-300">{ph.hpfCutoffHz}..{ph.lpfCutoffHz} Гц</strong>
+                                  </span>
+                                  <span title="Время затухания реверберации RT60 и доля Wet">
+                                    Rev: <strong className="text-cyan-300">{ph.reverbRt60Sec}с ({Math.round((ph.reverbWetMix || 0) * 100)}%)</strong>
+                                  </span>
+                                  {ph.echoWetMix > 0.04 && (
+                                    <span title="Задержка эха/дилэя и уровень повторов">
+                                      Echo: <strong className="text-sky-300">{ph.echoDelayMs}мс ({Math.round(ph.echoWetMix * 100)}%)</strong>
+                                    </span>
+                                  )}
+                                  {(Math.abs(ph.pan || 0) > 0.12 || (ph.stereoWidth || 1) > 1.2) && (
+                                    <span title="Стерео-панорама и ширина">
+                                      Pan: <strong className="text-pink-300">{ph.pan > 0 ? `R${Math.round(ph.pan * 100)}` : ph.pan < 0 ? `L${Math.round(Math.abs(ph.pan) * 100)}` : 'C'} (W:{ph.stereoWidth}x)</strong>
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : null}
+
+              {/* Блок 3: Регуляторы глубины кривых автоматизации */}
+              <div className="p-4 bg-neutral-950 rounded-xl border border-neutral-800 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-bold text-neutral-200 uppercase tracking-wider">
+                    Настройка кривых автоматизации обработчиков (Time-Varying Automation Curves)
+                  </div>
+                  <span className="text-[11px] text-emerald-400 font-mono">
+                    Плавная интерполяция каждые 100 мс без щелчков
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-neutral-400">1. Автоматизация громкости, экспрессии и стерео-панорамы:</span>
+                      <span className="font-mono text-amber-400 font-bold">{loudnessStrength}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={loudnessStrength}
+                      onChange={e => setLoudnessStrength(Number(e.target.value))}
+                      className="w-full accent-amber-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-neutral-400">2. Автоматизация пространства (FDN-Реверберация + Stereo Slapback/Delay):</span>
+                      <span className="font-mono text-cyan-400 font-bold">{reverbStrength}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={reverbStrength}
+                      onChange={e => setReverbStrength(Number(e.target.value))}
+                      className="w-full accent-cyan-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-neutral-400">3. Автоматизация фильтров (Телефон / Рация / За стеной / 6-полосный EQ / Перегруз):</span>
+                      <span className="font-mono text-purple-400 font-bold">{eqStrength}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={eqStrength}
+                      onChange={e => setEqStrength(Number(e.target.value))}
+                      className="w-full accent-purple-500"
+                    />
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-neutral-400">Смещение целевой громкости голосов относительно оригинала:</span>
+                      <span className="font-mono text-emerald-400 font-bold">{targetLufsOffset > 0 ? `+${targetLufsOffset}` : targetLufsOffset} dB</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={-6}
+                      max={6}
+                      step={0.5}
+                      value={targetLufsOffset}
+                      onChange={e => setTargetLufsOffset(Number(e.target.value))}
+                      className="w-full accent-emerald-500"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Отчет о примененной автоматизации */}
+              {acousticMatchResult && (
+                <div className="p-4 bg-emerald-950/30 border border-emerald-500/40 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-300">
+                      ✓ Кривые автоматизации эффектов успешно наложены на склеенную дорожку голосов!
+                    </span>
+                    <span className="text-[11px] font-mono text-emerald-400">
+                      {acousticMatchResult.outputPath}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-neutral-300 font-mono">
+                    <div>Точек кривой: {acousticMatchResult.appliedParameters?.loudnessEnvelope?.automationPointsCount || 0}</div>
+                    <div>Базовый Gain: {acousticMatchResult.appliedParameters?.loudnessEnvelope?.gainDeltaDb > 0 ? '+' : ''}{acousticMatchResult.appliedParameters?.loudnessEnvelope?.gainDeltaDb} dB</div>
+                    <div>Фраз со спецэффектами: {acousticMatchResult.appliedParameters?.detectedEffectsSummary?.phrasesWithSpecialEffects || 0}</div>
+                    <div>Категория среды: {acousticMatchResult.appliedParameters?.reverbSpace?.originalCategory}</div>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Step 2: Display 3 Acoustic Snapshots Visualizer */}
-            {acousticProfile && (
-              <div className="space-y-3 bg-neutral-950/80 border border-neutral-800 rounded-xl p-4">
-                <div className="flex items-center justify-between border-b border-neutral-800 pb-2">
-                  <span className="text-xs font-bold text-neutral-200 flex items-center gap-2">
-                    <Activity className="w-4 h-4 text-sky-400" />
-                    <span>3 Слепка Акустики Оригинала:</span>
-                  </span>
-                  <span className="text-[11px] text-neutral-400">
-                    Длительность: {acousticProfile.durationSec}s | Фраз: {acousticProfile.phraseSnapshots?.length || 0}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  {/* Слепок 1: Громкость */}
-                  <div className="bg-neutral-900 p-3 rounded-lg border border-neutral-800 space-y-2">
-                    <div className="flex items-center justify-between text-xs font-semibold text-amber-300">
-                      <span className="flex items-center gap-1.5">
-                        <Volume2 className="w-3.5 h-3.5 text-amber-400" />
-                        <span>1. Громкость</span>
-                      </span>
-                      <span className="font-mono text-[11px]">{acousticProfile.overallStats.integratedLufs} LUFS</span>
-                    </div>
-                    <div className="space-y-1 text-[11px] text-neutral-300">
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Speech RMS:</span>
-                        <span className="font-mono">{acousticProfile.overallStats.speechRmsDb} dB</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">True Peak:</span>
-                        <span className="font-mono">{acousticProfile.overallStats.peakDb} dB</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Динамика (LRA):</span>
-                        <span className="font-mono">{acousticProfile.overallStats.loudnessRangeDb} LU</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Слепок 2: Реверберация */}
-                  <div className="bg-neutral-900 p-3 rounded-lg border border-neutral-800 space-y-2">
-                    <div className="flex items-center justify-between text-xs font-semibold text-sky-300">
-                      <span className="flex items-center gap-1.5">
-                        <Radio className="w-3.5 h-3.5 text-sky-400" />
-                        <span>2. Ревербер.</span>
-                      </span>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-950 text-sky-300 font-medium">
-                        {acousticProfile.overallStats.reverbCategory}
-                      </span>
-                    </div>
-                    <div className="space-y-1 text-[11px] text-neutral-300">
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Room Size:</span>
-                        <span className="font-mono">{Math.round(acousticProfile.overallStats.estimatedRoomSize * 100)}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Wet/Dry Ratio:</span>
-                        <span className="font-mono">{Math.round(acousticProfile.overallStats.wetDryRatio * 100)}%</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Прямой/Эхо (DRR):</span>
-                        <span className="font-mono">12.5 dB</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Слепок 3: Эквализация */}
-                  <div className="bg-neutral-900 p-3 rounded-lg border border-neutral-800 space-y-2">
-                    <div className="flex items-center justify-between text-xs font-semibold text-purple-300">
-                      <span className="flex items-center gap-1.5">
-                        <Sliders className="w-3.5 h-3.5 text-purple-400" />
-                        <span>3. Эквализация</span>
-                      </span>
-                      <span className="font-mono text-[11px]">{acousticProfile.overallStats.spectralCentroidHz} Hz</span>
-                    </div>
-                    <div className="space-y-1 text-[11px] text-neutral-300">
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Презенс (2.8 kHz):</span>
-                        <span className="font-mono text-emerald-400">+2.0 dB</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Воздух (8 kHz+):</span>
-                        <span className="font-mono text-emerald-400">+1.5 dB</span>
-                      </div>
-                      <div className="flex justify-between">
-                        <span className="text-neutral-400">Спектр. наклон:</span>
-                        <span className="font-mono">-4.5 dB/oct</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Step 3: Our Dubbing Track & Match Controls */}
-            <div className="space-y-4 bg-neutral-950/60 p-4 rounded-xl border border-neutral-800">
-              <div className="text-xs font-semibold text-neutral-200 border-b border-neutral-800 pb-2 flex items-center justify-between">
-                <span>2. Приведение нашей голосовой дорожки дубляжа:</span>
-                {ourVocalsPath && (
-                  <span className="text-[11px] text-neutral-400 font-mono truncate max-w-xs">
-                    {ourVocalsPath.split(/[/\\]/).pop()}
-                  </span>
-                )}
-              </div>
-
-              {/* Sliders */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                {/* Loudness Strength */}
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-neutral-300 font-medium">
-                    <span>Сила приведения Громкости:</span>
-                    <span className="text-amber-400 font-mono font-bold">{loudnessStrength}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={loudnessStrength}
-                    onChange={e => setLoudnessStrength(Number(e.target.value))}
-                    className="w-full accent-amber-500 bg-neutral-800 h-1.5 rounded-lg cursor-pointer"
-                  />
-                  <p className="text-[10px] text-neutral-500">Точная автоподгонка LUFS/RMS каждой фразы</p>
-                </div>
-
-                {/* Reverb Strength */}
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-neutral-300 font-medium">
-                    <span>Сила приведения Реверба:</span>
-                    <span className="text-sky-400 font-mono font-bold">{reverbStrength}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={reverbStrength}
-                    onChange={e => setReverbStrength(Number(e.target.value))}
-                    className="w-full accent-sky-500 bg-neutral-800 h-1.5 rounded-lg cursor-pointer"
-                  />
-                  <p className="text-[10px] text-neutral-500">Воссоздание объёма помещения и хвостов эха</p>
-                </div>
-
-                {/* EQ Strength */}
-                <div className="space-y-1.5">
-                  <div className="flex justify-between text-neutral-300 font-medium">
-                    <span>Сила приведения EQ:</span>
-                    <span className="text-purple-400 font-mono font-bold">{eqStrength}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={eqStrength}
-                    onChange={e => setEqStrength(Number(e.target.value))}
-                    className="w-full accent-purple-500 bg-neutral-800 h-1.5 rounded-lg cursor-pointer"
-                  />
-                  <p className="text-[10px] text-neutral-500">Многополосная подгонка частотного баланса</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Result Report */}
-            {acousticMatchResult && (
-              <div className="p-3.5 bg-sky-950/40 border border-sky-800/60 rounded-xl space-y-1 text-xs">
-                <div className="font-bold text-sky-200 flex items-center gap-1.5">
-                  <CheckCircle2 className="w-4 h-4 text-sky-400" />
-                  <span>Успешно приведено к слепкам оригинала!</span>
-                </div>
-                <div className="text-[11px] text-sky-300/90 font-mono break-all">
-                  Выходной файл: {acousticMatchResult.outputPath}
-                </div>
-              </div>
-            )}
-
-            {/* Modal Actions */}
-            <div className="flex items-center justify-between pt-3 border-t border-neutral-800">
+            <div className="px-6 py-4 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between gap-3">
               <button
                 onClick={handleAddAcousticModuleToPipeline}
-                className="px-3.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 rounded-xl text-xs font-medium flex items-center gap-2 transition"
-                title="Добавить шагом в автоматический конвейер сведения"
+                className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-emerald-300 rounded-xl text-xs font-semibold border border-emerald-500/30 flex items-center gap-2 transition"
               >
-                <Plus className="w-4 h-4 text-emerald-400" />
-                <span>Добавить модуль в конвейер</span>
+                <Plus className="w-4 h-4" />
+                <span>Добавить шаг «acoustic_matched» в конвейер сведения</span>
               </button>
 
               <div className="flex items-center gap-2.5">
@@ -4260,14 +4792,22 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 >
                   Закрыть
                 </button>
-
                 <button
                   onClick={handleApplyAcousticProfileMatch}
-                  disabled={isApplyingAcousticMatch || !origVocalsPath || !ourVocalsPath}
-                  className="px-5 py-2 bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white rounded-xl text-xs font-bold flex items-center gap-2 transition shadow-lg shadow-sky-900/30"
+                  disabled={isApplyingAcousticMatch || !origVocalsPath || !ourVocalsPath || !!origVocalsError || !!ourVocalsError}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 transition shadow-lg shadow-emerald-900/30"
                 >
-                  {isApplyingAcousticMatch ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
-                  <span>Привести наш дубляж к оригиналу</span>
+                  {isApplyingAcousticMatch ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Рендеринг кривых автоматизации...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Наложить эффекты по кривой автоматизации сейчас</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>

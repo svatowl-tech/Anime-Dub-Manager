@@ -42,13 +42,17 @@ function registerAudioAnalysisHandlers() {
     return await AudioAnalysisService.getTimingAnalysis(episodeDir);
   }));
 
-  ipcMain.handle('audio-find-original-vocals', wrapIpcHandler(async (event, { searchDirs = [], manifest = null, ourVocalsPath = null }) => {
-    return AudioAnalysisService.findOriginalVocalsTrack(searchDirs, manifest, ourVocalsPath);
+  ipcMain.handle('audio-find-original-vocals', wrapIpcHandler(async (event, { searchDirs = [], manifest = null, ourVocalsPath = null, options = {} }) => {
+    return AudioAnalysisService.findOriginalVocalsTrack(searchDirs, manifest, ourVocalsPath, options);
+  }));
+
+  ipcMain.handle('audio-find-glued-voices', wrapIpcHandler(async (event, { searchDirs = [], manifest = null }) => {
+    return AudioAnalysisService.findGluedVoicesTrack(searchDirs, manifest);
   }));
 
   ipcMain.handle('audio-analyze-original-snapshots', wrapIpcHandler(async (event, { audioPath, options = {} }) => {
     if (!audioPath) {
-      throw new Error('audioPath обязателен для построения 3-х слепков оригинала');
+      throw new Error('audioPath обязателен для построения слепков и карты эффектов оригинала');
     }
     const onProgress = (progress) => {
       try {
@@ -58,9 +62,9 @@ function registerAudioAnalysisHandlers() {
     return await AudioAnalysisService.analyzeOriginalAcousticSnapshots(audioPath, options, onProgress);
   }));
 
-  ipcMain.handle('audio-apply-acoustic-match', wrapIpcHandler(async (event, { ourVocalsPath, originalVocalsPath, searchDirs = [], options = {} }) => {
-    if (!ourVocalsPath) {
-      throw new Error('ourVocalsPath обязателен для приведения к оригиналу');
+  ipcMain.handle('audio-apply-acoustic-match', wrapIpcHandler(async (event, { ourVocalsPath, originalVocalsPath, searchDirs = [], manifest = null, options = {} }) => {
+    if (!ourVocalsPath && !manifest) {
+      throw new Error('ourVocalsPath обязателен для приведения склеенной дорожки голосов к оригиналу');
     }
     const onProgress = (progress) => {
       try {
@@ -71,6 +75,7 @@ function registerAudioAnalysisHandlers() {
       ourVocalsPath,
       originalVocalsPath,
       searchDirs,
+      manifest,
       options,
       onProgress
     });
@@ -80,3 +85,4 @@ function registerAudioAnalysisHandlers() {
 module.exports = {
   registerAudioAnalysisHandlers
 };
+

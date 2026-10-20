@@ -162,6 +162,49 @@ function registerMixingHandlers(getData, mainWindow) {
     });
   }));
 
+  ipcMain.handle('mixing-abort', wrapIpcHandler(async (event, { episode, targetDir } = {}) => {
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    const onLog = createLogSender('abort');
+    onLog('⏹ Пользователь запросил принудительную остановку сведения...', 'warn');
+    return await MixingPipelineService.abortProcessing({ episode, targetDir, baseDir });
+  }));
+
+  ipcMain.handle('mixing-clear-step', wrapIpcHandler(async (event, { episode, targetDir, stepId, trackPath, filePath }) => {
+    if (!episode || !stepId) throw new Error('Не указаны обязательные параметры (episode, stepId)');
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    const onLog = createLogSender(stepId);
+    const singleFile = trackPath || filePath || null;
+    onLog(singleFile ? `🗑 Удаление обработанной дорожки "${path.basename(singleFile)}" из шага...` : '🧹 Очистка всех результатов выбранного шага...', 'info');
+    return await MixingPipelineService.clearStepOutput({
+      episode,
+      targetDir,
+      baseDir,
+      stepId,
+      trackPath: singleFile,
+      filePath: singleFile
+    });
+  }));
+
+  ipcMain.handle('mixing-update-step-tracks', wrapIpcHandler(async (event, { episode, targetDir, stepId, action, trackKey, trackPaths, excludedTrackKeys, customInputTracks, applyToAllSteps }) => {
+    if (!episode || !stepId) throw new Error('Не указаны обязательные параметры (episode, stepId)');
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    return await MixingPipelineService.updateStepTracks({
+      episode,
+      targetDir,
+      baseDir,
+      stepId,
+      action,
+      trackKey,
+      trackPaths,
+      excludedTrackKeys,
+      customInputTracks,
+      applyToAllSteps
+    });
+  }));
+
   ipcMain.handle('mixing-save-final-video', wrapIpcHandler(async (event, { episode, targetDir, destinationPath }) => {
     let dest = destinationPath;
     if (!dest) {

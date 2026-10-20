@@ -1,4 +1,5 @@
 const fs = require('fs').promises;
+const fsPromises = fs;
 const fsSync = require('fs');
 const path = require('path');
 const ffmpeg = require('fluent-ffmpeg');
@@ -9,6 +10,7 @@ const ffmpegService = require('./ffmpegService.cjs');
 const AutoTimingService = require('./AutoTimingService.cjs');
 const AudioNeuralService = require('./AudioNeuralService.cjs');
 const AudioAnalysisService = require('./AudioAnalysisService.cjs');
+const { trackProcess, killAllActiveProcesses } = require('../lib/ProcessTracker.cjs');
 
 /**
  * MODULE DATABASE (Реестр всех доступных модулей обработки с подробнейшими настройками и пресетами)
@@ -60,34 +62,35 @@ const MODULE_DATABASE = [
     id: 'acoustic_original_match',
     category: 'analysis',
     defaultPrefix: 'acoustic_matched_',
-    title: 'Акустический слепок оригинала и автосопоставление (Acoustic Matcher)',
-    description: 'Принимает на вход только разделенный вокал оригинала и снимает 3 слепка (громкость, реверберация, спектральный баланс). Приводит нашу голосовую дорожку четко к акустике оригинала.',
+    title: 'Повторение эффектов оригинала по кривой автоматизации (Acoustic Matched)',
+    description: 'Принимает ИСКЛЮЧИТЕЛЬНО разделенную вокальную дорожку оригинала и склеенную дорожку всех голосов (voices_master). Выполняет полный пофразовый и покадровый анализ эффектов оригинала (реверб, эхо, рация/телефон, глушение за стеной, EQ, панорама, динамика) и воспроизводит их в точных таймингах по кривой автоматизации.',
     icon: 'Activity',
     defaultParams: {
       loudnessMatchStrength: 100,
       reverbMatchStrength: 100,
       eqMatchStrength: 100,
       targetLufsOffset: 0.0,
-      strictOriginalVocalsRequired: true
+      strictOriginalVocalsRequired: true,
+      strictGluedVoicesRequired: true
     },
     presets: [
       {
         id: 'acoustic_match_full',
-        title: '🎯 Полное совпадение с оригиналом (100% Громкость, Реверб, EQ)',
-        description: 'Точное приведение каждой фразы даббинга к уровню громкости, акустике помещения и частотному балансу оригинала',
-        params: { loudnessMatchStrength: 100, reverbMatchStrength: 100, eqMatchStrength: 100, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true }
+        title: '🎯 Полная автоматизация всех эффектов оригинала (100% Динамика, Пространство, Фильтры)',
+        description: 'Пофразовый и покадровый перенос всех эффектов оригинала (реверб, эхо, телефон/рация, за стеной, EQ, панорама) на склеенную дорожку голосов',
+        params: { loudnessMatchStrength: 100, reverbMatchStrength: 100, eqMatchStrength: 100, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true, strictGluedVoicesRequired: true }
       },
       {
         id: 'acoustic_match_soft_reverb',
-        title: '🎙 Естественное сведение (100% Громкость, 50% Реверб, 80% EQ)',
-        description: 'Точная динамика и частотный баланс с мягким умеренным ревербом',
-        params: { loudnessMatchStrength: 100, reverbMatchStrength: 50, eqMatchStrength: 80, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true }
+        title: '🎙 Деликатная автоматизация пространства (100% Динамика, 60% Реверб/Эхо, 85% Фильтры/EQ)',
+        description: 'Точный перенос частотных фильтров (рация, глушение) и динамики с умеренной глубиной реверберации',
+        params: { loudnessMatchStrength: 100, reverbMatchStrength: 60, eqMatchStrength: 85, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true, strictGluedVoicesRequired: true }
       },
       {
         id: 'acoustic_match_dry_focus',
-        title: '✂️ Чистая динамика и EQ без добавления реверберации',
-        description: 'Выравнивание только громкости и спектральной окраски по оригиналу без эха',
-        params: { loudnessMatchStrength: 100, reverbMatchStrength: 0, eqMatchStrength: 100, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true }
+        title: '✂️ Автоматизация только фильтров (Рация/LPF/EQ) и громкости без реверберации',
+        description: 'Повторяет частотные эффекты (телефон, за стеной, тембр) и кривую громкости оригинала без добавления эха и зала',
+        params: { loudnessMatchStrength: 100, reverbMatchStrength: 0, eqMatchStrength: 100, targetLufsOffset: 0.0, strictOriginalVocalsRequired: true, strictGluedVoicesRequired: true }
       }
     ]
   },
@@ -1892,6 +1895,233 @@ const MODULE_DATABASE = [
         }
       }
     ]
+  },
+  // ============================================================================
+  // ВЫДЕЛЕННЫЕ МОДУЛИ ОБРАБОТКИ FFMPEG (БЕЗ СКРЫТЫХ ФОЛЛБЭКОВ)
+  // ============================================================================
+  {
+    id: 'ffmpeg_timbre_eq',
+    category: 'timbre',
+    defaultPrefix: '01_ff_timbre_',
+    title: 'FFmpeg: Многополосная калибровка АЧХ по эталону (Broadcast EQ)',
+    description: 'Чистая аппаратная обработка FFmpeg: 5-полосный параметрический эквалайзер и срез суб-баса для приведения тембра голоса к студийным профилям без участия Python.',
+    icon: 'Sliders',
+    defaultParams: {
+      matchIntensity: 75,
+      targetProfile: 'studio_neutral',
+      subBassCutoff: 75,
+      airLimitDb: 3.0
+    },
+    presets: [
+      {
+        id: 'ff_timbre_neutral',
+        title: '🎯 Студийный эталон (FFmpeg EQ)',
+        description: 'Сбалансированная коррекция мутности 250 Гц и подъем разборчивости 3.2 кГц',
+        params: { matchIntensity: 75, targetProfile: 'studio_neutral', subBassCutoff: 75, airLimitDb: 3.0 }
+      },
+      {
+        id: 'ff_timbre_warm',
+        title: '📻 Тёплый бродкаст (FFmpeg EQ)',
+        description: 'Уплотнение нижней середины 160 Гц и мягкий верх',
+        params: { matchIntensity: 75, targetProfile: 'warm_broadcast', subBassCutoff: 70, airLimitDb: 2.0 }
+      },
+      {
+        id: 'ff_timbre_crisp',
+        title: '✨ Яркий аниме-презенс (FFmpeg EQ)',
+        description: 'Акцент на 1.8–3.8 кГц и открытый верх 11 кГц',
+        params: { matchIntensity: 80, targetProfile: 'crisp_anime', subBassCutoff: 85, airLimitDb: 3.5 }
+      }
+    ]
+  },
+  {
+    id: 'ffmpeg_denoise',
+    category: 'denoise',
+    defaultPrefix: '01_ff_denoise_',
+    title: 'FFmpeg: Спектральное Шумоподавление (afftdn + Formant EQ)',
+    description: 'Прямой спектральный шумодав FFmpeg (afftdn) с сохранением голосовых формант и регулировкой подмешивания Dry/Wet.',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      noiseReductionDb: 18.0,
+      noiseFloorDb: -52.0,
+      sensitivity: 5.0,
+      wetDryBlend: 95.0,
+      preserveVoiceFormants: true,
+      noiseTraining: false
+    },
+    presets: [
+      {
+        id: 'ff_denoise_gentle',
+        title: '🍃 Бережная чистка (FFmpeg afftdn)',
+        description: 'Мягкое удаление фонового шипения без искажения тембра',
+        params: { noiseReductionDb: 12.0, noiseFloorDb: -55.0, sensitivity: 4.0, wetDryBlend: 90.0, preserveVoiceFormants: true, noiseTraining: false }
+      },
+      {
+        id: 'ff_denoise_strong',
+        title: '🛡️ Глубокое подавление шума (FFmpeg afftdn)',
+        description: 'Интенсивная очистка шумных домашних записей с автозахватом профиля шума',
+        params: { noiseReductionDb: 24.0, noiseFloorDb: -48.0, sensitivity: 7.5, wetDryBlend: 100.0, preserveVoiceFormants: true, noiseTraining: true }
+      }
+    ]
+  },
+  {
+    id: 'ffmpeg_deecho',
+    category: 'denoise',
+    defaultPrefix: '02_ff_deecho_',
+    title: 'FFmpeg: Подавление Эха и Комнаты (afftdn + Notch EQ)',
+    description: 'Подавление комнатных отражений и порхающего эха средствами FFmpeg (спектральный фильтр + вырез резонансов комнаты + сохранение тела голоса).',
+    icon: 'Waves',
+    defaultParams: {
+      deechoReductionDb: 14.0,
+      earlyReflectionsDecay: 0.70,
+      sensitivity: 5.0,
+      wetDryBlend: 85.0,
+      preserveBodyFrequencies: true,
+      noiseTraining: false
+    },
+    presets: [
+      {
+        id: 'ff_deecho_standard',
+        title: '🏠 Стандартная сушка комнаты (FFmpeg)',
+        description: 'Ослабление коробочных отражений и хвостов реверберации',
+        params: { deechoReductionDb: 14.0, earlyReflectionsDecay: 0.70, sensitivity: 5.0, wetDryBlend: 85.0, preserveBodyFrequencies: true, noiseTraining: false }
+      },
+      {
+        id: 'ff_deecho_tight',
+        title: '🔇 Плотный сухой голос (FFmpeg)',
+        description: 'Максимальное приглушение ранних отражений и гула помещения',
+        params: { deechoReductionDb: 20.0, earlyReflectionsDecay: 0.90, sensitivity: 7.5, wetDryBlend: 95.0, preserveBodyFrequencies: true, noiseTraining: true }
+      }
+    ]
+  },
+  {
+    id: 'ffmpeg_vocal_remover',
+    category: 'separation',
+    defaultPrefix: '01_ff_stem_',
+    title: 'FFmpeg: Частотно-спектральное разделение оригинала (DSP M&E Filter)',
+    description: 'Быстрое разделение оригинальной дорожки на вокальный диапазон и фонограмму (M&E) средствами фильтров FFmpeg без нейросетей.',
+    icon: 'Scissors',
+    defaultParams: {
+      sensitivity: 5.0,
+      marginDb: 1.5,
+      postProcessThreshold: 0.20,
+      instrumentalBlend: 100.0
+    },
+    presets: [
+      {
+        id: 'ff_sep_balanced',
+        title: '⚖️ Сбалансированное приглушение вокала (FFmpeg)',
+        description: 'Ослабление центральных речевых частот оригинала с сохранением эффектов',
+        params: { sensitivity: 5.0, marginDb: 1.5, postProcessThreshold: 0.20, instrumentalBlend: 100.0 }
+      },
+      {
+        id: 'ff_sep_deep',
+        title: '🔪 Глубокий вырез речевого спектра (FFmpeg)',
+        description: 'Максимальное подавление частот голоса 1–3.2 кГц в фонограмме',
+        params: { sensitivity: 8.5, marginDb: 2.0, postProcessThreshold: 0.35, instrumentalBlend: 100.0 }
+      }
+    ]
+  },
+  {
+    id: 'ffmpeg_harmonic_restorer',
+    category: 'restoration',
+    defaultPrefix: '03_ff_exciter_',
+    title: 'FFmpeg: Гармонический Эксайтер и ВЧ-Реставратор (Air & Exciter)',
+    description: 'Восстановление высоких частот (13.5 кГц), читаемости формант (3.4 кГц) и ламповое насыщение через фильтр FFmpeg aexciter.',
+    icon: 'Sparkles',
+    defaultParams: {
+      airBandBoostDb: 3.5,
+      harmonicSaturation: 0.45,
+      formantClarity: 0.65,
+      subBassPreservation: true,
+      warmTubeEmulation: true
+    },
+    presets: [
+      {
+        id: 'ff_exciter_studio',
+        title: '✨ Воздух и ясность (FFmpeg aexciter)',
+        description: 'Оживление глухих микрофонов и добавление студийного блеска',
+        params: { airBandBoostDb: 3.5, harmonicSaturation: 0.45, formantClarity: 0.65, subBassPreservation: true, warmTubeEmulation: true }
+      }
+    ]
+  },
+  {
+    id: 'ffmpeg_master_strip',
+    category: 'dynamics',
+    defaultPrefix: '04_ff_strip_',
+    title: 'FFmpeg: Вокальный Ченнел-Стрип (EQ + Компрессор + Де-Эссер + Лимитер)',
+    description: 'Полная цепочка динамической обработки голоса на чистом FFmpeg: срез НЧ, презенс EQ, де-эссер, компрессор, пространственное эхо и лимитер.',
+    icon: 'Sliders',
+    defaultParams: {
+      eqHighpass: 80,
+      eqPresenceFreq: 3200,
+      eqPresenceGain: 2.5,
+      eqLowpass: 18000,
+      compThresholdDb: -18.0,
+      compRatio: 3.5,
+      compAttackMs: 15.0,
+      compReleaseMs: 120.0,
+      deesserFreqHz: 6500,
+      deesserAmount: 0.60,
+      reverbWet: 0.04,
+      limiterThresholdDb: -0.5
+    },
+    presets: [
+      {
+        id: 'ff_strip_broadcast',
+        title: '🎙️ Студийный вокальный стрип (FFmpeg)',
+        description: 'Универсальная цепочка EQ + Compressor + De-Esser + Limiter',
+        params: { eqHighpass: 80, eqPresenceFreq: 3200, eqPresenceGain: 2.5, eqLowpass: 18000, compThresholdDb: -18.0, compRatio: 3.5, compAttackMs: 15.0, compReleaseMs: 120.0, deesserFreqHz: 6500, deesserAmount: 0.60, reverbWet: 0.04, limiterThresholdDb: -0.5 }
+      }
+    ]
+  },
+  {
+    id: 'ffmpeg_airwindows_strip',
+    category: 'restoration',
+    defaultPrefix: '03_ff_restore_',
+    title: 'FFmpeg: Фильтр задувов, сибилянтов и сатурации (Pop + DeEss + Exciter)',
+    description: 'Аппаратная цепочка FFmpeg для подавления взрывных согласных (Pop), резких свистящих (DeEss), ВЧ-среза (Slew) и гармонического уплотнения.',
+    icon: 'Wand2',
+    defaultParams: {
+      deessIntensity: 0.50,
+      popIntensity: 0.50,
+      slewIntensity: 0.40,
+      densityDrive: 0.40
+    },
+    presets: [
+      {
+        id: 'ff_aw_clean',
+        title: '🧹 Чистка сибилянтов и задувов (FFmpeg)',
+        description: 'Мягкое устранение «П/Б» и «С/Ц» с легким насыщением',
+        params: { deessIntensity: 0.55, popIntensity: 0.55, slewIntensity: 0.40, densityDrive: 0.35 }
+      }
+    ]
+  },
+  {
+    id: 'ffmpeg_loudnorm',
+    category: 'dynamics',
+    defaultPrefix: '03_ff_loudnorm_',
+    title: 'FFmpeg: Нормализация громкости EBU R128 (Loudnorm + Limiter)',
+    description: 'Прямая нормализация громкости по стандарту вещания EBU R128 через фильтр FFmpeg loudnorm с защитой истинных пиков (True Peak Limiter).',
+    icon: 'Volume2',
+    defaultParams: {
+      targetLufs: -16.0,
+      truePeak: -1.0,
+      lra: 11.0
+    },
+    presets: [
+      {
+        id: 'ff_lufs_16',
+        title: '📺 Стриминг и Аниме (-16 LUFS / -1 dBTP)',
+        description: 'Стандарт громкости для онлайн-платформ и видеоплееров',
+        params: { targetLufs: -16.0, truePeak: -1.0, lra: 11.0 }
+      },
+      {
+        id: 'ff_lufs_23',
+        title: '📻 ТВ Бродкаст EBU R128 (-23 LUFS / -1 dBTP)',
+        description: 'Строгий телевизионный стандарт EBU R128',
+        params: { targetLufs: -23.0, truePeak: -1.0, lra: 11.0 }
+      }
+    ]
   }
 ];
 
@@ -1969,6 +2199,226 @@ function createDefaultPipeline() {
 class MixingPipelineService {
   constructor() {
     this.moduleDatabase = MODULE_DATABASE;
+    this.isAborted = false;
+    this._activeFfmpegCommands = new Set();
+  }
+
+  /**
+   * Immediately aborts any running step or full pipeline execution
+   */
+  async abortProcessing({ episode, targetDir, baseDir } = {}) {
+    this.isAborted = true;
+    log.warn('[Mixing] 🛑 Получен сигнал принудительной остановки (Abort) процесса сведения!');
+
+    // 1. Kill all active FFmpeg commands
+    for (const cmd of Array.from(this._activeFfmpegCommands)) {
+      try {
+        cmd.kill('SIGKILL');
+      } catch (e) {}
+    }
+    this._activeFfmpegCommands.clear();
+
+    // 2. Kill all active Python AI processes
+    try {
+      AudioNeuralService.abortAll();
+    } catch (e) {}
+
+    // 3. Kill any other registered child processes
+    try {
+      killAllActiveProcesses();
+    } catch (e) {}
+
+    // 4. Reset 'processing' status in manifest if episode is provided
+    if (episode) {
+      try {
+        const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+        const manifestPath = path.join(workingDir, 'mixing_manifest.json');
+        if (fsSync.existsSync(manifestPath)) {
+          const manifest = JSON.parse(fsSync.readFileSync(manifestPath, 'utf8'));
+          if (Array.isArray(manifest.pipeline)) {
+            manifest.pipeline.forEach(s => {
+              if (s.status === 'processing') {
+                s.status = 'idle';
+                s.error = 'Остановлено пользователем';
+              }
+            });
+          }
+          await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+          await this.persistPipeline(manifest.pipeline, workingDir, episode, baseDir);
+        }
+        return await this.getStatus({ episode, targetDir: workingDir, baseDir });
+      } catch (e) {
+        log.warn('[Mixing] Error updating manifest after abort:', e.message);
+      }
+    }
+
+    return { success: true, aborted: true };
+  }
+
+  /**
+   * Clears processed output files for a specific step (or deletes a single output file if trackPath is passed)
+   */
+  async clearStepOutput({ episode, targetDir, baseDir, stepId, trackPath = null, filePath = null }) {
+    if (!episode) throw new Error('Episode parameter is required');
+    if (!stepId) throw new Error('stepId parameter is required');
+
+    const singleTrackPath = trackPath || filePath || null;
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
+    const manifest = statusData.manifest;
+
+    const stepIndex = (manifest.pipeline || []).findIndex(s => s.stepId === stepId);
+    if (stepIndex === -1) {
+      throw new Error(`Шаг ${stepId} не найден в конвейере`);
+    }
+
+    const step = manifest.pipeline[stepIndex];
+    const stepDir = path.join(workingDir, `${String(stepIndex + 1).padStart(2, '0')}_${step.moduleId}`);
+
+    if (singleTrackPath) {
+      // Delete only the specified output file
+      try {
+        if (fsSync.existsSync(singleTrackPath)) {
+          await fs.unlink(singleTrackPath);
+        }
+      } catch (e) {
+        log.warn(`[Mixing] Could not delete track file ${singleTrackPath}:`, e.message);
+      }
+      step.outputFiles = (step.outputFiles || []).filter(f => f.path !== singleTrackPath && f.name !== path.basename(singleTrackPath));
+      if (step.outputFiles.length === 0) {
+        step.status = 'idle';
+        step.error = null;
+      }
+    } else {
+      // Delete all output files of this step
+      for (const f of (step.outputFiles || [])) {
+        if (f && f.path && fsSync.existsSync(f.path)) {
+          try { await fs.unlink(f.path); } catch (e) {}
+        }
+      }
+      if (fsSync.existsSync(stepDir)) {
+        try {
+          const entries = fsSync.readdirSync(stepDir);
+          for (const entry of entries) {
+            const fullP = path.join(stepDir, entry);
+            try { fsSync.unlinkSync(fullP); } catch (e) {}
+          }
+        } catch (e) {}
+      }
+      if (step.prefix && fsSync.existsSync(workingDir)) {
+        try {
+          const rootEntries = fsSync.readdirSync(workingDir);
+          for (const rFile of rootEntries) {
+            if (rFile.startsWith(step.prefix)) {
+              try { fsSync.unlinkSync(path.join(workingDir, rFile)); } catch (e) {}
+            }
+          }
+        } catch (e) {}
+      }
+      if (step.moduleId === 'video_mux') {
+        manifest.finalVideo = null;
+      }
+      step.outputFiles = [];
+      step.status = 'idle';
+      step.error = null;
+    }
+
+    await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    await this.persistPipeline(manifest.pipeline, workingDir, episode, baseDir);
+
+    return await this.getStatus({ episode, targetDir: workingDir, baseDir });
+  }
+
+  /**
+   * Updates per-step track selection (supports action-based or direct array updates)
+   */
+  async updateStepTracks({ episode, targetDir, baseDir, stepId, action, trackKey, trackPaths, excludedTrackKeys, customInputTracks, applyToAllSteps = false }) {
+    if (!episode) throw new Error('Episode parameter is required');
+    if (!stepId) throw new Error('stepId parameter is required');
+
+    const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
+    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
+    const manifest = statusData.manifest;
+
+    const stepIndex = (manifest.pipeline || []).findIndex(s => s.stepId === stepId);
+    if (stepIndex === -1) {
+      throw new Error(`Шаг ${stepId} не найден в конвейере`);
+    }
+
+    const updateTarget = (stepObj) => {
+      if (!Array.isArray(stepObj.excludedTrackKeys)) stepObj.excludedTrackKeys = [];
+      if (!Array.isArray(stepObj.customInputTracks)) stepObj.customInputTracks = [];
+
+      if (action === 'toggle_exclude' && trackKey) {
+        const idx = stepObj.excludedTrackKeys.indexOf(trackKey);
+        if (idx >= 0) {
+          stepObj.excludedTrackKeys.splice(idx, 1);
+        } else {
+          stepObj.excludedTrackKeys.push(trackKey);
+        }
+      } else if (action === 'clear_exclusions') {
+        stepObj.excludedTrackKeys = [];
+      } else if (action === 'add_custom' && Array.isArray(trackPaths)) {
+        for (const p of trackPaths) {
+          if (!p || !fsSync.existsSync(p)) continue;
+          const existsAlready = stepObj.customInputTracks.some(ct => ct.path === p);
+          if (!existsAlready) {
+            let sz = 0;
+            try { sz = fsSync.statSync(p).size; } catch (e) {}
+            const name = path.basename(p);
+            const nick = this._deriveDubberNickFromFilename(name);
+            stepObj.customInputTracks.push({
+              id: `custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              name,
+              dubberNick: nick,
+              path: p,
+              size: sz,
+              exists: true,
+              isCustom: true
+            });
+          }
+        }
+      } else if (action === 'remove_custom' && trackKey) {
+        stepObj.customInputTracks = stepObj.customInputTracks.filter(
+          ct => ct.path !== trackKey && ct.name !== trackKey && this._getTrackKey(ct) !== trackKey
+        );
+      }
+
+      if (Array.isArray(excludedTrackKeys)) {
+        stepObj.excludedTrackKeys = excludedTrackKeys;
+      }
+      if (Array.isArray(customInputTracks)) {
+        stepObj.customInputTracks = customInputTracks.map(tr => {
+          const p = tr.path || '';
+          let sz = tr.size || 0;
+          if (!sz && p && fsSync.existsSync(p)) {
+            try { sz = fsSync.statSync(p).size; } catch (e) {}
+          }
+          const name = tr.name || (p ? path.basename(p) : 'track.wav');
+          const nick = tr.dubberNick || this._deriveDubberNickFromFilename(name);
+          return {
+            id: tr.id || `custom_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            name,
+            dubberNick: nick,
+            path: p,
+            size: sz,
+            exists: p ? fsSync.existsSync(p) : false,
+            isCustom: true
+          };
+        });
+      }
+    };
+
+    if (applyToAllSteps) {
+      manifest.pipeline.forEach(s => updateTarget(s));
+    } else {
+      updateTarget(manifest.pipeline[stepIndex]);
+    }
+
+    await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+    await this.persistPipeline(manifest.pipeline, workingDir, episode, baseDir);
+
+    return await this.getStatus({ episode, targetDir: workingDir, baseDir });
   }
 
   createFactoryPipeline() {
@@ -2243,7 +2693,7 @@ class MixingPipelineService {
         finalVideo: null
       };
     } else {
-      // If workingDir has a direct mixing_pipeline.json file, it is the primary pipeline truth
+      // If workingDir has a direct mixing_pipeline.json file, merge it while preserving runtime step state & track selections
       const workingPipelineFile = path.join(workingDir, 'mixing_pipeline.json');
       if (fsSync.existsSync(workingPipelineFile)) {
         try {
@@ -2251,7 +2701,19 @@ class MixingPipelineService {
           const parsed = JSON.parse(raw);
           const arr = Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.pipeline) ? parsed.pipeline : null);
           if (arr && arr.length > 0) {
-            manifest.pipeline = arr;
+            const prevById = new Map((manifest.pipeline || []).map(s => [s.stepId, s]));
+            manifest.pipeline = arr.map(s => {
+              const prev = prevById.get(s.stepId);
+              if (!prev) return s;
+              return {
+                ...s,
+                status: prev.status || s.status || 'idle',
+                error: prev.error !== undefined ? prev.error : s.error,
+                outputFiles: (Array.isArray(prev.outputFiles) && prev.outputFiles.length > 0) ? prev.outputFiles : (s.outputFiles || []),
+                excludedTrackKeys: Array.isArray(s.excludedTrackKeys) ? s.excludedTrackKeys : (prev.excludedTrackKeys || []),
+                customInputTracks: Array.isArray(s.customInputTracks) ? s.customInputTracks : (prev.customInputTracks || [])
+              };
+            });
           }
         } catch (e) {}
       } else if (!Array.isArray(manifest.pipeline) || manifest.pipeline.length === 0) {
@@ -2657,16 +3119,55 @@ class MixingPipelineService {
       filteredDubberTracks = timedMasters;
     }
 
-    // Deduplicate so each unique audio track appears once (preserving multiple tracks for the same actor)
-    const uniqueNickMap = new Map();
+    // Deduplicate so each unique audio track appears once, and if a full replacement fix exists alongside a draft track for the same actor/layer, keep ONLY the full fix
+    const uniquePathList = [];
+    const seenPaths = new Set();
     for (const tr of filteredDubberTracks) {
       const key = tr.path || tr.name;
-      if (!uniqueNickMap.has(key)) {
-        uniqueNickMap.set(key, tr);
+      if (!seenPaths.has(key)) {
+        seenPaths.add(key);
+        uniquePathList.push(tr);
       }
     }
 
-    const finalDubberTracks = Array.from(uniqueNickMap.values()).map(tr => ({
+    const byActorAndLayer = new Map();
+    for (const tr of uniquePathList) {
+      const baseKey = `${(tr.baseDubberNick || tr.dubberNick || '').toLowerCase()}__${tr.trackNumber || 1}`;
+      if (!byActorAndLayer.has(baseKey)) byActorAndLayer.set(baseKey, []);
+      byActorAndLayer.get(baseKey).push(tr);
+    }
+
+    const deduplicatedTracks = [];
+    for (const group of byActorAndLayer.values()) {
+      if (group.length <= 1) {
+        deduplicatedTracks.push(...group);
+        continue;
+      }
+      const isFixEntry = (item) => /(?:^|[_[\s-])(fix|фикс)(?:\d*|[_\]\s.-]|$)/i.test(item.name || item.path || '');
+      const fixesInGroup = group.filter(isFixEntry);
+      const mainsInGroup = group.filter(item => !isFixEntry(item));
+
+      if (fixesInGroup.length > 0 && mainsInGroup.length > 0) {
+        const newestFix = fixesInGroup[fixesInGroup.length - 1];
+        const newestMain = mainsInGroup[mainsInGroup.length - 1];
+        const mainSize = newestMain.size || 1;
+        const fixSize = newestFix.size || 0;
+        const ratio = fixSize > 0 ? fixSize / mainSize : 0;
+        const diffMb = Math.abs(mainSize - fixSize) / (1024 * 1024);
+
+        if (fixSize > 0 && (ratio >= 0.65 || diffMb <= 3.5)) {
+          // Full replacement fix: take ONLY the full fix!
+          deduplicatedTracks.push(newestFix);
+        } else {
+          // Fragmentary fix: keep main track and fragmentary fix for stitching in Timing
+          deduplicatedTracks.push(newestMain, newestFix);
+        }
+      } else {
+        deduplicatedTracks.push(...group);
+      }
+    }
+
+    const finalDubberTracks = deduplicatedTracks.map(tr => ({
       id: tr.id,
       name: tr.name,
       dubberNick: tr.dubberNick,
@@ -2680,11 +3181,28 @@ class MixingPipelineService {
       manifest.isImported = true;
     }
 
-    // Refresh outputs for each step
+    // Refresh outputs for each step (preserving dubberNick and type metadata)
     for (let sIdx = 0; sIdx < manifest.pipeline.length; sIdx++) {
       const step = manifest.pipeline[sIdx];
+      step.excludedTrackKeys = Array.isArray(step.excludedTrackKeys) ? step.excludedTrackKeys : [];
+      step.customInputTracks = Array.isArray(step.customInputTracks) ? step.customInputTracks : [];
+      const prevOutMap = new Map((step.outputFiles || []).map(of => [of.name || path.basename(of.path || ''), of]));
+
       const stepDir = path.join(workingDir, `${String(sIdx + 1).padStart(2, '0')}_${step.moduleId}`);
       const stepFiles = [];
+
+      const buildStepFileObj = (fName, fPath, sizeBytes) => {
+        const prevMeta = prevOutMap.get(fName);
+        const derivedNick = prevMeta?.dubberNick || this._deriveDubberNickFromFilename(fName, step.prefix);
+        return {
+          name: fName,
+          path: fPath,
+          size: sizeBytes,
+          exists: true,
+          dubberNick: derivedNick,
+          ...(prevMeta?.type ? { type: prevMeta.type } : {})
+        };
+      };
 
       if (fsSync.existsSync(stepDir)) {
         const dirEntries = fsSync.readdirSync(stepDir);
@@ -2692,7 +3210,7 @@ class MixingPipelineService {
           if (audioExts.test(f) || /\.(mp4|mkv)$/i.test(f)) {
             const fPath = path.join(stepDir, f);
             const st = fsSync.statSync(fPath);
-            stepFiles.push({ name: f, path: fPath, size: st.size, exists: true });
+            stepFiles.push(buildStepFileObj(f, fPath, st.size));
           }
         }
       }
@@ -2702,18 +3220,25 @@ class MixingPipelineService {
         const fullP = path.join(workingDir, rmf);
         const st = fsSync.statSync(fullP);
         if (!stepFiles.some(sf => sf.name === rmf)) {
-          stepFiles.push({ name: rmf, path: fullP, size: st.size, exists: true });
+          stepFiles.push(buildStepFileObj(rmf, fullP, st.size));
         }
       }
 
       step.outputFiles = stepFiles;
       if (stepFiles.length > 0 && step.status === 'idle') {
         step.status = 'completed';
+      } else if (stepFiles.length === 0 && step.status === 'completed') {
+        step.status = 'idle';
       }
 
       if (step.moduleId === 'video_mux' && stepFiles.length > 0) {
         manifest.finalVideo = stepFiles[0];
       }
+    }
+
+    // Populate candidateInputs for every step so UI can display and toggle tracks per step
+    for (let sIdx = 0; sIdx < manifest.pipeline.length; sIdx++) {
+      manifest.pipeline[sIdx].candidateInputs = this._resolveCandidateInputsForStep(manifest, sIdx);
     }
 
     if (!manifest.finalVideo) {
@@ -2870,25 +3395,66 @@ class MixingPipelineService {
     }
   }
 
+  _deriveDubberNickFromFilename(filename = '', stepPrefix = '') {
+    let base = path.basename(filename || '', path.extname(filename || ''));
+    if (stepPrefix && base.startsWith(stepPrefix)) {
+      base = base.slice(stepPrefix.length);
+    } else {
+      base = base
+        .replace(/^00_timed_/i, '')
+        .replace(/^(0[1-9]|1[0-9])_(ff_[a-z0-9]+|[a-z0-9]+)_/i, '')
+        .replace(/^[0-9]{2}_[a-z0-9_]+?_/i, '');
+    }
+    const trMatch = base.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
+    const cleanNick = base
+      .replace(/_(дорожка\d+|track\d+|layer\d+|take\d+)/gi, '')
+      .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+      .replace(/^[_\s-]+|[_\s-]+$/g, '')
+      .trim();
+    if (trMatch) {
+      const trLabel = trMatch[1].replace(/дорожка/i, 'Дорожка ').replace(/track/i, 'Дорожка ');
+      return `${cleanNick || base} (${trLabel.trim()})`;
+    }
+    return cleanNick || base || 'Даббер';
+  }
+
+  _getTrackKey(track, stepPrefix = '') {
+    if (!track) return 'unknown';
+    const rawNick = track.dubberNick || this._deriveDubberNickFromFilename(track.name || path.basename(track.path || ''), stepPrefix);
+    const trMatch = rawNick.match(/(?:дорожка|track|layer|take)\s*(\d+)/i) ||
+                    (track.name || '').match(/_(?:дорожка|track|layer|take)(\d+)/i);
+    const trNum = trMatch ? trMatch[1] : '1';
+    const baseNick = rawNick
+      .replace(/\s*\([^)]*\)/g, '')
+      .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+      .replace(/^00_timed_/i, '')
+      .replace(/^[_\s-]+|[_\s-]+$/g, '')
+      .toLowerCase()
+      .trim();
+    return `${baseNick || 'dubber'}__${trNum}`;
+  }
+
   _resolveTrackOutName(track, inputFiles, index, prefix) {
     const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
-    const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
-    const rawNick = track.baseDubberNick || track.dubberNick || `dubber_${index + 1}`;
+    const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.dubberNick || '').match(/(дорожка\s*\d+|track\s*\d+)/i);
+    const fallbackNick = this._deriveDubberNickFromFilename(origBase);
+    const rawNick = track.baseDubberNick || track.dubberNick || fallbackNick || `dubber_${index + 1}`;
     const nick = rawNick.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim() || `dubber_${index + 1}`;
     
     if (trMatch) {
-      return `${prefix}${nick}_${trMatch[1].toLowerCase()}.wav`;
+      const normSuffix = trMatch[1].replace(/\s+/g, '').toLowerCase();
+      return `${prefix}${nick}_${normSuffix}.wav`;
     }
     
     const sameNickTracks = inputFiles.filter(f => {
-      const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+      const fRaw = f.baseDubberNick || f.dubberNick || this._deriveDubberNickFromFilename(f.name || '');
       const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
       return fNick.toLowerCase() === nick.toLowerCase();
     });
     
     if (sameNickTracks.length > 1) {
       const occ = inputFiles.slice(0, index + 1).filter(f => {
-        const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+        const fRaw = f.baseDubberNick || f.dubberNick || this._deriveDubberNickFromFilename(f.name || '');
         const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
         return fNick.toLowerCase() === nick.toLowerCase();
       }).length;
@@ -2900,24 +3466,25 @@ class MixingPipelineService {
 
   _resolveTrackNick(track, inputFiles, index) {
     const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
-    const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i);
-    const rawNick = track.baseDubberNick || track.dubberNick || `dubber_${index + 1}`;
+    const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.dubberNick || '').match(/(дорожка\s*\d+|track\s*\d+)/i);
+    const fallbackNick = this._deriveDubberNickFromFilename(origBase);
+    const rawNick = track.baseDubberNick || track.dubberNick || fallbackNick || `dubber_${index + 1}`;
     const nick = rawNick.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim() || `dubber_${index + 1}`;
     
     if (trMatch) {
-      const trLabel = trMatch[1].replace(/дорожка/i, 'Дорожка ').replace(/track/i, 'Дорожка ');
+      const trLabel = trMatch[1].replace(/дорожка\s*/i, 'Дорожка ').replace(/track\s*/i, 'Дорожка ');
       return `${nick} (${trLabel.trim()})`;
     }
     
     const sameNickTracks = inputFiles.filter(f => {
-      const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+      const fRaw = f.baseDubberNick || f.dubberNick || this._deriveDubberNickFromFilename(f.name || '');
       const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
       return fNick.toLowerCase() === nick.toLowerCase();
     });
     
     if (sameNickTracks.length > 1) {
       const occ = inputFiles.slice(0, index + 1).filter(f => {
-        const fRaw = f.baseDubberNick || f.dubberNick || 'dubber';
+        const fRaw = f.baseDubberNick || f.dubberNick || this._deriveDubberNickFromFilename(f.name || '');
         const fNick = fRaw.replace(/\s*\([^)]*\)/g, '').replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '').replace(/^00_timed_/i, '').replace(/^[_\s-]+|[_\s-]+$/g, '').trim();
         return fNick.toLowerCase() === nick.toLowerCase();
       }).length;
@@ -2985,6 +3552,10 @@ class MixingPipelineService {
    * Universal FFmpeg executor with deep command/stderr/progress logging and safe atomic file replacement
    */
   async _execFfmpeg(command, { logFn, onProgress, outPath, description = 'FFmpeg' } = {}) {
+    if (this.isAborted) {
+      throw new Error('Процесс сведения остановлен пользователем.');
+    }
+
     let finalTarget = outPath;
     if (!finalTarget && Array.isArray(command._outputs) && command._outputs.length > 0) {
       finalTarget = command._outputs[0]?.target;
@@ -3017,6 +3588,8 @@ class MixingPipelineService {
       command.outputOptions(['-y']);
     } catch (e) {}
 
+    this._activeFfmpegCommands.add(command);
+
     try {
       await new Promise((resolve, reject) => {
         const lastStderr = [];
@@ -3024,6 +3597,14 @@ class MixingPipelineService {
 
         command
           .on('start', (cmdLine) => {
+            if (this.isAborted) {
+              try { command.kill('SIGKILL'); } catch (e) {}
+              reject(new Error('Процесс сведения остановлен пользователем.'));
+              return;
+            }
+            if (command.ffmpegProc) {
+              trackProcess(command.ffmpegProc, description);
+            }
             commandLineStr = cmdLine;
             console.log(`[Mixing:FFmpeg] 🚀 ${description} -> START:\n  ${cmdLine}`);
             if (logFn) logFn(`[FFmpeg] ${description}: ${cmdLine}`, 'debug');
@@ -3041,9 +3622,15 @@ class MixingPipelineService {
             }
           })
           .on('end', () => {
+            this._activeFfmpegCommands.delete(command);
             resolve(tempOutPath || finalTarget);
           })
           .on('error', (err, stdout, stderr) => {
+            this._activeFfmpegCommands.delete(command);
+            if (this.isAborted || (err && /SIGKILL|killed|aborted/i.test(err.message))) {
+              reject(new Error('Процесс сведения остановлен пользователем.'));
+              return;
+            }
             const detailStderr = (stderr || lastStderr.join('\n')).slice(-700);
             const fullErrMsg = `[FFmpeg Ошибка] ${description}: ${err.message}${detailStderr ? `\nДетали stderr:\n${detailStderr}` : ''}`;
             console.error(`[Mixing:FFmpeg:Fatal] ❌ ${fullErrMsg}\nКоманда: ${commandLineStr}`);
@@ -3052,6 +3639,10 @@ class MixingPipelineService {
           })
           .run();
       });
+
+      if (this.isAborted) {
+        throw new Error('Процесс сведения остановлен пользователем.');
+      }
 
       // If we used a temporary file, safely replace outPath with retries
       if (tempOutPath && finalTarget) {
@@ -3068,6 +3659,7 @@ class MixingPipelineService {
 
       return finalTarget;
     } catch (err) {
+      this._activeFfmpegCommands.delete(command);
       if (tempOutPath && fsSync.existsSync(tempOutPath)) {
         try { await fs.unlink(tempOutPath); } catch (e) {}
       }
@@ -3151,7 +3743,14 @@ class MixingPipelineService {
     });
   }
 
-  async runStep({ episode, targetDir, baseDir, stepId, onProgress, onLog }) {
+  async runStep({ episode, targetDir, baseDir, stepId, onProgress, onLog, _fromChain = false }) {
+    if (!_fromChain) {
+      this.isAborted = false;
+    }
+    if (this.isAborted) {
+      throw new Error('Процесс сведения остановлен пользователем.');
+    }
+
     const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
     const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
     const manifest = statusData.manifest;
@@ -3179,6 +3778,7 @@ class MixingPipelineService {
 
     const startTime = Date.now();
     step.status = 'processing';
+    step.error = null;
     await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
     try {
@@ -3190,9 +3790,9 @@ class MixingPipelineService {
       logFn(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
       logFn(`▶ [ШАГ ${stepIndex + 1}/${manifest.pipeline.length}] Запуск: «${step.title || step.moduleId}» (ID: ${step.moduleId})`);
       logFn(`  Папка этапа: ${stepFolder}`);
-      logFn(`  Количество входных дорожек: ${inputFiles.length}`);
+      logFn(`  Количество выбранных входных дорожек: ${inputFiles.length}`);
       inputFiles.forEach((f, idx) => {
-        logFn(`    • [${idx + 1}/${inputFiles.length}] ${f.name} (путь: ${f.path})`, 'debug');
+        logFn(`    • [${idx + 1}/${inputFiles.length}] ${f.dubberNick || f.name} (${f.name})`, 'debug');
       });
       logFn(`  Параметры модуля: ${JSON.stringify(step.params || {})}`, 'debug', { params: step.params });
 
@@ -3206,6 +3806,9 @@ class MixingPipelineService {
           resultFiles = await this._execMfaLipsync({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'acoustic_original_match':
+        case 'acoustic_match_full':
+        case 'acoustic_match_soft_reverb':
+        case 'acoustic_match_dry_focus':
           resultFiles = await this._execAcousticMatch({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'apply_fixes':
@@ -3220,12 +3823,18 @@ class MixingPipelineService {
         case 'uvr_denoise_full':
           resultFiles = await this._execUvrDenoiseLite({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
           break;
+        case 'ffmpeg_denoise':
+          resultFiles = await this._execFfmpegDenoise({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'uvr_deecho_normal':
         case 'vst-spectral-dereverb':
         case 'reverb_foxjoy':
         case 'uvr_deecho_aggressive':
         case 'mdx_dereverb_room':
           resultFiles = await this._execUvrDeEchoNormal({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
+          break;
+        case 'ffmpeg_deecho':
+          resultFiles = await this._execFfmpegDeEcho({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'uvr_mdx_voc_ft':
         case 'uvr_mdx_inst_hq3':
@@ -3237,13 +3846,23 @@ class MixingPipelineService {
         case 'hp_karaoke_uvr':
         case 'mel_band_roformer_vocals':
         case 'bs_roformer_viperx':
+        case 'bs_roformer_cinema':
           resultFiles = await this._execStemSeparation({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
+          break;
+        case 'ffmpeg_vocal_remover':
+          resultFiles = await this._execFfmpegVocalRemover({ episode, workingDir, stepFolder, prefix: step.prefix, manifest, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'voicefixer_fe':
           resultFiles = await this._execVoiceFixer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'ffmpeg_harmonic_restorer':
+          resultFiles = await this._execFfmpegHarmonicRestorer({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'voice_timbre_match':
           resultFiles = await this._execVoiceTimbreMatch({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'ffmpeg_timbre_eq':
+          resultFiles = await this._execFfmpegTimbreEq({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'silence_gate':
           resultFiles = await this._execSilenceGate({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -3254,6 +3873,9 @@ class MixingPipelineService {
         case 'stage_loudness_norm':
         case 'loudness_norm':
           resultFiles = await this._execLoudnessNorm({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'ffmpeg_loudnorm':
+          resultFiles = await this._execFfmpegLoudnorm({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'deesser':
           resultFiles = await this._execDeesser({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -3284,10 +3906,16 @@ class MixingPipelineService {
         case 'voice_master_strip':
           resultFiles = await this._execPedalboardDsp({ moduleId: step.moduleId, workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'ffmpeg_master_strip':
+          resultFiles = await this._execFfmpegMasterStrip({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
         case 'airwindows_restore':
         case 'airwindows_saturate':
         case 'airwindows_dsp':
           resultFiles = await this._execAirwindowsDsp({ moduleId: step.moduleId, workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
+          break;
+        case 'ffmpeg_airwindows_strip':
+          resultFiles = await this._execFfmpegAirwindowsStrip({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
         case 'glue_compress':
           resultFiles = await this._execGlueCompress({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -3316,6 +3944,7 @@ class MixingPipelineService {
       }
 
       await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
+      await this.persistPipeline(manifest.pipeline, workingDir, episode, baseDir);
       logFn(`✔ Шаг «${step.moduleId}» успешно выполнен за ${elapsedSec}s! Создано файлов: ${resultFiles.length}`, 'info', {
         stepId: step.stepId,
         durationSec: elapsedSec,
@@ -3334,11 +3963,13 @@ class MixingPipelineService {
       };
     } catch (err) {
       const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(2);
-      step.status = 'error';
+      const isUserAborted = this.isAborted || (err && /остановлен пользователем|отменена пользователем/i.test(err.message));
+      step.status = isUserAborted ? 'idle' : 'error';
       step.error = err.message || String(err);
       await fs.writeFile(path.join(workingDir, 'mixing_manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-      console.error(`[Mixing:Step:Error] 💥 Аварийная остановка шага ${step.moduleId} (${stepId}) за ${elapsedSec}s:`, err);
-      logFn(`💥 КРИТИЧЕСКАЯ ОШИБКА шага «${step.moduleId}» за ${elapsedSec}s: ${err.message}`, 'error', {
+      await this.persistPipeline(manifest.pipeline, workingDir, episode, baseDir);
+      console.error(`[Mixing:Step:Error] 💥 Остановка шага ${step.moduleId} (${stepId}) за ${elapsedSec}s:`, err);
+      logFn(`💥 ${isUserAborted ? 'ОСТАНОВЛЕНО ПОЛЬЗОВАТЕЛЕМ' : 'КРИТИЧЕСКАЯ ОШИБКА'} шага «${step.moduleId}» за ${elapsedSec}s: ${err.message}`, 'error', {
         stack: err.stack,
         stepId: step.stepId,
         moduleId: step.moduleId,
@@ -3348,96 +3979,276 @@ class MixingPipelineService {
     }
   }
 
-  _resolveInputsForStep(manifest, stepIndex) {
-    const currentStep = manifest?.pipeline?.[stepIndex];
-    const moduleId = currentStep?.moduleId;
+  _isOriginalSeparationStep(stepOrModId) {
+    const mod = (typeof stepOrModId === 'string' ? stepOrModId : (stepOrModId?.moduleId || '')).toLowerCase();
+    return [
+      'htdemucs', 'htdemucs_ft', 'htdemucs_vocals_bgm', 'uvr_mdx_inst_hq3',
+      'uvr_mdx_voc_ft', 'kim_vocal_2', 'mdx23c_8step', 'hp_karaoke_uvr',
+      'mel_band_roformer_vocals', 'bs_roformer_viperx', 'bs_roformer_cinema',
+      'separate', 'separate_stems', 'demucs', 'ffmpeg_vocal_remover'
+    ].includes(mod) || mod.includes('roformer') || mod.includes('demucs') || mod.startsWith('uvr_mdx');
+  }
 
-    // Build category lookup from MODULE_DATABASE
-    const moduleCategoryMap = {};
-    if (Array.isArray(MODULE_DATABASE)) {
-      MODULE_DATABASE.forEach(m => {
-        if (m && m.id) moduleCategoryMap[m.id] = m.category;
+  _isAcousticMatchStep(stepOrModId) {
+    const mod = (typeof stepOrModId === 'string' ? stepOrModId : (stepOrModId?.moduleId || '')).toLowerCase();
+    return [
+      'acoustic_original_match',
+      'acoustic_match_full',
+      'acoustic_match_soft_reverb',
+      'acoustic_match_dry_focus',
+      'acoustic_matched'
+    ].includes(mod) || mod.startsWith('acoustic_match');
+  }
+
+  _isNonDubberStep(step) {
+    if (!step) return false;
+    const mod = (step.moduleId || '').toLowerCase();
+    if (this._isOriginalSeparationStep(mod)) return true;
+    if (this._isAcousticMatchStep(mod)) return true;
+    if (['ducking', 'master_audio_mix', 'video_mux'].includes(mod)) return true;
+    return false;
+  }
+
+  /**
+   * Resolves all candidate input tracks entering a given step, preserving per-dubber lineage across steps
+   * even if a track was excluded in an earlier step, and attaching excluded/custom flags for UI & execution.
+   */
+  _resolveCandidateInputsForStep(manifest, stepIndex) {
+    const currentStep = manifest?.pipeline?.[stepIndex];
+    if (!currentStep) return [];
+
+    const moduleId = currentStep.moduleId;
+    const excludedSet = new Set(Array.isArray(currentStep.excludedTrackKeys) ? currentStep.excludedTrackKeys : []);
+    const customTracks = Array.isArray(currentStep.customInputTracks) ? currentStep.customInputTracks : [];
+
+    const markExcluded = (item) => {
+      const key = item.trackKey || this._getTrackKey(item);
+      const isExcl = excludedSet.has(key) || (item.path && excludedSet.has(item.path)) || (item.name && excludedSet.has(item.name));
+      return {
+        ...item,
+        trackKey: key,
+        excluded: isExcl
+      };
+    };
+
+    // 1. Original Audio Separation steps
+    if (this._isOriginalSeparationStep(moduleId)) {
+      const list = [];
+      if (manifest.sourceFiles?.originalAudio?.path && fsSync.existsSync(manifest.sourceFiles.originalAudio.path)) {
+        list.push(markExcluded({
+          ...manifest.sourceFiles.originalAudio,
+          trackKey: 'original_audio',
+          dubberNick: 'Оригинальное аудио серии',
+          sourceLabel: 'Исходник серии'
+        }));
+      }
+      for (const ct of customTracks) {
+        if (ct && ct.path && fsSync.existsSync(ct.path)) {
+          list.push(markExcluded({ ...ct, isCustom: true, sourceLabel: 'Добавлена вручную' }));
+        }
+      }
+      return list;
+    }
+
+    // 1B. Acoustic Matched Step: Accepts EXCLUSIVELY Separated Original Vocals + Glued Voices Master
+    if (this._isAcousticMatchStep(moduleId)) {
+      const list = [];
+
+      // Find separated original vocal stem from preceding (or any completed) stem separation step
+      let origVocalFile = null;
+      let origVocalStepNum = null;
+      const allSteps = manifest.pipeline || [];
+      for (let i = 0; i < allSteps.length; i++) {
+        const s = allSteps[i];
+        if (!s || !this._isOriginalSeparationStep(s.moduleId) || !Array.isArray(s.outputFiles)) continue;
+        for (const f of s.outputFiles) {
+          if (!f || !f.path || !fsSync.existsSync(f.path)) continue;
+          const lower = path.basename(f.path).toLowerCase();
+          if (
+            !AudioAnalysisService.isUnseparatedOriginalAudio(f.path) &&
+            (f.type === 'vocals' || lower.includes('vocal'))
+          ) {
+            origVocalFile = f;
+            origVocalStepNum = i + 1;
+          }
+        }
+      }
+
+      if (origVocalFile) {
+        list.push(markExcluded({
+          ...origVocalFile,
+          trackKey: 'original_vocals',
+          dubberNick: '1. Вокальная дорожка оригинала (Эталон эффектов)',
+          sourceLabel: `Из шага #${origVocalStepNum} (Разделение оригинала)`
+        }));
+      }
+
+      // Find glued voices_master track from preceding (or completed) glue_compress step
+      let gluedVoiceFile = null;
+      let gluedStepNum = null;
+      for (let i = 0; i < allSteps.length; i++) {
+        const s = allSteps[i];
+        if (!s || s.moduleId !== 'glue_compress' || !Array.isArray(s.outputFiles) || s.outputFiles.length === 0) continue;
+        const gf = s.outputFiles[0];
+        if (gf && gf.path && fsSync.existsSync(gf.path)) {
+          gluedVoiceFile = gf;
+          gluedStepNum = i + 1;
+        }
+      }
+
+      if (gluedVoiceFile) {
+        list.push(markExcluded({
+          ...gluedVoiceFile,
+          trackKey: 'voices_master',
+          dubberNick: '2. Склеенная дорожка всех голосов (voices_master)',
+          sourceLabel: `Из шага #${gluedStepNum} (Склейка голосов)`
+        }));
+      }
+
+      for (const ct of customTracks) {
+        if (ct && ct.path && fsSync.existsSync(ct.path)) {
+          list.push(markExcluded({ ...ct, isCustom: true, sourceLabel: 'Добавлена вручную' }));
+        }
+      }
+      return list;
+    }
+
+    // 2. Bus / Post-Mix steps (ducking, master_audio_mix, video_mux)
+    if (['ducking', 'master_audio_mix', 'video_mux'].includes(moduleId)) {
+      const list = [];
+      if (moduleId === 'video_mux') {
+        const mixStep = (manifest.pipeline || []).find(s => s.moduleId === 'master_audio_mix' && s.outputFiles?.length > 0);
+        if (mixStep && mixStep.outputFiles[0]) {
+          list.push(markExcluded({
+            ...mixStep.outputFiles[0],
+            trackKey: 'master_audio',
+            dubberNick: 'Сведенный мастер-звук',
+            sourceLabel: 'Из Мастер-микса'
+          }));
+        }
+      } else {
+        // Prefer the latest completed bus voice track (either acoustic_matched or glue_compress)
+        let latestVoiceBusFile = null;
+        let latestVoiceBusLabel = 'Из Склейки голосов';
+        let latestVoiceBusNick = 'Склеенная шина голосов';
+        const searchEnd = stepIndex > 0 ? stepIndex : (manifest.pipeline || []).length;
+        for (let i = 0; i < searchEnd; i++) {
+          const s = manifest.pipeline[i];
+          if (!s || !s.enabled || !Array.isArray(s.outputFiles) || s.outputFiles.length === 0) continue;
+          if (this._isAcousticMatchStep(s.moduleId) && s.outputFiles[0] && fsSync.existsSync(s.outputFiles[0].path)) {
+            latestVoiceBusFile = s.outputFiles[0];
+            latestVoiceBusLabel = `Из шага #${i + 1} (Acoustic Matched)`;
+            latestVoiceBusNick = 'Склеенная шина голосов (с эффектами оригинала)';
+          } else if (s.moduleId === 'glue_compress' && s.outputFiles[0] && fsSync.existsSync(s.outputFiles[0].path)) {
+            latestVoiceBusFile = s.outputFiles[0];
+            latestVoiceBusLabel = `Из шага #${i + 1} (Склейка голосов)`;
+            latestVoiceBusNick = 'Склеенная шина голосов';
+          }
+        }
+        if (latestVoiceBusFile) {
+          list.push(markExcluded({
+            ...latestVoiceBusFile,
+            trackKey: 'voices_master',
+            dubberNick: latestVoiceBusNick,
+            sourceLabel: latestVoiceBusLabel
+          }));
+        }
+      }
+      for (const ct of customTracks) {
+        if (ct && ct.path && fsSync.existsSync(ct.path)) {
+          list.push(markExcluded({ ...ct, isCustom: true, sourceLabel: 'Добавлена вручную' }));
+        }
+      }
+      if (list.length > 0) return list;
+    }
+
+    // 3. Dubber Track steps (and glue_compress)
+    const trackMap = new Map();
+    const baseDubbers = manifest.sourceFiles?.dubberTracks || [];
+    for (let idx = 0; idx < baseDubbers.length; idx++) {
+      const tr = baseDubbers[idx];
+      if (!tr || !tr.path) continue;
+      const key = this._getTrackKey(tr);
+      trackMap.set(key, {
+        ...tr,
+        trackKey: key,
+        dubberNick: tr.dubberNick || this._deriveDubberNickFromFilename(tr.name),
+        sourceLabel: 'Исходная дорожка'
       });
     }
 
-    // List of modules that expect dubber tracks on input
-    const isDubberStep = [
-      'auto_timing', 'stage_mfa_lipsync', 'mfa_lipsync', 'acoustic_original_match',
-      'acoustic_match_full', 'acoustic_match_soft_reverb', 'acoustic_match_dry_focus', 'vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm',
-      'auto_norm_phrases', 'silence_gate', 'apply_fixes', 'stage_loudness_norm',
-      'uvr_denoise_lite', 'uvr_denoise_foxjoy', 'deepfilternet3', 'uvr_denoise_full',
-      'uvr_deecho_normal', 'vst-spectral-dereverb', 'reverb_foxjoy', 'uvr_deecho_aggressive',
-      'mdx_dereverb_room', 'voicefixer_fe', 'airwindows_dsp', 'deesser', 'airwindows_restore',
-      'airwindows_saturate', 'glue_compress', 'de_plosive', 'vocal_thickener',
-      'spectral_dereverb_lite', 'voice_eq', 'voice_compressor', 'voice_deesser',
-      'voice_reverb', 'voice_limiter', 'voice_master_strip'
-    ].includes(moduleId);
-
-    const isNonDubberStep = (step) => {
-      if (!step) return false;
-      const mod = (step.moduleId || '').toLowerCase();
-      const cat = (step.category || moduleCategoryMap[step.moduleId] || '').toLowerCase();
-
-      // Categories that process original audio stems or final master/export rather than per-dubber voice tracks
-      if (['separation', 'stem_separation', 'export', 'balance', 'mastering'].includes(cat)) {
-        return true;
-      }
-
-      // Explicit separation / stem / master / video mux module IDs
-      if ([
-        'htdemucs', 'htdemucs_ft', 'htdemucs_vocals_bgm', 'uvr_mdx_inst_hq3',
-        'uvr_mdx_voc_ft', 'kim_vocal_2', 'mdx23c_8step', 'hp_karaoke_uvr',
-        'mel_band_roformer_vocals', 'bs_roformer_viperx', 'bs_roformer_cinema',
-        'separate', 'separate_stems', 'demucs', 'ducking',
-        'master_audio_mix', 'video_mux'
-      ].includes(mod)) {
-        return true;
-      }
-
-      // Pattern matching for stem separation or master muxing
-      if (
-        mod.includes('roformer') ||
-        mod.includes('demucs') ||
-        mod.includes('separate') ||
-        mod.includes('stem') ||
-        mod.startsWith('uvr_mdx') ||
-        mod.startsWith('mdx') ||
-        mod === 'video_mux' ||
-        mod === 'master_audio_mix'
-      ) {
-        return true;
-      }
-
-      // Inspect outputFiles of the step: if output files look like original separated stems or master muxes
-      if (Array.isArray(step.outputFiles) && step.outputFiles.length > 0) {
-        const firstOut = typeof step.outputFiles[0] === 'string' ? step.outputFiles[0] : step.outputFiles[0]?.path || step.outputFiles[0]?.name || '';
-        const lowerOut = firstOut.toLowerCase();
-        if (
-          lowerOut.includes('original_vocals') ||
-          lowerOut.includes('stem_') ||
-          lowerOut.includes('_no_vocal') ||
-          lowerOut.includes('_instrumental') ||
-          lowerOut.includes('_bgm') ||
-          lowerOut.includes('master_audio') ||
-          lowerOut.includes('final_mux')
-        ) {
-          return true;
-        }
-      }
-
-      return false;
-    };
-
-    for (let i = stepIndex - 1; i >= 0; i--) {
+    // Walk forward through preceding completed dubber steps to pick up the latest processed file per dubber
+    for (let i = 0; i < stepIndex; i++) {
       const prevStep = manifest.pipeline[i];
-      if (prevStep && prevStep.enabled && prevStep.outputFiles && prevStep.outputFiles.length > 0) {
-        if (isDubberStep && isNonDubberStep(prevStep)) {
-          continue;
+      if (!prevStep || !prevStep.enabled) continue;
+      if (this._isNonDubberStep(prevStep)) continue;
+
+      // Also include any custom tracks added to upstream steps
+      if (Array.isArray(prevStep.customInputTracks)) {
+        for (const upCustom of prevStep.customInputTracks) {
+          if (upCustom && upCustom.path && fsSync.existsSync(upCustom.path)) {
+            const cKey = this._getTrackKey(upCustom);
+            if (!trackMap.has(cKey)) {
+              trackMap.set(cKey, {
+                ...upCustom,
+                trackKey: cKey,
+                dubberNick: upCustom.dubberNick || this._deriveDubberNickFromFilename(upCustom.name),
+                sourceLabel: `Добавлена в шаге #${i + 1}`
+              });
+            }
+          }
         }
-        return prevStep.outputFiles;
+      }
+
+      if (!Array.isArray(prevStep.outputFiles) || prevStep.outputFiles.length === 0) continue;
+
+      if (prevStep.moduleId === 'glue_compress') {
+        const gluedOut = prevStep.outputFiles[0];
+        if (gluedOut && gluedOut.path && fsSync.existsSync(gluedOut.path)) {
+          trackMap.clear();
+          trackMap.set('voices_master', {
+            ...gluedOut,
+            trackKey: 'voices_master',
+            dubberNick: 'Склеенная шина голосов',
+            sourceLabel: `Шаг #${i + 1} (Склейка голосов)`
+          });
+        }
+        continue;
+      }
+
+      for (const outFile of prevStep.outputFiles) {
+        if (!outFile || !outFile.path || !fsSync.existsSync(outFile.path)) continue;
+        const key = this._getTrackKey(outFile, prevStep.prefix);
+        const prevEntry = trackMap.get(key);
+        trackMap.set(key, {
+          ...outFile,
+          trackKey: key,
+          dubberNick: outFile.dubberNick || prevEntry?.dubberNick || this._deriveDubberNickFromFilename(outFile.name, prevStep.prefix),
+          sourceLabel: `Шаг #${i + 1} (${prevStep.moduleId})`
+        });
       }
     }
-    return manifest.sourceFiles?.dubberTracks || [];
+
+    // Add custom tracks explicitly attached to currentStep
+    for (const ct of customTracks) {
+      if (ct && ct.path && fsSync.existsSync(ct.path)) {
+        const cKey = this._getTrackKey(ct);
+        trackMap.set(cKey, {
+          ...ct,
+          trackKey: cKey,
+          dubberNick: ct.dubberNick || this._deriveDubberNickFromFilename(ct.name),
+          isCustom: true,
+          sourceLabel: 'Добавлена в этот шаг вручную'
+        });
+      }
+    }
+
+    return Array.from(trackMap.values()).map(markExcluded);
+  }
+
+  _resolveInputsForStep(manifest, stepIndex) {
+    const candidates = this._resolveCandidateInputsForStep(manifest, stepIndex);
+    return candidates.filter(t => !t.excluded);
   }
 
   /**
@@ -3600,17 +4411,7 @@ class MixingPipelineService {
     }
 
     if (!subtitlesList || subtitlesList.length === 0) {
-      logFn(`⚠️ Субтитры не найдены или пусты. Пропуск точечного липсинка с сохранением исходных дорожек.`, 'warn');
-      const fallbackResults = [];
-      for (const track of inputFiles) {
-        const nick = track.dubberNick || 'dubber';
-        const outName = `${prefix}${nick}.wav`;
-        const outPath = path.join(stepFolder, outName);
-        await fs.copyFile(track.path, outPath);
-        const st = fsSync.statSync(outPath);
-        fallbackResults.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
-      }
-      return fallbackResults;
+      throw new Error('Субтитры серии не найдены или пусты. Для работы фонетического липсинка MFA необходим файл субтитров (.ass/.srt).');
     }
 
     fsSync.writeFileSync(tempSubJsonPath, JSON.stringify(subtitlesList, null, 2), 'utf8');
@@ -3620,21 +4421,21 @@ class MixingPipelineService {
     const maxDriftMs = Number(params?.maxDriftMs ?? 50.0);
     const confidenceThreshold = Number(params?.confidenceThreshold ?? 0.50);
 
-    for (let i = 0; i < inputFiles.length; i++) {
-      const track = inputFiles[i];
-      const nick = track.dubberNick || `dubber_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
-      const outPath = path.join(stepFolder, outName);
-      const reportPath = path.join(stepFolder, `lipsync_report_${nick}.json`);
+    try {
+      for (let i = 0; i < inputFiles.length; i++) {
+        const track = inputFiles[i];
+        const nick = this._resolveTrackNick(track, inputFiles, i);
+        const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+        const outPath = path.join(stepFolder, outName);
+        const reportPath = path.join(stepFolder, `lipsync_report_${nick.replace(/[\\/:*?"<>|]/g, '_')}.json`);
 
-      const trackStartPct = Math.round((i / inputFiles.length) * 100);
-      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+        const trackStartPct = Math.round((i / inputFiles.length) * 100);
+        const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
 
-      logFn(`[${i+1}/${inputFiles.length}] MFA Фонетический анализ дорожки «${nick}»...`);
+        logFn(`[${i+1}/${inputFiles.length}] MFA Фонетический анализ дорожки «${nick}»...`);
 
-      try {
         let mfaReport = null;
-        
+
         await AudioNeuralService.mfaAnalyze({
           dubAudioPath: track.path,
           origAudioPath: origVocalsPath,
@@ -3655,6 +4456,8 @@ class MixingPipelineService {
 
         if (fsSync.existsSync(reportPath)) {
           mfaReport = JSON.parse(fsSync.readFileSync(reportPath, 'utf8'));
+        } else {
+          throw new Error(`MFA не сформировал отчет выравнивания для дорожки «${nick}».`);
         }
 
         if (mfaReport && Array.isArray(mfaReport) && mfaReport.length > 0 && autoApplyStretch) {
@@ -3696,22 +4499,19 @@ class MixingPipelineService {
         } else {
           await fs.copyFile(track.path, outPath);
         }
-      } catch (err) {
-        logFn(`⚠️ Ошибка MFA анализа (${err.message}). Сохранение исходной дорожки без изменений.`, 'warn');
-        await fs.copyFile(track.path, outPath);
-      }
 
-      const st = fsSync.statSync(outPath);
-      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+        const st = fsSync.statSync(outPath);
+        results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
 
-      if (onProgress) {
-        onProgress({ percent: trackEndPct, message: `MFA Lipsync: ${nick}` });
+        if (onProgress) {
+          onProgress({ percent: trackEndPct, message: `MFA Lipsync: ${nick}` });
+        }
       }
+    } finally {
+      try {
+        if (fsSync.existsSync(tempSubJsonPath)) fsSync.unlinkSync(tempSubJsonPath);
+      } catch (e) {}
     }
-
-    try {
-      if (fsSync.existsSync(tempSubJsonPath)) fsSync.unlinkSync(tempSubJsonPath);
-    } catch (e) {}
 
     return results;
   }
@@ -3797,73 +4597,141 @@ class MixingPipelineService {
    */
   async _execAcousticMatch({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
     logFn('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    logFn('▶ [МОДУЛЬ СВЕДЕНИЯ] Акустический слепок оригинала и автосопоставление 3-х слепков');
+    logFn('▶ [МОДУЛЬ СВЕДЕНИЯ: acoustic_matched] Пофразовый анализ эффектов оригинала и наложение по кривой автоматизации');
 
-    if (!inputFiles || inputFiles.length === 0) {
-      throw new Error('Нет входных голосовых дорожек дубляжа для приведения к оригиналу.');
+    const allSteps = manifest?.pipeline || [];
+
+    // 1. ПРОВЕРКА №1: Было ли разделение оригинального аудио из видео?
+    let separatedOriginalVocalsPath = null;
+
+    // Проверяем входные файлы шага (включая кастомные или переданные из шага разделения)
+    for (const f of (inputFiles || [])) {
+      const p = typeof f === 'string' ? f : f?.path;
+      if (!p || !fsSync.existsSync(p)) continue;
+      if (f.trackKey === 'original_vocals') {
+        separatedOriginalVocalsPath = p;
+        break;
+      }
+      const lower = path.basename(p).toLowerCase();
+      if (
+        !AudioAnalysisService.isUnseparatedOriginalAudio(p) &&
+        !AudioAnalysisService.isGluedVoicesMasterTrack(p, manifest) &&
+        (lower.includes('vocal') || f.type === 'vocals')
+      ) {
+        separatedOriginalVocalsPath = p;
+        break;
+      }
     }
+
+    // Если во входных не переопределено, проверяем выполненные шаги разделения стемов в конвейере
+    if (!separatedOriginalVocalsPath) {
+      const completedSepSteps = allSteps.filter(
+        s => this._isOriginalSeparationStep(s.moduleId) && s.status === 'completed' && Array.isArray(s.outputFiles) && s.outputFiles.length > 0
+      );
+      for (let i = completedSepSteps.length - 1; i >= 0; i--) {
+        const s = completedSepSteps[i];
+        const vocFile = s.outputFiles.find(f => {
+          if (!f || !f.path || !fsSync.existsSync(f.path)) return false;
+          if (AudioAnalysisService.isUnseparatedOriginalAudio(f.path)) return false;
+          const lower = path.basename(f.path).toLowerCase();
+          return f.type === 'vocals' || lower.includes('vocal');
+        });
+        if (vocFile) {
+          separatedOriginalVocalsPath = vocFile.path;
+          break;
+        }
+      }
+    }
+
+    if (!separatedOriginalVocalsPath || !fsSync.existsSync(separatedOriginalVocalsPath)) {
+      const errMsg =
+        '❌ Ошибка [acoustic_matched]: Оригинальное аудио из видео НЕ было разделено на стемы!\n' +
+        'Модуль принимает на вход ИСКЛЮЧИТЕЛЬНО выделенную вокальную дорожку оригинала и склеенную дорожку всех голосов.\n' +
+        'Пожалуйста, сначала выполните шаг разделения оригинального аудио (Demucs / UVR / RoFormer / Vocal Splitter) перед этим модулем.';
+      logFn(errMsg, 'error');
+      throw new Error(errMsg);
+    }
+
+    // 2. ПРОВЕРКА №2: Было ли выполнено склеивание всех голосов в одну дорожку (glue_compress -> voices_master)?
+    let gluedVoicesPath = null;
+
+    for (const f of (inputFiles || [])) {
+      const p = typeof f === 'string' ? f : f?.path;
+      if (!p || !fsSync.existsSync(p)) continue;
+      if (p === separatedOriginalVocalsPath) continue;
+      if (f.trackKey === 'voices_master' || AudioAnalysisService.isGluedVoicesMasterTrack(p, manifest)) {
+        gluedVoicesPath = p;
+        break;
+      }
+    }
+
+    if (!gluedVoicesPath) {
+      const completedGlueSteps = allSteps.filter(
+        s => s.moduleId === 'glue_compress' && s.status === 'completed' && Array.isArray(s.outputFiles) && s.outputFiles.length > 0
+      );
+      if (completedGlueSteps.length > 0) {
+        const lastGlue = completedGlueSteps[completedGlueSteps.length - 1];
+        const gf = lastGlue.outputFiles[0];
+        if (gf && gf.path && fsSync.existsSync(gf.path)) {
+          gluedVoicesPath = gf.path;
+        }
+      }
+    }
+
+    if (!gluedVoicesPath || !fsSync.existsSync(gluedVoicesPath)) {
+      const errMsg =
+        '❌ Ошибка [acoustic_matched]: Все голоса НЕ были склеены в одну дорожку!\n' +
+        'Модуль принимает на вход ИСКЛЮЧИТЕЛЬНО вокальную дорожку оригинала и одну склеенную дорожку всех голосов (voices_master.wav).\n' +
+        'Пожалуйста, сначала выполните шаг «Склейка и шинная компрессия голосов (Glue Bus)» перед этим модулем.';
+      logFn(errMsg, 'error');
+      throw new Error(errMsg);
+    }
+
+    logFn(`✓ Входные дорожки проверены и подтверждены:`);
+    logFn(`  1) Вокальная дорожка оригинала: ${path.basename(separatedOriginalVocalsPath)}`);
+    logFn(`  2) Склеенная дорожка всех голосов: ${path.basename(gluedVoicesPath)}`);
+
+    const outName = `${prefix}voices_master.wav`;
+    const outPath = path.join(stepFolder, outName);
 
     const episodeDir = episode?.dir || manifest?.episodeDir || workingDir;
-    const searchDirs = [
-      workingDir,
-      episodeDir,
-      path.join(workingDir, '01_separate'),
-      path.join(workingDir, '01_htdemucs'),
-      path.join(workingDir, '03_demucs'),
-      path.join(workingDir, '04_stem_separation'),
-      path.join(episodeDir, 'Исходники'),
-      path.join(episodeDir, 'Тайминг'),
-      path.join(episodeDir, 'Сведение')
-    ];
+    const searchDirs = [workingDir, episodeDir].filter(Boolean);
 
-    const originalVocalsPath = AudioAnalysisService.findOriginalVocalsTrack(searchDirs, manifest);
+    const matchResult = await AudioAnalysisService.applyAcousticProfileMatch({
+      ourVocalsPath: gluedVoicesPath,
+      originalVocalsPath: separatedOriginalVocalsPath,
+      searchDirs,
+      manifest,
+      outputPath: outPath,
+      options: params,
+      onProgress: (p) => {
+        if (onProgress) {
+          onProgress({
+            percent: p.progress || 50,
+            stepProgress: p.progress || 50,
+            message: p.status === 'rendering_matched_vocals'
+              ? 'Рендеринг эффектов по кривым автоматизации...'
+              : 'Пофразовый анализ эффектов оригинала...'
+          });
+        }
+      },
+      onLog: (m, lvl) => logFn(m, lvl)
+    });
 
-    if (!originalVocalsPath || !fsSync.existsSync(originalVocalsPath)) {
-      logFn('❌ Разделенная дорожка вокала оригинала НЕ найдена!', 'error');
-      throw new Error(
-        "❌ Ошибка: Не найдена заранее разделенная дорожка голосов оригинала!\n" +
-        "Модуль анализирует ТОЛЬКО чистый вокал оригинала (Demucs / UVR).\n" +
-        "Пожалуйста, сначала выполните шаг 'Разделение стемов Demucs/UVR' или добавьте оригинальный вокал (original_vocals.wav)."
-      );
-    }
+    const st = fsSync.statSync(outPath);
+    const resultItem = {
+      name: outName,
+      path: outPath,
+      size: st.size,
+      type: 'audio',
+      trackKey: 'voices_master',
+      dubberNick: 'Склеенная шина голосов (Acoustic Matched)',
+      matched: true,
+      stats: matchResult.appliedParams
+    };
 
-    logFn(`✓ Обнаружен оригинальный разделенный вокал: ${path.basename(originalVocalsPath)}`);
-
-    const results = [];
-
-    for (let i = 0; i < inputFiles.length; i++) {
-      const inputFile = inputFiles[i];
-      const inPath = typeof inputFile === 'string' ? inputFile : inputFile.path;
-      const nick = inputFile.dubberNick || `voice_${i+1}`;
-      const outName = `${prefix}${nick}.wav`;
-      const outPath = path.join(stepFolder, outName);
-
-      logFn(`Приведение дорожки [${i + 1}/${inputFiles.length}] «${nick}» к слепкам оригинала...`);
-
-      const matchResult = await AudioAnalysisService.applyAcousticProfileMatch({
-        ourVocalsPath: inPath,
-        originalVocalsPath,
-        searchDirs,
-        outputPath: outPath,
-        options: params,
-        onProgress: p => {
-          if (onProgress) onProgress({ stepProgress: Math.round(((i + (p.progress || 0) / 100) / inputFiles.length) * 100) });
-        },
-        onLog: (m, lvl) => logFn(m, lvl)
-      });
-
-      results.push({
-        name: outName,
-        path: outPath,
-        type: 'audio',
-        dubberNick: nick,
-        matched: true,
-        stats: matchResult.appliedParams
-      });
-    }
-
-    logFn(`✓ Завершено приведение к акустическому слепку оригинала (${results.length} файлов).`);
-    return results;
+    logFn(`✓ Наложение эффектов оригинала по кривым автоматизации успешно завершено: ${outName} (${(st.size / (1024 * 1024)).toFixed(2)} MB)`);
+    return [resultItem];
   }
 
   /**
@@ -4019,113 +4887,105 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
 
-      // 1. Попытка нейросетевой обработки через Sidecar (DeepFilterNet3 / VR-DeNoise)
-      let usedNeural = false;
-      try {
-        logFn(`[Neural AI] Запуск нейросетевой модели «${modelName}» для дорожки «${nick}»...`);
-        const neuralRes = await AudioNeuralService.denoiseAudio({
-          inputPath: track.path,
-          outputPath: outPath,
-          modelPath: localModelFile,
-          modelId: activeModelId,
-          attenuationLimitDb: Number(params.attenuationLimitDb ?? -100.0),
-          sensitivity,
-          wetDryBlend,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
-            }
-          },
-          onLog: logFn
-        });
-        if (neuralRes && fsSync.existsSync(outPath)) {
-          usedNeural = true;
-          logFn(`✓ Дорожка «${nick}» успешно очищена нейросетью «${modelName}»`);
-        }
-      } catch (neuralErr) {
-        logFn(`[Neural AI Fallback] Модель «${modelName}» недоступна (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
-      }
-
-      if (!usedNeural) {
-        // Adaptive Multi-stage Spectral Stationarity Reducer (DSP Fallback):
-        // Scale noise reduction Db directly based on user sensitivity!
-        const sensFactor = sensitivity / 10.0;
-        const fftNr = Math.min(45, Math.max(0.1, nrDb * sensFactor));
-        const fftFloor = Math.min(-20, Math.max(-85, floorDb));
-        
-        let tnVal = 0;
-        let trVal = 0;
-        if (params.noiseTraining === true) {
-          tnVal = 1;
-          trVal = 1;
-        } else {
-          if (sensitivity > 6.0) {
-            tnVal = 1;
-            trVal = 1;
-          } else if (sensitivity >= 2.0) {
-            tnVal = 0;
-            trVal = 1;
-          } else {
-            tnVal = 0;
-            trVal = 0;
+      logFn(`[Neural AI] Запуск нейросетевой модели «${modelName}» для дорожки «${nick}»...`);
+      const neuralRes = await AudioNeuralService.denoiseAudio({
+        inputPath: track.path,
+        outputPath: outPath,
+        modelPath: localModelFile,
+        modelId: activeModelId,
+        attenuationLimitDb: Number(params.attenuationLimitDb ?? -100.0),
+        sensitivity,
+        wetDryBlend,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
           }
-        }
+        },
+        onLog: logFn
+      });
 
-        let filterChain = '';
-        if (wetDryBlend < 100) {
-          const wetVal = (wetDryBlend / 100).toFixed(2);
-          const dryVal = (1.0 - wetDryBlend / 100).toFixed(2);
-          filterChain = `asplit[orig][tofilt]; [tofilt]highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:tr=${trVal}:om=o`;
-          if (preserveFormants) {
-            filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
-          }
-          filterChain += `[filt]; [orig]volume=${dryVal}[dry]; [filt]volume=${wetVal}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
-        } else {
-          filterChain = `highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:tr=${trVal}:om=o`;
-          if (preserveFormants) {
-            filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
-          }
-        }
-
-        const cmd = ffmpeg(track.path)
-          .audioFilters(filterChain)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath);
-
-        try {
-          await this._execFfmpeg(cmd, {
-            logFn,
-            onProgress: (p) => {
-              if (onProgress && p && typeof p.percent === 'number') {
-                const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-                onProgress({ percent: current, message: `VR-DeNoise [${nick}] (${p.percent}%)` });
-              }
-            },
-            outPath,
-            description: `VR-DeNoise [${nick}]`
-          });
-        } catch (err) {
-          logFn(`Предупреждение при обработке дорожки «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
-          const safeCmd = ffmpeg(track.path)
-            .audioFilters(`highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:om=o`)
-            .audioCodec('pcm_s16le')
-            .audioChannels(2)
-            .audioFrequency(48000)
-            .output(outPath);
-          await this._execFfmpeg(safeCmd, {
-            logFn,
-            outPath,
-            description: `VR-DeNoise Fallback [${nick}]`
-          });
-        }
+      if (!neuralRes || !fsSync.existsSync(outPath)) {
+        throw new Error(`Модель «${modelName}» не создала выходной файл для дорожки «${nick}».`);
       }
 
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
-      logFn(`✓ Дорожка «${nick}» обработана моделью VR-DeNoise Lite -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+      logFn(`✓ Дорожка «${nick}» успешно очищена нейросетью «${modelName}» -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: FFmpeg Spectral Denoise (Dedicated standalone FFmpeg afftdn module)
+   */
+  async _execFfmpegDenoise({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const nrDb = Number(params.noiseReductionDb ?? 16.0);
+    const floorDb = Number(params.noiseFloorDb ?? -50.0);
+    const sensitivity = Number(params.sensitivity ?? 6.0);
+    const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 95.0)));
+    const preserveFormants = params.preserveVoiceFormants !== false;
+
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для модуля FFmpeg Spectral Denoise.');
+    }
+
+    logFn(`[FFmpeg Spectral Denoise] Запуск частотного FFT-шумоподавления для ${inputFiles.length} дорожек...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      const sensFactor = sensitivity / 10.0;
+      const fftNr = Math.min(45, Math.max(0.1, nrDb * sensFactor));
+      const fftFloor = Math.min(-20, Math.max(-85, floorDb));
+      const tnVal = sensitivity > 6.0 ? 1 : 0;
+      const trVal = sensitivity >= 2.0 ? 1 : 0;
+
+      let filterChain = '';
+      if (wetDryBlend < 100) {
+        const wetVal = (wetDryBlend / 100).toFixed(2);
+        const dryVal = (1.0 - wetDryBlend / 100).toFixed(2);
+        filterChain = `asplit[orig][tofilt]; [tofilt]highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:tr=${trVal}:om=o`;
+        if (preserveFormants) {
+          filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
+        }
+        filterChain += `[filt]; [orig]volume=${dryVal}[dry]; [filt]volume=${wetVal}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
+      } else {
+        filterChain = `highpass=f=65,afftdn=nr=${fftNr.toFixed(1)}:nf=${fftFloor}:tn=${tnVal}:tr=${trVal}:om=o`;
+        if (preserveFormants) {
+          filterChain += `,equalizer=f=3400:t=q:w=1.2:g=1.2,equalizer=f=10500:t=h:g=0.8`;
+        }
+      }
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterChain)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `FFmpeg Denoise [${nick}] (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `FFmpeg Spectral Denoise [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ Дорожка «${nick}» обработана FFmpeg Spectral Denoise -> ${outName}`);
     }
 
     return results;
@@ -4205,116 +5065,107 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Применение модели «${modelName}» к дорожке «${nick}»...`);
 
-      // 1. Попытка нейросетевой дериверберации через Sidecar (DeepFilterNet3 / Reverb HQ FoxJoy / UVR De-Echo)
-      let usedNeural = false;
-      try {
-        logFn(`[Neural AI] Запуск модели «${modelName}» для дорожки «${nick}»...`);
-        const neuralRes = await AudioNeuralService.dereverbAudio({
-          inputPath: track.path,
-          outputPath: outPath,
-          modelPath: localModelFile,
-          modelId: activeModelId,
-          reverbReduction: Number(params.reverbReduction ?? (params.deechoReductionDb ? params.deechoReductionDb / 20.0 : 0.8)),
-          sensitivity,
-          wetDryBlend,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
-            }
-          },
-          onLog: logFn
-        });
-        if (neuralRes && fsSync.existsSync(outPath)) {
-          usedNeural = true;
-          logFn(`✓ Дорожка «${nick}» успешно очищена от эха нейросетью «${modelName}»`);
-        }
-      } catch (neuralErr) {
-        logFn(`[Neural AI Fallback] Модель «${modelName}» недоступна (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
-      }
-
-      if (!usedNeural) {
-        // De-reverberation & Flutter Echo Cancellation Filter (DSP Fallback):
-        // Scale suppression amount and decay based on user sensitivity!
-        const sensFactor = sensitivity / 10.0;
-        const effectiveDeechoDb = Math.min(30, Math.max(1, deechoDb * sensFactor));
-        const nrAmount = Math.min(22, Math.max(1, Math.round(effectiveDeechoDb * 0.75)));
-        
-        const effectiveEarlyDecay = Math.max(0.05, Math.min(1.0, earlyDecay * (0.2 + sensFactor * 0.8)));
-        const notchGain = -(effectiveEarlyDecay * 2.2).toFixed(1);
-
-        let tnVal = 0;
-        let trVal = 0;
-        if (params.noiseTraining === true) {
-          tnVal = 1;
-          trVal = 1;
-        } else {
-          if (sensitivity > 6.0) {
-            tnVal = 1;
-            trVal = 1;
-          } else if (sensitivity >= 2.0) {
-            tnVal = 0;
-            trVal = 1;
-          } else {
-            tnVal = 0;
-            trVal = 0;
+      logFn(`[Neural AI] Запуск модели «${modelName}» для дорожки «${nick}»...`);
+      const neuralRes = await AudioNeuralService.dereverbAudio({
+        inputPath: track.path,
+        outputPath: outPath,
+        modelPath: localModelFile,
+        modelId: activeModelId,
+        reverbReduction: Number(params.reverbReduction ?? (params.deechoReductionDb ? params.deechoReductionDb / 20.0 : 0.8)),
+        sensitivity,
+        wetDryBlend,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
           }
-        }
+        },
+        onLog: logFn
+      });
 
-        let filterChain = '';
-        if (wetDryBlend < 100) {
-          const wetVal = (wetDryBlend / 100).toFixed(2);
-          const dryVal = (1.0 - wetDryBlend / 100).toFixed(2);
-          filterChain = `asplit[orig][tofilt]; [tofilt]highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=${tnVal}:tr=${trVal}:om=o,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
-          if (preserveBody) {
-            filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
-          }
-          filterChain += `[filt]; [orig]volume=${dryVal}[dry]; [filt]volume=${wetVal}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
-        } else {
-          filterChain = `highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=${tnVal}:tr=${trVal}:om=o,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
-          if (preserveBody) {
-            filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
-          }
-        }
-
-        const cmd = ffmpeg(track.path)
-          .audioFilters(filterChain)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath);
-
-        try {
-          await this._execFfmpeg(cmd, {
-            logFn,
-            onProgress: (p) => {
-              if (onProgress && p && typeof p.percent === 'number') {
-                const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-                onProgress({ percent: current, message: `De-Echo [${nick}] (${p.percent}%)` });
-              }
-            },
-            outPath,
-            description: `UVR De-Echo [${nick}]`
-          });
-        } catch (err) {
-          logFn(`Предупреждение при de-echo на «${nick}»: ${err.message}. Пробуем безопасный базовый профиль...`, 'warn');
-          const safeCmd = ffmpeg(track.path)
-            .audioFilters(`highpass=f=60,equalizer=f=3200:t=q:w=2.0:g=-1.5,afftdn=nr=10:nf=-50:tn=${tnVal}:om=o`)
-            .audioCodec('pcm_s16le')
-            .audioChannels(2)
-            .audioFrequency(48000)
-            .output(outPath);
-          await this._execFfmpeg(safeCmd, {
-            logFn,
-            outPath,
-            description: `UVR De-Echo Fallback [${nick}]`
-          });
-        }
+      if (!neuralRes || !fsSync.existsSync(outPath)) {
+        throw new Error(`Модель дериверберации «${modelName}» не создала выходной файл для дорожки «${nick}».`);
       }
 
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
-      logFn(`✓ Дорожка «${nick}» обработана моделью UVR De-Echo Normal -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+      logFn(`✓ Дорожка «${nick}» успешно очищена от эха моделью «${modelName}» -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: FFmpeg De-Echo & Room Filter (Dedicated standalone FFmpeg module)
+   */
+  async _execFfmpegDeEcho({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const deechoDb = Number(params.deechoReductionDb ?? 14.0);
+    const earlyDecay = Math.max(0.1, Math.min(1.0, Number(params.earlyReflectionsDecay ?? 0.70)));
+    const preserveBody = params.preserveBodyFrequencies !== false;
+    const sensitivity = Number(params.sensitivity ?? 6.5);
+    const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 85.0)));
+
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для модуля FFmpeg De-Echo.');
+    }
+
+    logFn(`[FFmpeg De-Echo] Запуск фильтрации комнатного эха для ${inputFiles.length} дорожек...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      const sensFactor = sensitivity / 10.0;
+      const effectiveDeechoDb = Math.min(30, Math.max(1, deechoDb * sensFactor));
+      const nrAmount = Math.min(22, Math.max(1, Math.round(effectiveDeechoDb * 0.75)));
+      const effectiveEarlyDecay = Math.max(0.05, Math.min(1.0, earlyDecay * (0.2 + sensFactor * 0.8)));
+      const notchGain = -(effectiveEarlyDecay * 2.2).toFixed(1);
+      const tnVal = sensitivity > 6.0 ? 1 : 0;
+      const trVal = sensitivity >= 2.0 ? 1 : 0;
+
+      let filterChain = '';
+      if (wetDryBlend < 100) {
+        const wetVal = (wetDryBlend / 100).toFixed(2);
+        const dryVal = (1.0 - wetDryBlend / 100).toFixed(2);
+        filterChain = `asplit[orig][tofilt]; [tofilt]highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=${tnVal}:tr=${trVal}:om=o,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
+        if (preserveBody) {
+          filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
+        }
+        filterChain += `[filt]; [orig]volume=${dryVal}[dry]; [filt]volume=${wetVal}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
+      } else {
+        filterChain = `highpass=f=60,afftdn=nr=${nrAmount}:nf=-52:tn=${tnVal}:tr=${trVal}:om=o,equalizer=f=3200:t=q:w=2.0:g=${notchGain},equalizer=f=4800:t=q:w=2.5:g=${notchGain}`;
+        if (preserveBody) {
+          filterChain += `,equalizer=f=260:t=q:w=1.0:g=1.0,equalizer=f=420:t=q:w=1.2:g=0.8`;
+        }
+      }
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterChain)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `FFmpeg De-Echo [${nick}] (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `FFmpeg De-Echo [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ Дорожка «${nick}» обработана FFmpeg De-Echo -> ${outName}`);
     }
 
     return results;
@@ -4413,47 +5264,83 @@ class MixingPipelineService {
       vocFilters = `asplit[orig_audio][to_filt]; [to_filt]${vocFilters}[filtered_vocal]; [orig_audio]volume=${origWeight}[dry]; [filtered_vocal]volume=${vocWeight}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
     }
 
-    // 1. Попытка высококачественной нейросетевой сепарации (MDX-Net ONNX / VR PyTorch / Demucs v4 / RoFormer)
-    let usedNeural = false;
     const stemsSelection = params.stems || (params.extractVocals && !params.extractInstrumental ? 'vocals_only' : (!params.extractVocals && params.extractInstrumental ? 'instrumental_only' : 'both'));
 
-    try {
-      logFn(`[Neural AI] Запуск модели «${modelName}» для разделения стемов...`);
-      const neuralStems = await AudioNeuralService.separateStems({
-        inputPath: sourceAudioPath,
-        outputDir: stepFolder,
-        modelName: activeModelId,
-        modelPath: localModelFile,
-        modelId: activeModelId,
-        shifts: Number(params.shifts ?? 1),
-        overlap: Number(params.overlap ?? 0.25),
-        stems: stemsSelection,
-        prefix,
-        onProgress: (p) => {
-          if (onProgress && p && typeof p.percent === 'number') {
-            onProgress({ percent: p.percent, message: `${modelName}: ${p.percent}%` });
-          }
-        },
-        onLog: logFn
-      });
+    logFn(`[Neural AI] Запуск модели «${modelName}» для разделения стемов...`);
+    const neuralStems = await AudioNeuralService.separateStems({
+      inputPath: sourceAudioPath,
+      outputDir: stepFolder,
+      modelName: activeModelId,
+      modelPath: localModelFile,
+      modelId: activeModelId,
+      shifts: Number(params.shifts ?? 1),
+      overlap: Number(params.overlap ?? 0.25),
+      stems: stemsSelection,
+      prefix,
+      onProgress: (p) => {
+        if (onProgress && p && typeof p.percent === 'number') {
+          onProgress({ percent: p.percent, message: `${modelName}: ${p.percent}%` });
+        }
+      },
+      onLog: logFn
+    });
 
-      if (neuralStems && Array.isArray(neuralStems) && neuralStems.length > 0) {
-        usedNeural = true;
-        const formatted = neuralStems.map(s => {
-          let sz = 0;
-          try { sz = fsSync.statSync(s.path).size; } catch (e) {}
-          return {
-            name: path.basename(s.path),
-            path: s.path,
-            size: sz,
-            type: s.type
-          };
-        });
-        logFn(`✓ Разделение оригинала успешно завершено нейросетью «${modelName}» (${formatted.length} стем-файлов)!`);
-        return formatted;
+    if (!neuralStems || !Array.isArray(neuralStems) || neuralStems.length === 0) {
+      throw new Error(`Модель «${modelName}» не сформировала стем-файлы.`);
+    }
+
+    const formatted = neuralStems.map(s => {
+      let sz = 0;
+      try { sz = fsSync.statSync(s.path).size; } catch (e) {}
+      return {
+        name: path.basename(s.path),
+        path: s.path,
+        size: sz,
+        type: s.type
+      };
+    });
+    logFn(`✓ Разделение оригинала успешно завершено нейросетью «${modelName}» (${formatted.length} стем-файлов)!`);
+    return formatted;
+  }
+
+  /**
+   * EXEC: FFmpeg Vocal / Instrumental Splitter (Dedicated standalone FFmpeg module)
+   */
+  async _execFfmpegVocalRemover({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
+    let sourceAudioPath = manifest.sourceFiles.originalAudio?.path;
+    if (inputFiles.length > 0 && fsSync.existsSync(inputFiles[0].path)) {
+      sourceAudioPath = inputFiles[0].path;
+    } else if (!sourceAudioPath || !fsSync.existsSync(sourceAudioPath)) {
+      const vPath = manifest.sourceFiles.video?.path || episode?.rawPath;
+      if (!vPath || !fsSync.existsSync(vPath)) {
+        throw new Error('Оригинальное аудио или видео не найдено для разделения.');
       }
-    } catch (neuralErr) {
-      logFn(`[Neural AI Fallback] Модель «${modelName}» недоступна (${neuralErr.message}). Переход на адаптивный DSP-фильтр.`, 'warn');
+      sourceAudioPath = path.join(workingDir, '00_исходные', '00_original_audio.wav');
+      await fs.mkdir(path.dirname(sourceAudioPath), { recursive: true });
+      await this._extractAudioFromVideo(vPath, sourceAudioPath, logFn);
+    }
+
+    const sensitivity = Number(params.sensitivity ?? 6.5);
+    const marginDb = Number(params.marginDb ?? 1.5);
+    const gateThreshold = Number(params.postProcessThreshold ?? 0.20);
+    const instBlend = Number(params.instrumentalBlend ?? 100.0);
+
+    logFn(`[FFmpeg Vocal/M&E Splitter] Разделение частотного диапазона оригинала (Чувствительность=${sensitivity}/10)...`);
+
+    const hpVocFreq = Math.round(55 + (sensitivity * 7));
+    const lpVocFreq = Math.round(16500 - (sensitivity * 750));
+    let vocFilters = `highpass=f=${hpVocFreq},lowpass=f=${lpVocFreq}`;
+    if (marginDb !== 0) {
+      vocFilters += `,equalizer=f=1000:t=q:w=1.0:g=${marginDb.toFixed(1)},equalizer=f=3400:t=q:w=1.5:g=${(marginDb * 0.5).toFixed(1)}`;
+    }
+    if (gateThreshold > 0.0) {
+      const gateDb = -(65 - gateThreshold * 35).toFixed(1);
+      vocFilters += `,agate=threshold=${gateDb}dB:range=-15dB:attack=15:release=140`;
+    }
+    if (instBlend < 100.0) {
+      const origWeight = (1.0 - instBlend / 100.0).toFixed(2);
+      const vocWeight = (instBlend / 100.0).toFixed(2);
+      vocFilters = `asplit[orig_audio][to_filt]; [to_filt]${vocFilters}[filtered_vocal]; [orig_audio]volume=${origWeight}[dry]; [filtered_vocal]volume=${vocWeight}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
     }
 
     const results = [];
@@ -4462,8 +5349,6 @@ class MixingPipelineService {
     const instName = `${prefix}original_instrumental_ME.wav`;
     const instPath = path.join(stepFolder, instName);
 
-    logFn(`Выделение вокальной дорожки -> ${vocalsName}...`);
-    // Vocal Extraction Filter Graph: Mid-side center vocal isolation with high-resolution FFT bandpass
     const vocCmd = ffmpeg(sourceAudioPath)
       .audioFilters(vocFilters)
       .audioCodec('pcm_s16le')
@@ -4472,19 +5357,17 @@ class MixingPipelineService {
       .output(vocalsPath);
 
     await this._execFfmpeg(vocCmd, {
+      logFn,
       onProgress: (p) => {
-        if (onProgress && p && p.percent) onProgress({ percent: 20 + Math.round(p.percent * 0.38), message: `Извлечение вокала: ${p.percent}%` });
+        if (onProgress && p && p.percent) onProgress({ percent: Math.round(p.percent * 0.5), message: `Извлечение вокала: ${p.percent}%` });
       },
       outPath: vocalsPath,
-      description: `Изоляция вокала [${modelName}]`
+      description: `FFmpeg Изоляция вокала`
     });
 
     const vocSt = fsSync.statSync(vocalsPath);
     results.push({ name: vocalsName, path: vocalsPath, size: vocSt.size, type: 'vocals' });
 
-    logFn(`Выделение инструментала и фонограммы (M&E) -> ${instName}...`);
-    // Instrumental Extraction Filter Graph: Spectral subtraction of center vocal channel
-    // Notch depth scales directly with sensitivity! At 1.0, notch is gentle (-2.5dB). At 10.0, notch is deep (-25dB)
     const notchDepth = -(sensitivity * 2.5).toFixed(1);
     const instFilters = `highpass=f=25,equalizer=f=1000:t=q:w=1.0:g=${(notchDepth * 0.4).toFixed(1)},equalizer=f=3200:t=q:w=2.0:g=${notchDepth}`;
 
@@ -4498,16 +5381,16 @@ class MixingPipelineService {
     await this._execFfmpeg(instCmd, {
       logFn,
       onProgress: (p) => {
-        if (onProgress && p && p.percent) onProgress({ percent: 60 + Math.round(p.percent * 0.38), message: `Извлечение фонограммы: ${p.percent}%` });
+        if (onProgress && p && p.percent) onProgress({ percent: 50 + Math.round(p.percent * 0.5), message: `Извлечение фонограммы: ${p.percent}%` });
       },
       outPath: instPath,
-      description: `Извлечение фонограммы (M&E) [${modelName}]`
+      description: `FFmpeg Извлечение фонограммы (M&E)`
     });
 
     const instSt = fsSync.statSync(instPath);
     results.push({ name: instName, path: instPath, size: instSt.size, type: 'instrumental' });
 
-    logFn(`✓ Разделение оригинала завершено моделью ${modelName}! Сформировано стемов: ${results.length}`);
+    logFn(`✓ Частотное разделение FFmpeg завершено! Сформировано стемов: ${results.length}`);
     return results;
   }
 
@@ -4539,20 +5422,16 @@ class MixingPipelineService {
     let modelInstalled = fsSync.existsSync(localModelFile);
     if (!modelInstalled && autoDownload) {
       logFn('Файл весов vf.ckpt не обнаружен локально. Запуск загрузки / инициализации...');
-      try {
-        await this.downloadUvrModel({
-          modelId: 'voicefixer_fe',
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка VoiceFixer (vf.ckpt): ${p.percent}%` });
-            }
-          },
-          onLog: logFn
-        });
-        modelInstalled = fsSync.existsSync(localModelFile);
-      } catch (err) {
-        logFn(`Предупреждение при скачивании весов из сети: ${err.message}. Переход на встроенный локальный модуль Neural Harmonic Synthesizer.`, 'warn');
-      }
+      await this.downloadUvrModel({
+        modelId: 'voicefixer_fe',
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка VoiceFixer (vf.ckpt): ${p.percent}%` });
+          }
+        },
+        onLog: logFn
+      });
+      modelInstalled = fsSync.existsSync(localModelFile);
     }
 
     if (autoDownload && !fsSync.existsSync(localVocoderFile)) {
@@ -4567,16 +5446,8 @@ class MixingPipelineService {
           onLog: logFn
         });
       } catch (vocErr) {
-        logFn(`Загрузка вокодера TFGAN пропущена (${vocErr.message}). Движок задействует адаптивный синтез.`, 'warn');
+        logFn(`Примечание: загрузка дополнительного файла вокодера пропущена (${vocErr.message}).`, 'warn');
       }
-    }
-
-    if (modelInstalled) {
-      const st = fsSync.statSync(localModelFile);
-      logFn(`✓ Задействована модель: vf.ckpt (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
-      logFn(`Архитектура: VoiceFixer Neural Harmonic Synthesizer | Гармонический синтез на ${inputFiles.length} дорожках`);
-    } else {
-      logFn(`✓ Задействован встроенный движок архитектуры VoiceFixer Neural Harmonic Synthesizer на ${inputFiles.length} дорожках`);
     }
 
     const results = [];
@@ -4589,78 +5460,96 @@ class MixingPipelineService {
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
       const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
 
-      logFn(`[${i+1}/${inputFiles.length}] Применение модели VoiceFixer к дорожке «${nick}»...`);
+      logFn(`[${i+1}/${inputFiles.length}] Запуск VoiceFixer Harmonic Restorer для дорожки «${nick}»...`);
+      const neuralRes = await AudioNeuralService.voiceFixer({
+        inputPath: track.path,
+        outputPath: outPath,
+        modelPath: localModelFile,
+        airBandBoostDb: airBoost,
+        harmonicSaturation: sat,
+        formantClarity: clarity,
+        warmTubeEmulation: warmTube,
+        subBassProtect,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `VoiceFixer [${nick}]: ${p.percent}%` });
+          }
+        },
+        onLog: logFn
+      });
 
-      let usedNeural = false;
-      try {
-        logFn(`[Neural AI] Запуск VoiceFixer Harmonic Restorer для дорожки «${nick}»...`);
-        const neuralRes = await AudioNeuralService.voiceFixer({
-          inputPath: track.path,
-          outputPath: outPath,
-          modelPath: localModelFile,
-          airBandBoostDb: airBoost,
-          harmonicSaturation: sat,
-          formantClarity: clarity,
-          warmTubeEmulation: warmTube,
-          subBassProtect,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `VoiceFixer [${nick}]: ${p.percent}%` });
-            }
-          },
-          onLog: logFn
-        });
-        if (neuralRes && fsSync.existsSync(outPath)) {
-          usedNeural = true;
-          logFn(`✓ Дорожка «${nick}» успешно обработана нейросетью VoiceFixer Harmonic Restorer`);
-        }
-      } catch (neuralErr) {
-        logFn(`[Neural AI Fallback] VoiceFixer недоступен (${neuralErr.message}). Переход на встроенный DSP-гармонайзер.`, 'warn');
-      }
-
-      if (!usedNeural) {
-        let filterChain = '';
-        if (subBassProtect) {
-          filterChain += `highpass=f=70,`;
-        }
-        
-        // Air-band restoration (12.5kHz - 16kHz)
-        filterChain += `equalizer=f=13500:t=h:g=${airBoost.toFixed(1)}`;
-        
-        // Formant presence & clarity (3.4kHz)
-        const clarityGain = (clarity * 3.0).toFixed(1);
-        filterChain += `,equalizer=f=3400:t=q:w=1.2:g=${clarityGain}`;
-
-        // Warm analog tube harmonic saturation
-        if (warmTube && sat > 0.15) {
-          const drive = (1.0 + sat * 0.8).toFixed(2);
-          filterChain += `,aexciter=level_in=1:level_out=1:amount=${(sat * 2).toFixed(1)}:drive=${drive}:freq=7500`;
-        }
-
-        const cmd = ffmpeg(track.path)
-          .audioFilters(filterChain)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath);
-
-        await this._execFfmpeg(cmd, {
-          logFn,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `VoiceFixer: ${nick} (${p.percent}%)` });
-            }
-          },
-          outPath,
-          description: `VoiceFixer [${nick}]`
-        });
+      if (!neuralRes || !fsSync.existsSync(outPath)) {
+        throw new Error(`Нейросеть VoiceFixer не сформировала выходной файл для дорожки «${nick}».`);
       }
 
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
-      logFn(`✓ Дорожка «${nick}» обработана моделью VoiceFixer -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+      logFn(`✓ Дорожка «${nick}» обработана нейросетью VoiceFixer -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: FFmpeg Harmonic Exciter & Air Restorer (Dedicated standalone FFmpeg module)
+   */
+  async _execFfmpegHarmonicRestorer({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const airBoost = Number(params.airBandBoostDb ?? 3.5);
+    const sat = Math.max(0.1, Math.min(1.0, Number(params.harmonicSaturation ?? 0.45)));
+    const clarity = Math.max(0.1, Math.min(1.0, Number(params.formantClarity ?? 0.65)));
+    const subBassProtect = params.subBassPreservation !== false;
+    const warmTube = params.warmTubeEmulation !== false;
+
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для модуля FFmpeg Harmonic Exciter.');
+    }
+
+    logFn(`[FFmpeg Harmonic Exciter] Восстановление ВЧ-воздуха и гармоник для ${inputFiles.length} дорожек...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      let filterChain = '';
+      if (subBassProtect) {
+        filterChain += `highpass=f=70,`;
+      }
+      filterChain += `equalizer=f=13500:t=h:g=${airBoost.toFixed(1)}`;
+      const clarityGain = (clarity * 3.0).toFixed(1);
+      filterChain += `,equalizer=f=3400:t=q:w=1.2:g=${clarityGain}`;
+      if (warmTube && sat > 0.15) {
+        const drive = (1.0 + sat * 0.8).toFixed(2);
+        filterChain += `,aexciter=level_in=1:level_out=1:amount=${(sat * 2).toFixed(1)}:drive=${drive}:freq=7500`;
+      }
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterChain)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `FFmpeg Exciter: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `FFmpeg Harmonic Exciter [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ Дорожка «${nick}» обработана FFmpeg Harmonic Exciter -> ${outName}`);
     }
 
     return results;
@@ -4670,7 +5559,7 @@ class MixingPipelineService {
    * EXEC: Voice Timbre Match (harmonizes frequency curve of all dubber voices to studio standard)
    */
   async _execVoiceTimbreMatch({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
-    await fsPromises.mkdir(stepFolder, { recursive: true });
+    await fs.mkdir(stepFolder, { recursive: true });
     const matchIntensity = Number(params.matchIntensity ?? 75);
     const targetProfile = String(params.targetProfile ?? 'studio_neutral');
     const subBassCutoff = Number(params.subBassCutoff ?? 75);
@@ -4681,7 +5570,7 @@ class MixingPipelineService {
       throw new Error('Нет входных дорожек для калибровки АЧХ.');
     }
 
-    logFn(`[Калибровка АЧХ] Старт гармонизации спектра для ${inputFiles.length} дорожек к профилю «${targetProfile}» (Интенсивность: ${matchIntensity}%, Сглаживание: ${smoothness}x)...`);
+    logFn(`[Калибровка АЧХ] Старт гармонизации спектра (Python LTAS) для ${inputFiles.length} дорожек к профилю «${targetProfile}» (Интенсивность: ${matchIntensity}%, Сглаживание: ${smoothness}x)...`);
 
     const results = [];
     for (let i = 0; i < inputFiles.length; i++) {
@@ -4692,39 +5581,110 @@ class MixingPipelineService {
       const trackStartPct = Math.round((i / inputFiles.length) * 100);
       const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
 
-      logFn(`[${i+1}/${inputFiles.length}] Выравнивание АЧХ даббера «${nick}» к студийному эталону...`);
+      logFn(`[${i+1}/${inputFiles.length}] Выравнивание АЧХ даббера «${nick}» к студийному эталону (LTAS)...`);
 
-      try {
-        await AudioNeuralService.matchVoiceTimbre({
-          inputPath: track.path,
-          outputPath: outPath,
-          matchIntensity,
-          targetProfile,
-          subBassCutoff,
-          airLimitDb,
-          smoothness,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `Калибровка АЧХ [${nick}]: ${p.percent}%` });
-            }
-          },
-          onLog: logFn
-        });
+      await AudioNeuralService.matchVoiceTimbre({
+        inputPath: track.path,
+        outputPath: outPath,
+        matchIntensity,
+        targetProfile,
+        subBassCutoff,
+        airLimitDb,
+        smoothness,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Калибровка АЧХ [${nick}]: ${p.percent}%` });
+          }
+        },
+        onLog: logFn
+      });
 
-        if (fsSync.existsSync(outPath)) {
-          const st = fsSync.statSync(outPath);
-          results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
-          logFn(`✓ Дорожка «${nick}» успешно приведена к единому студийному знаменателю АЧХ -> ${outName}`);
-        } else {
-          throw new Error(`Выходной файл не создан: ${outPath}`);
-        }
-      } catch (err) {
-        logFn(`[Калибровка АЧХ Ошибка] Сбой для «${nick}»: ${err.message}. Перенос исходного аудио без искажений.`, 'warn');
-        await fsPromises.copyFile(track.path, outPath);
-        const st = fsSync.statSync(outPath);
-        results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error(`Python LTAS-калибратор не сформировал выходной файл для дорожки «${nick}».`);
       }
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ Дорожка «${nick}» успешно приведена к единому студийному знаменателю АЧХ -> ${outName}`);
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: FFmpeg Multi-Band Timbre EQ (Dedicated standalone FFmpeg module)
+   */
+  async _execFfmpegTimbreEq({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    await fs.mkdir(stepFolder, { recursive: true });
+    const matchIntensity = Number(params.matchIntensity ?? 75);
+    const targetProfile = String(params.targetProfile ?? 'studio_neutral');
+    const subBassCutoff = Number(params.subBassCutoff ?? 75);
+    const airLimitDb = Number(params.airLimitDb ?? 3.0);
+
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для модуля FFmpeg Multi-Band Timbre EQ.');
+    }
+
+    logFn(`[FFmpeg Timbre EQ] Калибровка тембра ${inputFiles.length} дорожек по профилю «${targetProfile}»...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      const scale = Math.max(0.1, Math.min(1.0, matchIntensity / 100));
+      const hpFreq = Math.max(20, Math.round(subBassCutoff));
+      let eqBands = [];
+      if (targetProfile === 'warm_broadcast') {
+        eqBands = [
+          `equalizer=f=160:t=q:w=1.2:g=${(1.5 * scale).toFixed(2)}`,
+          `equalizer=f=350:t=q:w=1.4:g=${(-1.2 * scale).toFixed(2)}`,
+          `equalizer=f=2800:t=q:w=1.2:g=${(1.2 * scale).toFixed(2)}`,
+          `equalizer=f=9000:t=h:g=${Math.min(airLimitDb, 1.5 * scale).toFixed(2)}`
+        ];
+      } else if (targetProfile === 'crisp_anime') {
+        eqBands = [
+          `equalizer=f=220:t=q:w=1.3:g=${(-1.5 * scale).toFixed(2)}`,
+          `equalizer=f=1800:t=q:w=1.1:g=${(1.8 * scale).toFixed(2)}`,
+          `equalizer=f=3800:t=q:w=1.2:g=${(2.2 * scale).toFixed(2)}`,
+          `equalizer=f=11000:t=h:g=${Math.min(airLimitDb, 2.5 * scale).toFixed(2)}`
+        ];
+      } else {
+        eqBands = [
+          `equalizer=f=250:t=q:w=1.4:g=${(-1.2 * scale).toFixed(2)}`,
+          `equalizer=f=1400:t=q:w=1.2:g=${(1.0 * scale).toFixed(2)}`,
+          `equalizer=f=3200:t=q:w=1.2:g=${(1.4 * scale).toFixed(2)}`,
+          `equalizer=f=10000:t=h:g=${Math.min(airLimitDb, 1.8 * scale).toFixed(2)}`
+        ];
+      }
+      const filterChain = [`highpass=f=${hpFreq}`, ...eqBands].join(',');
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterChain)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `FFmpeg Timbre EQ [${nick}]: ${p.percent}%` });
+          }
+        },
+        outPath,
+        description: `FFmpeg Timbre EQ [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ Дорожка «${nick}» откалибрована FFmpeg Timbre EQ -> ${outName}`);
     }
 
     return results;
@@ -4838,29 +5798,26 @@ class MixingPipelineService {
       if (mode === 'pyloudnorm' || mode === 'pyln') {
         const trackStartPct = Math.round((i / inputFiles.length) * 100);
         const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
-        try {
-          await AudioNeuralService.loudnessNorm({
-            inputPath: track.path,
-            outputPath: outPath,
-            targetLufs: trackTargetLufs,
-            truePeak,
-            modeType: 'track',
-            onProgress: (p) => {
-              if (onProgress && p && typeof p.percent === 'number') {
-                const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-                onProgress({ percent: current, message: `pyloudnorm: ${nick} (${Math.round(p.percent)}%)` });
-              }
-            },
-            onLog: (msg) => logFn(`[pyloudnorm] ${msg}`)
-          });
-          if (fsSync.existsSync(outPath)) {
-            const st = fsSync.statSync(outPath);
-            results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
-            continue;
-          }
-        } catch (pyErr) {
-          logFn(`[pyloudnorm warning] ${pyErr.message}, переход на FFmpeg loudnorm`);
+        await AudioNeuralService.loudnessNorm({
+          inputPath: track.path,
+          outputPath: outPath,
+          targetLufs: trackTargetLufs,
+          truePeak,
+          modeType: 'track',
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+              onProgress({ percent: current, message: `pyloudnorm: ${nick} (${Math.round(p.percent)}%)` });
+            }
+          },
+          onLog: (msg) => logFn(`[pyloudnorm] ${msg}`)
+        });
+        if (!fsSync.existsSync(outPath)) {
+          throw new Error(`pyloudnorm не сформировал выходной файл для дорожки «${nick}».`);
         }
+        const st = fsSync.statSync(outPath);
+        results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+        continue;
       }
 
       let filter = '';
@@ -4922,44 +5879,71 @@ class MixingPipelineService {
       const outName = this._resolveTrackOutName(file, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i + 1}/${inputFiles.length}] EBU R128 обработка «${nick}» -> ${outName}`);
+      logFn(`[${i + 1}/${inputFiles.length}] EBU R128 pyloudnorm обработка «${nick}» -> ${outName}`);
 
-      try {
-        await AudioNeuralService.loudnessNorm({
-          inputPath: file.path,
-          outputPath: outPath,
-          targetLufs,
-          truePeak,
-          modeType,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = Math.round((i / inputFiles.length) * 100 + (p.percent / inputFiles.length));
-              onProgress({ percent: Math.min(99, current), message: `EBU R128: ${nick} (${Math.round(p.percent)}%)` });
-            }
-          },
-          onLog: (msg) => logFn(`[pyloudnorm] ${msg}`)
-        });
-      } catch (err) {
-        logFn(`[pyloudnorm warning] Ошибка Python sidecar (${err.message}), fallback на FFmpeg loudnorm`);
-        const filter = `loudnorm=I=${targetLufs}:TP=${truePeak}:LRA=11:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
-        const cmd = ffmpeg(file.path)
-          .audioFilters(filter)
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath);
+      await AudioNeuralService.loudnessNorm({
+        inputPath: file.path,
+        outputPath: outPath,
+        targetLufs,
+        truePeak,
+        modeType,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = Math.round((i / inputFiles.length) * 100 + (p.percent / inputFiles.length));
+            onProgress({ percent: Math.min(99, current), message: `EBU R128: ${nick} (${Math.round(p.percent)}%)` });
+          }
+        },
+        onLog: (msg) => logFn(`[pyloudnorm] ${msg}`)
+      });
 
-        await this._execFfmpeg(cmd, { logFn, outPath, description: `FFmpeg Loudnorm Fallback [${nick}]` });
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error(`Модуль pyloudnorm не создал выходной файл для дорожки «${nick}».`);
       }
 
-      if (fsSync.existsSync(outPath)) {
-        const st = fsSync.statSync(outPath);
-        results.push({ name: outName, path: outPath, size: st.size, dubberNick: file.dubberNick });
-      }
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
     }
 
     if (onProgress) {
       onProgress({ percent: 100, message: 'EBU R128 нормализация завершена' });
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: FFmpeg EBU R128 Loudnorm (Dedicated standalone FFmpeg module)
+   */
+  async _execFfmpegLoudnorm({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const targetLufs = Number(params.targetLufs ?? -16.0);
+    const truePeak = Number(params.truePeak ?? -1.0);
+    const lra = Number(params.lra ?? 11.0);
+
+    if (!inputFiles || inputFiles.length === 0) {
+      throw new Error('Нет входных файлов для модуля FFmpeg Loudnorm.');
+    }
+
+    logFn(`[FFmpeg Loudnorm] Нормализация громкости EBU R128 (target: ${targetLufs} LUFS, peak: ${truePeak} dBTP) для ${inputFiles.length} файлов...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const file = inputFiles[i];
+      const nick = this._resolveTrackNick(file, inputFiles, i);
+      const outName = this._resolveTrackOutName(file, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+
+      const filter = `loudnorm=I=${targetLufs}:TP=${truePeak}:LRA=${lra}:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
+      const cmd = ffmpeg(file.path)
+        .audioFilters(filter)
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      await this._execFfmpeg(cmd, { logFn, outPath, description: `FFmpeg Loudnorm [${nick}]` });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
     }
 
     return results;
@@ -5375,80 +6359,24 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Обработка дорожки «${nick}» (Pedalboard DSP: ${modTitle})...`);
 
-      try {
-        await AudioNeuralService.processPedalboardDsp({
-          inputPath: track.path,
-          outputPath: outPath,
-          moduleId,
-          params: params || {},
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `Pedalboard DSP: ${nick} (${p.percent.toFixed(0)}%)` });
-            }
-          },
-          onLog: (msg, level) => {
-            logFn(`  [${nick}] ${msg}`, level || 'debug');
+      await AudioNeuralService.processPedalboardDsp({
+        inputPath: track.path,
+        outputPath: outPath,
+        moduleId,
+        params: params || {},
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Pedalboard DSP: ${nick} (${p.percent.toFixed(0)}%)` });
           }
-        });
-      } catch (neuralErr) {
-        logFn(`⚠️ Ошибка Python Pedalboard (${neuralErr.message}). Запуск студийного FFmpeg DSP резерва...`, 'warn');
+        },
+        onLog: (msg, level) => {
+          logFn(`  [${nick}] ${msg}`, level || 'debug');
+        }
+      });
 
-        // High-precision FFmpeg DSP fallback
-        const eqHighpass = Number(params?.eqHighpass ?? 80);
-        const eqPresenceFreq = Number(params?.eqPresenceFreq ?? 3200);
-        const eqPresenceGain = Number(params?.eqPresenceGain ?? 2.5);
-        const eqLowpass = Number(params?.eqLowpass ?? 18000);
-        const compThresh = Number(params?.compThresholdDb ?? -18.0);
-        const compRatio = Number(params?.compRatio ?? 3.5);
-        const compAttack = Number(params?.compAttackMs ?? 15.0);
-        const compRelease = Number(params?.compReleaseMs ?? 120.0);
-        const deessFreq = Number(params?.deesserFreqHz ?? 6500);
-        const deessAmount = Number(params?.deesserAmount ?? 0.60);
-        const reverbWet = Number(params?.reverbWet ?? 0.06);
-        const limiterThresh = Number(params?.limiterThresholdDb ?? -0.5);
-
-        const filterParts = [];
-        if (moduleId === 'voice_eq' || moduleId === 'voice_master_strip') {
-          if (eqHighpass > 20) filterParts.push(`highpass=f=${eqHighpass}`);
-          if (Math.abs(eqPresenceGain) > 0.1) filterParts.push(`equalizer=f=${eqPresenceFreq}:t=q:w=1.2:g=${eqPresenceGain}`);
-          if (eqLowpass < 22000) filterParts.push(`lowpass=f=${eqLowpass}`);
-        }
-        if (moduleId === 'voice_deesser' || (moduleId === 'voice_master_strip' && deessAmount > 0.05)) {
-          filterParts.push(`equalizer=f=${deessFreq}:t=q:w=2.2:g=${(-deessAmount * 7).toFixed(1)}`);
-        }
-        if (moduleId === 'voice_compressor' || moduleId === 'voice_master_strip') {
-          filterParts.push(`acompressor=threshold=${compThresh}dB:ratio=${compRatio}:attack=${compAttack}:release=${compRelease}:knee=3dB:makeup=1.5dB`);
-        }
-        if (moduleId === 'voice_reverb' || (moduleId === 'voice_master_strip' && reverbWet > 0.01)) {
-          filterParts.push(`aecho=0.8:0.6:40|70:${(reverbWet * 3).toFixed(2)}|${(reverbWet * 2).toFixed(2)}`);
-        }
-        if (moduleId === 'voice_limiter' || moduleId === 'voice_master_strip') {
-          filterParts.push(`alimiter=limit=${limiterThresh}dB:attack=1:release=40:level=true`);
-        }
-
-        if (filterParts.length === 0) {
-          filterParts.push('alimiter=limit=-0.5dB');
-        }
-
-        const cmd = ffmpeg(track.path)
-          .audioFilters(filterParts.join(','))
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath);
-
-        await this._execFfmpeg(cmd, {
-          logFn,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `FFmpeg DSP Fallback: ${nick} (${p.percent}%)` });
-            }
-          },
-          outPath,
-          description: `Pedalboard DSP Fallback [${nick}]`
-        });
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error(`Spotify Pedalboard DSP («${modTitle}») не создал выходной файл для дорожки «${nick}».`);
       }
 
       const st = fsSync.statSync(outPath);
@@ -5460,9 +6388,79 @@ class MixingPipelineService {
   }
 
   /**
+   * EXEC: FFmpeg Broadcast Voice Strip (Dedicated standalone FFmpeg module)
+   */
+  async _execFfmpegMasterStrip({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для модуля FFmpeg Broadcast Voice Strip.');
+    }
+
+    const eqHighpass = Number(params?.eqHighpass ?? 80);
+    const eqPresenceFreq = Number(params?.eqPresenceFreq ?? 3200);
+    const eqPresenceGain = Number(params?.eqPresenceGain ?? 2.5);
+    const eqLowpass = Number(params?.eqLowpass ?? 18000);
+    const compThresh = Number(params?.compThresholdDb ?? -18.0);
+    const compRatio = Number(params?.compRatio ?? 3.5);
+    const compAttack = Number(params?.compAttackMs ?? 15.0);
+    const compRelease = Number(params?.compReleaseMs ?? 120.0);
+    const deessFreq = Number(params?.deesserFreqHz ?? 6500);
+    const deessAmount = Number(params?.deesserAmount ?? 0.60);
+    const reverbWet = Number(params?.reverbWet ?? 0.06);
+    const limiterThresh = Number(params?.limiterThresholdDb ?? -0.5);
+
+    logFn(`[FFmpeg Broadcast Voice Strip] Комплексная обработка ${inputFiles.length} дорожек...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      const filterParts = [];
+      if (eqHighpass > 20) filterParts.push(`highpass=f=${eqHighpass}`);
+      if (Math.abs(eqPresenceGain) > 0.1) filterParts.push(`equalizer=f=${eqPresenceFreq}:t=q:w=1.2:g=${eqPresenceGain}`);
+      if (eqLowpass < 22000) filterParts.push(`lowpass=f=${eqLowpass}`);
+      if (deessAmount > 0.05) {
+        filterParts.push(`equalizer=f=${deessFreq}:t=q:w=2.2:g=${(-deessAmount * 7).toFixed(1)}`);
+      }
+      filterParts.push(`acompressor=threshold=${compThresh}dB:ratio=${compRatio}:attack=${compAttack}:release=${compRelease}:knee=3dB:makeup=1.5dB`);
+      if (reverbWet > 0.01) {
+        filterParts.push(`aecho=0.8:0.6:40|70:${(reverbWet * 3).toFixed(2)}|${(reverbWet * 2).toFixed(2)}`);
+      }
+      filterParts.push(`alimiter=limit=${limiterThresh}dB:attack=1:release=40:level=true`);
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterParts.join(','))
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `FFmpeg Master Strip: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `FFmpeg Broadcast Voice Strip [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
+    return results;
+  }
+
+  /**
    * EXEC: Airwindows DSP Restoration & Saturation Suite
-   * Batch processes tracks through Airwindows VST3 plugins (DeEss, Pop, Slew3, VoiceTrick / Density)
-   * with automatic FFmpeg C++ DSP fallback.
+   * Batch processes tracks through Airwindows VST3 / Python DSP without silent fallback
    */
   async _execAirwindowsDsp({ moduleId = 'airwindows_restore', workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
     if (inputFiles.length === 0) {
@@ -5487,73 +6485,24 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Обработка дорожки «${nick}» (Airwindows DSP: ${modTitle})...`);
 
-      try {
-        await AudioNeuralService.processAirwindowsDsp({
-          inputPath: track.path,
-          outputPath: outPath,
-          moduleId,
-          params: params || {},
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `Airwindows DSP: ${nick} (${p.percent.toFixed(0)}%)` });
-            }
-          },
-          onLog: (msg, level) => {
-            logFn(`  [${nick}] ${msg}`, level || 'debug');
+      await AudioNeuralService.processAirwindowsDsp({
+        inputPath: track.path,
+        outputPath: outPath,
+        moduleId,
+        params: params || {},
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `Airwindows DSP: ${nick} (${p.percent.toFixed(0)}%)` });
           }
-        });
-      } catch (neuralErr) {
-        logFn(`⚠️ Ошибка Python Airwindows (${neuralErr.message}). Запуск нативного FFmpeg DSP резерва...`, 'warn');
-
-        const deess = Number(params?.deessIntensity ?? 0.50);
-        const pop = Number(params?.popIntensity ?? 0.50);
-        const slew = Number(params?.slewIntensity ?? 0.40);
-        const density = Number(params?.densityDrive ?? 0.40);
-
-        const filterParts = [];
-
-        if (pop > 0.05) {
-          const cutHigh = Math.round(60 + pop * 60);
-          filterParts.push(`highpass=f=${cutHigh},equalizer=f=110:t=q:w=1.5:g=${(-pop * 10.0).toFixed(1)}`);
+        },
+        onLog: (msg, level) => {
+          logFn(`  [${nick}] ${msg}`, level || 'debug');
         }
-        if (deess > 0.05) {
-          const normF = (6500 / 24000.0).toFixed(4);
-          const normI = (deess > 1.0 ? deess / 10.0 : deess).toFixed(2);
-          filterParts.push(`deesser=f=${normF}:i=${normI}:m=0.5:s=o`);
-        }
-        if (slew > 0.05) {
-          filterParts.push(`equalizer=f=8500:t=q:w=2.5:g=${(-slew * 4.0).toFixed(1)}`);
-        }
-        if (density > 0.05) {
-          const drive = (1.0 + density * 1.2).toFixed(2);
-          filterParts.push(`aexciter=level_in=1:level_out=1:amount=${(density * 2.0).toFixed(1)}:drive=${drive}:freq=3500`);
-        }
+      });
 
-        if (filterParts.length === 0) {
-          filterParts.push('alimiter=limit=-0.5dB');
-        } else {
-          filterParts.push('alimiter=limit=-0.5dB');
-        }
-
-        const cmd = ffmpeg(track.path)
-          .audioFilters(filterParts.join(','))
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(outPath);
-
-        await this._execFfmpeg(cmd, {
-          logFn,
-          onProgress: (p) => {
-            if (onProgress && p && typeof p.percent === 'number') {
-              const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
-              onProgress({ percent: current, message: `Airwindows Fallback: ${nick} (${p.percent}%)` });
-            }
-          },
-          outPath,
-          description: `Airwindows DSP Fallback [${nick}]`
-        });
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error(`Airwindows DSP («${modTitle}») не создал выходной файл для дорожки «${nick}».`);
       }
 
       const st = fsSync.statSync(outPath);
@@ -5561,6 +6510,75 @@ class MixingPipelineService {
     }
 
     logFn(`✔ Успешно обработано ${results.length} дорожек через Airwindows DSP («${modTitle}»)!`);
+    return results;
+  }
+
+  /**
+   * EXEC: FFmpeg De-Pop / De-Ess / Exciter Strip (Dedicated standalone FFmpeg module)
+   */
+  async _execFfmpegAirwindowsStrip({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    if (inputFiles.length === 0) {
+      throw new Error('Нет входных дорожек для модуля FFmpeg De-Pop / De-Ess / Exciter Strip.');
+    }
+
+    const deess = Number(params?.deessIntensity ?? 0.50);
+    const pop = Number(params?.popIntensity ?? 0.50);
+    const slew = Number(params?.slewIntensity ?? 0.40);
+    const density = Number(params?.densityDrive ?? 0.40);
+
+    logFn(`[FFmpeg De-Pop/De-Ess/Exciter] Обработка ${inputFiles.length} дорожек...`);
+    const results = [];
+
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      const filterParts = [];
+      if (pop > 0.05) {
+        const cutHigh = Math.round(60 + pop * 60);
+        filterParts.push(`highpass=f=${cutHigh},equalizer=f=110:t=q:w=1.5:g=${(-pop * 10.0).toFixed(1)}`);
+      }
+      if (deess > 0.05) {
+        const normF = (6500 / 24000.0).toFixed(4);
+        const normI = (deess > 1.0 ? deess / 10.0 : deess).toFixed(2);
+        filterParts.push(`deesser=f=${normF}:i=${normI}:m=0.5:s=o`);
+      }
+      if (slew > 0.05) {
+        filterParts.push(`equalizer=f=8500:t=q:w=2.5:g=${(-slew * 4.0).toFixed(1)}`);
+      }
+      if (density > 0.05) {
+        const drive = (1.0 + density * 1.2).toFixed(2);
+        filterParts.push(`aexciter=level_in=1:level_out=1:amount=${(density * 2.0).toFixed(1)}:drive=${drive}:freq=3500`);
+      }
+      filterParts.push('alimiter=limit=-0.5dB');
+
+      const cmd = ffmpeg(track.path)
+        .audioFilters(filterParts.join(','))
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(outPath);
+
+      await this._execFfmpeg(cmd, {
+        logFn,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `FFmpeg De-Pop/De-Ess: ${nick} (${p.percent}%)` });
+          }
+        },
+        outPath,
+        description: `FFmpeg De-Pop/De-Ess [${nick}]`
+      });
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+    }
+
     return results;
   }
 
@@ -5699,6 +6717,12 @@ class MixingPipelineService {
     }
 
     let voicePath = inputFiles.find(f => f.name.includes('voices_master') || f.path.includes('voices_master'))?.path;
+    if (!voicePath) {
+      const acousticStep = [...(manifest.pipeline || [])].reverse().find(s => this._isAcousticMatchStep(s.moduleId) && s.outputFiles?.length > 0);
+      if (acousticStep && acousticStep.outputFiles[0] && fsSync.existsSync(acousticStep.outputFiles[0].path)) {
+        voicePath = acousticStep.outputFiles[0].path;
+      }
+    }
     if (!voicePath) {
       const glueStep = manifest.pipeline.find(s => s.moduleId === 'glue_compress' && s.outputFiles?.length > 0);
       if (glueStep && glueStep.outputFiles[0] && fsSync.existsSync(glueStep.outputFiles[0].path)) {
@@ -5843,11 +6867,20 @@ class MixingPipelineService {
     // ВАЖНО: Ни в коем случае не путать голос с даккнутым фоном (duckedAudioPath)!
     let voicePath = null;
 
-    // Сначала ищем склеенный голосовой мастер из glue_compress
-    const glueStep = manifest.pipeline.find(s => s.moduleId === 'glue_compress' && s.outputFiles?.length > 0);
-    if (glueStep && glueStep.outputFiles[0] && fsSync.existsSync(glueStep.outputFiles[0].path)) {
-      voicePath = glueStep.outputFiles[0].path;
-      logFn(`Использован мастер склейки голосов: ${path.basename(voicePath)}`);
+    // Сначала проверяем, был ли выполнен шаг наложения эффектов оригинала (acoustic_matched) поверх склеенной шины голосов
+    const acousticStep = [...(manifest.pipeline || [])].reverse().find(s => this._isAcousticMatchStep(s.moduleId) && s.outputFiles?.length > 0);
+    if (acousticStep && acousticStep.outputFiles[0] && fsSync.existsSync(acousticStep.outputFiles[0].path)) {
+      voicePath = acousticStep.outputFiles[0].path;
+      logFn(`Использована склеенная шина голосов с эффектами оригинала (acoustic_matched): ${path.basename(voicePath)}`);
+    }
+
+    // Если нет, ищем склеенный голосовой мастер из glue_compress
+    if (!voicePath) {
+      const glueStep = manifest.pipeline.find(s => s.moduleId === 'glue_compress' && s.outputFiles?.length > 0);
+      if (glueStep && glueStep.outputFiles[0] && fsSync.existsSync(glueStep.outputFiles[0].path)) {
+        voicePath = glueStep.outputFiles[0].path;
+        logFn(`Использован мастер склейки голосов: ${path.basename(voicePath)}`);
+      }
     }
 
     // Если нет, ищем в предшествующих этапах голосовой обработки
@@ -6035,6 +7068,7 @@ class MixingPipelineService {
   }
 
   async runAllSteps({ episode, targetDir, baseDir, onProgress, onLog }) {
+    this.isAborted = false;
     const workingDir = this.resolveWorkingDir(targetDir, episode, baseDir);
     const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
     const manifest = statusData.manifest;
@@ -6071,6 +7105,11 @@ class MixingPipelineService {
     logFn(`=======================================================`);
 
     for (let i = 0; i < enabledSteps.length; i++) {
+      if (this.isAborted) {
+        logFn(`⏹ Выполнение цепочки остановлено пользователем.`, 'warn');
+        throw new Error('Процесс сведения остановлен пользователем.');
+      }
+
       const step = enabledSteps[i];
       const stepPctStart = Math.round((i / enabledSteps.length) * 100);
       const stepPctEnd = Math.round(((i + 1) / enabledSteps.length) * 100);
@@ -6085,6 +7124,7 @@ class MixingPipelineService {
         targetDir: workingDir,
         baseDir,
         stepId: step.stepId,
+        _fromChain: true,
         onProgress: (p) => {
           if (onProgress && p && typeof p.percent === 'number') {
             const overall = stepPctStart + Math.round((p.percent / 100) * (stepPctEnd - stepPctStart));

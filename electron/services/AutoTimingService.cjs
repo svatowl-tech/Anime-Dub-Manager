@@ -668,83 +668,71 @@ class AutoTimingService {
       const phrases = [];
       const fixTargets = track.fixTargetLines || [];
 
-      let isTrackInTimeline = false;
-      if (intervals.length > 0) {
+      let isTrackInTimeline = !track.isFix;
+      if (intervals.length > 0 && track.isFix) {
         const firstStart = intervals[0].startSec;
         const lastEnd = intervals[intervals.length - 1].endSec;
         const totalSpan = lastEnd - firstStart;
+        const targets = fixTargets.length > 0 ? fixTargets : charLines;
+        const matchCount = intervals.filter(inv => 
+          targets.some(t => {
+            const tSec = t.timestamp !== undefined ? t.timestamp : t.startSec;
+            return tSec !== undefined && Math.abs(tSec - inv.startSec) < 8.0;
+          })
+        ).length;
+        if ((matchCount >= Math.ceil(intervals.length / 2) && firstStart > 5.0) || totalSpan > 60.0) {
+          isTrackInTimeline = true;
+        }
+      }
 
-        if (track.isFix) {
-          const targets = fixTargets.length > 0 ? fixTargets : charLines;
-          const matchCount = intervals.filter(inv => 
-            targets.some(t => {
-              const tSec = t.timestamp !== undefined ? t.timestamp : t.startSec;
-              return tSec !== undefined && Math.abs(tSec - inv.startSec) < 15.0;
-            })
-          ).length;
-          if (matchCount >= Math.ceil(intervals.length / 2) && firstStart > 5.0) {
-            isTrackInTimeline = true;
+      // Two-pass surgical subtitle matching for timeline tracks so no phrase ever steals a neighbor's subtitle
+      const matchedSubByInterval = new Array(intervals.length).fill(null);
+      if (isTrackInTimeline && charLines.length > 0) {
+        const usedSubIdx = new Set();
+        const candidatePairs = [];
+        for (let k = 0; k < intervals.length; k++) {
+          for (let sIdx = 0; sIdx < charLines.length; sIdx++) {
+            const diff = Math.abs(charLines[sIdx].startSec - intervals[k].startSec);
+            if (diff <= 2.2) {
+              candidatePairs.push({ k, sIdx, diff });
+            }
           }
-        } else {
-          if (firstStart > 15.0 || totalSpan > 45.0) {
-            isTrackInTimeline = true;
-          }
+        }
+        candidatePairs.sort((a, b) => a.diff - b.diff);
+        for (const pair of candidatePairs) {
+          if (matchedSubByInterval[pair.k] !== null || usedSubIdx.has(pair.sIdx)) continue;
+          matchedSubByInterval[pair.k] = charLines[pair.sIdx];
+          usedSubIdx.add(pair.sIdx);
         }
       }
 
       for (let k = 0; k < intervals.length; k++) {
         const interval = intervals[k];
-        let subLine = null;
+        let subLine = matchedSubByInterval[k];
 
-        if (track.isFix) {
-          if (isTrackInTimeline) {
-            let bestDiff = Infinity;
-            for (const cl of charLines) {
-              const diff = Math.abs(cl.startSec - interval.startSec);
-              if (diff < bestDiff && diff < 25.0) {
-                bestDiff = diff;
-                subLine = cl;
-              }
+        if (track.isFix && !isTrackInTimeline) {
+          if (fixTargets.length > 0 && k < fixTargets.length) {
+            const target = fixTargets[k];
+            if (target.subId) {
+              subLine = charLines.find(cl => String(cl.id) === String(target.subId) || String(cl.rawLineIndex) === String(target.subId));
             }
-          } else {
-            if (fixTargets.length > 0 && k < fixTargets.length) {
-              const target = fixTargets[k];
-              if (target.subId) {
-                subLine = charLines.find(cl => String(cl.id) === String(target.subId) || String(cl.rawLineIndex) === String(target.subId));
-              }
-              if (!subLine && target.timestamp !== undefined) {
-                subLine = charLines.find(cl => Math.abs(cl.startSec - target.timestamp) < 2.0);
-              }
-              if (!subLine && typeof target.lineIndex === 'number') {
-                subLine = charLines.find(cl => cl.rawLineIndex === target.lineIndex);
-              }
-              if (!subLine && target.timestamp !== undefined) {
-                subLine = { 
-                  startSec: target.timestamp, 
-                  endSec: target.timestamp + interval.durationSec, 
-                  id: target.subId || `fix_${k}`, 
-                  text: target.text || '' 
-                };
-              }
+            if (!subLine && target.timestamp !== undefined) {
+              subLine = charLines.find(cl => Math.abs(cl.startSec - target.timestamp) < 2.0);
             }
-            if (!subLine && charLines.length > 0) {
-              subLine = charLines[k] || charLines[charLines.length - 1];
+            if (!subLine && typeof target.lineIndex === 'number') {
+              subLine = charLines.find(cl => cl.rawLineIndex === target.lineIndex);
+            }
+            if (!subLine && target.timestamp !== undefined) {
+              subLine = { 
+                startSec: target.timestamp, 
+                endSec: target.timestamp + interval.durationSec, 
+                id: target.subId || `fix_${k}`, 
+                text: target.text || '' 
+              };
             }
           }
-        } else {
-          if (isTrackInTimeline) {
-            let bestDiff = Infinity;
-            for (const cl of charLines) {
-              const diff = Math.abs(cl.startSec - interval.startSec);
-              if (diff < bestDiff && diff < 20.0) {
-                bestDiff = diff;
-                subLine = cl;
-              }
-            }
-          } else {
-            if (charLines.length > 0) {
-              subLine = charLines[k] || charLines[charLines.length - 1];
-            }
+          if (!subLine && charLines.length > 0 && k < charLines.length) {
+            subLine = charLines[k];
           }
         }
 
@@ -752,9 +740,24 @@ class AutoTimingService {
         const subEnd = subLine ? subLine.endSec : interval.endSec;
         const subId = subLine ? String(subLine.id ?? subLine.rawLineIndex ?? k) : `track_${track.trackId}_${k}`;
 
-        const initialStart = isTrackInTimeline 
-          ? interval.startSec 
-          : Math.max(0, subStart - leadInSec);
+        let initialStart = interval.startSec;
+        if (!isTrackInTimeline && track.isFix) {
+          initialStart = Math.max(0, subStart - leadInSec);
+        } else if (subLine) {
+          // Surgical scalpel nudge: only nudge if desync is between 0.30s and 1.50s, and stay strictly inside local track corridor!
+          const rawDelta = subStart - interval.startSec;
+          const absDelta = Math.abs(rawDelta);
+          if (absDelta >= 0.30 && absDelta <= 1.50) {
+            const prevEnd = k > 0 ? (phrases[k - 1].targetEndSec + 0.05) : 0;
+            const nextStart = (k + 1 < intervals.length) ? (intervals[k + 1].startSec - 0.05) : Infinity;
+            const clampedDelta = Math.max(-1.20, Math.min(1.20, rawDelta));
+            let desiredStart = interval.startSec + clampedDelta;
+            desiredStart = Math.max(prevEnd, Math.min(desiredStart, nextStart - interval.durationSec));
+            if (desiredStart >= prevEnd && desiredStart + interval.durationSec <= nextStart) {
+              initialStart = Number(Math.max(0, desiredStart).toFixed(3));
+            }
+          }
+        }
         const initialEnd = initialStart + interval.durationSec;
 
         const phraseObj = {
@@ -792,7 +795,7 @@ class AutoTimingService {
       });
     }
 
-    // Разведение коллизий между разными актерами
+    // Разведение коллизий между разными актерами (хирургически, без агрессивных далеких сдвигов)
     allProjectPhrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
 
     const collisionLogs = [];
@@ -825,17 +828,21 @@ class AutoTimingService {
           continue;
         }
 
-        totalCollisionsFound++;
         const collisionOverlapSec = (current.targetEndSec + minGapSec) - next.targetStartSec;
-        const requiredNextStart = current.targetEndSec + minGapSec;
-        const shiftAmount = requiredNextStart - next.targetStartSec;
+        // Surgical guard: only auto-resolve small tail overlaps (<= 1.2s); never shove a phrase several seconds away
+        if (collisionOverlapSec > 1.25) {
+          continue;
+        }
+
+        totalCollisionsFound++;
+        const shiftAmount = collisionOverlapSec;
 
         let earlyShiftSec = 0;
         if (i > 0) {
           const prev = allProjectPhrases[i - 1];
           const availableRoomBefore = current.targetStartSec - (prev.targetEndSec + minGapSec);
           if (availableRoomBefore > 0.05) {
-            earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, shiftAmount * 0.4);
+            earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, shiftAmount * 0.45);
             current.targetStartSec = Math.max(0, current.targetStartSec - earlyShiftSec);
             current.targetEndSec = current.targetStartSec + current.durationSec;
           }
@@ -843,30 +850,15 @@ class AutoTimingService {
 
         const finalNextStart = current.targetEndSec + minGapSec;
         const delta = finalNextStart - next.targetStartSec;
-        next.targetStartSec = finalNextStart;
-        next.targetEndSec = next.targetStartSec + next.durationSec;
-        next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
-        next.collisionResolved = true;
-        totalCollisionsResolved++;
+        if (delta > 0 && delta <= 1.25) {
+          next.targetStartSec = finalNextStart;
+          next.targetEndSec = next.targetStartSec + next.durationSec;
+          next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
+          next.collisionResolved = true;
+          totalCollisionsResolved++;
 
-        const logMsg = `[${formatSeconds(current.targetStartSec)} - ${formatSeconds(next.targetEndSec)}] Разведена коллизия: фраза «${current.dubberNick}» (${current.characterName}) перекрывала фразу «${next.dubberNick}» (${next.characterName}) на ${collisionOverlapSec.toFixed(2)}с. Сдвиг: +${delta.toFixed(2)}с.`;
-        collisionLogs.push(logMsg);
-
-        let rippleIdx = j;
-        while (rippleIdx + 1 < allProjectPhrases.length) {
-          const rCur = allProjectPhrases[rippleIdx];
-          const rNext = allProjectPhrases[rippleIdx + 1];
-
-          if (rNext.targetStartSec >= rCur.targetEndSec + minGapSec) break;
-
-          const rKey = `${rCur.subId}:${rNext.subId}`;
-          if (subOverlapMatrix.has(rKey)) break;
-
-          rNext.targetStartSec = rCur.targetEndSec + minGapSec;
-          rNext.targetEndSec = rNext.targetStartSec + rNext.durationSec;
-          rNext.shiftDeltaSec = rNext.targetStartSec - rNext.sourceStartSec;
-          rNext.collisionResolved = true;
-          rippleIdx++;
+          const logMsg = `[${formatSeconds(current.targetStartSec)} - ${formatSeconds(next.targetEndSec)}] Хирургически разведена коллизия: фраза «${current.dubberNick}» (${current.characterName}) и «${next.dubberNick}» (${next.characterName}). Сдвиг: +${delta.toFixed(2)}с.`;
+          collisionLogs.push(logMsg);
         }
       }
     }

@@ -10,6 +10,19 @@ const EnvironmentManager = require('./EnvironmentManager.cjs');
 class AudioNeuralService {
   constructor() {
     this._cachedEnvStatus = null;
+    this._activeJobs = new Set();
+  }
+
+  /**
+   * Immediately aborts all running Python AI sidecar processes
+   */
+  abortAll() {
+    for (const job of Array.from(this._activeJobs)) {
+      try {
+        job.abort();
+      } catch (e) {}
+    }
+    this._activeJobs.clear();
   }
 
   /**
@@ -90,7 +103,7 @@ class AudioNeuralService {
     if (!scriptPath || !fs.existsSync(scriptPath)) return;
     try {
       const code = fs.readFileSync(scriptPath, 'utf8');
-      if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim') || !code.includes('airwindows_restore') || !code.includes('loudness_norm') || code.includes('choices=[')) {
+      if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim') || code.includes('process_func(chunk, sr)') || !code.includes('airwindows_restore') || !code.includes('loudness_norm') || !code.includes('_match_audio_length') || code.includes('choices=[')) {
         const bundledCandidates = [
           path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
           path.join(__dirname, 'audio_ai_processor.py'),
@@ -231,15 +244,27 @@ class AudioNeuralService {
       // Track process for emergency SIGKILL cancellation
       trackProcess(child, operationName);
 
-      if (abortSignal) {
-        abortSignal.addEventListener('abort', () => {
+      const jobHandle = {
+        abort: () => {
           if (!isSettled) {
             isSettled = true;
+            this._activeJobs.delete(jobHandle);
             try {
-              child.kill('SIGKILL');
+              if (process.platform === 'win32' && child.pid) {
+                spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+              } else {
+                child.kill('SIGKILL');
+              }
             } catch (e) {}
-            reject(new Error(`Операция ${operationName} отменена пользователем.`));
+            reject(new Error(`Операция «${operationName}» остановлена пользователем.`));
           }
+        }
+      };
+      this._activeJobs.add(jobHandle);
+
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', () => {
+          jobHandle.abort();
         });
       }
 
@@ -288,6 +313,7 @@ class AudioNeuralService {
       });
 
       child.on('error', (err) => {
+        this._activeJobs.delete(jobHandle);
         if (!isSettled) {
           isSettled = true;
           log.error(`[AudioNeuralService] Child process error: ${err.message}`);
@@ -298,6 +324,7 @@ class AudioNeuralService {
       });
 
       child.on('close', (code) => {
+        this._activeJobs.delete(jobHandle);
         if (isSettled) return;
         isSettled = true;
 

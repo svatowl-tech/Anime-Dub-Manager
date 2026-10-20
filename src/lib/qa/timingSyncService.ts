@@ -385,10 +385,20 @@ export function applyTimingPassportToClips(
       if (matchingIssue) {
         if (matchingIssue.type === 'overlap') {
           hasCollision = true;
+          timingIssueText = matchingIssue.description;
+        } else if (matchingIssue.type === 'desync') {
+          // Only mark as start-time desync if subStartSec is provided and start delta is within surgical corridor (0.30s..1.50s)
+          if (typeof matchingIssue.subStartSec === 'number') {
+            const startDelta = Math.abs(clipStart - matchingIssue.subStartSec);
+            if (startDelta >= 0.30 && startDelta <= 1.50) {
+              timingIssue = 'desync';
+              timingIssueText = matchingIssue.description;
+            }
+          }
         } else {
           timingIssue = matchingIssue.type as any;
+          timingIssueText = matchingIssue.description;
         }
-        timingIssueText = matchingIssue.description;
       } else if (matchingCol) {
         timingIssueText = `Наезд: «${matchingCol.dubber1Name}» и «${matchingCol.dubber2Name}» (${matchingCol.overlapDurationSec}с)`;
       }

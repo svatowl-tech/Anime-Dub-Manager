@@ -586,10 +586,14 @@ class ExportService {
 
                 await logStep(`[Фикс] Успешно сведен фикс даббера «${nick}» -> ${path.basename(mainOutPath)}`, 'success', dubberPercent);
               } else {
-                await logStep(`[Фикс] Даббер «${nick}»: цельный фикс (${(fixStat.size / (1024*1024)).toFixed(2)} МБ, разница ${sizeDiffMb.toFixed(1)} МБ) заменяет всю дорожку целиком. Вшивание не требуется.`, 'info', dubberPercent);
-                const targetFixPath = path.join(targetDir, getExportName(latestFix, true));
-                await fs.copyFile(latestFix.path, targetFixPath);
-                await logStep(`[Экспорт] Скопирован чистовой фикс: ${path.basename(targetFixPath)}`, 'success', dubberPercent);
+                await logStep(`[Фикс] Даббер «${nick}»: цельный фикс (${(fixStat.size / (1024*1024)).toFixed(2)} МБ, разница ${sizeDiffMb.toFixed(1)} МБ) полностью переписывает дорожку. Берется в работу только фикс.`, 'info', dubberPercent);
+                const cleanMainPath = path.join(targetDir, getExportName(latestFix, false));
+                const staleFixTagPath = path.join(targetDir, getExportName(latestFix, true));
+                if (fsSync.existsSync(staleFixTagPath) && path.resolve(staleFixTagPath) !== path.resolve(cleanMainPath)) {
+                  await fs.unlink(staleFixTagPath).catch(() => {});
+                }
+                await fs.copyFile(latestFix.path, cleanMainPath);
+                await logStep(`[Экспорт] Скопирован чистовой цельный фикс как основная дорожка: ${path.basename(cleanMainPath)}`, 'success', dubberPercent);
               }
             } catch (e) {
               await logStep(`[Ошибка] Сбой авто-сведения фикса даббера «${nick}»: ${e.message}. Выполняется резервное копирование обоих файлов.`, 'warn', dubberPercent);
@@ -599,7 +603,7 @@ class ExportService {
                 await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
               }
             }
-          } else if (smartExport && latestOriginal && latestFix) {
+          } else if (latestOriginal && latestFix) {
             try {
               const origStat = await fs.stat(latestOriginal.path);
               const fixStat = await fs.stat(latestFix.path);
@@ -608,20 +612,25 @@ class ExportService {
               const fixSize = fixStat.size || 0;
               const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
               const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
-              const isFullReplacement = (ratio >= 0.70 || sizeDiffMb <= 3.0) && fixSize > 0;
+              const isFullReplacement = (ratio >= 0.65 || sizeDiffMb <= 3.5) && fixSize > 0;
 
               if (!isFullReplacement) {
                 const origOut = path.join(targetDir, getExportName(latestOriginal, false));
-                await fs.copyFile(latestOriginal.path, origOut);
-                await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
-                await logStep(`[Умный экспорт] Даббер «${nick}»: экспортированы оригинал и фрагментарный фикс.`, 'info', dubberPercent);
-              } else {
                 const fixOut = path.join(targetDir, getExportName(latestFix, true));
+                await fs.copyFile(latestOriginal.path, origOut);
                 await fs.copyFile(latestFix.path, fixOut);
-                await logStep(`[Умный экспорт] Даббер «${nick}»: цельный фикс заменяет оригинал (экспортирован только чистовик).`, 'info', dubberPercent);
+                await logStep(`[Экспорт в тайминг] Даббер «${nick}»: фикс переписывает отдельные фразы — экспортированы основная дорожка и фрагментарный фикс для вшивания.`, 'info', dubberPercent);
+              } else {
+                const cleanMainOut = path.join(targetDir, getExportName(latestFix, false));
+                const staleFixOut = path.join(targetDir, getExportName(latestFix, true));
+                if (fsSync.existsSync(staleFixOut) && path.resolve(staleFixOut) !== path.resolve(cleanMainOut)) {
+                  await fs.unlink(staleFixOut).catch(() => {});
+                }
+                await fs.copyFile(latestFix.path, cleanMainOut);
+                await logStep(`[Экспорт в тайминг] Даббер «${nick}»: фикс полностью переписывает дорожку — в работу взят только чистовой фикс (${path.basename(cleanMainOut)}).`, 'info', dubberPercent);
               }
             } catch (e) {
-              await logStep(`[Умный экспорт] Ошибка оценки файлов «${nick}»: ${e.message}`, 'warn', dubberPercent);
+              await logStep(`[Экспорт] Ошибка оценки файлов «${nick}»: ${e.message}`, 'warn', dubberPercent);
               const origOut = path.join(targetDir, getExportName(latestOriginal, false));
               await fs.copyFile(latestOriginal.path, origOut);
               if (latestFix) await fs.copyFile(latestFix.path, path.join(targetDir, getExportName(latestFix, true)));
@@ -629,33 +638,33 @@ class ExportService {
           } else {
             if (original && original.length > 0) {
               const sortedOriginals = [...original].sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
-              for (let oIdx = 0; oIdx < sortedOriginals.length; oIdx++) {
-                const origFile = sortedOriginals[oIdx];
+              // Keep only newest take unless explicit multi-track markers exist
+              const hasMultiLayers = sortedOriginals.some(o => /(?:дорожка|слой|track|take|layer)[_\s-]*\d+/i.test(o.path || o.fileName || ''));
+              const effectiveOriginals = hasMultiLayers ? sortedOriginals : [sortedOriginals[sortedOriginals.length - 1]];
+              for (let oIdx = 0; oIdx < effectiveOriginals.length; oIdx++) {
+                const origFile = effectiveOriginals[oIdx];
                 const ext = path.extname(origFile.path) || '.wav';
-                const origName = sortedOriginals.length === 1
+                const origName = effectiveOriginals.length === 1
                   ? `${baseVideoName}_[${nick}]${ext}`
                   : `${baseVideoName}_[${nick}]_дорожка${oIdx + 1}${ext}`;
                 const origOut = path.join(targetDir, origName);
                 await fs.copyFile(origFile.path, origOut);
-                await logStep(`[Экспорт] Дорожка даббера «${nick}» ${sortedOriginals.length > 1 ? `(слой ${oIdx + 1})` : ''}: ${path.basename(origOut)}`, 'info', dubberPercent);
+                await logStep(`[Экспорт] Дорожка даббера «${nick}» ${effectiveOriginals.length > 1 ? `(слой ${oIdx + 1})` : ''}: ${path.basename(origOut)}`, 'info', dubberPercent);
               }
             }
 
             if (fixes && fixes.length > 0) {
               const sortedFixes = [...fixes].sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
-              const hasOriginals = original && original.length > 0;
-              for (let fIdx = 0; fIdx < sortedFixes.length; fIdx++) {
-                const fixFile = sortedFixes[fIdx];
-                const ext = path.extname(fixFile.path) || '.wav';
-                const fixName = (!hasOriginals && sortedFixes.length === 1)
-                  ? `${baseVideoName}_[${nick}]${ext}`
-                  : (sortedFixes.length === 1
-                    ? `${baseVideoName}_[${nick}]_[фикс]${ext}`
-                    : `${baseVideoName}_[${nick}]_[фикс${fIdx + 1}]${ext}`);
-                const fixOut = path.join(targetDir, fixName);
-                await fs.copyFile(fixFile.path, fixOut);
-                await logStep(`[Экспорт] Дорожка даббера «${nick}»: ${path.basename(fixOut)}`, 'info', dubberPercent);
+              const newestFixOnly = sortedFixes[sortedFixes.length - 1];
+              const ext = path.extname(newestFixOnly.path) || '.wav';
+              const fixName = `${baseVideoName}_[${nick}]${ext}`;
+              const staleFixOut = path.join(targetDir, `${baseVideoName}_[${nick}]_[фикс]${ext}`);
+              if (fsSync.existsSync(staleFixOut)) {
+                await fs.unlink(staleFixOut).catch(() => {});
               }
+              const fixOut = path.join(targetDir, fixName);
+              await fs.copyFile(newestFixOnly.path, fixOut);
+              await logStep(`[Экспорт] Дорожка даббера «${nick}» (только фикс): ${path.basename(fixOut)}`, 'info', dubberPercent);
             }
           }
         }
