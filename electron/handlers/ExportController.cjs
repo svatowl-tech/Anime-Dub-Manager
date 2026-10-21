@@ -6,6 +6,7 @@ const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
 const ExportService = require('../services/ExportService.cjs');
 const AutoTimingService = require('../services/AutoTimingService.cjs');
 const AudioAnalysisService = require('../services/AudioAnalysisService.cjs');
+const { sanitizePath, sanitizeProjectTitle } = require('../lib/pathSanitizer.cjs');
 
 function registerExportHandlers(getData, mainWindow) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow);
@@ -16,7 +17,7 @@ function registerExportHandlers(getData, mainWindow) {
     
     const config = await getData('config.json');
     const baseDir = config.baseDir || app.getPath('userData');
-    const exportDir = path.isAbsolute(targetDir) ? targetDir : path.join(baseDir, targetDir);
+    const exportDir = sanitizePath(path.isAbsolute(targetDir) ? targetDir : path.join(baseDir, targetDir));
     const participantsData = await getData('participants.json');
     const projectsData = await getData('projects.json');
     
@@ -235,7 +236,8 @@ function registerExportHandlers(getData, mainWindow) {
 
     const projectsData = await getData('projects.json');
     const project = (projectsData || []).find(p => p.id === episode.projectId);
-    const projectTitle = project ? project.title : 'Unknown';
+    const rawProjectTitle = project ? project.title : 'Unknown';
+    const projectTitle = sanitizeProjectTitle(rawProjectTitle);
     const baseVideoName = `${projectTitle}_${episode.number}`;
 
     const rawDir = path.join(exportDir, '00_исходные');

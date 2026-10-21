@@ -261,49 +261,112 @@ export const useAssEditorActions = (
   };
 
   const handleLinkAsAlias = async (aliasName: string, mainName: string) => {
-    if (!currentEpisode) return;
-    try {
-      // 1. Update project characterAliases
-      const aliases = { ...characterAliases };
-      aliases[aliasName] = mainName;
-      
-      await ipcSafe.invoke('save-project', {
-        ...currentEpisode.project,
-        characterAliases: JSON.stringify(aliases)
-      });
+    if (!currentEpisode || !currentEpisode.project) return;
+    if (aliasName === mainName) return;
 
-      // 2. Re-analyze to update actors list and line counts
-      const mappingEntries = (state as any).globalMapping.filter((m: any) => m.characterName === mainName && m.dubberId);
-      
-      const aliasAssignments = assignments.filter(a => a.characterName === aliasName);
-      let updatedAssignments = assignments.filter(a => a.characterName !== aliasName);
-      
-      // Transfer dubber assignments from alias to main if they exist
-      aliasAssignments.forEach(aa => {
-        const dubberIdToUse = aa.dubberId;
-        const dubberToUse = aa.dubber;
-        
-        const alreadyHasThisDubber = updatedAssignments.some(a => a.characterName === mainName && a.dubberId === dubberIdToUse);
-        
-        if (!alreadyHasThisDubber && dubberIdToUse) {
-           updatedAssignments.push({
-             ...aa,
-             characterName: mainName,
-             dubberId: dubberIdToUse,
-             dubber: dubberToUse,
-             id: Math.random().toString(36).substring(2, 11)
-           });
+    try {
+      // 1. Resolve canonical main character and flatten alias chains
+      const currentAliases: Record<string, string> = JSON.parse(currentEpisode.project.characterAliases || '{}');
+      let canonicalMain = mainName;
+      while (currentAliases[canonicalMain] && currentAliases[canonicalMain] !== canonicalMain) {
+        canonicalMain = currentAliases[canonicalMain];
+      }
+      currentAliases[aliasName] = canonicalMain;
+
+      Object.keys(currentAliases).forEach(k => {
+        if (currentAliases[k] === aliasName) {
+          currentAliases[k] = canonicalMain;
         }
       });
 
-      // Also ensure all dubbers from global mapping for the main character are present
-      mappingEntries.forEach((me: any) => {
-        const alreadyHasThisDubber = updatedAssignments.some(a => a.characterName === mainName && a.dubberId === me.dubberId);
+      // 2. Update global mapping so future episodes know the dubber and portrait
+      let globalMapping: { characterName: string; dubberId: string; photoUrl?: string; isMain?: boolean }[] = [];
+      try {
+        const raw = currentEpisode.project.globalMapping || '[]';
+        const parsed = JSON.parse(raw);
+        globalMapping = Array.isArray(parsed)
+          ? parsed
+          : Object.entries(parsed).map(([k, v]) => ({ characterName: k, dubberId: v as string }));
+      } catch (e) {
+        globalMapping = [];
+      }
+
+      const aliasMapEntry = globalMapping.find(m => m.characterName.toLowerCase() === aliasName.toLowerCase());
+      const mainMapIdx = globalMapping.findIndex(m => m.characterName.toLowerCase() === canonicalMain.toLowerCase());
+
+      const currentAssignedDubber = assignments.find(a =>
+        (a.characterName === canonicalMain || a.characterName === aliasName) && a.dubberId
+      )?.dubberId;
+
+      const dubberToUse = (mainMapIdx !== -1 && globalMapping[mainMapIdx].dubberId)
+        ? globalMapping[mainMapIdx].dubberId
+        : (aliasMapEntry?.dubberId || currentAssignedDubber || '');
+
+      const photoToUse = (mainMapIdx !== -1 && globalMapping[mainMapIdx].photoUrl)
+        ? globalMapping[mainMapIdx].photoUrl
+        : aliasMapEntry?.photoUrl;
+
+      if (mainMapIdx !== -1) {
+        globalMapping[mainMapIdx] = {
+          ...globalMapping[mainMapIdx],
+          characterName: canonicalMain,
+          dubberId: dubberToUse,
+          photoUrl: photoToUse || globalMapping[mainMapIdx].photoUrl,
+          isMain: globalMapping[mainMapIdx].isMain || aliasMapEntry?.isMain || false
+        };
+      } else {
+        globalMapping.push({
+          characterName: canonicalMain,
+          dubberId: dubberToUse,
+          photoUrl: photoToUse,
+          isMain: aliasMapEntry?.isMain || false
+        });
+      }
+
+      const updatedProject = {
+        ...currentEpisode.project,
+        characterAliases: JSON.stringify(currentAliases),
+        globalMapping: JSON.stringify(globalMapping)
+      };
+      await ipcSafe.invoke('save-project', updatedProject);
+      if (currentEpisode.project) {
+        currentEpisode.project.characterAliases = updatedProject.characterAliases;
+        currentEpisode.project.globalMapping = updatedProject.globalMapping;
+      }
+
+      // 3. Merge assignments in current episode
+      const aliasAssignments = assignments.filter(a => a.characterName === aliasName);
+      let updatedAssignments = assignments.filter(a => a.characterName !== aliasName);
+
+      aliasAssignments.forEach(aa => {
+        const dubberIdToUse = aa.dubberId;
+        const dubberToUse = aa.dubber;
+
+        const alreadyHasThisDubber = updatedAssignments.some(
+          a => a.characterName === canonicalMain && a.dubberId === dubberIdToUse
+        );
+
+        if (!alreadyHasThisDubber && dubberIdToUse) {
+          updatedAssignments.push({
+            ...aa,
+            characterName: canonicalMain,
+            dubberId: dubberIdToUse,
+            dubber: dubberToUse,
+            id: Math.random().toString(36).substring(2, 11)
+          });
+        }
+      });
+
+      const mappingEntries = globalMapping.filter(m => m.characterName === canonicalMain && m.dubberId);
+      mappingEntries.forEach(me => {
+        const alreadyHasThisDubber = updatedAssignments.some(
+          a => a.characterName === canonicalMain && a.dubberId === me.dubberId
+        );
         if (!alreadyHasThisDubber) {
           updatedAssignments.push({
             id: Math.random().toString(36).substring(2, 11),
             episodeId: currentEpisode.id,
-            characterName: mainName,
+            characterName: canonicalMain,
             dubberId: me.dubberId,
             dubber: participants.find(p => p.id === me.dubberId),
             status: 'PENDING',
@@ -312,25 +375,93 @@ export const useAssEditorActions = (
         }
       });
 
-      // If main character still has no assignments, create one empty
-      if (updatedAssignments.filter(a => a.characterName === mainName).length === 0) {
+      if (updatedAssignments.filter(a => a.characterName === canonicalMain).length === 0) {
         updatedAssignments.push({
           id: Math.random().toString(36).substring(2, 11),
           episodeId: currentEpisode.id,
-          characterName: mainName,
-          dubberId: "",
+          characterName: canonicalMain,
+          dubberId: dubberToUse || "",
           status: "PENDING"
         });
       }
 
+      // 4. Cascade to all other episodes of the project
+      try {
+        const freshProj = await ipcSafe.invoke('get-project', currentEpisode.projectId);
+        if (freshProj && Array.isArray(freshProj.episodes)) {
+          for (const ep of freshProj.episodes) {
+            if (ep.id === currentEpisode.id) continue;
+            if (Array.isArray(ep.assignments) && ep.assignments.some((a: any) => a.characterName === aliasName)) {
+              let epChanged = false;
+              const epAliasAssigns = ep.assignments.filter((a: any) => a.characterName === aliasName);
+              let epUpdatedAssigns = ep.assignments.filter((a: any) => a.characterName !== aliasName);
+
+              epAliasAssigns.forEach((aa: any) => {
+                const dId = aa.dubberId;
+                const exists = epUpdatedAssigns.some(
+                  (a: any) => a.characterName === canonicalMain && a.dubberId === dId
+                );
+                if (!exists && dId) {
+                  epUpdatedAssigns.push({
+                    ...aa,
+                    characterName: canonicalMain,
+                    id: Math.random().toString(36).substring(2, 11)
+                  });
+                  epChanged = true;
+                }
+              });
+
+              if (epUpdatedAssigns.filter((a: any) => a.characterName === canonicalMain).length === 0) {
+                epUpdatedAssigns.push({
+                  id: Math.random().toString(36).substring(2, 11),
+                  episodeId: ep.id,
+                  characterName: canonicalMain,
+                  dubberId: dubberToUse || "",
+                  status: "PENDING"
+                });
+                epChanged = true;
+              }
+
+              if (epChanged || epUpdatedAssigns.length !== ep.assignments.length) {
+                const clean = epUpdatedAssigns.map(({ dubber, substitute, ...r }: any) => r);
+                await ipcSafe.invoke('save-episode', { ...ep, assignments: clean });
+              }
+            }
+          }
+        }
+      } catch (cascadeErr) {
+        console.warn("Could not cascade alias merge in useAssEditorActions:", cascadeErr);
+      }
+
+      // 5. Rename speaker names in actual .ass file if it exists
+      if (currentEpisode.subPath) {
+        try {
+          const data = await ipcSafe.invoke('get-raw-subtitles', currentEpisode.subPath);
+          if (data && data.lines) {
+            const updatedLines = data.lines.map((l: any) => {
+              if (l.name === aliasName) {
+                return { ...l, name: canonicalMain };
+              }
+              return l;
+            });
+            await ipcSafe.invoke('save-translated-subtitles', {
+              assFilePath: currentEpisode.subPath,
+              translatedLines: updatedLines
+            });
+          }
+        } catch (err) {
+          console.error("Error updating .ass file with new alias:", err);
+        }
+      }
+
       setAssignments(updatedAssignments);
       await saveToDatabase(updatedAssignments);
-      
-      // 4. Update actors list
-      setActors(prev => prev.filter(a => a !== aliasName));
-      
+
+      // 6. Update actors list
+      setActors(prev => Array.from(new Set(prev.map(a => a === aliasName ? canonicalMain : a))));
+
       setLinkingCharacter(null);
-      setStatus(`Персонаж "${aliasName}" успешно связан с "${mainName}".`);
+      setStatus(`Персонаж "${aliasName}" успешно привязан как алиас для "${canonicalMain}".`);
       onRefresh();
     } catch (error) {
       console.error("Link alias error:", error);

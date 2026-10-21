@@ -5,6 +5,7 @@ const log = require('electron-log');
 const { bakeSubtitles, transcodeToMp4, muxRelease, applyFixesToOriginalAudio } = require('./ffmpegService.cjs');
 const { splitSubsByDubber, extractSignsAss, exportFullAssWithRoles } = require('./subtitleService.cjs');
 const AutoTimingService = require('./AutoTimingService.cjs');
+const { sanitizeFileNamePart, sanitizeFolderName, sanitizeProjectTitle, sanitizeDubberNick, sanitizePath } = require('../lib/pathSanitizer.cjs');
 
 /**
  * Helper to copy a file and report progress.
@@ -71,13 +72,15 @@ class ExportService {
     }
 
     if (!episode || !targetDir) throw new Error('Missing required parameters');
+    targetDir = sanitizePath(targetDir);
     log.info(`Exporting dabber files for episode ${episode.number} to ${targetDir}`);
     await fs.mkdir(targetDir, { recursive: true });
 
     let videoProgressEnd = episode.subPath ? 95 : 100;
 
     const project = (projectsData || []).find(p => p.id === episode.projectId);
-    const projectTitle = project ? project.title : 'Unknown';
+    const rawProjectTitle = project ? project.title : 'Unknown';
+    const projectTitle = sanitizeProjectTitle(rawProjectTitle);
     const baseVideoName = `${projectTitle}_${episode.number}`;
 
     if (episode.rawPath) {
@@ -242,11 +245,12 @@ class ExportService {
     }
 
     if (!episode || !targetDir) throw new Error('Missing required parameters');
-
+    targetDir = sanitizePath(targetDir);
     await fs.mkdir(targetDir, { recursive: true });
 
     const project = (projectsData || []).find(p => p.id === episode.projectId);
-    const projectTitle = project ? project.title : 'Unknown';
+    const rawProjectTitle = project ? project.title : 'Unknown';
+    const projectTitle = sanitizeProjectTitle(rawProjectTitle);
     const baseVideoName = `${projectTitle}_${episode.number}`;
 
     const epFromProject = project ? (project.episodes || []).find(e => e.number === episode.number || e.id === episode.id) : null;
@@ -437,10 +441,11 @@ class ExportService {
       }
 
       const getExportName = (upload, isFix) => {
-        const nick = getNick(upload.uploadedById || upload.participantId, upload);
+        const rawNick = getNick(upload.uploadedById || upload.participantId, upload);
+        const safeNick = sanitizeDubberNick(rawNick);
         const ext = path.extname(upload.path || upload.fileName || '.wav');
         const fixSuffix = isFix ? '_[фикс]' : '';
-        return `${baseVideoName}_[${nick}]${fixSuffix}${ext}`;
+        return `${baseVideoName}_[${safeNick}]${fixSuffix}${ext}`;
       };
 
       // ----------------------------------------------------
@@ -644,12 +649,13 @@ class ExportService {
               for (let oIdx = 0; oIdx < effectiveOriginals.length; oIdx++) {
                 const origFile = effectiveOriginals[oIdx];
                 const ext = path.extname(origFile.path) || '.wav';
+                const safeNick = sanitizeDubberNick(nick);
                 const origName = effectiveOriginals.length === 1
-                  ? `${baseVideoName}_[${nick}]${ext}`
-                  : `${baseVideoName}_[${nick}]_дорожка${oIdx + 1}${ext}`;
+                  ? `${baseVideoName}_[${safeNick}]${ext}`
+                  : `${baseVideoName}_[${safeNick}]_дорожка${oIdx + 1}${ext}`;
                 const origOut = path.join(targetDir, origName);
                 await fs.copyFile(origFile.path, origOut);
-                await logStep(`[Экспорт] Дорожка даббера «${nick}» ${effectiveOriginals.length > 1 ? `(слой ${oIdx + 1})` : ''}: ${path.basename(origOut)}`, 'info', dubberPercent);
+                await logStep(`[Экспорт] Дорожка даббера «${safeNick}» ${effectiveOriginals.length > 1 ? `(слой ${oIdx + 1})` : ''}: ${path.basename(origOut)}`, 'info', dubberPercent);
               }
             }
 
@@ -657,14 +663,15 @@ class ExportService {
               const sortedFixes = [...fixes].sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
               const newestFixOnly = sortedFixes[sortedFixes.length - 1];
               const ext = path.extname(newestFixOnly.path) || '.wav';
-              const fixName = `${baseVideoName}_[${nick}]${ext}`;
-              const staleFixOut = path.join(targetDir, `${baseVideoName}_[${nick}]_[фикс]${ext}`);
+              const safeNick = sanitizeDubberNick(nick);
+              const fixName = `${baseVideoName}_[${safeNick}]${ext}`;
+              const staleFixOut = path.join(targetDir, `${baseVideoName}_[${safeNick}]_[фикс]${ext}`);
               if (fsSync.existsSync(staleFixOut)) {
                 await fs.unlink(staleFixOut).catch(() => {});
               }
               const fixOut = path.join(targetDir, fixName);
               await fs.copyFile(newestFixOnly.path, fixOut);
-              await logStep(`[Экспорт] Дорожка даббера «${nick}» (только фикс): ${path.basename(fixOut)}`, 'info', dubberPercent);
+              await logStep(`[Экспорт] Дорожка даббера «${safeNick}» (только фикс): ${path.basename(fixOut)}`, 'info', dubberPercent);
             }
           }
         }

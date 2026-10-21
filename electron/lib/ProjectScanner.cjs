@@ -2,58 +2,122 @@ const fs = require('fs/promises');
 const path = require('path');
 const log = require('electron-log');
 
+const { sanitizeFolderName: safeSanitizeFolder, sanitizeProjectTitle } = require('./pathSanitizer.cjs');
+
 function sanitizeFolderName(name) {
-  if (!name) return 'Project';
-  return name.replace(/[/\\?%*:|"<>]/g, '_').trim();
+  return safeSanitizeFolder(name, 'Project');
 }
 
-function extractEpisodeNumber(str) {
+function extractEpisodeNumber(str, projectTitle) {
   if (!str) return null;
   let clean = str.trim();
 
-  // Strip resolution tags and common video parameters to prevent false positive numbers (e.g., 1080p, 720, 2024)
-  clean = clean.replace(/(?:1080p|720p|2160p|480p|360p|4k|2k)/gi, ' ');
-  clean = clean.replace(/(?:\b202[0-9]\b)/g, ' ');
+  // 1. Strip file extension if present
+  clean = clean.replace(/\.[a-zA-Z0-9]{2,5}$/, '');
 
-  // 1. Pure digits like "1", "01", "12"
+  // 2. Strip leading release group [Group] or (Group)
+  clean = clean.replace(/^\[[^\]]+\]\s*/, '').replace(/^\([^)]+\)\s*/, '');
+
+  // 3. Strip CRC32 tags
+  clean = clean.replace(/\[[0-9a-fA-F]{8}\]/g, ' ');
+
+  // 4. Strip video resolutions and specs
+  clean = clean.replace(/\b(?:2160p|1080p|720p|480p|360p|4k|8k|uhd|fhd|hd)\b/gi, ' ');
+  clean = clean.replace(/\b(?:x264|x265|h264|h265|hevc|avc|av1|vp9|10bit|8bit|hi10p|aac\d?|flac\d?|mp3|opus|ac3|eac3|dts(?:-hd)?|truehd|ddp?5\.1|5\.1ch|2\.0ch|stereo)\b/gi, ' ');
+  clean = clean.replace(/\b(?:WEBRip|WEB-DL|BDRip|BD-Rip|BluRay|HDTV|DVDRip|DVD|Remux)\b/gi, ' ');
+
+  // 5. Strip 4-digit years
+  clean = clean.replace(/[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]/g, ' ');
+  clean = clean.replace(/\b(?:19|20)\d{2}\b/g, ' ');
+
+  // 6. Strip projectTitle if provided
+  if (projectTitle && typeof projectTitle === 'string' && projectTitle.trim()) {
+    const esc = projectTitle.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    clean = clean.replace(new RegExp('(?:^|[\\s._\\[(-])' + esc + '(?:[\\s._\\])-]|$)', 'i'), ' ');
+    const words = projectTitle.trim().split(/[^a-zA-Zа-яА-Я0-9]+/i).filter(w => w.length > 1);
+    if (words.length > 0) {
+      const phrase = words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s._:-]+');
+      clean = clean.replace(new RegExp(phrase, 'i'), ' ');
+    }
+  }
+
+  // 7. Strip season markers
+  clean = clean.replace(/\b(?:season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s*season|сезон\s*\d{1,2}|\d{1,2}\s*сезон|part\s*\d{1,2}|часть\s*\d{1,2}|cour\s*\d{1,2})\b/gi, ' ');
+
+  // 8. Pure digits like "1", "01", "12"
   if (/^\d+$/.test(clean.trim())) {
     const num = parseInt(clean.trim(), 10);
     if (!isNaN(num) && num > 0 && num < 2000) return num;
   }
 
-  // 2. Standard S01E02 / E02 / E2 / e02 / e2 patterns
-  const sEPattern = clean.match(/(?:s\d{1,2})?e(\d{1,4})/i);
+  // 9. Russian batch/indicator [01 из 12], (01 из 24)
+  const ruBatchMatch = clean.match(/\[?\b0*([1-9]\d{0,3})\s*(?:-|–|—)?\s*\d*\s*(?:из|of)\s*\d+\b/i);
+  if (ruBatchMatch && ruBatchMatch[1]) {
+    const num = parseInt(ruBatchMatch[1], 10);
+    if (!isNaN(num) && num > 0 && num < 2000) return num;
+  }
+
+  // 10. Standard S01E02 / E02 / E2 / 2x05 patterns
+  const sEPattern = clean.match(/(?:s\d{1,2}[\s._-]*e|season\s*\d{1,2}[\s._-]*ep(?:isode)?\s*|\b\d{1,2}x)0*([1-9]\d{0,3})\b/i);
   if (sEPattern && sEPattern[1]) {
     const num = parseInt(sEPattern[1], 10);
     if (!isNaN(num) && num > 0 && num < 2000) return num;
   }
 
-  // 3. Keywords before digits: "Episode 1", "Ep_01", "Серия 1", "Эпизод 1", "Серия_01"
-  const prefixMatch = clean.match(/(?:episode|ep|серия|эпизод|series)[_\s-]*(\d{1,4})/i);
+  // 11. Russian season + episode: "2 сезон 5 серия"
+  const ruSeasonEp = clean.match(/\d{1,2}\s*сезон[,\s._-]*0*([1-9]\d{0,3})\s*сери[яи]/i);
+  if (ruSeasonEp && ruSeasonEp[1]) {
+    const num = parseInt(ruSeasonEp[1], 10);
+    if (!isNaN(num) && num > 0 && num < 2000) return num;
+  }
+
+  // 12. Keywords before digits: "Episode 1", "Ep_01", "Серия 1", "Эпизод 1", "Выпуск 1"
+  const prefixMatch = clean.match(/(?:ep(?:isode)?\.?|серия|эпизод|выпуск|\#)[\s._-]*0*([1-9]\d{0,3})\b/i);
   if (prefixMatch && prefixMatch[1]) {
     const num = parseInt(prefixMatch[1], 10);
     if (!isNaN(num) && num > 0 && num < 2000) return num;
   }
 
-  // 4. Keywords after digits: "1 серия", "01 серия", "1 эпизод", "01 эпизод", "1 ep"
-  const suffixMatch = clean.match(/(\d{1,4})[_\s-]*(?:серия|эпизод|серии|ep|eps|episode)/i);
+  // 13. Keywords after digits: "1 серия", "01 серия", "1 эпизод", "01 эпизод", "1 ep"
+  const suffixMatch = clean.match(/0*([1-9]\d{0,3})[_\s-]*(?:серия|эпизод|серии|выпуск|ep|eps|episode)\b/i);
   if (suffixMatch && suffixMatch[1]) {
     const num = parseInt(suffixMatch[1], 10);
     if (!isNaN(num) && num > 0 && num < 2000) return num;
   }
 
-  // 5. Brackets around digits: "[01]", "(01)", "[1]"
-  const bracketMatch = clean.match(/[\[\(](\d{1,4})[\]\)]/);
-  if (bracketMatch && bracketMatch[1]) {
-    const num = parseInt(bracketMatch[1], 10);
+  // 14. Standard anime release format with DASH delimiter: "Title 2 - 05" or "Title — 05" (last match)
+  const dashMatches = Array.from(clean.matchAll(/(?:\s+[-–—_]+\s+|[-–—_]{2,}|\s+[-–—_]+|[-–—_]+\s+)0*([1-9]\d{0,3})(?:v\d+)?(?=[\s._\-\(\[]|$)/gi));
+  if (dashMatches.length > 0) {
+    const lastMatch = dashMatches[dashMatches.length - 1];
+    const num = parseInt(lastMatch[1], 10);
     if (!isNaN(num) && num > 0 && num < 2000) return num;
   }
 
-  // 6. Delimited standalone numbers: "- 01 -", "_01_", ".01.", " 01 "
-  const delimitedMatch = clean.match(/(?:^|[_\s.-])(\d{1,4})(?:[_\s.-]|$)/);
-  if (delimitedMatch && delimitedMatch[1]) {
-    const num = parseInt(delimitedMatch[1], 10);
+  // 15. Brackets around digits: "[01]", "(01)", "[1]"
+  const bracketMatches = Array.from(clean.matchAll(/\[0*([1-9]\d{0,3})(?:v\d+)?\]|\(0*([1-9]\d{0,3})(?:v\d+)?\)/gi));
+  if (bracketMatches.length > 0) {
+    for (const bm of bracketMatches) {
+      const val = bm[1] || bm[2];
+      if (val) {
+        const num = parseInt(val, 10);
+        if (!isNaN(num) && num > 0 && num < 2000) return num;
+      }
+    }
+  }
+
+  // 16. Trailing number at end of string
+  const endMatch = clean.match(/[\s._-]+0*([1-9]\d{0,3})(?:v\d+)?$/i);
+  if (endMatch && endMatch[1]) {
+    const num = parseInt(endMatch[1], 10);
     if (!isNaN(num) && num > 0 && num < 2000) return num;
+  }
+
+  // 17. Delimited standalone numbers (take the last candidate)
+  const delimitedMatches = Array.from(clean.matchAll(/(?:^|[_\s.-])0*([1-9]\d{0,2})(?:[_\s.-]|$)/g));
+  if (delimitedMatches.length > 0) {
+    const last = delimitedMatches[delimitedMatches.length - 1];
+    const num = parseInt(last[1], 10);
+    if (!isNaN(num) && num > 0 && num < 1000) return num;
   }
 
   return null;
@@ -251,7 +315,7 @@ async function scanAndRecoverProject(baseDir, project, allEpisodes) {
       const dirName = entry.name;
       if (['torrents_temp', 'torrents_meta', 'backups', 'models'].includes(dirName.toLowerCase())) continue;
 
-      const epNum = extractEpisodeNumber(dirName);
+      const epNum = extractEpisodeNumber(dirName, project.title);
       if (epNum !== null) {
         const epFolder = path.join(projectDir, dirName);
         const scannedData = await scanEpisodeFolder(epFolder, epNum);
@@ -266,7 +330,7 @@ async function scanAndRecoverProject(baseDir, project, allEpisodes) {
 
   for (const entry of entries) {
     if (entry.isFile()) {
-      const epNum = extractEpisodeNumber(entry.name);
+      const epNum = extractEpisodeNumber(entry.name, project.title);
       if (epNum !== null) {
         const ext = path.extname(entry.name).toLowerCase();
         const fullPath = path.join(projectDir, entry.name);
@@ -288,7 +352,7 @@ async function scanAndRecoverProject(baseDir, project, allEpisodes) {
     const subFiles = await fs.readdir(subsDir, { withFileTypes: true }).catch(() => []);
     for (const sf of subFiles) {
       if (sf.isFile()) {
-        const epNum = extractEpisodeNumber(sf.name);
+        const epNum = extractEpisodeNumber(sf.name, project.title);
         if (epNum !== null && subExts.includes(path.extname(sf.name).toLowerCase())) {
           let existingDisk = diskMap.get(epNum) || { folderPath: null, episodeJson: null, videoPath: null, subPath: null };
           if (!existingDisk.subPath) {

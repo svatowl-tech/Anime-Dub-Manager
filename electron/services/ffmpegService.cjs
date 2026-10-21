@@ -160,6 +160,7 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
     const vPath = path.resolve(videoPath);
     const aPath = path.resolve(finalAssPath);
     const oPath = path.resolve(outputPath);
+    await fs.promises.mkdir(path.dirname(oPath), { recursive: true }).catch(() => {});
 
     // Pre-calculate duration for reliable progress calculation
     const totalDurationSec = await getDurationSec(vPath);
@@ -288,6 +289,7 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
     
     const vPath = path.resolve(videoPath);
     const oPath = path.resolve(outputPath);
+    await fs.promises.mkdir(path.dirname(oPath), { recursive: true }).catch(() => {});
 
     // Pre-calculate duration for reliable progress percentage calculation on MKV/MP4 files
     const totalDurationSec = await getDurationSec(vPath);
@@ -417,6 +419,7 @@ function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, 
     const vPath = path.resolve(videoPath);
     const aPath = path.resolve(audioPath);
     const oPath = path.resolve(outputPath);
+    await fs.promises.mkdir(path.dirname(oPath), { recursive: true }).catch(() => {});
 
     const totalDurationSec = await getDurationSec(vPath);
 

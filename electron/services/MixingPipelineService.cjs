@@ -11,6 +11,7 @@ const AutoTimingService = require('./AutoTimingService.cjs');
 const AudioNeuralService = require('./AudioNeuralService.cjs');
 const AudioAnalysisService = require('./AudioAnalysisService.cjs');
 const { trackProcess, killAllActiveProcesses } = require('../lib/ProcessTracker.cjs');
+const { sanitizeProjectTitle, sanitizePath } = require('../lib/pathSanitizer.cjs');
 
 /**
  * MODULE DATABASE (Реестр всех доступных модулей обработки с подробнейшими настройками и пресетами)
@@ -2527,7 +2528,7 @@ class MixingPipelineService {
 
     // 2. Derive using baseDir and project title
     const root = this.getBaseRoot(baseDir, episode);
-    const projectTitle = (episode?.project?.title || 'Project').replace(/[\/:*?"<>|]/g, '_');
+    const projectTitle = sanitizeProjectTitle(episode?.project?.title || 'Project');
     
     const projDir = path.join(root, projectTitle);
     const candFolders = [
@@ -7001,7 +7002,7 @@ class MixingPipelineService {
       throw new Error('Видеофайл серии не найден.');
     }
 
-    const projectTitle = (episode?.project?.title || 'Project').replace(/[\\/:*?"<>|]/g, '_');
+    const projectTitle = sanitizeProjectTitle(episode?.project?.title || 'Project');
     const epNum = episode?.number !== undefined ? episode.number : 1;
     const finalVideoName = `${prefix}${projectTitle}_Серия_${epNum}_[СВЕДЕНО].mp4`;
     const finalVideoPath = path.join(stepFolder, finalVideoName);

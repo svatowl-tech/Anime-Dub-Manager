@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useMemo } from "react";
+import React, { useState, useRef, useEffect, useMemo } from "react";
 import { Bookmark, AlertCircle, Plus, Copy, Trash2, Sparkles } from "lucide-react";
 import { RawSubtitleLine } from "./types";
 import { getCharacterColor } from "./characterColors";
@@ -55,6 +55,54 @@ export const SubtitleLineRow = React.memo(({
     () => getCharacterColor(currentName, stableNames),
     [currentName, stableNames]
   );
+
+  const [localName, setLocalName] = useState(currentName || '');
+  const commitTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    setLocalName(currentName || '');
+  }, [currentName]);
+
+  useEffect(() => {
+    return () => {
+      if (commitTimeoutRef.current) {
+        clearTimeout(commitTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  const commitName = (val: string) => {
+    if (commitTimeoutRef.current) {
+      clearTimeout(commitTimeoutRef.current);
+      commitTimeoutRef.current = null;
+    }
+    const trimmed = val.trim();
+    if (trimmed !== (currentName || '').trim()) {
+      onUpdate(line.rawLineIndex, { name: trimmed });
+      if (trimmed) {
+        onCommitName(trimmed);
+      }
+    }
+  };
+
+  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    setLocalName(val);
+
+    // If user clicked/selected an exact match from datalist, commit immediately
+    if (val.trim() && stableNames.includes(val.trim())) {
+      commitName(val);
+      return;
+    }
+
+    // Debounce commit while typing so each intermediate letter is not committed
+    if (commitTimeoutRef.current) {
+      clearTimeout(commitTimeoutRef.current);
+    }
+    commitTimeoutRef.current = setTimeout(() => {
+      commitName(val);
+    }, 600);
+  };
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -154,19 +202,24 @@ export const SubtitleLineRow = React.memo(({
         />
         <input
           type="text"
-          value={currentName}
-          onChange={(e) => onUpdate(line.rawLineIndex, { name: e.target.value })}
-          onBlur={(e) => onCommitName(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+          value={localName}
+          onChange={handleNameChange}
+          onBlur={() => commitName(localName)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              commitName(localName);
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
           className={`w-full bg-neutral-900/90 border rounded pl-6 pr-6 py-1 text-xs focus:outline-none focus:border-indigo-500 transition-colors font-medium ${
             updates?.name !== undefined
               ? "border-indigo-500/50 text-indigo-300"
-              : !currentName || !currentName.trim()
+              : !localName || !localName.trim()
               ? "border-red-500/50 text-red-300 bg-red-500/10"
               : "text-neutral-200"
           }`}
           style={
-            currentName?.trim() && updates?.name === undefined
+            localName?.trim() && updates?.name === undefined
               ? {
                   borderColor: charColor.badgeBorder,
                   color: charColor.textHex

@@ -35,6 +35,7 @@ import MkvImportModal from './mkv/MkvImportModal';
 import TorrentMkvDetectedModal from './mkv/TorrentMkvDetectedModal';
 import { inspectMkvTracks, extractSelectedMkvTracks, MkvTrackInfo } from '../lib/mkvSubtitleExtractor';
 import { linkDownloadedTorrentFile } from '../lib/torrentEpisodeLinker';
+import { extractEpisodeNumber } from '../lib/episodeNumberExtractor';
 
 interface DashboardProps {
   onNavigate?: (tab: string) => void;
@@ -3357,25 +3358,43 @@ export default function Dashboard({
                 
                 <div className="flex-1 overflow-y-auto min-h-0 border border-neutral-800 rounded-lg">
                   <div className="divide-y divide-neutral-800">
-                    {torrentMetadata?.files?.map(f => (
-                      <label key={f.index} className="flex items-center justify-between p-3 hover:bg-neutral-900/50 transition-colors group cursor-pointer">
-                        <div className="flex items-center gap-3 min-w-0 pr-4">
-                          <input 
-                            type="checkbox"
-                            checked={selectedFileIndexes.includes(f.index)}
-                            onChange={(e) => {
-                              if (e.target.checked) setSelectedFileIndexes([...selectedFileIndexes, f.index]);
-                              else setSelectedFileIndexes(selectedFileIndexes.filter(i => i !== f.index));
-                            }}
-                            className="w-4 h-4 rounded border-neutral-700 bg-neutral-900 checked:bg-indigo-500 checked:border-indigo-500"
-                          />
-                          <div>
-                            <div className="text-sm text-neutral-200 truncate" title={f.name}>{f.name}</div>
-                            <div className="text-xs text-neutral-500 font-mono mt-0.5">{(f.length / 1024 / 1024).toFixed(2)} MB</div>
+                    {torrentMetadata?.files?.map(f => {
+                      const detectedEp = extractEpisodeNumber(
+                        f.name,
+                        [selectedProject?.title, selectedProject?.originalTitle].filter(Boolean) as string[]
+                      );
+                      const ext = (f.name.split('.').pop() || '').toLowerCase();
+                      const isVideo = ['mkv', 'mp4', 'webm', 'avi', 'mov', 'ts'].includes(ext);
+
+                      return (
+                        <label key={f.index} className="flex items-center justify-between p-3 hover:bg-neutral-900/50 transition-colors group cursor-pointer">
+                          <div className="flex items-center gap-3 min-w-0 pr-4">
+                            <input 
+                              type="checkbox"
+                              checked={selectedFileIndexes.includes(f.index)}
+                              onChange={(e) => {
+                                if (e.target.checked) setSelectedFileIndexes([...selectedFileIndexes, f.index]);
+                                else setSelectedFileIndexes(selectedFileIndexes.filter(i => i !== f.index));
+                              }}
+                              className="w-4 h-4 rounded border-neutral-700 bg-neutral-900 checked:bg-indigo-500 checked:border-indigo-500"
+                            />
+                            <div className="min-w-0">
+                              <div className="text-sm text-neutral-200 truncate flex items-center gap-2" title={f.name}>
+                                <span className="truncate">{f.name}</span>
+                              </div>
+                              <div className="flex items-center gap-2 text-xs text-neutral-500 font-mono mt-0.5">
+                                <span>{(f.length / 1024 / 1024).toFixed(2)} MB</span>
+                                {isVideo && detectedEp > 0 && (
+                                  <span className="px-1.5 py-0.2 bg-indigo-500/15 text-indigo-400 border border-indigo-500/30 rounded text-[10px] font-sans font-medium">
+                                    → Серия {detectedEp}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
                           </div>
-                        </div>
-                      </label>
-                    ))}
+                        </label>
+                      );
+                    })}
                   </div>
                 </div>
                 

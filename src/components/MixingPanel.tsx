@@ -49,7 +49,8 @@ import {
   FileDown,
   RotateCcw,
   Folder,
-  Activity
+  Activity,
+  X
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { safeCopyToClipboard } from '../lib/clipboard';

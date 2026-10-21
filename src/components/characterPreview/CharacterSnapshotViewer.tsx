@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Camera, Image as ImageIcon, Sparkles, Copy, Download, ChevronLeft, ChevronRight, Check } from 'lucide-react';
+import { Camera, Image as ImageIcon, Sparkles, Copy, Download, ChevronLeft, ChevronRight, Check, Crop } from 'lucide-react';
 import { CharacterDialogueLine } from '../../lib/characterPreview/characterPreviewTypes';
 import { formatSecondsToTime } from '../../lib/characterPreview/timeUtils';
 import { toast } from 'sonner';
+import CharacterAvatarCropModal from './CharacterAvatarCropModal';
 
 interface CharacterSnapshotViewerProps {
   currentLine: CharacterDialogueLine | null;
@@ -30,6 +31,7 @@ export default function CharacterSnapshotViewer({
   onSetAsPortrait,
 }: CharacterSnapshotViewerProps) {
   const [copied, setCopied] = useState(false);
+  const [isCropModalOpen, setIsCropModalOpen] = useState(false);
 
   const handleCopySnapshot = async () => {
     if (!snapshotUrl) return;
@@ -59,7 +61,7 @@ export default function CharacterSnapshotViewer({
 
   const handleSetPortraitClick = () => {
     if (!snapshotUrl) return;
-    onSetAsPortrait(snapshotUrl);
+    setIsCropModalOpen(true);
   };
 
   const minTime = currentLine ? Math.max(0, currentLine.startSec - 0.2) : 0;
@@ -187,6 +189,19 @@ export default function CharacterSnapshotViewer({
             className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-indigo-500 hover:accent-indigo-400 transition-all"
           />
         </div>
+      )}
+
+      {/* Avatar Region Crop Modal */}
+      {isCropModalOpen && snapshotUrl && (
+        <CharacterAvatarCropModal
+          isOpen={isCropModalOpen}
+          onClose={() => setIsCropModalOpen(false)}
+          imageUrl={snapshotUrl}
+          characterName={currentLine?.name || 'Персонаж'}
+          onConfirm={(croppedUrl) => {
+            onSetAsPortrait(croppedUrl);
+          }}
+        />
       )}
     </div>
   );

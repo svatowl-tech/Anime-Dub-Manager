@@ -170,9 +170,10 @@ export function useSubtitleEditorState(
 
   const commitNewName = (name: string) => {
     if (!name || !name.trim()) return;
+    const trimmed = name.trim();
     setStableNames(prev => {
-      if (!prev.includes(name)) {
-        return [...prev, name].sort();
+      if (!prev.includes(trimmed)) {
+        return [...prev, trimmed];
       }
       return prev;
     });
@@ -932,15 +933,19 @@ export function useSubtitleEditorState(
 
   useEffect(() => {
     setStableNames(prev => {
-      const next = [...prev];
-      let changed = false;
+      const validSet = new Set(uniqueNames);
+      // Retain existing valid names to keep shortcut order stable
+      const filtered = prev.filter(name => validSet.has(name));
+      const existingSet = new Set(filtered);
+      let changed = filtered.length !== prev.length;
+
       uniqueNames.forEach(name => {
-        if (!next.includes(name)) {
-          next.push(name);
+        if (!existingSet.has(name)) {
+          filtered.push(name);
           changed = true;
         }
       });
-      return changed ? next : prev;
+      return changed ? filtered : prev;
     });
   }, [uniqueNames]);
 

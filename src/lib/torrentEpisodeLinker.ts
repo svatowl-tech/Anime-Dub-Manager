@@ -50,7 +50,8 @@ export async function linkDownloadedTorrentFile(params: {
     const episodes: Episode[] = Array.isArray(proj.episodes) ? [...proj.episodes] : [];
     
     // 2. Determine target episode number
-    let detectedEpNum = extractEpisodeNumber(nameToParse, fallbackEpNumber);
+    const knownTitles = [proj.title, proj.originalTitle].filter((t): t is string => Boolean(t && t.trim()));
+    let detectedEpNum = extractEpisodeNumber(nameToParse, knownTitles, fallbackEpNumber);
     if (!detectedEpNum || detectedEpNum <= 0) {
       detectedEpNum = fallbackEpNumber && fallbackEpNumber > 0 ? fallbackEpNumber : Math.max(1, episodes.length + 1);
     }

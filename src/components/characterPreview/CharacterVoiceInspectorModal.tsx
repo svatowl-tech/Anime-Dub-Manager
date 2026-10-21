@@ -15,6 +15,7 @@ import CharacterLineList from './CharacterLineList';
 import CharacterSnapshotViewer from './CharacterSnapshotViewer';
 import CharacterVoicePlayer from './CharacterVoicePlayer';
 import LineReassignControl from './LineReassignControl';
+import CharacterAvatarCropModal from './CharacterAvatarCropModal';
 import { toast } from 'sonner';
 
 export default function CharacterVoiceInspectorModal({
@@ -48,6 +49,7 @@ export default function CharacterVoiceInspectorModal({
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [activeLinePlayingIndex, setActiveLinePlayingIndex] = useState<number | null>(null);
   const [isReassigning, setIsReassigning] = useState<boolean>(false);
+  const [isCropModalOpen, setIsCropModalOpen] = useState<boolean>(false);
 
   // Playback settings
   const [settings, setSettings] = useState<VoicePlaybackSettings>({
@@ -511,7 +513,7 @@ export default function CharacterVoiceInspectorModal({
       } else if (e.key === 's' || e.key === 'S' || e.key === 'ы' || e.key === 'Ы') {
         e.preventDefault();
         if (snapshotUrl) {
-          handleSetPortrait(snapshotUrl);
+          setIsCropModalOpen(true);
         } else {
           toast.info('Кадр еще загружается...');
         }
@@ -969,6 +971,7 @@ export default function CharacterVoiceInspectorModal({
           <div className="flex items-center gap-3">
             <span>Клавиши: <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 font-mono">Пробел</kbd> — Слушать речь</span>
             <span><kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 font-mono">← / →</kbd> — Реплики</span>
+            <span><kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 font-mono">S</kbd> — Выбрать область в аватарку</span>
             <span><kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 font-mono">Esc</kbd> — Закрыть</span>
           </div>
           <div className="text-neutral-400">
@@ -976,6 +979,19 @@ export default function CharacterVoiceInspectorModal({
           </div>
         </div>
       </div>
+
+      {/* Avatar Region Crop Modal */}
+      {isCropModalOpen && snapshotUrl && (
+        <CharacterAvatarCropModal
+          isOpen={isCropModalOpen}
+          onClose={() => setIsCropModalOpen(false)}
+          imageUrl={snapshotUrl}
+          characterName={mainCharacterName}
+          onConfirm={(croppedUrl) => {
+            handleSetPortrait(croppedUrl);
+          }}
+        />
+      )}
     </div>
   );
 }

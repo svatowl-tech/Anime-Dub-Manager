@@ -1015,12 +1015,14 @@ async function splitSubsByDubber(assFilePath, outputDirectory, assignments, dubb
     }
 
     const ext = outputFormat === 'ass' ? '.ass' : '.srt';
-    const outputPath = path.join(outputDirectory, `${baseFileName}_[${dubber.nickname}]_${lineCount}${ext}`);
+    const safeNick = (dubber.nickname || 'Даббер').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/_+/g, '_').trim().replace(/^[. ]+|[. ]+$/g, '');
+    const safeBase = (baseFileName || 'subtitles').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/_+/g, '_').trim().replace(/^[. ]+|[. ]+$/g, '');
+    const outputPath = path.join(outputDirectory, `${safeBase}_[${safeNick}]_${lineCount}${ext}`);
 
     // Remove any previous file(s) for this dubber in outputDirectory to avoid duplicate files
     try {
       const existingFiles = await fs.readdir(outputDirectory);
-      const dubberPrefix = `${baseFileName}_[${dubber.nickname}]_`;
+      const dubberPrefix = `${safeBase}_[${safeNick}]_`;
       for (const f of existingFiles) {
         if (f.startsWith(dubberPrefix) && (f.endsWith('.ass') || f.endsWith('.srt'))) {
           const oldFilePath = path.join(outputDirectory, f);
@@ -1033,7 +1035,7 @@ async function splitSubsByDubber(assFilePath, outputDirectory, assignments, dubb
       log.warn('[SubtitleService] Error cleaning prior dubber file:', cleanErr);
     }
 
-    log.info(`[SubtitleService] Writing file for dubber ${dubber.nickname} (${lineCount} lines): ${outputPath}`);
+    log.info(`[SubtitleService] Writing file for dubber ${safeNick} (${lineCount} lines): ${outputPath}`);
     await fs.writeFile(outputPath, newLines.join('\n'), 'utf-8');
     if (outputFormat === 'ass') await cleanAssFile(outputPath);
     generatedFiles.push(outputPath);
