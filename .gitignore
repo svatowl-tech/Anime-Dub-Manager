@@ -26,3 +26,17 @@ __pycache__/
 .pytest_cache/
 .coverage
 
+# Media and export artifacts
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.wav
+*.mp3
+*.flac
+*.aac
+*.opus
+Subtitles_by_Actor/
+Export/
+out/

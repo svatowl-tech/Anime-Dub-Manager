@@ -18,8 +18,21 @@ jobs:
       YOUTUBE_DL_SKIP_DOWNLOAD: "true"
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      - name: Configure Git for Windows (support special characters and long paths)
+        if: runner.os == 'Windows'
+        run: |
+          git config --system core.protectNTFS false
+          git config --system core.longpaths true
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            /*
+            !*.mp4
+            !*.mkv
+            !*.avi
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node.js 22 (LTS)
         uses: actions/setup-node@v4
