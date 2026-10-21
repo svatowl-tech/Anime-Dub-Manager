@@ -1,18 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Search, 
-  Send, 
-  CheckCircle2, 
-  ExternalLink, 
-  Eye, 
-  Share2, 
-  Calendar, 
-  Sparkles, 
-  RefreshCw, 
-  Copy, 
-  Check, 
+import {
+  Search,
+  CheckCircle2,
+  ExternalLink,
+  Eye,
+  Share2,
+  Calendar,
+  RefreshCw,
+  Copy,
+  Check,
   AlertCircle,
-  Radio,
   FileCheck,
   QrCode,
   LogIn
@@ -42,26 +39,49 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
   onOpenAuth,
   onRefreshProjects
 }) => {
-  // Only channel dialogs
-  const channelDialogs = dialogs.filter(d => d.isChannel || d.type === 'channel');
+  const channelDialogs = dialogs.filter((d) => d.isChannel || d.type === 'channel');
 
-  const [selectedChannelId, setSelectedChannelId] = useState<string>(() => {
-    if (defaultChannelId) return defaultChannelId;
+  const resolveInitialChannel = (): string => {
+    if (currentProject?.tgReleaseChannelId) return currentProject.tgReleaseChannelId;
     if (currentProject?.links) {
       try {
-        const links = typeof currentProject.links === 'string' ? JSON.parse(currentProject.links) : currentProject.links;
+        const links =
+          typeof currentProject.links === 'string'
+            ? JSON.parse(currentProject.links)
+            : currentProject.links;
         if (links?.tg) return links.tg;
       } catch {}
     }
+    if (defaultChannelId) return defaultChannelId;
     return channelDialogs.length > 0 ? channelDialogs[0].id : '';
-  });
+  };
 
-  const [customChannelPeer, setCustomChannelPeer] = useState<string>('');
-  const [isCustomPeer, setIsCustomPeer] = useState<boolean>(false);
+  const initialChannel = resolveInitialChannel();
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(initialChannel);
+  const [customChannelPeer, setCustomChannelPeer] = useState<string>(
+    initialChannel.startsWith('@') || initialChannel.includes('t.me/') ? initialChannel : ''
+  );
+  const [isCustomPeer, setIsCustomPeer] = useState<boolean>(
+    channelDialogs.length === 0 ||
+      (Boolean(initialChannel) && !channelDialogs.some((d) => d.id === initialChannel))
+  );
 
-  // Search query initialized with project title & episode
-  const defaultQuery = currentProject?.title 
-    ? `${currentProject.title} ${currentEpisode?.number || ''}`.trim() 
+  // Sync channel when dialogs or project changes
+  useEffect(() => {
+    const candidate = resolveInitialChannel();
+    if (!selectedChannelId && candidate) {
+      setSelectedChannelId(candidate);
+      if (candidate.startsWith('@') || candidate.includes('t.me/')) {
+        setCustomChannelPeer(candidate);
+      }
+    }
+    if (channelDialogs.length > 0 && !customChannelPeer) {
+      setIsCustomPeer(false);
+    }
+  }, [dialogs.length, currentProject?.id, defaultChannelId]);
+
+  const defaultQuery = currentProject?.title
+    ? `${currentProject.title} ${currentEpisode?.number || ''}`.trim()
     : '';
   const [searchQuery, setSearchQuery] = useState<string>(defaultQuery);
 
@@ -75,27 +95,36 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
     if (e) e.preventDefault();
 
     const rawPeer = isCustomPeer ? customChannelPeer.trim() : selectedChannelId;
-    if (!rawPeer) {
+    if (!rawPeer && !searchQuery.trim().includes('t.me/')) {
       toast.error('Выберите канал для проверки или введите @username');
       return;
     }
 
-    // Check if input is a direct post link, e.g. https://t.me/channel/123 or t.me/channel/123
     let targetPeer = rawPeer;
-    const directUrlMatch = rawPeer.match(/t\.me\/([a-zA-Z0-9_]+)\/(\d+)/) || searchQuery.trim().match(/t\.me\/([a-zA-Z0-9_]+)\/(\d+)/);
+    const directUrlMatch =
+      rawPeer.match(/t\.me\/(?:s\/)?([a-zA-Z0-9_]+)\/(\d+)/) ||
+      searchQuery.trim().match(/t\.me\/(?:s\/)?([a-zA-Z0-9_]+)\/(\d+)/);
     if (directUrlMatch) {
       targetPeer = `@${directUrlMatch[1]}/${directUrlMatch[2]}`;
     }
 
-    const isPublicChannel = targetPeer.startsWith('@') || targetPeer.includes('t.me/') || !/^-?\d+$/.test(targetPeer);
+    const isPublicChannel =
+      targetPeer.startsWith('@') ||
+      targetPeer.includes('t.me/') ||
+      !/^-?\d+$/.test(targetPeer);
 
     if (!isConnected && !isPublicChannel) {
-      toast.error('Для закрытых каналов (числовой ID) требуется авторизация в Telegram MTProto', {
-        action: onOpenAuth ? {
-          label: 'Войти',
-          onClick: () => onOpenAuth()
-        } : undefined
-      });
+      toast.error(
+        'Для закрытых каналов (по числовому ID) требуется авторизация в Telegram MTProto',
+        {
+          action: onOpenAuth
+            ? {
+                label: 'Войти',
+                onClick: () => onOpenAuth()
+              }
+            : undefined
+        }
+      );
       if (onOpenAuth) onOpenAuth();
       return;
     }
@@ -114,40 +143,17 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
         if (res.posts.length > 0) {
           toast.success(`Найдено ${res.posts.length} публикаций в канале!`);
         } else {
-          toast.info('Публикаций по данному запросу пока не найдено в канале');
+          toast.info('Публикаций по данному запросу не найдено');
         }
       } else {
         const errorMsg = res?.error || 'Не удалось выполнить поиск';
         setFoundPosts([]);
-        if (errorMsg.includes('MTProto') || errorMsg.includes('авториз') || errorMsg.includes('t.me') || errorMsg.includes('таймаут')) {
-          toast.error(errorMsg, {
-            duration: 6000,
-            action: onOpenAuth ? {
-              label: 'Войти в Telegram',
-              onClick: () => onOpenAuth()
-            } : undefined
-          });
-        } else {
-          toast.error(errorMsg);
-        }
+        toast.error(errorMsg);
       }
     } catch (err: any) {
       const errMessage = err?.message || String(err);
       setFoundPosts([]);
-      if (errMessage.includes('Подключение к Telegram MTProto отсутствует') || errMessage.includes('AUTH_KEY_UNREGISTERED') || errMessage.includes('авториз') || errMessage.includes('таймаут')) {
-        toast.error(errMessage, {
-          duration: 6000,
-          action: onOpenAuth ? {
-            label: 'Войти',
-            onClick: () => onOpenAuth()
-          } : undefined
-        });
-        if (onOpenAuth && (errMessage.includes('AUTH_KEY_UNREGISTERED') || errMessage.includes('Сессия'))) {
-          onOpenAuth();
-        }
-      } else {
-        toast.error(`Ошибка поиска постов: ${errMessage}`);
-      }
+      toast.error(`Ошибка поиска постов: ${errMessage}`);
     } finally {
       setIsSearching(false);
     }
@@ -174,7 +180,9 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
       });
 
       setLinkedPostId(post.id);
-      toast.success(`Пост успешно привязан! Серия #${currentEpisode.number} отмечена как выложенная 🎉`);
+      toast.success(
+        `Пост успешно привязан! Серия #${currentEpisode.number} отмечена как выложенная 🎉`
+      );
       if (onRefreshProjects) onRefreshProjects();
     } catch (err: any) {
       toast.error(`Не удалось сохранить статус: ${err.message || String(err)}`);
@@ -190,14 +198,14 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
-                <strong>Telegram MTProto не подключен.</strong> Поиск по публичным каналам (@юзернейм) работает напрямую. Для закрытых каналов и автоматизаций выполните вход.
+                <strong>Telegram MTProto не подключен.</strong> Поиск по публичным каналам (@username) работает напрямую через веб-предпросмотр. Для закрытых каналов войдите в аккаунт.
               </span>
             </div>
             {onOpenAuth && (
               <button
                 type="button"
                 onClick={onOpenAuth}
-                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition"
+                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition cursor-pointer"
               >
                 <QrCode className="w-3.5 h-3.5" />
                 <span>Войти по QR-коду</span>
@@ -216,7 +224,7 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
                 Автопроверка постинга в канале
               </h3>
               <p className="text-[11px] text-neutral-400">
-                Поиск опубликованных серий в вашем Telegram-канале с автоматической привязкой ссылок и завершением релиза
+                Поиск опубликованных серий в Telegram-канале с автоматической привязкой ссылок и завершением релиза
               </p>
             </div>
           </div>
@@ -240,18 +248,15 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
         {/* Channel & Search Form */}
         <form onSubmit={handleSearchPosts} className="grid grid-cols-1 md:grid-cols-12 gap-2 pt-1">
           <div className="md:col-span-5 flex items-center gap-2">
-            {!isCustomPeer ? (
+            {!isCustomPeer && channelDialogs.length > 0 ? (
               <select
                 value={selectedChannelId}
                 onChange={(e) => setSelectedChannelId(e.target.value)}
                 className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white focus:border-emerald-500 outline-none transition"
               >
-                {channelDialogs.length === 0 && (
-                  <option value="">Каналы загружаются или отсутствуют в аккаунте...</option>
-                )}
-                {channelDialogs.map(d => (
-                  <option key={d.id} value={d.id}>
-                    📢 {d.title} ({d.id})
+                {channelDialogs.map((d) => (
+                  <option key={d.id} value={d.username ? `@${d.username}` : d.id}>
+                    📢 {d.title} ({d.username ? `@${d.username}` : d.id})
                   </option>
                 ))}
               </select>
@@ -260,19 +265,21 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
                 type="text"
                 value={customChannelPeer}
                 onChange={(e) => setCustomChannelPeer(e.target.value)}
-                placeholder="Юзернейм канала (напр. @akaneproject)"
+                placeholder="Юзернейм или ссылка (напр. @akaneproject)"
                 className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white focus:border-emerald-500 outline-none transition font-mono"
               />
             )}
 
-            <button
-              type="button"
-              onClick={() => setIsCustomPeer(!isCustomPeer)}
-              className="px-2.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded-xl transition flex-shrink-0 cursor-pointer border border-neutral-700"
-              title="Переключить между списком каналов и вводом @username"
-            >
-              {isCustomPeer ? 'Из списка' : 'Ввести @юзернейм'}
-            </button>
+            {channelDialogs.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setIsCustomPeer(!isCustomPeer)}
+                className="px-2.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded-xl transition flex-shrink-0 cursor-pointer border border-neutral-700"
+                title="Переключить между списком каналов и ручным вводом @username"
+              >
+                {isCustomPeer ? 'Из списка' : 'Ввести @канал'}
+              </button>
+            )}
           </div>
 
           <div className="md:col-span-5 relative">
@@ -281,7 +288,7 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Поисковый запрос (название аниме или номер серии)..."
+              placeholder="Поисковый запрос (название тайтла или пусто для всех постов)..."
               className="w-full bg-neutral-950 border border-neutral-800 rounded-xl pl-8 pr-3 py-2 text-xs text-white focus:border-emerald-500 outline-none transition"
             />
           </div>
@@ -308,49 +315,22 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
           </div>
         ) : foundPosts.length === 0 ? (
           <div className="h-64 flex flex-col items-center justify-center text-neutral-500 space-y-3 border border-dashed border-neutral-800 rounded-2xl p-6 text-center">
-            {!isConnected ? (
-              <>
-                <div className="w-12 h-12 rounded-2xl bg-amber-950/40 border border-amber-800/40 flex items-center justify-center text-amber-400">
-                  <LogIn className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-neutral-200">
-                    Авторизация в Telegram не выполнена
-                  </p>
-                  <p className="text-xs text-neutral-400 max-w-md mt-1">
-                    Чтобы находить посты в канале, скачивать дорожки и управлять публикациями, войдите в свой Telegram аккаунт.
-                  </p>
-                </div>
-                {onOpenAuth && (
-                  <button
-                    type="button"
-                    onClick={onOpenAuth}
-                    className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition cursor-pointer shadow-md shadow-sky-950/40"
-                  >
-                    <QrCode className="w-4 h-4" />
-                    <span>Авторизоваться через QR-код</span>
-                  </button>
-                )}
-              </>
-            ) : (
-              <>
-                <FileCheck className="w-10 h-10 text-neutral-700" />
-                <div>
-                  <p className="text-sm font-semibold text-neutral-300">
-                    {hasSearched ? 'Посты не найдены' : 'Проверьте публикацию серии'}
-                  </p>
-                  <p className="text-xs text-neutral-500 max-w-md mt-1">
-                    {hasSearched
-                      ? 'Попробуйте изменить поисковый запрос или выбрать другой канал.'
-                      : 'Выберите канал, нажмите «Проверить постинг», и приложение найдёт пост с серией, позволит скопировать ссылку или одним кликом отметить серию завершённой.'}
-                  </p>
-                </div>
-              </>
-            )}
+            <FileCheck className="w-10 h-10 text-neutral-700" />
+            <div>
+              <p className="text-sm font-semibold text-neutral-300">
+                {hasSearched ? 'Посты не найдены' : 'Проверьте публикацию серии'}
+              </p>
+              <p className="text-xs text-neutral-500 max-w-md mt-1">
+                {hasSearched
+                  ? 'Попробуйте очистить строку поиска, чтобы вывести все последние посты канала, или проверьте @username канала.'
+                  : 'Укажите @username канала (или выберите из списка) и нажмите «Проверить постинг».'}
+              </p>
+            </div>
           </div>
         ) : (
-          foundPosts.map(post => {
-            const isLinked = linkedPostId === post.id || currentEpisode?.tgPostLink === post.link;
+          foundPosts.map((post) => {
+            const isLinked =
+              linkedPostId === post.id || currentEpisode?.tgPostLink === post.link;
 
             return (
               <div
@@ -362,7 +342,7 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
                 }`}
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-3 flex-wrap">
                     <span className="px-2 py-0.5 rounded-lg bg-neutral-950 border border-neutral-800 text-[11px] font-mono text-sky-400 font-bold">
                       Пост #{post.id}
                     </span>
@@ -370,13 +350,15 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
                       <Calendar className="w-3 h-3 text-neutral-500" />
                       {post.dateFormatted}
                     </span>
-                    {typeof post.views === 'number' && (
+                    {post.views !== undefined && post.views !== null && (
                       <span className="flex items-center gap-1 text-[11px] text-neutral-400">
                         <Eye className="w-3 h-3 text-neutral-500" />
-                        {post.views.toLocaleString()}
+                        {typeof post.views === 'number'
+                          ? post.views.toLocaleString()
+                          : String(post.views)}
                       </span>
                     )}
-                    {typeof post.forwards === 'number' && (
+                    {typeof post.forwards === 'number' && post.forwards > 0 && (
                       <span className="flex items-center gap-1 text-[11px] text-neutral-400">
                         <Share2 className="w-3 h-3 text-neutral-500" />
                         {post.forwards}
@@ -436,7 +418,9 @@ export const TelegramPostVerifyTab: React.FC<TelegramPostVerifyTabProps> = ({
                       }`}
                     >
                       <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>{isLinked ? 'Выложено ✓' : 'Привязать и отметить: Всё выложено!'}</span>
+                      <span>
+                        {isLinked ? 'Выложено ✓' : 'Привязать и отметить: Всё выложено!'}
+                      </span>
                     </button>
                   </div>
                 </div>

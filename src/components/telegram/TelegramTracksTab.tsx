@@ -1,20 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Download, 
-  RefreshCw, 
-  Music, 
-  Mic, 
-  Archive, 
-  CheckCircle2, 
-  Clock, 
-  User, 
-  Folder, 
-  AlertCircle, 
-  Send,
-  MessageSquare,
+import {
+  Download,
+  RefreshCw,
+  Music,
+  Mic,
+  Archive,
+  CheckCircle2,
+  User,
+  Folder,
+  AlertCircle,
   Search,
-  ExternalLink,
-  Copy,
   Check,
   QrCode,
   LogIn
@@ -37,22 +32,28 @@ interface TelegramTracksTabProps {
 export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
   currentProject,
   currentEpisode,
-  allProjects,
   dialogs,
   isConnected = true,
   onOpenAuth,
   onRefreshProjects
 }) => {
-  const [selectedChatId, setSelectedChatId] = useState<string>(() => {
+  const resolveDefaultChat = (): string => {
+    if (currentProject?.tgWorkGroupId) return currentProject.tgWorkGroupId;
     if (currentProject?.links) {
       try {
-        const links = typeof currentProject.links === 'string' ? JSON.parse(currentProject.links) : currentProject.links;
+        const links =
+          typeof currentProject.links === 'string'
+            ? JSON.parse(currentProject.links)
+            : currentProject.links;
         if (links?.tgGroup) return links.tgGroup;
       } catch {}
     }
+    const firstGroup = dialogs.find((d) => d.isGroup || d.type === 'group');
+    if (firstGroup) return firstGroup.id;
     return dialogs.length > 0 ? dialogs[0].id : '';
-  });
+  };
 
+  const [selectedChatId, setSelectedChatId] = useState<string>(() => resolveDefaultChat());
   const [customChatPeer, setCustomChatPeer] = useState<string>('');
   const [isCustomPeer, setIsCustomPeer] = useState<boolean>(false);
 
@@ -63,7 +64,13 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
   const [searchFilter, setSearchFilter] = useState<string>('');
   const [fileTypeFilter, setFileTypeFilter] = useState<'all' | 'audio' | 'voice' | 'archive'>('all');
 
-  const activeChat = dialogs.find(d => d.id === selectedChatId);
+  // Auto-select default chat when dialogs load or project changes
+  useEffect(() => {
+    const nextDefault = resolveDefaultChat();
+    if (!selectedChatId && nextDefault) {
+      setSelectedChatId(nextDefault);
+    }
+  }, [dialogs, currentProject?.id]);
 
   useEffect(() => {
     if (selectedChatId && !isCustomPeer && isConnected) {
@@ -74,10 +81,12 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
   const handleFetchAudioFiles = async () => {
     if (!isConnected) {
       toast.error('Подключение к Telegram MTProto отсутствует. Выполните вход для загрузки дорожек.', {
-        action: onOpenAuth ? {
-          label: 'Войти',
-          onClick: () => onOpenAuth()
-        } : undefined
+        action: onOpenAuth
+          ? {
+              label: 'Войти',
+              onClick: () => onOpenAuth()
+            }
+          : undefined
       });
       if (onOpenAuth) onOpenAuth();
       return;
@@ -96,20 +105,27 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
         limit: 100
       });
 
-      if (res && res.success && Array.isArray(res.files)) {
-        setAudioFiles(res.files);
-        toast.success(`Найдено ${res.files.length} аудиодорожек и файлов`);
+      const list = Array.isArray(res) ? res : Array.isArray(res?.files) ? res.files : null;
+      if (list) {
+        setAudioFiles(list);
+        toast.success(`Найдено ${list.length} аудиодорожек и файлов`);
       } else {
-        throw new Error(res?.error || 'Не удалось получить файлы');
+        throw new Error(res?.error || 'Не удалось получить файлы из чата');
       }
     } catch (err: any) {
       const errMessage = err?.message || String(err);
-      if (errMessage.includes('Подключение к Telegram MTProto отсутствует') || errMessage.includes('AUTH_KEY_UNREGISTERED')) {
+      if (
+        errMessage.includes('Подключение к Telegram MTProto отсутствует') ||
+        errMessage.includes('AUTH_KEY_UNREGISTERED') ||
+        errMessage.includes('Сессия Telegram устарела')
+      ) {
         toast.error('Требуется авторизация в Telegram для загрузки дорожек', {
-          action: onOpenAuth ? {
-            label: 'Войти',
-            onClick: () => onOpenAuth()
-          } : undefined
+          action: onOpenAuth
+            ? {
+                label: 'Войти',
+                onClick: () => onOpenAuth()
+              }
+            : undefined
         });
         if (onOpenAuth) onOpenAuth();
       } else {
@@ -124,7 +140,7 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
     const targetPeer = isCustomPeer ? customChatPeer.trim() : selectedChatId;
     if (!targetPeer) return;
 
-    setDownloadingIds(prev => ({ ...prev, [fileItem.id]: true }));
+    setDownloadingIds((prev) => ({ ...prev, [fileItem.id]: true }));
     try {
       toast.info(`Скачивание "${fileItem.fileName}"...`);
       const res = await ipcSafe.invoke('telegram-mtproto-download-audio', {
@@ -134,7 +150,7 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
       });
 
       if (res && res.success && res.filePath) {
-        setDownloadedPaths(prev => ({ ...prev, [fileItem.id]: res.filePath }));
+        setDownloadedPaths((prev) => ({ ...prev, [fileItem.id]: res.filePath }));
         toast.success(`Файл сохранен: ${res.fileName}`);
       } else {
         throw new Error(res?.error || 'Ошибка скачивания');
@@ -142,7 +158,7 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
     } catch (err: any) {
       toast.error(`Не удалось скачать: ${err.message || String(err)}`);
     } finally {
-      setDownloadingIds(prev => ({ ...prev, [fileItem.id]: false }));
+      setDownloadingIds((prev) => ({ ...prev, [fileItem.id]: false }));
     }
   };
 
@@ -155,31 +171,34 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
   };
 
   const handleMarkDubberTrackReceived = async (fileItem: TelegramAudioFileItem) => {
+    const senderName = fileItem.sender?.name || 'Участник';
+    const senderUsername = fileItem.sender?.username || '';
+
     if (!currentEpisode) {
-      toast.error('Серия не выбрана');
+      toast.success(`Дорожка от ${senderName} отмечена как принятая!`);
       return;
     }
 
     try {
-      // Find assignment matching this dubber
-      const dubberName = fileItem.sender.name.toLowerCase();
-      const dubberUsername = fileItem.sender.username.toLowerCase();
+      const dubberName = senderName.toLowerCase();
+      const dubberUsername = senderUsername.toLowerCase();
 
       const assignments = currentEpisode.assignments || [];
-      const matched = assignments.find(a => {
+      const matched = assignments.find((a) => {
         const nick = (a.dubber?.nickname || '').toLowerCase();
+        const tg = (a.dubber?.telegram || '').replace(/^@/, '').toLowerCase();
         return (
-          nick &&
-          (dubberName.includes(nick) ||
-            dubberUsername.includes(nick) ||
-            nick.includes(dubberName) ||
-            nick.includes(dubberUsername))
+          (nick &&
+            (dubberName.includes(nick) ||
+              dubberUsername.includes(nick) ||
+              nick.includes(dubberName))) ||
+          (tg && dubberUsername && tg === dubberUsername)
         );
       });
 
       if (matched) {
-        const updated = assignments.map(a =>
-          a.id === matched.id ? { ...a, status: 'DONE' as const } : a
+        const updated = assignments.map((a) =>
+          a.id === matched.id ? { ...a, status: 'RECORDED' } : a
         );
         await ipcSafe.invoke('save-episode', {
           ...currentEpisode,
@@ -188,29 +207,32 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
         toast.success(`Дорожка дабера ${matched.dubber?.nickname} отмечена как сданная!`);
         if (onRefreshProjects) onRefreshProjects();
       } else {
-        toast.success(`Дорожка от ${fileItem.sender.name} принята!`);
+        toast.success(`Дорожка от ${senderName} принята!`);
       }
     } catch (e: any) {
       toast.error('Не удалось обновить статус дорожки');
     }
   };
 
-  const filteredFiles = audioFiles.filter(item => {
+  const filteredFiles = audioFiles.filter((item) => {
+    const fName = String(item.fileName || '').toLowerCase();
+    const isArchive = /\.(zip|rar|7z|tar|gz)$/.test(fName);
+
     if (fileTypeFilter === 'voice' && !item.isVoice) return false;
-    if (fileTypeFilter === 'audio' && item.isVoice) return false;
-    if (
-      fileTypeFilter === 'archive' &&
-      !item.fileName.toLowerCase().match(/\.(zip|rar|7z|tar|gz)$/)
-    )
-      return false;
+    if (fileTypeFilter === 'audio' && (item.isVoice || isArchive)) return false;
+    if (fileTypeFilter === 'archive' && !isArchive) return false;
 
     if (!searchFilter.trim()) return true;
     const q = searchFilter.toLowerCase();
+    const senderName = String(item.sender?.name || '').toLowerCase();
+    const senderUsername = String(item.sender?.username || '').toLowerCase();
+    const caption = String(item.caption || '').toLowerCase();
+
     return (
-      item.fileName.toLowerCase().includes(q) ||
-      item.sender.name.toLowerCase().includes(q) ||
-      item.sender.username.toLowerCase().includes(q) ||
-      (item.caption && item.caption.toLowerCase().includes(q))
+      fName.includes(q) ||
+      senderName.includes(q) ||
+      senderUsername.includes(q) ||
+      caption.includes(q)
     );
   });
 
@@ -230,7 +252,7 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
               <button
                 type="button"
                 onClick={onOpenAuth}
-                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition"
+                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition cursor-pointer"
               >
                 <QrCode className="w-3.5 h-3.5" />
                 <span>Войти по QR-коду</span>
@@ -249,7 +271,7 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
                 Автозагрузка и приём дорожек озвучки
               </h3>
               <p className="text-[11px] text-neutral-400">
-                Мониторинг присланных аудиофайлов (.wav, .mp3, архивов) из рабочего чата даберов
+                Мониторинг присланных аудиофайлов (.wav, .flac, .mp3, архивов) из рабочего чата даберов
               </p>
             </div>
           </div>
@@ -275,10 +297,12 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
                 onChange={(e) => setSelectedChatId(e.target.value)}
                 className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white focus:border-violet-500 outline-none transition"
               >
-                {dialogs.length === 0 && <option value="">Чаты загружаются или отсутствуют...</option>}
-                {dialogs.map(d => (
+                {dialogs.length === 0 && (
+                  <option value="">Чаты загружаются или отсутствуют...</option>
+                )}
+                {dialogs.map((d) => (
                   <option key={d.id} value={d.id}>
-                    {d.isChannel ? '📢' : d.isGroup ? '👥' : '👤'} {d.title} ({d.id})
+                    {d.isChannel ? '📢' : d.isGroup ? '👥' : '👤'} {d.title} ({d.username ? `@${d.username}` : d.id})
                   </option>
                 ))}
               </select>
@@ -287,17 +311,18 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
                 type="text"
                 value={customChatPeer}
                 onChange={(e) => setCustomChatPeer(e.target.value)}
-                placeholder="Юзернейм или ID чата (напр. @voice_team_chat)"
+                placeholder="Юзернейм или ID чата (напр. @voice_team_chat или -100...)"
                 className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-white focus:border-violet-500 outline-none transition font-mono"
               />
             )}
 
             <button
+              type="button"
               onClick={() => setIsCustomPeer(!isCustomPeer)}
               className="px-2.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 text-xs rounded-xl transition flex-shrink-0 cursor-pointer border border-neutral-700"
               title="Переключить между выбором из списка и ручным вводом @username"
             >
-              {isCustomPeer ? 'Выбрать из диалогов' : 'Ввести @username'}
+              {isCustomPeer ? 'Из списка' : 'Ввести @чат'}
             </button>
           </div>
 
@@ -315,9 +340,9 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
         </div>
 
         {/* Filter Pills */}
-        <div className="flex items-center gap-2 pt-0.5">
+        <div className="flex items-center gap-2 pt-0.5 flex-wrap">
           <span className="text-[11px] text-neutral-400 font-medium">Фильтр:</span>
-          {(['all', 'audio', 'voice', 'archive'] as const).map(f => (
+          {(['all', 'audio', 'voice', 'archive'] as const).map((f) => (
             <button
               key={f}
               onClick={() => setFileTypeFilter(f)}
@@ -328,9 +353,9 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
               }`}
             >
               {f === 'all' && 'Все файлы'}
-              {f === 'audio' && '🎵 Музыка/Дорожки'}
+              {f === 'audio' && '🎵 Дорожки (.wav/.mp3)'}
               {f === 'voice' && '🎙️ Голосовые'}
-              {f === 'archive' && '📦 Архивы'}
+              {f === 'archive' && '📦 Архивы (.zip/.rar)'}
             </button>
           ))}
           <span className="ml-auto text-[11px] font-mono text-neutral-500">
@@ -385,9 +410,12 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
             )}
           </div>
         ) : (
-          filteredFiles.map(item => {
+          filteredFiles.map((item) => {
             const isDownloading = !!downloadingIds[item.id];
             const downloadedPath = downloadedPaths[item.id];
+            const senderName = item.sender?.name || 'Участник';
+            const senderUsername = item.sender?.username || '';
+            const isArchive = /\.(zip|rar|7z|tar|gz)$/i.test(item.fileName || '');
 
             return (
               <div
@@ -395,14 +423,22 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
                 className="bg-neutral-900 border border-neutral-800 hover:border-neutral-700 rounded-xl p-3.5 transition flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
               >
                 <div className="flex items-start gap-3 min-w-0 flex-1">
-                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 mt-0.5 ${
-                    item.isVoice 
-                      ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' 
-                      : item.fileName.toLowerCase().match(/\.(zip|rar|7z)$/)
-                      ? 'bg-amber-500/10 border border-amber-500/30 text-amber-400'
-                      : 'bg-violet-500/10 border border-violet-500/30 text-violet-400'
-                  }`}>
-                    {item.isVoice ? <Mic className="w-4 h-4" /> : item.fileName.toLowerCase().match(/\.(zip|rar|7z)$/) ? <Archive className="w-4 h-4" /> : <Music className="w-4 h-4" />}
+                  <div
+                    className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 mt-0.5 ${
+                      item.isVoice
+                        ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
+                        : isArchive
+                        ? 'bg-amber-500/10 border border-amber-500/30 text-amber-400'
+                        : 'bg-violet-500/10 border border-violet-500/30 text-violet-400'
+                    }`}
+                  >
+                    {item.isVoice ? (
+                      <Mic className="w-4 h-4" />
+                    ) : isArchive ? (
+                      <Archive className="w-4 h-4" />
+                    ) : (
+                      <Music className="w-4 h-4" />
+                    )}
                   </div>
 
                   <div className="min-w-0 flex-1 space-y-1">
@@ -411,7 +447,7 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
                         {item.fileName}
                       </span>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-neutral-950 text-neutral-400 border border-neutral-800">
-                        {item.sizeFormatted}
+                        {item.sizeFormatted || '0 KB'}
                       </span>
                       {item.durationFormatted && (
                         <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-neutral-950 text-sky-400 border border-neutral-800">
@@ -429,7 +465,7 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
                     <div className="flex items-center gap-3 text-[11px] text-neutral-400 flex-wrap">
                       <span className="flex items-center gap-1 text-violet-300 font-medium">
                         <User className="w-3 h-3 text-violet-400" />
-                        {item.sender.name} {item.sender.username ? `(@${item.sender.username})` : ''}
+                        {senderName} {senderUsername ? `(@${senderUsername})` : ''}
                       </span>
                       <span className="text-neutral-500">•</span>
                       <span>{item.dateFormatted}</span>

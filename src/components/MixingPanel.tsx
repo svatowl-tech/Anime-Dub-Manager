@@ -350,8 +350,11 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const trackAudioRef = useRef<HTMLAudioElement | null>(null);
   const mixAudioElementsRef = useRef<HTMLAudioElement[]>([]);
+  const currentTimeRef = useRef<number>(0);
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
+  const [videoViewMode, setVideoViewMode] = useState<'source' | 'final'>('source');
   const [videoPlaybackError, setVideoPlaybackError] = useState<string | null>(null);
+  const [audioPlaybackError, setAudioPlaybackError] = useState<string | null>(null);
   const [selectedAudioTrack, setSelectedAudioTrack] = useState<{
     id: string;
     name: string;
@@ -359,12 +362,17 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     label: string;
     stepId?: string;
     isModuleMix?: boolean;
+    isFinalVideo?: boolean;
     mixFiles?: MixingFileItem[];
   } | null>(null);
 
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [duration, setDuration] = useState<number>(0);
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
 
   // Volume controls for player (Pure layering, zero real-time DSP)
   const [playWithVideo, setPlayWithVideo] = useState<boolean>(true);
@@ -395,8 +403,13 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const stopAndClearModuleMix = useCallback(() => {
     mixAudioElementsRef.current.forEach(audio => {
       try {
+        audio.onloadedmetadata = null;
+        audio.ontimeupdate = null;
+        audio.onended = null;
+        audio.onerror = null;
         audio.pause();
-        audio.src = '';
+        audio.removeAttribute('src');
+        audio.load();
       } catch (e) {}
     });
     mixAudioElementsRef.current = [];
@@ -411,19 +424,62 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       }
       if (trackAudioRef.current) {
         trackAudioRef.current.pause();
-        trackAudioRef.current.src = '';
+        trackAudioRef.current.removeAttribute('src');
         try { trackAudioRef.current.load(); } catch (e) {}
       }
-      mixAudioElementsRef.current.forEach(audio => {
-        try {
-          audio.pause();
-          audio.src = '';
-          audio.load();
-        } catch (e) {}
-      });
-      mixAudioElementsRef.current = [];
+      stopAndClearModuleMix();
     } catch (e) {}
+  }, [stopAndClearModuleMix]);
+
+  // Sanitize any leftover temporary .tmp_ prefix from paths
+  const sanitizeTempPath = useCallback((rawPath: string) => {
+    if (!rawPath) return '';
+    return rawPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
   }, []);
+
+  // Format media file URL (video or audio) for HTML5 elements safely across Windows/macOS/Linux
+  const formatMediaUrl = useCallback((filePath: string) => {
+    if (!filePath) return '';
+    if (
+      filePath.startsWith('http://') ||
+      filePath.startsWith('https://') ||
+      filePath.startsWith('blob:') ||
+      filePath.startsWith('/api/media-file')
+    ) {
+      return filePath;
+    }
+    if (filePath.startsWith('custom-media://local/media?path=')) {
+      return filePath;
+    }
+    const cleanP = sanitizeTempPath(
+      filePath
+        .replace(/^file:\/\//, '')
+        .replace(/^custom-media:\/\//, '')
+    );
+    if (window.electronAPI) {
+      // Use query-parameter encoding on valid host 'local' so Windows drive letters (I:\), Cyrillic, brackets [СВЕДЕНО], and spaces never break URL parsing
+      return `custom-media://local/media?path=${encodeURIComponent(cleanP)}`;
+    }
+    return cleanP;
+  }, [sanitizeTempPath]);
+
+  const resolveMediaUrlAsync = useCallback(async (filePath: string): Promise<string> => {
+    if (!filePath) return '';
+    const cleaned = sanitizeTempPath(filePath);
+    if (window.electronAPI) {
+      return formatMediaUrl(cleaned);
+    }
+    const cleanName = cleaned.replace(/\\/g, '/').split('/').pop() || cleaned;
+    const cachedFile = (window as any).getFileFromCache?.(cleanName);
+    if (cachedFile) {
+      return URL.createObjectURL(cachedFile);
+    }
+    try {
+      const resolved = await resolveLocalPath(cleaned);
+      if (resolved) return resolved;
+    } catch (e) {}
+    return formatMediaUrl(cleaned);
+  }, [formatMediaUrl, sanitizeTempPath]);
 
   // Load mixing status for current episode
   const loadStatus = useCallback(async () => {
@@ -473,39 +529,55 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }
   }, [currentEpisode, mixLog]);
 
-  // Reset custom target dir when episode changes so default project path is used
+  // Reset custom target dir & player state when episode changes
   useEffect(() => {
     setCustomTargetDir('');
-  }, [currentEpisode?.id]);
+    releasePlayerAudioLocks();
+    setSelectedAudioTrack(null);
+    setVideoViewMode('source');
+    setCurrentTime(0);
+    setDuration(0);
+  }, [currentEpisode?.id, releasePlayerAudioLocks]);
 
-  // Format video file URL for HTML5 video element safely
-  const formatMediaUrl = useCallback((filePath: string) => {
-    if (!filePath) return '';
-    if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:')) {
-      return filePath;
+  // Automatically switch to 'final' view mode when finalVideo first appears and no custom track is selected
+  const prevFinalVideoPathRef = useRef<string | null>(null);
+  useEffect(() => {
+    const finalPath = manifest?.finalVideo?.path ? sanitizeTempPath(manifest.finalVideo.path) : null;
+    if (finalPath && finalPath !== prevFinalVideoPathRef.current) {
+      prevFinalVideoPathRef.current = finalPath;
+      if (!selectedAudioTrack || selectedAudioTrack.isFinalVideo) {
+        setVideoViewMode('final');
+        setIsVideoMuted(false);
+        setVideoVolume(prev => (prev < 0.3 ? 0.85 : prev));
+        setSelectedAudioTrack({
+          id: 'final_mixed_video',
+          name: manifest?.finalVideo?.name || finalPath.split(/[/\\]/).pop() || 'Сведенное видео',
+          path: finalPath,
+          label: 'Сведено [MP4]',
+          isFinalVideo: true
+        });
+      }
+    } else if (!finalPath) {
+      prevFinalVideoPathRef.current = null;
+      if (videoViewMode === 'final') {
+        setVideoViewMode('source');
+      }
     }
-    const cleanP = filePath.replace(/^file:\/\//, '').replace(/^custom-media:\/\//, '').replace(/\\/g, '/');
-    if (window.electronAPI) {
-      // custom-media:// scheme is standard, secure, and supports Range requests / streaming in Electron
-      return cleanP.startsWith('/') ? `custom-media://${cleanP}` : `custom-media:///${cleanP}`;
-    }
-    return filePath;
-  }, []);
+  }, [manifest?.finalVideo?.path, manifest?.finalVideo?.name, selectedAudioTrack, videoViewMode, sanitizeTempPath]);
 
-  // Resolve video URL for HTML5 video element
+  // Resolve video URL for HTML5 video element based on videoViewMode ('source' vs 'final')
   useEffect(() => {
     let active = true;
     setVideoPlaybackError(null);
 
     const resolveVideo = async () => {
-      // 1. Candidate paths in order of priority: source video -> current episode raw path -> final video
       const sourcePath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
-      const finalPath = manifest?.finalVideo?.path;
+      const rawFinalPath = manifest?.finalVideo?.path;
+      const finalPath = rawFinalPath ? sanitizeTempPath(rawFinalPath) : null;
 
       let targetPath = sourcePath;
 
-      // Check if final video path exists first if user selected or completed final video
-      if (finalPath) {
+      if (videoViewMode === 'final' && finalPath) {
         let finalExists = true;
         if (window.electronAPI) {
           try {
@@ -516,6 +588,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         }
         if (finalExists) {
           targetPath = finalPath;
+        } else if (sourcePath) {
+          targetPath = sourcePath;
         }
       }
 
@@ -524,62 +598,63 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         return;
       }
 
-      if (window.electronAPI) {
-        const formatted = formatMediaUrl(targetPath);
-        if (active) {
-          setVideoSrc(formatted);
-          const fileName = targetPath.split(/[/\\]/).pop() || targetPath;
-          mixLog('debug', 'Видео', `Видеопоток подключен: ${fileName}`);
-        }
-      } else {
-        const cleanName = targetPath.replace(/\\/g, '/').split('/').pop() || targetPath;
-        const cachedFile = (window as any).getFileFromCache?.(cleanName);
-        if (cachedFile) {
-          if (active) {
-            setVideoSrc(URL.createObjectURL(cachedFile));
-            mixLog('debug', 'Видео', `Видео из браузерного кэша: ${cleanName}`);
+      const resolved = await resolveMediaUrlAsync(targetPath);
+      if (active) {
+        setVideoSrc(prev => {
+          if (prev !== resolved) {
+            const fileName = targetPath.split(/[/\\]/).pop() || targetPath;
+            mixLog('debug', 'Видео', `Видеопоток подключен (${videoViewMode === 'final' ? 'Сведенный' : 'Исходник'}): ${fileName}`);
           }
-          return;
-        }
-        try {
-          const resolved = await resolveLocalPath(targetPath);
-          if (active) {
-            setVideoSrc(resolved);
-            mixLog('debug', 'Видео', `Локальный видеопоток браузера: ${targetPath}`);
-          }
-        } catch (e) {
-          if (active) setVideoSrc(targetPath);
-        }
+          return resolved;
+        });
       }
     };
 
     resolveVideo();
     return () => { active = false; };
-  }, [manifest?.finalVideo?.path, manifest?.sourceFiles?.video?.path, currentEpisode?.rawPath, mixLog, formatMediaUrl]);
+  }, [videoViewMode, manifest?.finalVideo?.path, manifest?.sourceFiles?.video?.path, currentEpisode?.rawPath, mixLog, resolveMediaUrlAsync, sanitizeTempPath]);
+
+  // Restore currentTime when videoSrc changes
+  const handleVideoLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
+    const vid = e.currentTarget;
+    if (vid.duration && !isNaN(vid.duration) && isFinite(vid.duration)) {
+      setDuration(vid.duration);
+    }
+    if (currentTimeRef.current > 0 && Math.abs(vid.currentTime - currentTimeRef.current) > 0.5) {
+      try {
+        vid.currentTime = Math.min(currentTimeRef.current, vid.duration || currentTimeRef.current);
+      } catch (_) {}
+    }
+    vid.muted = isVideoMuted;
+    vid.volume = isVideoMuted ? 0 : Math.min(1, Math.max(0, videoVolume));
+    if (isPlaying && vid.paused) {
+      vid.play().catch(() => {});
+    }
+  };
 
   const handleVideoError = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
     const videoEl = e.currentTarget;
     const err = videoEl.error;
     console.warn('[MixingPanel] Video element playback error:', err, 'src:', videoSrc);
 
-    // Fallback: If current src was final video, try falling back to original source video
+    // Fallback: If current mode was 'final' video and it failed, fall back to 'source' video
     const sourcePath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
-    if (sourcePath && videoSrc && !videoSrc.includes(encodeURIComponent(sourcePath)) && !videoSrc.includes(sourcePath.replace(/\\/g, '/'))) {
-      mixLog('warn', 'Видео', `Сбой воспроизведения сведенного видео. Автопереключение на исходный видеоряд: ${sourcePath}`);
-      setVideoSrc(formatMediaUrl(sourcePath));
+    if (videoViewMode === 'final' && sourcePath) {
+      mixLog('warn', 'Видео', `Сбой открытия сведенного видео. Автопереключение на исходный видеоряд: ${sourcePath}`);
+      setVideoViewMode('source');
       setVideoPlaybackError(null);
       return;
     }
 
-    let errMsg = 'Формат или кодек видео недоступен для браузерного воспроизведения';
+    let errMsg = 'Формат или кодек видео недоступен для прямого воспроизведения в плеере';
     if (err) {
       if (err.code === 1) errMsg = 'Воспроизведение видео прервано пользователем';
       if (err.code === 2) errMsg = 'Сбой сети при получении видеопотока';
       if (err.code === 3) errMsg = 'Ошибка декодирования (несовместимый видеокодек HEVC или контейнер MKV)';
-      if (err.code === 4) errMsg = 'Контейнер/кодек видео не поддерживается плеером (напр. MKV / AC3 / 10-bit H.264)';
+      if (err.code === 4) errMsg = 'Контейнер/кодек видео не поддерживается HTML5-плеером (напр. MKV / AC3 / 10-bit H.264). Прослушивание аудиодорожек продолжает работать штатно!';
     }
     setVideoPlaybackError(errMsg);
-    mixLog('warn', 'Видео', `Несовместимость плеера видео: ${errMsg}`);
+    mixLog('warn', 'Видео', `Несовместимость видеоконтейнера: ${errMsg}`);
   };
 
   // Listen to IPC progress and log events
@@ -594,7 +669,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             setImportProgress(data.percent);
           }
           if (data.percent === 100) {
-            loadStatus();
+            // Delay slightly so _safeReplaceFile finishes renaming .tmp_ to final file before status scan
+            setTimeout(() => {
+              loadStatus();
+            }, 350);
           }
         }
         if (data.message) {
@@ -641,15 +719,124 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }
   }, [videoVolume, isVideoMuted, videoSrc]);
 
+  // Connect track & module mix volume and mute state (including per-dubber rolesVolumeMap)
   useEffect(() => {
-    const vol = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
+    const baseVol = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
     if (trackAudioRef.current) {
-      trackAudioRef.current.volume = Math.min(1, vol);
+      trackAudioRef.current.muted = isTrackMuted;
+      trackAudioRef.current.volume = Math.min(1, baseVol);
     }
     mixAudioElementsRef.current.forEach(a => {
-      a.volume = Math.min(1, vol);
+      const roleFactor = Number((a as any)._roleVolumeFactor ?? 1);
+      a.muted = isTrackMuted;
+      a.volume = Math.min(1, Math.max(0, baseVol * roleFactor));
     });
-  }, [trackVolume, isTrackMuted]);
+  }, [trackVolume, isTrackMuted, rolesVolumeMap]);
+
+  // Helper: Load a URL into trackAudioRef, seek to targetTime when ready, and optionally start playing
+  const loadSingleTrackAudio = useCallback((resolvedSrc: string, targetTime: number, autoPlay: boolean) => {
+    const audioEl = trackAudioRef.current;
+    if (!audioEl) return;
+
+    setAudioPlaybackError(null);
+    audioEl.pause();
+    audioEl.src = resolvedSrc;
+    audioEl.muted = isTrackMuted;
+    audioEl.volume = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
+
+    const onLoaded = () => {
+      audioEl.removeEventListener('loadedmetadata', onLoaded);
+      audioEl.removeEventListener('error', onError);
+      if (audioEl.duration && !isNaN(audioEl.duration) && isFinite(audioEl.duration)) {
+        setDuration(prev => (prev > 0 ? prev : audioEl.duration));
+      }
+      if (targetTime > 0) {
+        try {
+          audioEl.currentTime = Math.min(targetTime, audioEl.duration || targetTime);
+        } catch (_) {}
+      }
+      if (autoPlay) {
+        audioEl.play().catch(err => {
+          console.warn('[MixingPanel] Audio play warning:', err);
+        });
+        if (videoRef.current && !videoPlaybackError) {
+          try {
+            if (Math.abs(videoRef.current.currentTime - targetTime) > 0.3) {
+              videoRef.current.currentTime = targetTime;
+            }
+            videoRef.current.play().catch(() => {});
+          } catch (_) {}
+        }
+        setIsPlaying(true);
+      }
+    };
+
+    const onError = () => {
+      audioEl.removeEventListener('loadedmetadata', onLoaded);
+      audioEl.removeEventListener('error', onError);
+      const errCode = audioEl.error?.code;
+      const msg = `Не удалось загрузить аудиофайл (код ${errCode || 'неизвестен'})`;
+      console.warn('[MixingPanel] Track audio load error:', audioEl.error, 'src:', resolvedSrc);
+      setAudioPlaybackError(msg);
+      toast.error(msg);
+    };
+
+    audioEl.addEventListener('loadedmetadata', onLoaded);
+    audioEl.addEventListener('error', onError);
+    audioEl.load();
+  }, [isTrackMuted, trackVolume, videoPlaybackError]);
+
+  // Switch player to Final Mixed Video mode ([СВЕДЕНО].mp4)
+  const selectFinalVideoForPlayback = useCallback(async (videoItem?: MixingFileItem, customLabel?: string, stepId?: string) => {
+    const targetItem = videoItem || manifest?.finalVideo;
+    if (!targetItem || !targetItem.path) {
+      toast.error('Финальное сведенное видео ещё не создано');
+      return;
+    }
+
+    stopAndClearModuleMix();
+    if (trackAudioRef.current) {
+      trackAudioRef.current.pause();
+      trackAudioRef.current.removeAttribute('src');
+      try { trackAudioRef.current.load(); } catch (_) {}
+    }
+
+    const cleanPath = sanitizeTempPath(targetItem.path);
+    setAudioPlaybackError(null);
+    setVideoPlaybackError(null);
+    setVideoViewMode('final');
+    setIsVideoMuted(false);
+    if (videoVolume < 0.35) {
+      setVideoVolume(0.9);
+    }
+
+    const resolvedUrl = await resolveMediaUrlAsync(cleanPath);
+    setVideoSrc(resolvedUrl);
+
+    setSelectedAudioTrack({
+      id: targetItem.path,
+      name: sanitizeTempPath(targetItem.name || cleanPath.split(/[/\\]/).pop() || 'Сведенное видео'),
+      path: resolvedUrl,
+      label: customLabel || 'Сведено [MP4]',
+      stepId: stepId || 'video_mux',
+      isFinalVideo: true
+    });
+
+    setTimeout(() => {
+      if (videoRef.current) {
+        videoRef.current.muted = false;
+        videoRef.current.volume = Math.min(1, Math.max(0.35, videoVolume));
+        if (currentTimeRef.current > 0) {
+          try { videoRef.current.currentTime = currentTimeRef.current; } catch (_) {}
+        }
+        videoRef.current.play().then(() => {
+          setIsPlaying(true);
+        }).catch(() => {});
+      }
+    }, 80);
+
+    toast.success(`Включен просмотр сведенного видео: ${sanitizeTempPath(targetItem.name)}`, { duration: 2500 });
+  }, [manifest?.finalVideo, stopAndClearModuleMix, sanitizeTempPath, videoVolume, resolveMediaUrlAsync]);
 
   // Select original audio source for playback
   const selectOriginalAudioTrack = useCallback(async () => {
@@ -667,48 +854,233 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       } catch (e) {}
     }
 
+    stopAndClearModuleMix();
+    setVideoViewMode('source');
+
     if (!origPath) {
-      // Fallback: unmute video audio element directly so user can hear original sound!
+      // Fallback: unmute source video audio element directly so user can hear original sound
+      if (trackAudioRef.current) {
+        trackAudioRef.current.pause();
+        trackAudioRef.current.removeAttribute('src');
+      }
       setIsVideoMuted(false);
-      if (videoVolume < 0.2) setVideoVolume(0.8);
-      stopAndClearModuleMix();
-      setSelectedAudioTrack(null);
-      toast.info('Звук оригинала воспроизводится напрямую из видеофайла 🎬');
+      if (videoVolume < 0.3) setVideoVolume(0.85);
+      setSelectedAudioTrack({
+        id: 'original_audio_source',
+        name: 'Оригинальный звук из видеофайла серии',
+        path: '',
+        label: 'Оригинал (Видео)',
+      });
+      if (videoRef.current && !videoPlaybackError) {
+        videoRef.current.muted = false;
+        videoRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+      }
+      toast.info('Звук оригинала воспроизводится напрямую из исходного видеофайла 🎬');
       return;
     }
 
-    let resolvedSrc = origPath;
-    if (window.electronAPI) {
-      if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
-        const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
-        resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
-      }
-    } else {
-      try {
-        resolvedSrc = await resolveLocalPath(origPath);
-      } catch (e) {}
-    }
-
-    stopAndClearModuleMix();
-
-    if (trackAudioRef.current) {
-      trackAudioRef.current.pause();
-      trackAudioRef.current.src = resolvedSrc;
-      trackAudioRef.current.currentTime = currentTime;
-      if (isPlaying) {
-        trackAudioRef.current.play().catch(() => {});
-      }
-    }
+    // Mute video element's own audio so it doesn't double-play with 00_original_audio.wav
+    setIsVideoMuted(true);
+    const resolvedSrc = await resolveMediaUrlAsync(origPath);
 
     setSelectedAudioTrack({
       id: 'original_audio_source',
-      name: 'Оригинальный звук серии (Японский исходник)',
+      name: 'Оригинальный звук серии (00_original_audio.wav)',
       path: resolvedSrc,
       label: 'Оригинал',
     });
 
+    loadSingleTrackAudio(resolvedSrc, currentTimeRef.current, true);
     toast.info('Включена оригинальная звуковая дорожка серии', { duration: 2500 });
-  }, [manifest?.sourceFiles?.originalAudio?.path, currentEpisode, workingDir, customTargetDir, currentTime, isPlaying, stopAndClearModuleMix, videoVolume]);
+  }, [manifest?.sourceFiles?.originalAudio?.path, currentEpisode, workingDir, customTargetDir, stopAndClearModuleMix, videoVolume, videoPlaybackError, resolveMediaUrlAsync, loadSingleTrackAudio]);
+
+  // Select an individual audio or video file for inspection in the player
+  const selectTrackForInspection = useCallback(async (item: MixingFileItem, label: string, stepId?: string) => {
+    if (!item || !item.path) return;
+
+    const cleanName = sanitizeTempPath(item.name || '');
+    const cleanPath = sanitizeTempPath(item.path);
+
+    // If the user clicked a video file (e.g. output of 14_video_mux), switch to Final Video playback mode!
+    if (/\.(mp4|mkv|mov|avi|webm)$/i.test(cleanName || cleanPath)) {
+      await selectFinalVideoForPlayback({ ...item, name: cleanName, path: cleanPath }, label, stepId);
+      return;
+    }
+
+    // If user clicked the already-selected single track, toggle play/pause for convenience
+    if (selectedAudioTrack && !selectedAudioTrack.isModuleMix && !selectedAudioTrack.isFinalVideo && selectedAudioTrack.id === item.path) {
+      if (isPlaying) {
+        if (videoRef.current) videoRef.current.pause();
+        if (trackAudioRef.current) trackAudioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        if (videoRef.current && !videoPlaybackError) {
+          videoRef.current.play().catch(() => {});
+        }
+        if (trackAudioRef.current) {
+          trackAudioRef.current.play().catch(() => {});
+        }
+        setIsPlaying(true);
+      }
+      return;
+    }
+
+    stopAndClearModuleMix();
+
+    // Switch video display to raw source video so we don't play voices over the already-mixed final video
+    if (videoViewMode === 'final') {
+      setVideoViewMode('source');
+    }
+
+    // If inspecting master_audio_mix or ducking output (which already contains background audio), mute raw video audio to prevent doubling
+    const lowerName = cleanName.toLowerCase();
+    if (lowerName.includes('master_audio_mix') || lowerName.includes('ducking') || lowerName.includes('original_audio')) {
+      setIsVideoMuted(true);
+    }
+
+    const resolvedSrc = await resolveMediaUrlAsync(cleanPath);
+
+    setSelectedAudioTrack({
+      id: item.path,
+      name: cleanName || item.name,
+      path: resolvedSrc,
+      label,
+      stepId,
+      isFinalVideo: false
+    });
+
+    loadSingleTrackAudio(resolvedSrc, currentTimeRef.current, true);
+    toast.info(`Воспроизведение дорожки: ${cleanName || item.name}`, { duration: 2500 });
+  }, [sanitizeTempPath, selectFinalVideoForPlayback, selectedAudioTrack, isPlaying, videoPlaybackError, stopAndClearModuleMix, videoViewMode, resolveMediaUrlAsync, loadSingleTrackAudio]);
+
+  // Select module mix for multi-track playback
+  const selectModuleMixForInspection = useCallback(async (step: PipelineStep) => {
+    if (!step.outputFiles || step.outputFiles.length === 0) {
+      toast.error('У этого модуля ещё нет сохраненных обработанных дорожек');
+      return;
+    }
+
+    const meta = moduleDatabase.find(m => m.id === step.moduleId);
+
+    // If this is the video_mux step or only outputs video files, play the final video!
+    const videoOutputs = step.outputFiles.filter(f => /\.(mp4|mkv|mov|avi|webm)$/i.test(f.name || f.path));
+    const audioOutputs = step.outputFiles.filter(f => !/\.(mp4|mkv|mov|avi|webm)$/i.test(f.name || f.path));
+
+    if (audioOutputs.length === 0 && videoOutputs.length > 0) {
+      await selectFinalVideoForPlayback(videoOutputs[0], `${meta?.title || step.moduleId}: ${videoOutputs[0].name}`, step.stepId);
+      return;
+    }
+
+    if (audioOutputs.length === 1) {
+      await selectTrackForInspection(audioOutputs[0], `${meta?.title || step.moduleId}: ${audioOutputs[0].name}`, step.stepId);
+      return;
+    }
+
+    // Stop single track audio
+    if (trackAudioRef.current) {
+      trackAudioRef.current.pause();
+      trackAudioRef.current.removeAttribute('src');
+      try { trackAudioRef.current.load(); } catch (_) {}
+    }
+
+    // Clear previous mix elements
+    stopAndClearModuleMix();
+    setAudioPlaybackError(null);
+
+    if (videoViewMode === 'final') {
+      setVideoViewMode('source');
+    }
+
+    const targetTime = currentTimeRef.current;
+    const baseVol = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
+    const audioElements: HTMLAudioElement[] = [];
+
+    for (let i = 0; i < audioOutputs.length; i++) {
+      const file = audioOutputs[i];
+      const cleanPath = sanitizeTempPath(file.path);
+      const resolvedSrc = await resolveMediaUrlAsync(cleanPath);
+
+      const audio = new Audio();
+      audio.preload = 'auto';
+      audio.src = resolvedSrc;
+
+      // Apply per-dubber role volume if configured
+      let rolePct = 100;
+      if (file.dubberNick && rolesVolumeMap[file.dubberNick] !== undefined) {
+        rolePct = Number(rolesVolumeMap[file.dubberNick]) || 100;
+      }
+      const roleFactor = Math.max(0, Math.min(2, rolePct / 100));
+      (audio as any)._roleVolumeFactor = roleFactor;
+      audio.muted = isTrackMuted;
+      audio.volume = Math.min(1, Math.max(0, baseVol * roleFactor));
+
+      audio.onloadedmetadata = () => {
+        if (i === 0 && audio.duration && !isNaN(audio.duration) && isFinite(audio.duration)) {
+          setDuration(prev => (prev > 0 ? prev : audio.duration));
+        }
+        if (targetTime > 0) {
+          try {
+            audio.currentTime = Math.min(targetTime, audio.duration || targetTime);
+          } catch (_) {}
+        }
+      };
+
+      // First mix track drives clock if video is unavailable or has error
+      if (i === 0) {
+        audio.ontimeupdate = () => {
+          const vid = videoRef.current;
+          const videoDriving = vid && !vid.paused && !videoPlaybackError && vid.readyState >= 2;
+          if (!videoDriving) {
+            setCurrentTime(audio.currentTime);
+          }
+        };
+        audio.onended = () => {
+          const vid = videoRef.current;
+          const videoDriving = vid && !vid.paused && !videoPlaybackError;
+          if (!videoDriving) {
+            setIsPlaying(false);
+          }
+        };
+      }
+
+      audio.load();
+      audioElements.push(audio);
+    }
+
+    mixAudioElementsRef.current = audioElements;
+
+    setSelectedAudioTrack({
+      id: `module_mix_${step.stepId}`,
+      name: `Микс всех дорожек модуля «${meta?.title || step.moduleId}» (${audioOutputs.length} шт.)`,
+      path: '',
+      label: `Микс модуля (${audioOutputs.length} шт.)`,
+      stepId: step.stepId,
+      isModuleMix: true,
+      isFinalVideo: false,
+      mixFiles: audioOutputs
+    });
+
+    // Start playing all mix tracks + video synchronously
+    setTimeout(() => {
+      if (videoRef.current && !videoPlaybackError) {
+        try {
+          if (Math.abs(videoRef.current.currentTime - targetTime) > 0.3) {
+            videoRef.current.currentTime = targetTime;
+          }
+          videoRef.current.play().catch(() => {});
+        } catch (_) {}
+      }
+      audioElements.forEach(a => {
+        if (targetTime > 0 && a.readyState >= 1) {
+          try { a.currentTime = Math.min(targetTime, a.duration || targetTime); } catch (_) {}
+        }
+        a.play().catch(e => console.warn('Mix track play warning:', e));
+      });
+      setIsPlaying(true);
+    }, 60);
+
+    toast.success(`В плеере включен совместный микс всех ${audioOutputs.length} дорожек модуля!`, { duration: 3000 });
+  }, [moduleDatabase, selectFinalVideoForPlayback, selectTrackForInspection, stopAndClearModuleMix, videoViewMode, isTrackMuted, trackVolume, sanitizeTempPath, resolveMediaUrlAsync, rolesVolumeMap, videoPlaybackError]);
 
   // Handle Play / Pause synchronization
   const togglePlay = useCallback(() => {
@@ -718,165 +1090,106 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       mixAudioElementsRef.current.forEach(a => a.pause());
       setIsPlaying(false);
     } else {
-      if (videoRef.current) {
+      const targetTime = currentTimeRef.current;
+
+      if (selectedAudioTrack?.isFinalVideo || videoViewMode === 'final') {
+        if (videoRef.current) {
+          videoRef.current.muted = isVideoMuted;
+          videoRef.current.volume = isVideoMuted ? 0 : Math.min(1, Math.max(0, videoVolume));
+          videoRef.current.play().catch(e => console.warn('Video play warning:', e));
+        }
+        setIsPlaying(true);
+        return;
+      }
+
+      if (videoRef.current && !videoPlaybackError) {
         videoRef.current.muted = isVideoMuted;
         videoRef.current.volume = isVideoMuted ? 0 : Math.min(1, Math.max(0, videoVolume));
+        if (Math.abs(videoRef.current.currentTime - targetTime) > 0.3) {
+          try { videoRef.current.currentTime = targetTime; } catch (_) {}
+        }
         videoRef.current.play().catch(e => console.warn('Video play warning:', e));
       }
 
-      if (!selectedAudioTrack && manifest?.sourceFiles?.originalAudio?.path) {
-        selectOriginalAudioTrack();
-      } else if (selectedAudioTrack?.isModuleMix) {
-        mixAudioElementsRef.current.forEach(a => a.play().catch(e => console.warn('Mix audio play warning:', e)));
-      } else if (trackAudioRef.current && selectedAudioTrack) {
+      if (!selectedAudioTrack) {
+        if (manifest?.finalVideo?.path) {
+          selectFinalVideoForPlayback(manifest.finalVideo);
+          return;
+        } else if (manifest?.sourceFiles?.originalAudio?.path) {
+          selectOriginalAudioTrack();
+          return;
+        }
+      } else if (selectedAudioTrack.isModuleMix) {
+        mixAudioElementsRef.current.forEach(a => {
+          if (Math.abs(a.currentTime - targetTime) > 0.25) {
+            try { a.currentTime = targetTime; } catch (_) {}
+          }
+          a.play().catch(e => console.warn('Mix audio play warning:', e));
+        });
+      } else if (trackAudioRef.current && selectedAudioTrack.path) {
+        if (!trackAudioRef.current.src || trackAudioRef.current.src === window.location.href) {
+          loadSingleTrackAudio(selectedAudioTrack.path, targetTime, true);
+          return;
+        }
+        if (Math.abs(trackAudioRef.current.currentTime - targetTime) > 0.25) {
+          try { trackAudioRef.current.currentTime = targetTime; } catch (_) {}
+        }
         trackAudioRef.current.play().catch(e => console.warn('Track audio play warning:', e));
       }
+
       setIsPlaying(true);
     }
-  }, [isPlaying, isVideoMuted, videoVolume, selectedAudioTrack, manifest?.sourceFiles?.originalAudio?.path, selectOriginalAudioTrack]);
+  }, [isPlaying, selectedAudioTrack, videoViewMode, isVideoMuted, videoVolume, videoPlaybackError, manifest?.finalVideo, manifest?.sourceFiles?.originalAudio?.path, selectFinalVideoForPlayback, selectOriginalAudioTrack, loadSingleTrackAudio]);
 
-  // Sync seek position
-  const handleSeek = (time: number) => {
-    setCurrentTime(time);
-    if (videoRef.current) {
-      videoRef.current.currentTime = time;
+  // Sync seek position across video, single audio track, and module mix tracks
+  const handleSeek = useCallback((time: number) => {
+    const clampedTime = Math.max(0, isFinite(time) ? time : 0);
+    setCurrentTime(clampedTime);
+    currentTimeRef.current = clampedTime;
+
+    if (videoRef.current && videoRef.current.readyState >= 1) {
+      try { videoRef.current.currentTime = clampedTime; } catch (_) {}
     }
-    if (trackAudioRef.current) {
-      trackAudioRef.current.currentTime = time;
+    if (trackAudioRef.current && trackAudioRef.current.readyState >= 1) {
+      try { trackAudioRef.current.currentTime = clampedTime; } catch (_) {}
     }
     mixAudioElementsRef.current.forEach(a => {
-      a.currentTime = time;
+      if (a.readyState >= 1) {
+        try { a.currentTime = clampedTime; } catch (_) {}
+      }
     });
-  };
+  }, []);
 
-  // Video event handlers
-  const handleVideoTimeUpdate = () => {
+  // Video timeUpdate handler — keeps overlay audio tracks tightly synced
+  const handleVideoTimeUpdate = useCallback(() => {
     if (!videoRef.current) return;
     const vTime = videoRef.current.currentTime;
     setCurrentTime(vTime);
 
+    if (videoViewMode === 'final' || selectedAudioTrack?.isFinalVideo) {
+      return;
+    }
+
     // Keep trackAudio in tight sync with video
-    if (trackAudioRef.current && !trackAudioRef.current.paused) {
+    if (trackAudioRef.current && !trackAudioRef.current.paused && trackAudioRef.current.readyState >= 2) {
       const diff = Math.abs(trackAudioRef.current.currentTime - vTime);
-      if (diff > 0.15) {
-        trackAudioRef.current.currentTime = vTime;
+      if (diff > 0.2) {
+        try { trackAudioRef.current.currentTime = vTime; } catch (_) {}
       }
     }
 
     // Keep module mix audio elements in tight sync with video
     if (mixAudioElementsRef.current.length > 0) {
       mixAudioElementsRef.current.forEach(a => {
-        if (!a.paused) {
+        if (!a.paused && a.readyState >= 2) {
           const diff = Math.abs(a.currentTime - vTime);
-          if (diff > 0.15) {
-            a.currentTime = vTime;
+          if (diff > 0.2) {
+            try { a.currentTime = vTime; } catch (_) {}
           }
         }
       });
     }
-  };
-
-  const handleVideoLoadedMetadata = (e: React.SyntheticEvent<HTMLVideoElement>) => {
-    setDuration(e.currentTarget.duration || 0);
-  };
-
-  // Select an audio file for inspection in the player
-  const selectTrackForInspection = async (item: MixingFileItem, label: string, stepId?: string) => {
-    stopAndClearModuleMix();
-
-    let resolvedSrc = item.path;
-    if (window.electronAPI) {
-      if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
-        const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
-        resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
-      }
-    } else {
-      try {
-        resolvedSrc = await resolveLocalPath(item.path);
-      } catch (e) {}
-    }
-
-    if (trackAudioRef.current) {
-      trackAudioRef.current.pause();
-      trackAudioRef.current.src = resolvedSrc;
-      trackAudioRef.current.currentTime = currentTime;
-      if (isPlaying) {
-        trackAudioRef.current.play().catch(() => {});
-      }
-    }
-
-    setSelectedAudioTrack({
-      id: item.path,
-      name: item.name,
-      path: resolvedSrc,
-      label,
-      stepId
-    });
-
-    toast.info(`Выбран для прослушивания: ${item.name}`, { duration: 2500 });
-  };
-
-  // Select module mix for multi-track playback
-  const selectModuleMixForInspection = async (step: PipelineStep) => {
-    if (!step.outputFiles || step.outputFiles.length === 0) {
-      toast.error('У этого модуля ещё нет сохраненных обработанных дорожек');
-      return;
-    }
-
-    const meta = getModuleMeta(step.moduleId);
-
-    // Stop single track audio
-    if (trackAudioRef.current) {
-      trackAudioRef.current.pause();
-      trackAudioRef.current.src = '';
-    }
-
-    // Clear previous mix elements
-    stopAndClearModuleMix();
-
-    if (step.outputFiles.length === 1) {
-      selectTrackForInspection(step.outputFiles[0], `${meta?.title || step.moduleId}: ${step.outputFiles[0].name}`, step.stepId);
-      return;
-    }
-
-    const audioElements: HTMLAudioElement[] = [];
-    for (const file of step.outputFiles) {
-      let resolvedSrc = file.path;
-      if (window.electronAPI) {
-        if (!resolvedSrc.startsWith('http') && !resolvedSrc.startsWith('custom-media://') && !resolvedSrc.startsWith('blob:')) {
-          const cleanP = resolvedSrc.replace(/^file:\/\//, '').replace(/\\/g, '/');
-          resolvedSrc = `custom-media://${encodeURIComponent(cleanP).replace(/%2F/g, '/')}`;
-        }
-      } else {
-        try {
-          resolvedSrc = await resolveLocalPath(file.path);
-        } catch (e) {}
-      }
-
-      const audio = new Audio(resolvedSrc);
-      audio.currentTime = currentTime;
-      audio.volume = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
-      audioElements.push(audio);
-    }
-
-    mixAudioElementsRef.current = audioElements;
-
-    setSelectedAudioTrack({
-      id: `module_mix_${step.stepId}`,
-      name: `Микс всех дорожек модуля «${meta?.title || step.moduleId}» (${step.outputFiles.length} шт.)`,
-      path: '',
-      label: `Микс модуля (${step.outputFiles.length} шт.)`,
-      stepId: step.stepId,
-      isModuleMix: true,
-      mixFiles: step.outputFiles
-    });
-
-    if (isPlaying) {
-      audioElements.forEach(a => a.play().catch(e => console.warn('Mix track play warning:', e)));
-    }
-
-    toast.success(`В плеере включен совместный микс всех ${step.outputFiles.length} дорожек модуля!`, { duration: 3000 });
-  };
+  }, [videoViewMode, selectedAudioTrack?.isFinalVideo]);
 
   // Pipeline save debounce ref & status indicator
   const saveDebounceTimerRef = useRef<any>(null);
@@ -1864,13 +2177,26 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       {/* Hidden audio element for synchronous preview of selected rendered file (Pure layering) */}
       <audio 
         ref={trackAudioRef}
+        preload="auto"
         onTimeUpdate={() => {
-          if (!videoRef.current && trackAudioRef.current) {
+          const vid = videoRef.current;
+          const videoActivelyDriving = Boolean(vid && !vid.paused && !videoPlaybackError && vid.readyState >= 2);
+          if (!videoActivelyDriving && trackAudioRef.current) {
             setCurrentTime(trackAudioRef.current.currentTime);
           }
         }}
         onLoadedMetadata={(e) => {
-          if (!duration) setDuration(e.currentTarget.duration);
+          const d = e.currentTarget.duration;
+          if (d && !isNaN(d) && isFinite(d) && (!duration || duration <= 0)) {
+            setDuration(d);
+          }
+        }}
+        onEnded={() => {
+          const vid = videoRef.current;
+          const videoActivelyDriving = Boolean(vid && !vid.paused && !videoPlaybackError);
+          if (!videoActivelyDriving) {
+            setIsPlaying(false);
+          }
         }}
       />
 
@@ -3153,8 +3479,61 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
         {/* Right Column: Video & Synchronous Layered Audio Player */}
         <div className="w-1/2 flex flex-col bg-neutral-950 p-5 space-y-4 overflow-y-auto">
+          {/* Mode Switcher Bar: Final Mixed Video vs Source Video + Track Inspection */}
+          {manifest?.finalVideo && (
+            <div className="bg-neutral-900/90 border border-neutral-800 p-1.5 rounded-xl flex items-center gap-1.5 text-xs">
+              <button
+                onClick={() => selectFinalVideoForPlayback(manifest.finalVideo)}
+                className={`flex-1 py-1.5 px-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition ${
+                  videoViewMode === 'final' || selectedAudioTrack?.isFinalVideo
+                    ? 'bg-emerald-600 text-white shadow-sm'
+                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/70'
+                }`}
+                title="Смотреть и слушать готовое сведенное видео со встроенным финальным звуком"
+              >
+                <Film className="w-3.5 h-3.5" />
+                <span>✨ Готовое сведенное видео [СВЕДЕНО]</span>
+              </button>
+              <button
+                onClick={() => {
+                  setVideoViewMode('source');
+                  if (selectedAudioTrack?.isFinalVideo) {
+                    selectOriginalAudioTrack();
+                  }
+                }}
+                className={`flex-1 py-1.5 px-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition ${
+                  videoViewMode === 'source' && !selectedAudioTrack?.isFinalVideo
+                    ? 'bg-purple-600 text-white shadow-sm'
+                    : 'text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800/70'
+                }`}
+                title="Режим прослушивания отдельных дорожек и модулей поверх исходного видеоряда"
+              >
+                <Headphones className="w-3.5 h-3.5" />
+                <span>🎧 Прослушивание дорожек / модулей</span>
+              </button>
+            </div>
+          )}
+
           {/* Video Player Display */}
           <div className="aspect-video bg-black rounded-xl overflow-hidden border border-neutral-800 relative group flex items-center justify-center shadow-lg">
+            {/* Active Video Stream Badge */}
+            {videoSrc && (
+              <div className="absolute top-2.5 left-2.5 z-10 flex items-center gap-1.5 pointer-events-none">
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wide uppercase backdrop-blur-md border ${
+                  videoViewMode === 'final'
+                    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/40'
+                    : 'bg-neutral-900/80 text-neutral-300 border-neutral-700/60'
+                }`}>
+                  {videoViewMode === 'final' ? '🎬 Сведенный мастер (MP4)' : '📹 Исходный видеоряд'}
+                </span>
+                {isPlaying && (
+                  <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-purple-600/80 text-white backdrop-blur-md animate-pulse">
+                    ▶ Играет
+                  </span>
+                )}
+              </div>
+            )}
+
             {videoSrc ? (
               <video
                 ref={videoRef}
@@ -3169,7 +3548,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             ) : (
               <div className="text-center p-6 text-neutral-500 space-y-2">
                 <Film className="w-10 h-10 mx-auto text-neutral-700" />
-                <p className="text-xs">Видеоряд серии еще не импортирован</p>
+                <p className="text-xs">Видеоряд серии еще не импортирован (аудиоплеер дорожек работает автономно)</p>
               </div>
             )}
 
@@ -3180,11 +3559,20 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 <div className="max-w-md space-y-1">
                   <h4 className="text-sm font-semibold text-amber-200">Несовместимость воспроизведения видео</h4>
                   <p className="text-xs text-neutral-300 leading-relaxed">{videoPlaybackError}</p>
-                  <p className="text-[11px] text-neutral-400 italic pt-1">
-                    Совет: Видео в контейнерах MKV или с аудиокодеками AC3/DTS/HEVC не поддерживается HTML5-плеером Electron.
+                  <p className="text-[11px] text-emerald-400 pt-1">
+                    🎧 Вы можете продолжать прослушивать любые аудиодорожки и модули — аудиоплеер работает независимо от видео!
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                  {manifest?.finalVideo?.path && (
+                    <button
+                      onClick={() => selectFinalVideoForPlayback(manifest.finalVideo)}
+                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold rounded-lg transition shadow flex items-center gap-1.5"
+                    >
+                      <Film className="w-3.5 h-3.5" />
+                      <span>🎬 Включить готовое MP4-видео</span>
+                    </button>
+                  )}
                   {(manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath) && (
                     <button
                       onClick={handleCreateVideoProxy}
@@ -3209,6 +3597,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                       onClick={() => {
                         const srcPath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
                         if (srcPath) {
+                          setVideoViewMode('source');
                           setVideoSrc(formatMediaUrl(srcPath));
                           setVideoPlaybackError(null);
                         }
@@ -3249,35 +3638,67 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
           <div className="bg-neutral-900 border border-neutral-800 p-3 rounded-xl flex items-center justify-between gap-3 text-xs">
             <div className="flex items-center gap-2.5 truncate">
               <div className={`p-1.5 rounded-lg shrink-0 ${
-                selectedAudioTrack?.isModuleMix ? 'bg-amber-500/20 text-amber-300' : 'bg-purple-600/20 text-purple-400'
+                selectedAudioTrack?.isFinalVideo
+                  ? 'bg-emerald-500/20 text-emerald-300'
+                  : selectedAudioTrack?.isModuleMix
+                  ? 'bg-amber-500/20 text-amber-300'
+                  : 'bg-purple-600/20 text-purple-400'
               }`}>
-                {selectedAudioTrack?.isModuleMix ? <Volume2 className="w-4 h-4" /> : <Headphones className="w-4 h-4" />}
+                {selectedAudioTrack?.isFinalVideo ? (
+                  <Film className="w-4 h-4" />
+                ) : selectedAudioTrack?.isModuleMix ? (
+                  <Volume2 className="w-4 h-4" />
+                ) : (
+                  <Headphones className="w-4 h-4" />
+                )}
               </div>
               <div className="truncate">
                 <span className="text-neutral-400 text-[11px] block">
-                  {selectedAudioTrack?.isModuleMix ? 'Прослушивается совместный микс модуля:' : 'Прослушиваемый файл модуля:'}
+                  {selectedAudioTrack?.isFinalVideo
+                    ? 'Воспроизводится финальное сведенное видео:'
+                    : selectedAudioTrack?.isModuleMix
+                    ? 'Прослушивается совместный микс модуля:'
+                    : 'Прослушиваемый источник:'}
                 </span>
-                <span className="font-semibold text-neutral-100 truncate block">
+                <span className="font-semibold text-neutral-100 truncate block" title={selectedAudioTrack?.name}>
                   {selectedAudioTrack ? selectedAudioTrack.name : 'Исходный звук видеоряда'}
                 </span>
+                {audioPlaybackError && (
+                  <span className="text-[10px] text-red-400 block truncate">{audioPlaybackError}</span>
+                )}
               </div>
             </div>
 
-            {/* Source Switcher: Original vs Module */}
+            {/* Source Switcher: Original vs Final vs Module */}
             <div className="flex items-center gap-1.5 shrink-0">
+              {manifest?.finalVideo && (
+                <button
+                  onClick={() => selectFinalVideoForPlayback(manifest.finalVideo)}
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium transition border ${
+                    selectedAudioTrack?.isFinalVideo || videoViewMode === 'final'
+                      ? 'bg-emerald-600 text-white border-emerald-500 font-bold shadow-sm'
+                      : 'bg-neutral-800/80 hover:bg-neutral-700/80 text-emerald-300 border-emerald-800/60'
+                  }`}
+                  title="Переключить плеер на готовое сведенное видео [СВЕДЕНО]"
+                >
+                  🎬 Сведено
+                </button>
+              )}
               <button
                 onClick={selectOriginalAudioTrack}
                 className={`px-2.5 py-1 rounded text-[11px] font-medium transition border ${
-                  selectedAudioTrack?.id === 'original_audio_source' || (!selectedAudioTrack && manifest?.sourceFiles?.originalAudio?.path)
+                  selectedAudioTrack?.id === 'original_audio_source'
                     ? 'bg-amber-600 text-white border-amber-500 font-bold shadow-sm'
                     : 'bg-neutral-800/80 hover:bg-neutral-700/80 text-neutral-300 border-neutral-700/60'
                 }`}
-                title="Переключить плеер на оригинальную японскую дорожку видеоряда"
+                title="Переключить плеер на оригинальную японскую дорожку серии"
               >
                 📻 Оригинал
               </button>
               <span className={`px-2 py-1 rounded text-[10px] font-medium border ${
-                selectedAudioTrack?.isModuleMix
+                selectedAudioTrack?.isFinalVideo
+                  ? 'bg-emerald-900/60 text-emerald-200 border-emerald-700 font-bold'
+                  : selectedAudioTrack?.isModuleMix
                   ? 'bg-purple-900/60 text-purple-200 border-purple-700 font-bold'
                   : selectedAudioTrack && selectedAudioTrack.id !== 'original_audio_source'
                   ? 'bg-purple-900/40 text-purple-300 border border-purple-800/50'
@@ -3295,9 +3716,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
               <input 
                 type="range"
                 min="0"
-                max={duration || 100}
+                max={duration > 0 ? duration : 100}
                 step="0.05"
-                value={currentTime}
+                value={Math.min(currentTime, duration > 0 ? duration : 100)}
                 onChange={(e) => handleSeek(parseFloat(e.target.value))}
                 className="w-full accent-purple-500 cursor-pointer"
               />
@@ -3327,7 +3748,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 </button>
 
                 <button
-                  onClick={() => handleSeek(Math.min(duration, currentTime + 5))}
+                  onClick={() => handleSeek(Math.min(duration || currentTime + 5, currentTime + 5))}
                   className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded text-xs transition"
                   title="Вперед на 5 секунд"
                 >
@@ -3343,43 +3764,49 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                       ? 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200' 
                       : 'bg-blue-950/60 border-blue-600/40 text-blue-300 font-semibold'
                   }`}
-                  title={isVideoMuted ? "Включить оригинальный звук из видеофайла" : "Заглушить оригинальный звук из видеофайла"}
+                  title={isVideoMuted ? "Включить звук видеопотока" : "Заглушить звук видеопотока"}
                 >
                   {isVideoMuted ? <VolumeX className="w-3.5 h-3.5 text-neutral-500" /> : <Volume2 className="w-3.5 h-3.5 text-blue-400" />}
-                  <span>{isVideoMuted ? 'Звук видео: Выкл' : `Звук видео: ${Math.round(videoVolume * 100)}%`}</span>
+                  <span>
+                    {isVideoMuted
+                      ? 'Звук видео: Выкл'
+                      : `${videoViewMode === 'final' ? 'Мастер-звук видео' : 'Звук видео'}: ${Math.round(videoVolume * 100)}%`}
+                  </span>
                 </button>
               </div>
             </div>
 
             {/* Audio Volume Controls (Video Audio & Processed Track) */}
             <div className="pt-2 border-t border-neutral-800 space-y-3">
-              {/* Processed Track / Dubber Voices Volume */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-neutral-400 flex items-center gap-1.5">
-                    <Music className="w-3.5 h-3.5 text-purple-400" />
-                    Громкость дорожки модуля (голоса):
-                  </span>
-                  <button
-                    onClick={() => setIsTrackMuted(!isTrackMuted)}
-                    className="text-neutral-400 hover:text-neutral-200 flex items-center gap-1 text-[11px]"
-                    title={isTrackMuted ? "Включить звук" : "Заглушить звук"}
-                  >
-                    {isTrackMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-purple-400" />}
-                    <span>{isTrackMuted ? 'Выкл' : `${Math.round(trackVolume * 100)}%`}</span>
-                  </button>
+              {/* Processed Track / Dubber Voices Volume (shown when inspecting audio tracks) */}
+              {videoViewMode !== 'final' && !selectedAudioTrack?.isFinalVideo && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-neutral-400 flex items-center gap-1.5">
+                      <Music className="w-3.5 h-3.5 text-purple-400" />
+                      Громкость прослушиваемой дорожки / модуля:
+                    </span>
+                    <button
+                      onClick={() => setIsTrackMuted(!isTrackMuted)}
+                      className="text-neutral-400 hover:text-neutral-200 flex items-center gap-1 text-[11px]"
+                      title={isTrackMuted ? "Включить звук дорожки" : "Заглушить звук дорожки"}
+                    >
+                      {isTrackMuted ? <VolumeX className="w-3.5 h-3.5 text-red-400" /> : <Volume2 className="w-3.5 h-3.5 text-purple-400" />}
+                      <span>{isTrackMuted ? 'Выкл' : `${Math.round(trackVolume * 100)}%`}</span>
+                    </button>
+                  </div>
+                  <input 
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.05"
+                    disabled={isTrackMuted}
+                    value={isTrackMuted ? 0 : trackVolume}
+                    onChange={(e) => setTrackVolume(parseFloat(e.target.value))}
+                    className="w-full accent-purple-500 cursor-pointer"
+                  />
                 </div>
-                <input 
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  disabled={isTrackMuted}
-                  value={isTrackMuted ? 0 : trackVolume}
-                  onChange={(e) => setTrackVolume(parseFloat(e.target.value))}
-                  className="w-full accent-purple-500 cursor-pointer"
-                />
-              </div>
+              )}
 
               {/* Video Audio Volume Slider (when unmuted) */}
               {!isVideoMuted && (
@@ -3387,7 +3814,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                   <div className="flex items-center justify-between text-xs">
                     <span className="text-neutral-400 flex items-center gap-1.5">
                       <Film className="w-3.5 h-3.5 text-blue-400" />
-                      Громкость оригинального видеоряда:
+                      {videoViewMode === 'final' ? 'Громкость сведенного видео:' : 'Громкость фонового звука из видео:'}
                     </span>
                     <span className="text-[11px] text-blue-300 font-mono">{Math.round(videoVolume * 100)}%</span>
                   </div>
@@ -3413,20 +3840,30 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
                   <span>Готовая сведенная серия (Final Release):</span>
                 </div>
-                <div className="text-xs text-neutral-200 font-mono truncate mt-0.5" title={manifest.finalVideo.name}>
-                  {manifest.finalVideo.name}
+                <div className="text-xs text-neutral-200 font-mono truncate mt-0.5" title={sanitizeTempPath(manifest.finalVideo.name)}>
+                  {sanitizeTempPath(manifest.finalVideo.name)}
                 </div>
                 <div className="text-[11px] text-neutral-400 mt-0.5">
                   Размер: {formatFileSize(manifest.finalVideo.size)}
                 </div>
               </div>
-              <button
-                onClick={handleSaveFinalVideo}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 shrink-0 transition shadow"
-              >
-                <Save className="w-4 h-4" />
-                <span>Сохранить видео</span>
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => selectFinalVideoForPlayback(manifest.finalVideo)}
+                  className="px-3 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
+                  title="Запустить предпросмотр готового сведенного видео в плеере"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Смотреть</span>
+                </button>
+                <button
+                  onClick={handleSaveFinalVideo}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow"
+                >
+                  <Save className="w-4 h-4" />
+                  <span>Сохранить видео</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -4602,13 +5039,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                   <span className="text-[10px] font-mono text-neutral-500 w-7">#{ph.index}</span>
                                   <button
                                     onClick={() => {
-                                      if (videoRef.current) {
-                                        videoRef.current.currentTime = ph.startSec;
-                                      }
-                                      if (trackAudioRef.current) {
-                                        trackAudioRef.current.currentTime = ph.startSec;
-                                      }
-                                      setCurrentTime(ph.startSec);
+                                      handleSeek(ph.startSec);
                                       toast.info(`Плеер перемотан на фразу #${ph.index} (${ph.startFormatted})`);
                                     }}
                                     className="px-2 py-0.5 bg-neutral-800 hover:bg-emerald-700/40 text-emerald-300 rounded font-mono text-[11px] border border-neutral-700 hover:border-emerald-500/40 transition flex items-center gap-1"

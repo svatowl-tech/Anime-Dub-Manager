@@ -1,28 +1,24 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Send, 
-  Settings, 
-  MessageSquare, 
-  ShieldCheck, 
-  Sparkles, 
-  Layers, 
-  Globe, 
-  X, 
-  Zap, 
-  Users, 
+import {
+  Send,
+  Settings,
+  MessageSquare,
+  X,
+  Zap,
+  Users,
   FileText,
-  Lock,
   RefreshCw,
   Music,
-  FileCheck
+  FileCheck,
+  Hash
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../lib/ipcSafe';
-import { 
-  TelegramMTProtoStatus, 
-  TelegramMTProtoDialog, 
-  Episode, 
-  Project 
+import {
+  TelegramMTProtoStatus,
+  TelegramMTProtoDialog,
+  Episode,
+  Project
 } from '../types';
 import { TelegramTabType } from './telegram/types';
 import { TelegramAuthView } from './telegram/TelegramAuthView';
@@ -53,7 +49,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
   const [activeTab, setActiveTab] = useState<TelegramTabType>('tracks');
   const [status, setStatus] = useState<TelegramMTProtoStatus | null>(null);
   const [isLoadingStatus, setIsLoadingStatus] = useState<boolean>(true);
-  
+
   // Dialogs
   const [dialogs, setDialogs] = useState<TelegramMTProtoDialog[]>([]);
   const [isLoadingDialogs, setIsLoadingDialogs] = useState<boolean>(false);
@@ -63,11 +59,21 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
   const [selectedProjectId, setSelectedProjectId] = useState<string>(
     currentProject?.id || (allProjects && allProjects.length > 0 ? allProjects[0].id : '')
   );
-  const activeProject = (allProjects || []).find(p => p.id === selectedProjectId) || currentProject || null;
+
+  useEffect(() => {
+    if (currentProject?.id && currentProject.id !== selectedProjectId) {
+      setSelectedProjectId(currentProject.id);
+    } else if (!selectedProjectId && allProjects && allProjects.length > 0) {
+      setSelectedProjectId(allProjects[0].id);
+    }
+  }, [currentProject?.id, allProjects]);
+
+  const activeProject =
+    (allProjects || []).find((p) => p.id === selectedProjectId) || currentProject || null;
 
   // Project Chat Config Modal
   const [isProjectModalOpen, setIsProjectModalOpen] = useState<boolean>(false);
-  // Auth Modal (QR / Phone)
+  // Auth Modal (QR / Phone / Bot)
   const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
 
   useEffect(() => {
@@ -75,7 +81,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
 
     const handleAuthInvalidated = () => {
       console.warn('Telegram auth session invalidated. Reloading status...');
-      setStatus(prev => {
+      setStatus((prev) => {
         if (prev?.status === 'connected') {
           toast.error('Сессия Telegram устарела или завершена. Пожалуйста, выполните повторный вход.');
           setIsAuthModalOpen(true);
@@ -99,7 +105,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
       if (res && res.status) {
         setStatus(res);
         if (res.status === 'connected') {
-          loadDialogs();
+          await loadDialogs();
         } else {
           setDialogs([]);
         }
@@ -126,8 +132,15 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
     } catch (e: any) {
       console.warn('Dialogs fetch error:', e);
       const errStr = String(e?.message || e || '');
-      if (errStr.includes('AUTH_KEY_UNREGISTERED') || errStr.includes('Сессия Telegram устарела')) {
-        setStatus(prev => prev ? { ...prev, status: 'disconnected', me: null } : { status: 'disconnected', me: null, settings: {} as any });
+      if (
+        errStr.includes('AUTH_KEY_UNREGISTERED') ||
+        errStr.includes('Сессия Telegram устарела')
+      ) {
+        setStatus((prev) =>
+          prev
+            ? { ...prev, status: 'disconnected', me: null }
+            : { status: 'disconnected', me: null, settings: {} as any }
+        );
         setDialogs([]);
         setIsAuthModalOpen(true);
       }
@@ -137,7 +150,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
   };
 
   const isConnected = status?.status === 'connected';
-  const hasBot = !!(status?.botConnected || status?.settings?.botToken);
+  const hasBot = Boolean(status?.botConnected || status?.botMe || status?.settings?.botToken);
 
   return (
     <div className="flex-1 flex flex-col h-full bg-neutral-950 text-white overflow-hidden select-none">
@@ -148,25 +161,66 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
             <Send className="w-4 h-4" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-xs font-bold text-white uppercase tracking-wider">Telegram Studio Center</h2>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h2 className="text-xs font-bold text-white uppercase tracking-wider">
+                Telegram Studio Center
+              </h2>
               <button
-                onClick={() => !isConnected && setIsAuthModalOpen(true)}
-                className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition flex items-center gap-1 ${
+                onClick={() => (!isConnected ? setIsAuthModalOpen(true) : loadStatus())}
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold transition flex items-center gap-1 cursor-pointer ${
                   isConnected
-                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/25'
                     : hasBot
-                    ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30 hover:bg-purple-500/25 cursor-pointer'
-                    : 'bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25 cursor-pointer'
+                    ? 'bg-purple-500/15 text-purple-300 border border-purple-500/30 hover:bg-purple-500/25'
+                    : 'bg-amber-500/15 text-amber-400 border border-amber-500/30 hover:bg-amber-500/25'
                 }`}
-                title={!isConnected ? 'Нажмите для входа в MTProto' : 'MTProto подключен'}
+                title={
+                  !isConnected
+                    ? 'Нажмите для входа в MTProto'
+                    : `Аккаунт: @${status?.me?.username || status?.me?.firstName || 'подключен'}`
+                }
               >
-                {isConnected ? 'MTProto Online' : hasBot ? 'Bot API Online (MTProto offline)' : 'Авторизоваться в MTProto'}
+                {isLoadingStatus && <RefreshCw className="w-2.5 h-2.5 animate-spin" />}
+                {isConnected
+                  ? `MTProto: @${status?.me?.username || status?.me?.firstName || 'Online'}`
+                  : hasBot
+                  ? `Bot API: ${status?.botMe?.username ? `@${status.botMe.username}` : 'Online'}`
+                  : 'Авторизоваться в Telegram'}
               </button>
+
+              {activeProject && (
+                <button
+                  type="button"
+                  onClick={() => setIsProjectModalOpen(true)}
+                  className="px-2 py-0.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white text-[10px] font-medium border border-neutral-700 transition flex items-center gap-1 cursor-pointer"
+                  title="Привязать Telegram-канал и рабочую группу к этому проекту"
+                >
+                  <Hash className="w-2.5 h-2.5 text-sky-400" />
+                  <span>Чаты проекта</span>
+                </button>
+              )}
             </div>
-            <p className="text-[11px] text-neutral-400">
-              {activeProject ? `Проект: ${activeProject.title}` : 'Управление публикациями и чатами озвучки'}
-            </p>
+            <div className="flex items-center gap-2 mt-0.5">
+              {allProjects && allProjects.length > 1 ? (
+                <select
+                  value={selectedProjectId}
+                  onChange={(e) => setSelectedProjectId(e.target.value)}
+                  className="bg-transparent text-[11px] text-neutral-400 hover:text-neutral-200 outline-none cursor-pointer"
+                >
+                  {allProjects.map((p) => (
+                    <option key={p.id} value={p.id} className="bg-neutral-900 text-white">
+                      Проект: {p.title}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <p className="text-[11px] text-neutral-400">
+                  {activeProject
+                    ? `Проект: ${activeProject.title}`
+                    : 'Управление публикациями и чатами озвучки'}
+                </p>
+              )}
+            </div>
           </div>
         </div>
 
@@ -270,12 +324,15 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
       </div>
 
       {/* Offline Alert Strip when MTProto is disconnected */}
-      {!isConnected && (
-        <div className="bg-amber-950/40 border-b border-amber-900/50 px-4 py-2 flex items-center justify-between text-xs text-amber-200 flex-shrink-0">
+      {!isConnected && !isLoadingStatus && (
+        <div className="bg-amber-950/40 border-b border-amber-900/50 px-4 py-2 flex items-center justify-between text-xs text-amber-200 flex-shrink-0 flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
             <span>
-              Telegram MTProto не подключен. {hasBot ? 'Отправка постов работает через Bot API.' : 'Авторизуйтесь по QR / телефону для чтения чатов и скачивания дорожек.'}
+              Telegram MTProto не подключен.{' '}
+              {hasBot
+                ? 'Отправка постов и анонсов работает через Bot API.'
+                : 'Войдите по QR-коду, номеру телефона или Bot Token для работы с чатами и каналами.'}
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -283,13 +340,13 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
               onClick={() => setIsAuthModalOpen(true)}
               className="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white font-semibold rounded-lg text-xs transition cursor-pointer"
             >
-              Войти через QR-код
+              Подключить Telegram
             </button>
             <button
               onClick={() => setActiveTab('settings')}
               className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 font-semibold rounded-lg text-xs transition cursor-pointer"
             >
-              Настроить Bot API
+              Настройки
             </button>
           </div>
         </div>
@@ -347,6 +404,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
             dialogs={dialogs}
             selectedChatId={selectedChatId}
             isConnected={isConnected}
+            hasBot={hasBot}
             onOpenAuth={() => setIsAuthModalOpen(true)}
             onSelectChat={(id) => setSelectedChatId(id)}
           />
@@ -373,7 +431,7 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
         )}
       </div>
 
-      {/* Auth Modal (QR / Phone) */}
+      {/* Auth Modal (QR / Phone / Bot) */}
       {isAuthModalOpen && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-neutral-900 border border-neutral-800 rounded-3xl max-w-xl w-full max-h-[90vh] overflow-y-auto relative p-6 shadow-2xl">
@@ -383,19 +441,21 @@ export const TelegramClientPanel: React.FC<TelegramClientPanelProps> = ({
             >
               <X className="w-5 h-5" />
             </button>
-            <div className="mb-4">
-              <h3 className="text-base font-bold text-white">Авторизация в Telegram MTProto</h3>
-              <p className="text-xs text-neutral-400">Сканируйте QR-код через мобильное приложение Telegram или войдите по номеру телефона</p>
+            <div className="mb-3">
+              <h3 className="text-base font-bold text-white">Авторизация в Telegram</h3>
+              <p className="text-xs text-neutral-400">
+                Сканируйте QR-код, войдите по номеру телефона или подключите студийного бота
+              </p>
             </div>
             <TelegramAuthView
               onSuccess={async () => {
                 await loadStatus();
                 setIsAuthModalOpen(false);
-                toast.success('Авторизация в Telegram MTProto успешна!');
               }}
               savedPhone={status?.settings?.phoneNumber}
               savedApiId={status?.settings?.apiId ? String(status.settings.apiId) : ''}
               savedApiHash={status?.settings?.apiHash || ''}
+              savedBotToken={status?.settings?.botToken || ''}
             />
           </div>
         </div>

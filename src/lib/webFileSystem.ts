@@ -268,8 +268,20 @@ export async function resolveLocalPath(filePath: string): Promise<string> {
     // Не найдено в локальной папке
   }
 
-  // 3. Проверка доступности файла на сервере через медиа-эндпоинт
-  if (typeof window !== 'undefined' && window.location) {
+  const isElectronEnv = typeof window !== 'undefined' && (
+    Boolean((window as any).electronAPI) ||
+    Boolean((window as any).isElectron) ||
+    Boolean(window.navigator?.userAgent?.includes('Electron'))
+  );
+
+  // 3. Если мы находимся в Electron и путь локальный — сразу возвращаем защищенный custom-media:// URL
+  if (isElectronEnv && (/^[a-zA-Z]:[/\\]/.test(cleanPath) || cleanPath.startsWith('/'))) {
+    const sanitizedPath = cleanPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
+    return `custom-media://local/media?path=${encodeURIComponent(sanitizedPath)}`;
+  }
+
+  // 4. Проверка доступности файла на сервере через медиа-эндпоинт (для веб-режима)
+  if (!isElectronEnv && typeof window !== 'undefined' && window.location) {
     try {
       const serverMediaUrl = `/api/media-file?path=${encodeURIComponent(cleanPath)}`;
       const checkRes = await fetch(serverMediaUrl, { method: 'HEAD' });
@@ -281,12 +293,10 @@ export async function resolveLocalPath(filePath: string): Promise<string> {
     }
   }
 
-  // 4. Если мы находимся в Electron, форматируем абсолютный путь через протокол custom-media://
   if (/^[a-zA-Z]:[/\\]/.test(cleanPath) || cleanPath.startsWith('/')) {
-    if (typeof window !== 'undefined' && ((window as any).electronAPI || (window as any).isElectron || window.navigator?.userAgent?.includes('Electron'))) {
-      const normalized = cleanPath.replace(/\\/g, '/');
-      const formatted = normalized.startsWith('/') ? normalized : `/${normalized}`;
-      return `custom-media://${formatted}`;
+    if (isElectronEnv) {
+      const sanitizedPath = cleanPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
+      return `custom-media://local/media?path=${encodeURIComponent(sanitizedPath)}`;
     }
     return '';
   }

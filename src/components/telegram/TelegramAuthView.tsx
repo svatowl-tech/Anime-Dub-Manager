@@ -1,22 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Smartphone, 
-  Lock, 
-  Key, 
-  Send, 
-  ShieldCheck, 
-  AlertTriangle, 
-  RefreshCw, 
-  Terminal, 
-  ChevronDown, 
-  ChevronUp, 
+import {
+  Smartphone,
+  Lock,
+  Key,
+  Send,
+  ShieldCheck,
+  RefreshCw,
+  Terminal,
+  ChevronDown,
+  ChevronUp,
   ExternalLink,
-  Info,
   CheckCircle2,
   QrCode,
   Sparkles,
   Camera,
-  XCircle
+  XCircle,
+  Bot
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { ipcSafe } from '../../lib/ipcSafe';
@@ -26,6 +25,7 @@ interface TelegramAuthViewProps {
   savedPhone?: string;
   savedApiId?: string;
   savedApiHash?: string;
+  savedBotToken?: string;
 }
 
 const DEFAULT_TG_API_ID = '2040';
@@ -35,10 +35,11 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   onSuccess,
   savedPhone = '',
   savedApiId = '',
-  savedApiHash = ''
+  savedApiHash = '',
+  savedBotToken = ''
 }) => {
-  // Auth Mode: 'qr' | 'phone'
-  const [authMode, setAuthMode] = useState<'qr' | 'phone'>('qr');
+  // Auth Mode: 'qr' | 'phone' | 'bot'
+  const [authMode, setAuthMode] = useState<'qr' | 'phone' | 'bot'>('qr');
 
   // Shared API credentials
   const [apiId, setApiId] = useState<string>(savedApiId);
@@ -49,6 +50,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   const [phoneNumber, setPhoneNumber] = useState<string>(savedPhone);
   const [phoneCode, setPhoneCode] = useState<string>('');
   const [password2FA, setPassword2FA] = useState<string>('');
+  const [passwordHint, setPasswordHint] = useState<string>('');
   const [isCodeSent, setIsCodeSent] = useState<boolean>(false);
   const [is2FARequired, setIs2FARequired] = useState<boolean>(false);
   const [deliveryMethod, setDeliveryMethod] = useState<'app' | 'sms'>('app');
@@ -58,9 +60,11 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   const [isQrActive, setIsQrActive] = useState<boolean>(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [qrExpiresIn, setQrExpiresIn] = useState<number>(30);
-  const [qrStatusText, setQrStatusText] = useState<string>('Ожидание сканирования...');
   const [isQr2FARequired, setIsQr2FARequired] = useState<boolean>(false);
   const [qr2FAPassword, setQr2FAPassword] = useState<string>('');
+
+  // Bot Token Auth State
+  const [botToken, setBotToken] = useState<string>(savedBotToken);
 
   // General state
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -69,6 +73,8 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
 
   const qrPollIntervalRef = useRef<any>(null);
   const lastBackendLogRef = useRef<string>('');
+  const lastQrDataUrlRef = useRef<string>('');
+  const qrExpiresUnixRef = useRef<number>(0);
 
   const getEffectiveCredentials = () => {
     const effId = apiId.trim() ? Number(apiId.trim()) : Number(DEFAULT_TG_API_ID);
@@ -77,8 +83,8 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   };
 
   const addLog = (text: string, isError = false) => {
-    const time = new Date().toLocaleTimeString();
-    setLogs(prev => [...prev.slice(-25), { time, text, isError }]);
+    const time = new Date().toLocaleTimeString('ru-RU');
+    setLogs(prev => [...prev.slice(-30), { time, text, isError }]);
   };
 
   // Resend SMS timer countdown
@@ -92,12 +98,17 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
     return () => clearInterval(interval);
   }, [resendTimer]);
 
-  // QR Code Expiry Countdown
+  // QR Code Expiry Countdown synced with actual token expiration timestamp
   useEffect(() => {
     let interval: any;
     if (isQrActive && !isQr2FARequired) {
       interval = setInterval(() => {
-        setQrExpiresIn(prev => (prev > 1 ? prev - 1 : 1));
+        if (qrExpiresUnixRef.current > 0) {
+          const remaining = Math.max(1, qrExpiresUnixRef.current - Math.floor(Date.now() / 1000));
+          setQrExpiresIn(remaining);
+        } else {
+          setQrExpiresIn(prev => (prev > 1 ? prev - 1 : 1));
+        }
       }, 1000);
     }
     return () => clearInterval(interval);
@@ -126,18 +137,23 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
 
       if (res && res.success) {
         if (res.me) {
-          // Already logged in
           addLog(`Успешный вход: ${res.me?.firstName || res.me?.username || 'Авторизован'}`);
           toast.success('Сессия Telegram подтверждена!');
           onSuccess();
           return;
         }
 
+        const initialUrl = res.qrDataUrl || '';
+        lastQrDataUrlRef.current = initialUrl;
+        setQrDataUrl(initialUrl);
+
+        const expUnix = Number(res.expires || 0);
+        qrExpiresUnixRef.current = expUnix;
+        const remaining = expUnix > 0 ? Math.max(1, expUnix - Math.floor(Date.now() / 1000)) : 30;
+        setQrExpiresIn(remaining);
+
         setIsQrActive(true);
-        setQrDataUrl(res.qrDataUrl || '');
-        setQrExpiresIn(30);
         setIsQr2FARequired(false);
-        setQrStatusText('Откройте Telegram на телефоне и отсканируйте код');
         addLog('QR-код сгенерирован. Ожидание сканирования с мобильного устройства...');
         toast.success('QR-код готов к сканированию!');
 
@@ -176,24 +192,42 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
           }
         } catch (lErr) {}
 
-        if (status.status === 'authenticated' || (status.me && (status.status === 'connected' || status.status === 'authenticated'))) {
+        if (
+          status.status === 'authenticated' ||
+          (status.me && (status.status === 'connected' || status.status === 'authenticated'))
+        ) {
           clearInterval(qrPollIntervalRef.current);
           qrPollIntervalRef.current = null;
           setIsQrActive(false);
-          const userName = status.me?.firstName || status.me?.username || status.me?.id || 'Пользователь';
+          const userName =
+            status.me?.firstName || status.me?.username || status.me?.id || 'Пользователь';
           addLog(`Вход по QR-коду успешно выполнен: ${userName}`);
           toast.success(`Успешная авторизация в Telegram: ${userName}`);
           onSuccess();
         } else if (status.status === 'password_required') {
           clearInterval(qrPollIntervalRef.current);
           qrPollIntervalRef.current = null;
+          if (status.passwordHint) {
+            setPasswordHint(status.passwordHint);
+          }
           setIsQr2FARequired(true);
-          setQrStatusText('QR-код подтвержден! Введите облачный 2FA пароль для завершения.');
-          addLog('QR-код подтвержден на телефоне. Требуется ввод 2FA Cloud Password');
-          toast.info('Введите пароль 2FA двухфакторной защиты Telegram');
-        } else if (status.qrDataUrl && status.qrDataUrl !== qrDataUrl) {
+          addLog(
+            `QR-код подтвержден на телефоне. Требуется ввод 2FA пароля${
+              status.passwordHint ? ` (подсказка: ${status.passwordHint})` : ''
+            }`
+          );
+          toast.info('Введите облачный пароль 2FA двухфакторной защиты Telegram');
+        } else if (status.qrDataUrl && status.qrDataUrl !== lastQrDataUrlRef.current) {
+          lastQrDataUrlRef.current = status.qrDataUrl;
           setQrDataUrl(status.qrDataUrl);
-          setQrExpiresIn(30);
+          if (status.expires) {
+            qrExpiresUnixRef.current = Number(status.expires);
+            setQrExpiresIn(Math.max(1, Number(status.expires) - Math.floor(Date.now() / 1000)));
+          } else {
+            setQrExpiresIn(30);
+          }
+        } else if (status.expires && status.expires !== qrExpiresUnixRef.current) {
+          qrExpiresUnixRef.current = Number(status.expires);
         } else if (status.status === 'error') {
           clearInterval(qrPollIntervalRef.current);
           qrPollIntervalRef.current = null;
@@ -209,15 +243,18 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
 
   const handleRefreshQr = async () => {
     try {
-      addLog('Обновление токена QR-кода...');
+      addLog('Принудительное обновление токена QR-кода...');
       const creds = getEffectiveCredentials();
       const res = await ipcSafe.invoke('telegram-mtproto-start-qr', {
         apiId: creds.apiId,
         apiHash: creds.apiHash
       });
       if (res && res.qrDataUrl) {
+        lastQrDataUrlRef.current = res.qrDataUrl;
         setQrDataUrl(res.qrDataUrl);
-        setQrExpiresIn(30);
+        const expUnix = Number(res.expires || 0);
+        qrExpiresUnixRef.current = expUnix;
+        setQrExpiresIn(expUnix > 0 ? Math.max(1, expUnix - Math.floor(Date.now() / 1000)) : 30);
       }
     } catch (e: any) {
       console.warn('Refresh QR failed:', e);
@@ -227,6 +264,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   const handleCancelQr = async () => {
     if (qrPollIntervalRef.current) {
       clearInterval(qrPollIntervalRef.current);
+      qrPollIntervalRef.current = null;
     }
     setIsQrActive(false);
     setIsQr2FARequired(false);
@@ -320,12 +358,17 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
 
       if (res && res.requiresPassword) {
         setIs2FARequired(true);
-        addLog('Требуется пароль двухфакторной аутентификации (2FA Cloud Password)');
+        if (res.hint) setPasswordHint(res.hint);
+        addLog(
+          `Требуется пароль двухфакторной аутентификации (2FA Cloud Password)${
+            res.hint ? ` — подсказка: ${res.hint}` : ''
+          }`
+        );
         toast.info('На аккаунте включен 2FA пароль. Введите его для завершения входа.');
         return;
       }
 
-      if (res && res.success) {
+      if (res && (res.success || res.status === 'connected')) {
         addLog(`Успешный вход: ${res.me?.firstName || res.me?.username || 'Авторизован'}`);
         toast.success('Успешная авторизация в Telegram MTProto!');
         onSuccess();
@@ -344,14 +387,14 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
   const handleResendCode = async () => {
     if (resendTimer > 0) return;
     setIsLoading(true);
-    addLog('Запрос повторной отправки кода по SMS...');
+    addLog('Запрос повторной отправки кода...');
     try {
       const res = await ipcSafe.invoke('telegram-mtproto-resend-code', { forceSMS: true });
       if (res && res.success) {
         setResendTimer(60);
         setDeliveryMethod(res.deliveryMethod || 'sms');
         addLog(res.message || 'Новый код отправлен!');
-        toast.success('Код отправлен повторно');
+        toast.success(res.message || 'Код отправлен повторно');
       }
     } catch (err: any) {
       const msg = err.message || String(err);
@@ -362,31 +405,64 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
     }
   };
 
+  // BOT TOKEN AUTH FLOW
+  const handleConnectBot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!botToken.trim()) {
+      toast.error('Введите токен бота от @BotFather');
+      return;
+    }
+
+    setIsLoading(true);
+    addLog('Проверка токена бота через Telegram Bot API...');
+    try {
+      const res = await ipcSafe.invoke('telegram-bot-test-connection', {
+        botToken: botToken.trim()
+      });
+      if (res && res.success && res.bot) {
+        await ipcSafe.invoke('telegram-mtproto-save-settings', {
+          botToken: botToken.trim()
+        });
+        addLog(`Бот успешно подключен: @${res.bot.username} (${res.bot.firstName})`);
+        toast.success(`Бот @${res.bot.username} успешно подключен!`);
+        onSuccess();
+      } else {
+        throw new Error(res?.error || 'Не удалось проверить токен бота');
+      }
+    } catch (err: any) {
+      const msg = err.message || String(err);
+      addLog(`Ошибка Bot API: ${msg}`, true);
+      toast.error(msg);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
-    <div className="max-w-2xl mx-auto p-6 space-y-6">
+    <div className="max-w-2xl mx-auto p-2 sm:p-4 space-y-5">
       {/* Header Info */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-xl relative overflow-hidden">
+      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 shadow-xl relative overflow-hidden">
         <div className="flex items-start gap-4">
-          <div className="w-12 h-12 rounded-xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400 flex-shrink-0">
-            <Send className="w-6 h-6" />
+          <div className="w-11 h-11 rounded-xl bg-sky-500/10 border border-sky-500/30 flex items-center justify-center text-sky-400 flex-shrink-0">
+            <Send className="w-5 h-5" />
           </div>
           <div className="flex-1">
-            <h3 className="text-base font-bold text-white flex items-center gap-2">
-              Подключение Telegram MTProto API
+            <h3 className="text-sm font-bold text-white flex items-center gap-2 flex-wrap">
+              Подключение Telegram MTProto & Bot API
               <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30">
                 Direct Engine
               </span>
             </h3>
             <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
-              Прямое подключение к MTProto API Telegram позволяет публиковать релизы с HTML-разметкой, 
-              закреплять посты, автоматически рассылать задачи даберам и выгружать медиафайлы без лимитов ботов.
+              Прямое подключение к MTProto позволяет сканировать рабочие чаты, скачивать дорожки даберов,
+              проверять выход постов и рассылать уведомления.
             </p>
           </div>
         </div>
 
         {/* Credentials guide note */}
-        <div className="mt-4 pt-4 border-t border-neutral-800 flex items-center justify-between text-xs text-neutral-400">
-          <span>Ключи API можно бесплатно получить в профиле Telegram:</span>
+        <div className="mt-3.5 pt-3 border-t border-neutral-800 flex items-center justify-between text-xs text-neutral-400">
+          <span>Персональные ключи API (опционально):</span>
           <a
             href="https://my.telegram.org"
             target="_blank"
@@ -399,24 +475,21 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
       </div>
 
       {/* Tabs Selector */}
-      <div className="grid grid-cols-2 gap-2 bg-neutral-950 p-1.5 rounded-2xl border border-neutral-800">
+      <div className="grid grid-cols-3 gap-1.5 bg-neutral-950 p-1.5 rounded-2xl border border-neutral-800">
         <button
           type="button"
           onClick={() => {
             setAuthMode('qr');
             setIsCodeSent(false);
           }}
-          className={`py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer ${
+          className={`py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
             authMode === 'qr'
               ? 'bg-sky-600 text-white shadow-md'
               : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
           }`}
         >
-          <QrCode className="w-4 h-4" />
-          Вход по QR-коду
-          <span className="px-1.5 py-0.2 rounded text-[10px] bg-sky-400/30 text-sky-100 font-bold">
-            Рекомендуется
-          </span>
+          <QrCode className="w-3.5 h-3.5" />
+          <span>QR-код</span>
         </button>
 
         <button
@@ -425,30 +498,47 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
             setAuthMode('phone');
             handleCancelQr();
           }}
-          className={`py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition cursor-pointer ${
+          className={`py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
             authMode === 'phone'
               ? 'bg-sky-600 text-white shadow-md'
               : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
           }`}
         >
-          <Smartphone className="w-4 h-4" />
-          Вход по номеру телефона
+          <Smartphone className="w-3.5 h-3.5" />
+          <span>По номеру</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setAuthMode('bot');
+            handleCancelQr();
+          }}
+          className={`py-2 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition cursor-pointer ${
+            authMode === 'bot'
+              ? 'bg-purple-600 text-white shadow-md'
+              : 'text-neutral-400 hover:text-white hover:bg-neutral-900'
+          }`}
+        >
+          <Bot className="w-3.5 h-3.5" />
+          <span>Bot Token</span>
         </button>
       </div>
 
       {/* Main Auth Form Container */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 shadow-xl space-y-5">
+      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 shadow-xl space-y-5">
         {authMode === 'qr' ? (
           /* =================== QR CODE MODE =================== */
-          <div className="space-y-5">
+          <div className="space-y-4">
             {!isQrActive ? (
-              /* QR Setup & Key Inputs */
               <div className="space-y-4">
                 <div className="p-3.5 bg-sky-950/30 border border-sky-800/40 rounded-xl text-xs text-sky-200 flex items-start gap-2.5">
                   <Sparkles className="w-4 h-4 text-sky-400 flex-shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-semibold block text-white mb-0.5">Самый надежный способ входа:</span>
-                    Вход по QR-коду не требует ожидания SMS или кодов в сторонних сессиях. Вы просто сканируете код камерой из мобильного приложения Telegram.
+                    <span className="font-semibold block text-white mb-0.5">
+                      Самый быстрый и надежный способ входа:
+                    </span>
+                    Не требует ожидания SMS или ввода кодов. Отсканируйте QR-код камерой в мобильном приложении Telegram.
                   </div>
                 </div>
 
@@ -459,9 +549,13 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                     onClick={() => setShowAdvancedApiSettings(!showAdvancedApiSettings)}
                     className="text-xs text-neutral-400 hover:text-sky-400 transition flex items-center gap-1.5 cursor-pointer py-1 font-medium"
                   >
-                    <span>{showAdvancedApiSettings ? '▾ Скрыть настройки API Telegram' : '▸ Настройки API ID / Hash (необязательно)'}</span>
+                    <span>
+                      {showAdvancedApiSettings
+                        ? '▾ Скрыть настройки API Telegram'
+                        : '▸ Настройки API ID / Hash (необязательно)'}
+                    </span>
                     <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-1.5 py-0.2 rounded">
-                      Ключи по умолчанию включены
+                      Ключи по умолчанию активны
                     </span>
                   </button>
 
@@ -526,20 +620,25 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                     QR-код успешно подтвержден на телефоне!
                   </div>
                   <p className="text-neutral-300">
-                    На вашем аккаунте включен <strong>облачный пароль 2FA</strong>. Введите его ниже, чтобы завершить авторизацию:
+                    На вашем аккаунте включен <strong>облачный пароль 2FA</strong>. Введите его ниже для завершения входа:
                   </p>
+                  {passwordHint && (
+                    <div className="text-amber-200 font-mono text-[11px] bg-amber-950/60 px-2.5 py-1 rounded border border-amber-800/50">
+                      Подсказка к паролю: <strong>{passwordHint}</strong>
+                    </div>
+                  )}
                 </div>
 
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 mb-1.5 flex items-center gap-1.5">
                     <Lock className="w-3.5 h-3.5 text-amber-400" />
-                    Пароль двухфакторной аутентификации
+                    Пароль двухфакторной аутентификации (2FA)
                   </label>
                   <input
                     type="password"
                     value={qr2FAPassword}
                     onChange={(e) => setQr2FAPassword(e.target.value)}
-                    placeholder="Введите ваш 2FA пароль"
+                    placeholder={passwordHint ? `Подсказка: ${passwordHint}` : 'Введите ваш 2FA пароль'}
                     required
                     autoFocus
                     className="w-full bg-neutral-950 border border-amber-500/60 rounded-xl px-3.5 py-2.5 text-sm text-white focus:border-amber-400 focus:ring-1 focus:ring-amber-400 outline-none transition"
@@ -578,34 +677,34 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
               <div className="flex flex-col items-center text-center space-y-5">
                 <div className="relative p-3 bg-white rounded-2xl shadow-2xl border-4 border-sky-500/30 inline-block">
                   {qrDataUrl ? (
-                    <img 
-                      src={qrDataUrl} 
-                      alt="Telegram Login QR Code" 
-                      className="w-64 h-64 object-contain rounded-lg"
+                    <img
+                      src={qrDataUrl}
+                      alt="Telegram Login QR Code"
+                      className="w-60 h-60 object-contain rounded-lg"
                     />
                   ) : (
-                    <div className="w-64 h-64 flex items-center justify-center bg-neutral-100 text-neutral-500">
+                    <div className="w-60 h-60 flex items-center justify-center bg-neutral-100 text-neutral-500">
                       <RefreshCw className="w-8 h-8 animate-spin text-sky-600" />
                     </div>
                   )}
 
                   {/* QR refresh countdown badge */}
-                  <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-neutral-900 border border-neutral-700 text-neutral-300 rounded-full text-[11px] font-mono shadow-md flex items-center gap-1.5">
+                  <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 px-3 py-1 bg-neutral-900 border border-neutral-700 text-neutral-300 rounded-full text-[11px] font-mono shadow-md flex items-center gap-1.5 whitespace-nowrap">
                     <RefreshCw className="w-3 h-3 text-sky-400 animate-spin" />
-                    Обновление через: <span className="text-white font-bold">{qrExpiresIn}с</span>
+                    Автообновление: <span className="text-white font-bold">{qrExpiresIn}с</span>
                   </div>
                 </div>
 
                 {/* Instructions Steps */}
-                <div className="w-full bg-neutral-950 border border-neutral-800/80 rounded-xl p-4 text-left space-y-2.5">
+                <div className="w-full bg-neutral-950 border border-neutral-800/80 rounded-xl p-4 text-left space-y-2">
                   <h4 className="text-xs font-bold text-sky-400 flex items-center gap-1.5">
                     <Camera className="w-3.5 h-3.5" />
                     Инструкция по сканированию:
                   </h4>
                   <ol className="text-xs text-neutral-300 space-y-1.5 list-decimal list-inside leading-relaxed">
-                    <li>Откройте приложение <strong>Telegram</strong> на смартфоне.</li>
-                    <li>Перейдите в меню: <strong>Настройки → Устройства → Подключить устройство</strong>.</li>
-                    <li>Наведите камеру смартфона на QR-код выше для мгновенного входа.</li>
+                    <li>Откройте <strong>Telegram</strong> на смартфоне.</li>
+                    <li>Перейдите в <strong>Настройки → Устройства → Подключить устройство</strong>.</li>
+                    <li>Наведите камеру телефона на QR-код выше.</li>
                   </ol>
                 </div>
 
@@ -632,11 +731,10 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
               </div>
             )}
           </div>
-        ) : (
+        ) : authMode === 'phone' ? (
           /* =================== PHONE NUMBER MODE =================== */
           <div>
             {!isCodeSent ? (
-              /* Step 1: Phone & API Keys */
               <form onSubmit={(e) => handleSendCode(e, false)} className="space-y-4">
                 <div>
                   <label className="block text-xs font-semibold text-neutral-300 mb-1.5 flex items-center gap-1.5">
@@ -653,16 +751,19 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                   />
                 </div>
 
-                {/* Optional Advanced API Credentials Toggle */}
                 <div>
                   <button
                     type="button"
                     onClick={() => setShowAdvancedApiSettings(!showAdvancedApiSettings)}
                     className="text-xs text-neutral-400 hover:text-sky-400 transition flex items-center gap-1.5 cursor-pointer py-1 font-medium"
                   >
-                    <span>{showAdvancedApiSettings ? '▾ Скрыть настройки API Telegram' : '▸ Настройки API ID / Hash (необязательно)'}</span>
+                    <span>
+                      {showAdvancedApiSettings
+                        ? '▾ Скрыть настройки API Telegram'
+                        : '▸ Настройки API ID / Hash (необязательно)'}
+                    </span>
                     <span className="text-[10px] text-emerald-400 bg-emerald-950/60 border border-emerald-800/40 px-1.5 py-0.2 rounded">
-                      Ключи по умолчанию включены
+                      Ключи по умолчанию активны
                     </span>
                   </button>
 
@@ -718,13 +819,16 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                 </button>
               </form>
             ) : (
-              /* Step 2: Code & 2FA Password */
               <form onSubmit={handleSignInPhone} className="space-y-4">
                 <div className="bg-sky-950/40 border border-sky-800/60 rounded-xl p-3.5 flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2 text-sky-300">
                     <CheckCircle2 className="w-4 h-4 text-sky-400 flex-shrink-0" />
                     <span>
-                      Код отправлен в <strong>{deliveryMethod === 'app' ? 'чат «Telegram» в приложении' : 'SMS'}</strong> на номер {phoneNumber}
+                      Код отправлен в{' '}
+                      <strong>
+                        {deliveryMethod === 'app' ? 'чат «Telegram» в приложении' : 'SMS'}
+                      </strong>{' '}
+                      на номер {phoneNumber}
                     </span>
                   </div>
                   <button
@@ -759,7 +863,7 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                   <div className="space-y-1.5 animate-fadeIn">
                     <label className="block text-xs font-semibold text-amber-300 flex items-center gap-1.5">
                       <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
-                      Облачный пароль 2FA (Two-Factor Authentication)
+                      Облачный пароль 2FA {passwordHint ? `(подсказка: ${passwordHint})` : ''}
                     </label>
                     <input
                       type="password"
@@ -779,7 +883,9 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
                     disabled={resendTimer > 0 || isLoading}
                     className="px-3.5 py-2.5 rounded-xl border border-neutral-800 text-xs font-medium text-neutral-300 hover:bg-neutral-800 disabled:opacity-40 transition cursor-pointer"
                   >
-                    {resendTimer > 0 ? `Отправить повторно через ${resendTimer}с` : 'Отправить код по SMS'}
+                    {resendTimer > 0
+                      ? `Повторно через ${resendTimer}с`
+                      : 'Запросить код повторно'}
                   </button>
 
                   <button
@@ -803,29 +909,81 @@ export const TelegramAuthView: React.FC<TelegramAuthViewProps> = ({
               </form>
             )}
           </div>
+        ) : (
+          /* =================== BOT TOKEN MODE =================== */
+          <form onSubmit={handleConnectBot} className="space-y-4">
+            <div className="p-3.5 bg-purple-950/30 border border-purple-800/40 rounded-xl text-xs text-purple-200 flex items-start gap-2.5">
+              <Bot className="w-4 h-4 text-purple-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold block text-white mb-0.5">
+                  Подключение студийного бота (@BotFather):
+                </span>
+                Позволяет мгновенно публиковать релизные посты, закреплять анонсы и отправлять командные уведомления в чаты и каналы без входа в личный аккаунт.
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-neutral-300 mb-1.5 flex items-center gap-1.5">
+                <Key className="w-3.5 h-3.5 text-purple-400" />
+                HTTP API Токен бота (от @BotFather)
+              </label>
+              <input
+                type="password"
+                value={botToken}
+                onChange={(e) => setBotToken(e.target.value)}
+                placeholder="1234567890:ABCdefGHIjklMNOpqrsTUVwxyz..."
+                required
+                className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2.5 text-xs text-white font-mono focus:border-purple-500 outline-none transition"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="w-full py-3 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-semibold rounded-xl text-sm transition shadow-lg flex items-center justify-center gap-2 cursor-pointer"
+            >
+              {isLoading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  Проверка токена...
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  Проверить и подключить бота
+                </>
+              )}
+            </button>
+          </form>
         )}
       </div>
 
       {/* Live Logs Collapsible */}
       <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-lg">
         <button
+          type="button"
           onClick={() => setShowLogs(!showLogs)}
           className="w-full px-4 py-2.5 bg-neutral-950/80 flex items-center justify-between text-xs font-medium text-neutral-400 hover:text-white transition cursor-pointer"
         >
           <span className="flex items-center gap-2">
             <Terminal className="w-3.5 h-3.5 text-sky-400" />
-            Лог аутентификации MTProto
+            Лог подключения Telegram
           </span>
           {showLogs ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
         </button>
 
         {showLogs && (
-          <div className="p-3 bg-neutral-950 font-mono text-[11px] max-h-40 overflow-y-auto space-y-1">
+          <div className="p-3 bg-neutral-950 font-mono text-[11px] max-h-36 overflow-y-auto space-y-1">
             {logs.length === 0 ? (
               <div className="text-neutral-600 italic">Ожидание действий...</div>
             ) : (
               logs.map((l, i) => (
-                <div key={i} className={`flex items-start gap-2 ${l.isError ? 'text-red-400' : 'text-neutral-300'}`}>
+                <div
+                  key={i}
+                  className={`flex items-start gap-2 ${
+                    l.isError ? 'text-red-400' : 'text-neutral-300'
+                  }`}
+                >
                   <span className="text-neutral-500 flex-shrink-0">[{l.time}]</span>
                   <span className="break-all">{l.text}</span>
                 </div>

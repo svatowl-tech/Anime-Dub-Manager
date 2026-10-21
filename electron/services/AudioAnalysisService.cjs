@@ -480,25 +480,32 @@ class AudioAnalysisService {
     const resolved = path.resolve(filePath).toLowerCase();
     const base = path.basename(resolved);
 
-    // Не может быть уже обработанным acoustic_matched или оригиналом
-    if (base.startsWith('acoustic_matched_') || base.includes('original') || base.includes('ducked')) {
+    // Не может быть неразделенным оригиналом или даккнутым фоном
+    if (base.includes('original') || base.includes('ducked') || base.includes('master_audio')) {
       return false;
     }
 
     if (manifest && Array.isArray(manifest.pipeline)) {
-      const glueStep = manifest.pipeline.find(
-        s => (s.moduleId === 'glue_compress' || s.moduleId === 'mix_voices') && s.status === 'completed' && Array.isArray(s.outputFiles) && s.outputFiles.length > 0
+      const glueIdx = manifest.pipeline.findIndex(
+        s => s && (s.moduleId === 'glue_compress' || s.moduleId === 'mix_voices')
       );
-      if (glueStep) {
-        const matchGlue = glueStep.outputFiles.some(
-          f => f && f.path && path.resolve(f.path).toLowerCase() === resolved
-        );
-        if (matchGlue) return true;
+      if (glueIdx !== -1) {
+        for (let i = glueIdx; i < manifest.pipeline.length; i++) {
+          const st = manifest.pipeline[i];
+          if (!st || !Array.isArray(st.outputFiles)) continue;
+          const mod = (st.moduleId || '').toLowerCase();
+          if (['ducking', 'master_audio_mix', 'video_mux'].includes(mod)) continue;
+          const matched = st.outputFiles.some(
+            f => f && f.path && path.resolve(f.path).toLowerCase() === resolved
+          );
+          if (matched) return true;
+        }
       }
     }
 
     return (
       base.includes('voices_master') ||
+      base.includes('склеенная шина голосов') ||
       base.includes('mix_voices') ||
       base.includes('glue_') ||
       base.includes('glued_voices') ||

@@ -380,38 +380,230 @@ safeHandle('install-update', () => {
 app.whenReady().then(async () => {
   log.info('app.whenReady resolved. Initializing Anime Dub Manager...');
 
-  // Register custom-media streaming protocol handler (handles Windows paths with drive letters, cyrillic, byte ranges)
+  // Helper to create a Web ReadableStream from Node fs.createReadStream with immediate lock release on cancel
+  const createSafeFileStream = (filePath, streamOpts = {}) => {
+    let nodeStream = null;
+    return new ReadableStream({
+      start(controller) {
+        try {
+          nodeStream = fsSync.createReadStream(filePath, streamOpts);
+          nodeStream.on('data', (chunk) => {
+            try {
+              controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+              if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+                nodeStream.pause();
+              }
+            } catch (e) {
+              try { nodeStream.destroy(); } catch (_) {}
+            }
+          });
+          nodeStream.on('end', () => {
+            try { controller.close(); } catch (_) {}
+          });
+          nodeStream.on('error', (err) => {
+            try { controller.error(err); } catch (_) {}
+          });
+        } catch (err) {
+          try { controller.error(err); } catch (_) {}
+        }
+      },
+      pull() {
+        if (nodeStream && nodeStream.isPaused()) {
+          nodeStream.resume();
+        }
+      },
+      cancel() {
+        if (nodeStream) {
+          try { nodeStream.destroy(); } catch (_) {}
+          nodeStream = null;
+        }
+      }
+    });
+  };
+
+  const getMediaMimeType = (filePath) => {
+    const ext = path.extname(filePath || '').toLowerCase();
+    switch (ext) {
+      case '.mp4':
+      case '.m4v':
+        return 'video/mp4';
+      case '.webm':
+        return 'video/webm';
+      case '.mkv':
+        return 'video/x-matroska';
+      case '.mov':
+        return 'video/quicktime';
+      case '.avi':
+        return 'video/x-msvideo';
+      case '.wav':
+        return 'audio/wav';
+      case '.mp3':
+        return 'audio/mpeg';
+      case '.flac':
+        return 'audio/flac';
+      case '.ogg':
+      case '.opus':
+        return 'audio/ogg';
+      case '.m4a':
+      case '.aac':
+        return 'audio/mp4';
+      case '.jpg':
+      case '.jpeg':
+        return 'image/jpeg';
+      case '.png':
+        return 'image/png';
+      case '.webp':
+        return 'image/webp';
+      default:
+        return 'application/octet-stream';
+    }
+  };
+
+  // Register custom-media streaming protocol handler (handles Windows paths with drive letters, cyrillic, brackets, and HTTP 206 byte ranges)
   try {
-    protocol.handle('custom-media', (request) => {
+    protocol.handle('custom-media', async (request) => {
       try {
-        let rawUrl = request.url;
-        // Handle Windows single-letter drive host like custom-media://i/YandexDisk/... -> I:\YandexDisk\...
-        const singleDriveMatch = rawUrl.match(/^custom-media:\/\/([a-zA-Z])\/(.+)$/);
+        const rawUrl = request.url;
         let decodedPath = '';
-        if (singleDriveMatch) {
-          const driveLetter = singleDriveMatch[1].toUpperCase();
-          const restPath = decodeURIComponent(singleDriveMatch[2]);
-          decodedPath = `${driveLetter}:/${restPath}`;
-        } else {
-          let uri = rawUrl.replace(/^custom-media:\/\//, '');
-          uri = uri.replace(/^localhost\//, '');
-          decodedPath = decodeURIComponent(uri);
-          if (/^\/[a-zA-Z]:/.test(decodedPath)) {
-            decodedPath = decodedPath.slice(1);
+
+        // 1. Check for explicit ?path=... query parameter (custom-media://local/media?path=...)
+        try {
+          const parsedUrl = new URL(rawUrl);
+          const queryPath = parsedUrl.searchParams.get('path');
+          if (queryPath) {
+            decodedPath = queryPath;
+          }
+        } catch (_) {}
+
+        // 2. Fallback to path-based URL parsing for legacy URLs
+        if (!decodedPath) {
+          const urlNoQuery = rawUrl.split('?')[0];
+          const singleDriveMatch = urlNoQuery.match(/^custom-media:\/\/([a-zA-Z])\/(.+)$/);
+          if (singleDriveMatch) {
+            const driveLetter = singleDriveMatch[1].toUpperCase();
+            const restPath = decodeURIComponent(singleDriveMatch[2]);
+            decodedPath = `${driveLetter}:/${restPath}`;
+          } else {
+            let uri = urlNoQuery.replace(/^custom-media:\/\//, '');
+            uri = uri.replace(/^localhost\//, '').replace(/^local\/media\/?/, '');
+            decodedPath = decodeURIComponent(uri);
+            if (/^\/[a-zA-Z]:/.test(decodedPath)) {
+              decodedPath = decodedPath.slice(1);
+            }
           }
         }
-        decodedPath = decodedPath.replace(/\//g, path.sep);
+
+        decodedPath = decodedPath.replace(/^file:\/\//, '');
+        if (/^\/[a-zA-Z]:/.test(decodedPath)) {
+          decodedPath = decodedPath.slice(1);
+        }
+        decodedPath = process.platform === 'win32'
+          ? decodedPath.replace(/\//g, '\\')
+          : decodedPath.replace(/\\/g, '/');
+
         let targetFile = decodedPath;
-        if (/\.(mkv|avi|flv|ts|wmv|hevc)$/i.test(decodedPath)) {
-          const proxyPath = `${decodedPath}.preview_proxy.mp4`;
+
+        // If a temporary .tmp_ file was requested after it was already renamed to the final file, transparently resolve to final file
+        if (!fsSync.existsSync(targetFile)) {
+          const baseName = path.basename(targetFile);
+          if (baseName.startsWith('.tmp_')) {
+            const cleanedBase = baseName.replace(/^\.tmp_[0-9]+_[a-z0-9]+_/i, '');
+            const fallbackFinal = path.join(path.dirname(targetFile), cleanedBase);
+            if (fsSync.existsSync(fallbackFinal)) {
+              targetFile = fallbackFinal;
+            }
+          }
+        }
+
+        // Check for preview proxy if MKV/AVI/HEVC container
+        if (/\.(mkv|avi|flv|ts|wmv|hevc)$/i.test(targetFile)) {
+          const proxyPath = `${targetFile}.preview_proxy.mp4`;
           if (fsSync.existsSync(proxyPath)) {
             targetFile = proxyPath;
           }
         }
-        return net.fetch(require('url').pathToFileURL(targetFile).toString());
+
+        if (!targetFile || !fsSync.existsSync(targetFile)) {
+          log.warn(`[custom-media] File not found on disk: ${targetFile} (from ${rawUrl})`);
+          return new Response('Media file not found', {
+            status: 404,
+            headers: { 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const stat = await fs.stat(targetFile);
+        if (!stat.isFile()) {
+          return new Response('Not a file', {
+            status: 404,
+            headers: { 'Access-Control-Allow-Origin': '*' }
+          });
+        }
+
+        const totalSize = stat.size;
+        const mimeType = getMediaMimeType(targetFile);
+
+        if (request.method === 'HEAD') {
+          return new Response(null, {
+            status: 200,
+            headers: {
+              'Content-Type': mimeType,
+              'Content-Length': String(totalSize),
+              'Accept-Ranges': 'bytes',
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'no-cache'
+            }
+          });
+        }
+
+        const rangeHeader = request.headers.get('Range') || request.headers.get('range');
+        if (rangeHeader && totalSize > 0) {
+          const parts = rangeHeader.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? Math.min(parseInt(parts[1], 10), totalSize - 1) : totalSize - 1;
+
+          if (isNaN(start) || start < 0 || start >= totalSize || start > end) {
+            return new Response(null, {
+              status: 416,
+              headers: {
+                'Content-Range': `bytes */${totalSize}`,
+                'Access-Control-Allow-Origin': '*'
+              }
+            });
+          }
+
+          const chunkSize = (end - start) + 1;
+          const stream = createSafeFileStream(targetFile, { start, end, highWaterMark: 256 * 1024 });
+
+          return new Response(stream, {
+            status: 206,
+            headers: {
+              'Content-Range': `bytes ${start}-${end}/${totalSize}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': String(chunkSize),
+              'Content-Type': mimeType,
+              'Access-Control-Allow-Origin': '*',
+              'Cache-Control': 'no-cache'
+            }
+          });
+        }
+
+        const fullStream = createSafeFileStream(targetFile, { highWaterMark: 256 * 1024 });
+        return new Response(fullStream, {
+          status: 200,
+          headers: {
+            'Accept-Ranges': 'bytes',
+            'Content-Length': String(totalSize),
+            'Content-Type': mimeType,
+            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'no-cache'
+          }
+        });
       } catch (err) {
         log.error('[custom-media] protocol error:', err);
-        return new Response('Media file not found or invalid', { status: 404 });
+        return new Response('Media file error', {
+          status: 500,
+          headers: { 'Access-Control-Allow-Origin': '*' }
+        });
       }
     });
     log.info('[custom-media] protocol registered successfully.');

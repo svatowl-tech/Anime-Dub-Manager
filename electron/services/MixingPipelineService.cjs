@@ -2855,8 +2855,23 @@ class MixingPipelineService {
   async _refreshManifestFiles(manifest, workingDir, episode) {
     if (!fsSync.existsSync(workingDir)) return;
 
+    const isTempOrHiddenFile = (filename) => {
+      if (!filename) return true;
+      const base = path.basename(filename);
+      const lower = base.toLowerCase();
+      return (
+        base.startsWith('.tmp_') ||
+        base.startsWith('.trash_') ||
+        base.startsWith('.') ||
+        lower.startsWith('temp_') ||
+        lower.endsWith('.tmp') ||
+        lower.endsWith('.part') ||
+        lower.includes('.preview_proxy.')
+      );
+    };
+
     const entries = await fs.readdir(workingDir, { withFileTypes: true }).catch(() => []);
-    const fileNames = entries.filter(e => e.isFile()).map(e => e.name);
+    const fileNames = entries.filter(e => e.isFile() && !isTempOrHiddenFile(e.name)).map(e => e.name);
 
     const rawDir = path.join(workingDir, '00_исходные');
     const parentDir = path.dirname(workingDir);
@@ -2879,7 +2894,7 @@ class MixingPipelineService {
         path.resolve(process.cwd(), episode.rawPath)
       ];
       for (const cand of candidates) {
-        if (cand && fsSync.existsSync(cand) && videoExtRegex.test(cand) && !cand.includes('[СВЕДЕНО]') && !cand.includes('video_mux')) {
+        if (cand && fsSync.existsSync(cand) && !isTempOrHiddenFile(cand) && videoExtRegex.test(cand) && !cand.includes('[СВЕДЕНО]') && !cand.includes('video_mux')) {
           videoPath = cand;
           videoFile = path.basename(cand);
           break;
@@ -2892,7 +2907,7 @@ class MixingPipelineService {
       for (const dir of searchVideoDirs) {
         try {
           const dirFiles = fsSync.readdirSync(dir);
-          const found = dirFiles.find(f => videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
+          const found = dirFiles.find(f => !isTempOrHiddenFile(f) && videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
           if (found) {
             videoPath = path.join(dir, found);
             videoFile = found;
@@ -2989,7 +3004,7 @@ class MixingPipelineService {
 
     const foundDubberTracks = [];
     for (const sDir of searchDirs) {
-      const dirFiles = fsSync.readdirSync(sDir).filter(f => audioExts.test(f));
+      const dirFiles = fsSync.readdirSync(sDir).filter(f => !isTempOrHiddenFile(f) && audioExts.test(f));
       for (const f of dirFiles) {
         if (isStepOutputFile(f)) {
           continue;
@@ -3182,6 +3197,15 @@ class MixingPipelineService {
       manifest.isImported = true;
     }
 
+    // Reset finalVideo if it currently points to a missing or temporary .tmp_ file
+    if (manifest.finalVideo && (!manifest.finalVideo.path || isTempOrHiddenFile(manifest.finalVideo.path) || !fsSync.existsSync(manifest.finalVideo.path))) {
+      manifest.finalVideo = null;
+    }
+
+    const hasActiveFfmpeg = Boolean(this._activeFfmpegCommands && this._activeFfmpegCommands.size > 0);
+
+    const glueStepIdx = (manifest.pipeline || []).findIndex(s => s && s.enabled && s.moduleId === 'glue_compress');
+
     // Refresh outputs for each step (preserving dubberNick and type metadata)
     for (let sIdx = 0; sIdx < manifest.pipeline.length; sIdx++) {
       const step = manifest.pipeline[sIdx];
@@ -3190,40 +3214,87 @@ class MixingPipelineService {
       const prevOutMap = new Map((step.outputFiles || []).map(of => [of.name || path.basename(of.path || ''), of]));
 
       const stepDir = path.join(workingDir, `${String(sIdx + 1).padStart(2, '0')}_${step.moduleId}`);
-      const stepFiles = [];
+      let stepFiles = [];
+      const isPostGlueVoiceStep = glueStepIdx !== -1 && sIdx >= glueStepIdx && this._isVoiceChainStep(step);
 
-      const buildStepFileObj = (fName, fPath, sizeBytes) => {
+      const buildStepFileObj = (fName, fPath, sizeBytes, mtimeMs = 0) => {
         const prevMeta = prevOutMap.get(fName);
-        const derivedNick = prevMeta?.dubberNick || this._deriveDubberNickFromFilename(fName, step.prefix);
+        const derivedNick = isPostGlueVoiceStep
+          ? 'Склеенная шина голосов'
+          : (prevMeta?.dubberNick || this._deriveDubberNickFromFilename(fName, step.prefix));
         return {
           name: fName,
           path: fPath,
           size: sizeBytes,
           exists: true,
           dubberNick: derivedNick,
-          ...(prevMeta?.type ? { type: prevMeta.type } : {})
+          ...(isPostGlueVoiceStep ? { trackKey: 'voices_master' } : (prevMeta?.trackKey ? { trackKey: prevMeta.trackKey } : {})),
+          ...(prevMeta?.type ? { type: prevMeta.type } : {}),
+          _mtimeMs: mtimeMs
         };
       };
 
       if (fsSync.existsSync(stepDir)) {
+        // First pass: if no FFmpeg is currently running, heal any orphaned .tmp_ files or clean up .trash_ files
+        if (!hasActiveFfmpeg) {
+          try {
+            const rawEntries = fsSync.readdirSync(stepDir);
+            for (const rf of rawEntries) {
+              if (rf.startsWith('.trash_')) {
+                try { fsSync.unlinkSync(path.join(stepDir, rf)); } catch (_) {}
+              } else if (rf.startsWith('.tmp_')) {
+                const cleanedName = rf.replace(/^\.tmp_[0-9]+_[a-z0-9]+_/i, '');
+                const tmpFullPath = path.join(stepDir, rf);
+                const cleanFullPath = path.join(stepDir, cleanedName);
+                try {
+                  if (fsSync.existsSync(cleanFullPath)) {
+                    fsSync.unlinkSync(tmpFullPath);
+                  } else {
+                    const tmpSt = fsSync.statSync(tmpFullPath);
+                    if (tmpSt.size > 1024) {
+                      fsSync.renameSync(tmpFullPath, cleanFullPath);
+                    }
+                  }
+                } catch (_) {}
+              }
+            }
+          } catch (_) {}
+        }
+
         const dirEntries = fsSync.readdirSync(stepDir);
         for (const f of dirEntries) {
+          if (isTempOrHiddenFile(f)) continue;
           if (audioExts.test(f) || /\.(mp4|mkv)$/i.test(f)) {
             const fPath = path.join(stepDir, f);
-            const st = fsSync.statSync(fPath);
-            stepFiles.push(buildStepFileObj(f, fPath, st.size));
+            try {
+              const st = fsSync.statSync(fPath);
+              if (st.size > 0) {
+                stepFiles.push(buildStepFileObj(f, fPath, st.size, st.mtimeMs || 0));
+              }
+            } catch (_) {}
           }
         }
       }
 
-      const rootMatches = fileNames.filter(f => f.startsWith(step.prefix) && (audioExts.test(f) || /\.(mp4|mkv)$/i.test(f)));
+      const rootMatches = fileNames.filter(f => !isTempOrHiddenFile(f) && f.startsWith(step.prefix) && (audioExts.test(f) || /\.(mp4|mkv)$/i.test(f)));
       for (const rmf of rootMatches) {
         const fullP = path.join(workingDir, rmf);
-        const st = fsSync.statSync(fullP);
-        if (!stepFiles.some(sf => sf.name === rmf)) {
-          stepFiles.push(buildStepFileObj(rmf, fullP, st.size));
-        }
+        try {
+          const st = fsSync.statSync(fullP);
+          if (st.size > 0 && !stepFiles.some(sf => sf.name === rmf)) {
+            stepFiles.push(buildStepFileObj(rmf, fullP, st.size, st.mtimeMs || 0));
+          }
+        } catch (_) {}
       }
+
+      // If this is a post-glue voice processing step (without custom tracks) and has duplicate files on disk from older runs,
+      // strictly keep only the single newest processed voice bus file so earlier glue_compress duplicates never leak downstream.
+      if (isPostGlueVoiceStep && (!step.customInputTracks || step.customInputTracks.length === 0) && stepFiles.length > 1) {
+        stepFiles.sort((a, b) => (b._mtimeMs || 0) - (a._mtimeMs || 0));
+        stepFiles = [stepFiles[0]];
+      }
+
+      stepFiles = stepFiles.map(({ _mtimeMs, ...cleanObj }) => cleanObj);
 
       step.outputFiles = stepFiles;
       if (stepFiles.length > 0 && step.status === 'idle') {
@@ -3233,7 +3304,8 @@ class MixingPipelineService {
       }
 
       if (step.moduleId === 'video_mux' && stepFiles.length > 0) {
-        manifest.finalVideo = stepFiles[0];
+        const videoOut = stepFiles.find(sf => /\.(mp4|mkv)$/i.test(sf.name)) || stepFiles[0];
+        manifest.finalVideo = videoOut;
       }
     }
 
@@ -3243,11 +3315,13 @@ class MixingPipelineService {
     }
 
     if (!manifest.finalVideo) {
-      const rootMixedVideo = fileNames.find(f => (f.includes('[СВЕДЕНО]') || f.includes('video_mux')) && /\.(mp4|mkv)$/i.test(f));
+      const rootMixedVideo = fileNames.find(f => !isTempOrHiddenFile(f) && (f.includes('[СВЕДЕНО]') || f.includes('video_mux')) && /\.(mp4|mkv)$/i.test(f));
       if (rootMixedVideo) {
         const fullP = path.join(workingDir, rootMixedVideo);
-        const st = fsSync.statSync(fullP);
-        manifest.finalVideo = { name: rootMixedVideo, path: fullP, size: st.size, exists: true };
+        try {
+          const st = fsSync.statSync(fullP);
+          manifest.finalVideo = { name: rootMixedVideo, path: fullP, size: st.size, exists: true };
+        } catch (_) {}
       }
     }
 
@@ -3396,6 +3470,22 @@ class MixingPipelineService {
     }
   }
 
+  _isGluedVoiceBusTrack(track) {
+    if (!track) return false;
+    if (track.trackKey === 'voices_master') return true;
+    const rawName = (track.name || path.basename(track.path || '')).toLowerCase();
+    const rawNick = (track.dubberNick || track.baseDubberNick || '').toLowerCase();
+    return (
+      rawName.includes('voices_master') ||
+      rawName.includes('склеенная шина голосов') ||
+      rawName.includes('glued_voices') ||
+      rawName.includes('mix_voices') ||
+      rawNick.includes('voices_master') ||
+      rawNick.includes('склеенная шина голосов') ||
+      rawNick.includes('склеенная дорожка всех голосов')
+    );
+  }
+
   _deriveDubberNickFromFilename(filename = '', stepPrefix = '') {
     let base = path.basename(filename || '', path.extname(filename || ''));
     if (stepPrefix && base.startsWith(stepPrefix)) {
@@ -3412,6 +3502,9 @@ class MixingPipelineService {
       .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
       .replace(/^[_\s-]+|[_\s-]+$/g, '')
       .trim();
+    if (/^(voices_master|склеенная шина голосов|glued_voices|mix_voices)$/i.test(cleanNick) || cleanNick.toLowerCase().includes('voices_master') || cleanNick.toLowerCase().includes('склеенная шина голосов')) {
+      return 'Склеенная шина голосов';
+    }
     if (trMatch) {
       const trLabel = trMatch[1].replace(/дорожка/i, 'Дорожка ').replace(/track/i, 'Дорожка ');
       return `${cleanNick || base} (${trLabel.trim()})`;
@@ -3421,6 +3514,9 @@ class MixingPipelineService {
 
   _getTrackKey(track, stepPrefix = '') {
     if (!track) return 'unknown';
+    if (this._isGluedVoiceBusTrack(track)) {
+      return 'voices_master';
+    }
     const rawNick = track.dubberNick || this._deriveDubberNickFromFilename(track.name || path.basename(track.path || ''), stepPrefix);
     const trMatch = rawNick.match(/(?:дорожка|track|layer|take)\s*(\d+)/i) ||
                     (track.name || '').match(/_(?:дорожка|track|layer|take)(\d+)/i);
@@ -3432,10 +3528,16 @@ class MixingPipelineService {
       .replace(/^[_\s-]+|[_\s-]+$/g, '')
       .toLowerCase()
       .trim();
+    if (baseNick === 'voices_master' || baseNick.includes('склеенная шина голосов')) {
+      return 'voices_master';
+    }
     return `${baseNick || 'dubber'}__${trNum}`;
   }
 
   _resolveTrackOutName(track, inputFiles, index, prefix) {
+    if (this._isGluedVoiceBusTrack(track) && (!Array.isArray(inputFiles) || inputFiles.length === 1)) {
+      return `${prefix}voices_master.wav`;
+    }
     const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
     const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.dubberNick || '').match(/(дорожка\s*\d+|track\s*\d+)/i);
     const fallbackNick = this._deriveDubberNickFromFilename(origBase);
@@ -3466,6 +3568,9 @@ class MixingPipelineService {
   }
 
   _resolveTrackNick(track, inputFiles, index) {
+    if (this._isGluedVoiceBusTrack(track) && (!Array.isArray(inputFiles) || inputFiles.length === 1)) {
+      return 'Склеенная шина голосов';
+    }
     const origBase = path.basename(track.path || track.name || '', path.extname(track.path || track.name || ''));
     const trMatch = origBase.match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.name || '').match(/_(дорожка\d+|track\d+|layer\d+|take\d+)/i) || (track.dubberNick || '').match(/(дорожка\s*\d+|track\s*\d+)/i);
     const fallbackNick = this._deriveDubberNickFromFilename(origBase);
@@ -3934,6 +4039,21 @@ class MixingPipelineService {
           throw new Error(`Неизвестный тип модуля: ${step.moduleId}`);
       }
 
+      // Clean up any stale audio/video files in stepFolder that were not produced in this run
+      try {
+        const validResultPaths = new Set((resultFiles || []).map(rf => rf?.path ? path.resolve(rf.path).toLowerCase() : ''));
+        if (validResultPaths.size > 0 && fsSync.existsSync(stepFolder)) {
+          const existingEntries = fsSync.readdirSync(stepFolder);
+          for (const entry of existingEntries) {
+            if (!/\.(wav|mp3|flac|ogg|m4a|aac|mp4|mkv)$/i.test(entry)) continue;
+            const fullEntryPath = path.join(stepFolder, entry);
+            if (!validResultPaths.has(path.resolve(fullEntryPath).toLowerCase())) {
+              try { fsSync.unlinkSync(fullEntryPath); } catch (_) {}
+            }
+          }
+        }
+      } catch (_) {}
+
       const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(2);
       step.status = 'completed';
       step.outputFiles = resultFiles;
@@ -4005,14 +4125,68 @@ class MixingPipelineService {
     if (!step) return false;
     const mod = (step.moduleId || '').toLowerCase();
     if (this._isOriginalSeparationStep(mod)) return true;
-    if (this._isAcousticMatchStep(mod)) return true;
     if (['ducking', 'master_audio_mix', 'video_mux'].includes(mod)) return true;
     return false;
   }
 
   /**
-   * Resolves all candidate input tracks entering a given step, preserving per-dubber lineage across steps
-   * even if a track was excluded in an earlier step, and attaching excluded/custom flags for UI & execution.
+   * Checks whether a step belongs to the sequential Voice Processing Chain
+   * (includes per-dubber processing, glue_compress, acoustic_original_match, and post-glue voice modules;
+   * excludes original separation, sidechain ducking background output, master_audio_mix, and video_mux).
+   */
+  _isVoiceChainStep(stepOrModId) {
+    const mod = (typeof stepOrModId === 'string' ? stepOrModId : (stepOrModId?.moduleId || '')).toLowerCase();
+    if (!mod) return false;
+    if (this._isOriginalSeparationStep(mod)) return false;
+    if (['ducking', 'master_audio_mix', 'video_mux'].includes(mod)) return false;
+    return true;
+  }
+
+  /**
+   * Strictly finds the single immediately preceding enabled & completed voice chain step before `beforeStepIndex`.
+   * Never accumulates or merges outputs from older steps.
+   */
+  _findLatestCompletedVoiceStep(manifest, beforeStepIndex) {
+    const pipeline = manifest?.pipeline || [];
+    const limit = typeof beforeStepIndex === 'number' ? Math.min(beforeStepIndex, pipeline.length) : pipeline.length;
+    const glueStepIdx = pipeline.findIndex(s => s && s.enabled && s.moduleId === 'glue_compress');
+
+    for (let i = limit - 1; i >= 0; i--) {
+      const s = pipeline[i];
+      if (!s || !s.enabled) continue;
+      if (!this._isVoiceChainStep(s)) continue;
+      let validOutputs = (s.outputFiles || []).filter(f => f && f.path && fsSync.existsSync(f.path));
+      if (validOutputs.length > 0) {
+        const isPostGlue = glueStepIdx !== -1 && i >= glueStepIdx;
+        if (isPostGlue && (!s.customInputTracks || s.customInputTracks.length === 0) && validOutputs.length > 1) {
+          // Safeguard: if an old run left multiple files in a post-glue step, pick the latest modified file
+          validOutputs = [...validOutputs].sort((a, b) => {
+            try {
+              return fsSync.statSync(b.path).mtimeMs - fsSync.statSync(a.path).mtimeMs;
+            } catch (_) {
+              return 0;
+            }
+          }).slice(0, 1);
+        }
+        return {
+          step: s,
+          stepIndex: i,
+          stepNumber: i + 1,
+          isPostGlue,
+          outputFiles: validOutputs
+        };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Resolves all candidate input tracks entering a given step.
+   * CRITICAL RULE:
+   * - Every Voice Processing Module strictly receives ONLY the outputs of the immediately preceding voice module
+   *   (or source dubber tracks if it is the first voice module). Never accumulates earlier steps (like step #5 glue_compress into step #10).
+   * - Special modules (Original Separation, Acoustic Match, Ducking, Master Mix, Video Mux) receive their dedicated inputs,
+   *   where the voice input is always strictly the latest preceding completed voice module.
    */
   _resolveCandidateInputsForStep(manifest, stepIndex) {
     const currentStep = manifest?.pipeline?.[stepIndex];
@@ -4032,7 +4206,7 @@ class MixingPipelineService {
       };
     };
 
-    // 1. Original Audio Separation steps
+    // 1. Special Module: Original Audio Separation steps
     if (this._isOriginalSeparationStep(moduleId)) {
       const list = [];
       if (manifest.sourceFiles?.originalAudio?.path && fsSync.existsSync(manifest.sourceFiles.originalAudio.path)) {
@@ -4051,14 +4225,14 @@ class MixingPipelineService {
       return list;
     }
 
-    // 1B. Acoustic Matched Step: Accepts EXCLUSIVELY Separated Original Vocals + Glued Voices Master
+    // 1B. Special Module: Acoustic Matched Step (Separated Original Vocals + Immediately Preceding Glued Voice Step)
     if (this._isAcousticMatchStep(moduleId)) {
       const list = [];
+      const allSteps = manifest.pipeline || [];
 
-      // Find separated original vocal stem from preceding (or any completed) stem separation step
+      // Input 1: Separated original vocal stem from preceding (or any completed) stem separation step
       let origVocalFile = null;
       let origVocalStepNum = null;
-      const allSteps = manifest.pipeline || [];
       for (let i = 0; i < allSteps.length; i++) {
         const s = allSteps[i];
         if (!s || !this._isOriginalSeparationStep(s.moduleId) || !Array.isArray(s.outputFiles)) continue;
@@ -4084,26 +4258,32 @@ class MixingPipelineService {
         }));
       }
 
-      // Find glued voices_master track from preceding (or completed) glue_compress step
-      let gluedVoiceFile = null;
-      let gluedStepNum = null;
-      for (let i = 0; i < allSteps.length; i++) {
-        const s = allSteps[i];
-        if (!s || s.moduleId !== 'glue_compress' || !Array.isArray(s.outputFiles) || s.outputFiles.length === 0) continue;
-        const gf = s.outputFiles[0];
-        if (gf && gf.path && fsSync.existsSync(gf.path)) {
-          gluedVoiceFile = gf;
-          gluedStepNum = i + 1;
-        }
-      }
-
-      if (gluedVoiceFile) {
+      // Input 2: Strictly the immediately preceding completed voice step (e.g. glue_compress or a post-glue voice step)
+      const prevVoice = this._findLatestCompletedVoiceStep(manifest, stepIndex);
+      if (prevVoice && prevVoice.outputFiles.length > 0) {
+        const vf = prevVoice.outputFiles[0];
         list.push(markExcluded({
-          ...gluedVoiceFile,
+          ...vf,
           trackKey: 'voices_master',
           dubberNick: '2. Склеенная дорожка всех голосов (voices_master)',
-          sourceLabel: `Из шага #${gluedStepNum} (Склейка голосов)`
+          sourceLabel: `Из шага #${prevVoice.stepNumber} (${prevVoice.step.moduleId})`
         }));
+      } else {
+        // Fallback if no preceding voice step is completed yet: check if glue_compress is completed anywhere
+        for (let i = 0; i < allSteps.length; i++) {
+          const s = allSteps[i];
+          if (!s || s.moduleId !== 'glue_compress' || !Array.isArray(s.outputFiles) || s.outputFiles.length === 0) continue;
+          const gf = s.outputFiles[0];
+          if (gf && gf.path && fsSync.existsSync(gf.path)) {
+            list.push(markExcluded({
+              ...gf,
+              trackKey: 'voices_master',
+              dubberNick: '2. Склеенная дорожка всех голосов (voices_master)',
+              sourceLabel: `Из шага #${i + 1} (Склейка голосов)`
+            }));
+            break;
+          }
+        }
       }
 
       for (const ct of customTracks) {
@@ -4114,47 +4294,93 @@ class MixingPipelineService {
       return list;
     }
 
-    // 2. Bus / Post-Mix steps (ducking, master_audio_mix, video_mux)
+    // 2. Special Bus / Post-Mix steps (ducking, master_audio_mix, video_mux)
     if (['ducking', 'master_audio_mix', 'video_mux'].includes(moduleId)) {
       const list = [];
+      const searchEnd = stepIndex > 0 ? stepIndex : (manifest.pipeline || []).length;
+
       if (moduleId === 'video_mux') {
-        const mixStep = (manifest.pipeline || []).find(s => s.moduleId === 'master_audio_mix' && s.outputFiles?.length > 0);
-        if (mixStep && mixStep.outputFiles[0]) {
-          list.push(markExcluded({
-            ...mixStep.outputFiles[0],
-            trackKey: 'master_audio',
-            dubberNick: 'Сведенный мастер-звук',
-            sourceLabel: 'Из Мастер-микса'
-          }));
-        }
-      } else {
-        // Prefer the latest completed bus voice track (either acoustic_matched or glue_compress)
-        let latestVoiceBusFile = null;
-        let latestVoiceBusLabel = 'Из Склейки голосов';
-        let latestVoiceBusNick = 'Склеенная шина голосов';
-        const searchEnd = stepIndex > 0 ? stepIndex : (manifest.pipeline || []).length;
-        for (let i = 0; i < searchEnd; i++) {
+        // Strictly take the latest preceding master_audio_mix output
+        for (let i = searchEnd - 1; i >= 0; i--) {
           const s = manifest.pipeline[i];
-          if (!s || !s.enabled || !Array.isArray(s.outputFiles) || s.outputFiles.length === 0) continue;
-          if (this._isAcousticMatchStep(s.moduleId) && s.outputFiles[0] && fsSync.existsSync(s.outputFiles[0].path)) {
-            latestVoiceBusFile = s.outputFiles[0];
-            latestVoiceBusLabel = `Из шага #${i + 1} (Acoustic Matched)`;
-            latestVoiceBusNick = 'Склеенная шина голосов (с эффектами оригинала)';
-          } else if (s.moduleId === 'glue_compress' && s.outputFiles[0] && fsSync.existsSync(s.outputFiles[0].path)) {
-            latestVoiceBusFile = s.outputFiles[0];
-            latestVoiceBusLabel = `Из шага #${i + 1} (Склейка голосов)`;
-            latestVoiceBusNick = 'Склеенная шина голосов';
+          if (s && s.moduleId === 'master_audio_mix' && Array.isArray(s.outputFiles) && s.outputFiles.length > 0) {
+            const mf = s.outputFiles[0];
+            if (mf && mf.path && fsSync.existsSync(mf.path)) {
+              list.push(markExcluded({
+                ...mf,
+                trackKey: 'master_audio',
+                dubberNick: 'Сведенный мастер-звук',
+                sourceLabel: `Из шага #${i + 1} (Мастер-микс аудио)`
+              }));
+              break;
+            }
           }
         }
-        if (latestVoiceBusFile) {
-          list.push(markExcluded({
-            ...latestVoiceBusFile,
-            trackKey: 'voices_master',
-            dubberNick: latestVoiceBusNick,
-            sourceLabel: latestVoiceBusLabel
-          }));
+      } else {
+        // For BOTH 'ducking' and 'master_audio_mix':
+        // Voice Input: Strictly take the output of the immediately preceding completed voice step (e.g. Step #10, NEVER Step #5 if Step #10 exists!)
+        const prevVoice = this._findLatestCompletedVoiceStep(manifest, searchEnd);
+        if (prevVoice && prevVoice.outputFiles.length > 0) {
+          for (let vIdx = 0; vIdx < prevVoice.outputFiles.length; vIdx++) {
+            const vf = prevVoice.outputFiles[vIdx];
+            const isSingleBus = prevVoice.isPostGlue || prevVoice.outputFiles.length === 1;
+            const key = isSingleBus ? 'voices_master' : this._getTrackKey(vf, prevVoice.step.prefix);
+            const nick = isSingleBus
+              ? 'Склеенная шина голосов'
+              : (vf.dubberNick || this._deriveDubberNickFromFilename(vf.name, prevVoice.step.prefix));
+            list.push(markExcluded({
+              ...vf,
+              trackKey: key,
+              dubberNick: nick,
+              sourceLabel: `Из шага #${prevVoice.stepNumber} (${prevVoice.step.moduleId})`
+            }));
+          }
+        }
+
+        // Background Audio Input for 'master_audio_mix' (and 'ducking')
+        if (moduleId === 'master_audio_mix') {
+          let bgFile = null;
+          let bgLabel = '';
+          let bgNick = 'Фоновая дорожка';
+          for (let i = searchEnd - 1; i >= 0; i--) {
+            const s = manifest.pipeline[i];
+            if (s && s.enabled && s.moduleId === 'ducking' && Array.isArray(s.outputFiles) && s.outputFiles[0]?.path && fsSync.existsSync(s.outputFiles[0].path)) {
+              bgFile = s.outputFiles[0];
+              bgLabel = `Из шага #${i + 1} (Сайдчейн-даккинг)`;
+              bgNick = 'Приглушенный фон оригинала (Ducked)';
+              break;
+            }
+          }
+          if (!bgFile) {
+            for (let i = searchEnd - 1; i >= 0; i--) {
+              const s = manifest.pipeline[i];
+              if (s && s.enabled && this._isOriginalSeparationStep(s.moduleId) && Array.isArray(s.outputFiles)) {
+                const inst = s.outputFiles.find(f => f && f.path && fsSync.existsSync(f.path) && (f.type === 'instrumental' || /no_vocals|instrumental|_me\.wav/i.test(f.name || '')));
+                if (inst) {
+                  bgFile = inst;
+                  bgLabel = `Из шага #${i + 1} (Инструментал оригинала)`;
+                  bgNick = 'Инструментал оригинала (M&E)';
+                  break;
+                }
+              }
+            }
+          }
+          if (!bgFile && manifest.sourceFiles?.originalAudio?.path && fsSync.existsSync(manifest.sourceFiles.originalAudio.path)) {
+            bgFile = manifest.sourceFiles.originalAudio;
+            bgLabel = 'Исходник серии';
+            bgNick = 'Оригинальное аудио серии (Фон)';
+          }
+          if (bgFile) {
+            list.push(markExcluded({
+              ...bgFile,
+              trackKey: 'background_audio',
+              dubberNick: bgNick,
+              sourceLabel: bgLabel
+            }));
+          }
         }
       }
+
       for (const ct of customTracks) {
         if (ct && ct.path && fsSync.existsSync(ct.path)) {
           list.push(markExcluded({ ...ct, isCustom: true, sourceLabel: 'Добавлена вручную' }));
@@ -4163,88 +4389,58 @@ class MixingPipelineService {
       if (list.length > 0) return list;
     }
 
-    // 3. Dubber Track steps (and glue_compress)
-    const trackMap = new Map();
-    const baseDubbers = manifest.sourceFiles?.dubberTracks || [];
-    for (let idx = 0; idx < baseDubbers.length; idx++) {
-      const tr = baseDubbers[idx];
-      if (!tr || !tr.path) continue;
-      const key = this._getTrackKey(tr);
-      trackMap.set(key, {
-        ...tr,
-        trackKey: key,
-        dubberNick: tr.dubberNick || this._deriveDubberNickFromFilename(tr.name),
-        sourceLabel: 'Исходная дорожка'
-      });
-    }
+    // 3. Voice Processing Modules (all per-dubber modules, glue_compress, and post-glue voice modules)
+    // STRICT RULE: Take ONLY the output files of the immediately preceding completed voice step!
+    const prevVoice = this._findLatestCompletedVoiceStep(manifest, stepIndex);
+    const resultList = [];
 
-    // Walk forward through preceding completed dubber steps to pick up the latest processed file per dubber
-    for (let i = 0; i < stepIndex; i++) {
-      const prevStep = manifest.pipeline[i];
-      if (!prevStep || !prevStep.enabled) continue;
-      if (this._isNonDubberStep(prevStep)) continue;
-
-      // Also include any custom tracks added to upstream steps
-      if (Array.isArray(prevStep.customInputTracks)) {
-        for (const upCustom of prevStep.customInputTracks) {
-          if (upCustom && upCustom.path && fsSync.existsSync(upCustom.path)) {
-            const cKey = this._getTrackKey(upCustom);
-            if (!trackMap.has(cKey)) {
-              trackMap.set(cKey, {
-                ...upCustom,
-                trackKey: cKey,
-                dubberNick: upCustom.dubberNick || this._deriveDubberNickFromFilename(upCustom.name),
-                sourceLabel: `Добавлена в шаге #${i + 1}`
-              });
-            }
-          }
-        }
-      }
-
-      if (!Array.isArray(prevStep.outputFiles) || prevStep.outputFiles.length === 0) continue;
-
-      if (prevStep.moduleId === 'glue_compress') {
-        const gluedOut = prevStep.outputFiles[0];
-        if (gluedOut && gluedOut.path && fsSync.existsSync(gluedOut.path)) {
-          trackMap.clear();
-          trackMap.set('voices_master', {
-            ...gluedOut,
-            trackKey: 'voices_master',
-            dubberNick: 'Склеенная шина голосов',
-            sourceLabel: `Шаг #${i + 1} (Склейка голосов)`
-          });
-        }
-        continue;
-      }
-
-      for (const outFile of prevStep.outputFiles) {
+    if (prevVoice && prevVoice.outputFiles.length > 0) {
+      for (const outFile of prevVoice.outputFiles) {
         if (!outFile || !outFile.path || !fsSync.existsSync(outFile.path)) continue;
-        const key = this._getTrackKey(outFile, prevStep.prefix);
-        const prevEntry = trackMap.get(key);
-        trackMap.set(key, {
+        const isGluedBus = prevVoice.isPostGlue || this._isGluedVoiceBusTrack(outFile);
+        const key = isGluedBus ? 'voices_master' : this._getTrackKey(outFile, prevVoice.step.prefix);
+        const nick = isGluedBus
+          ? 'Склеенная шина голосов'
+          : (outFile.dubberNick || this._deriveDubberNickFromFilename(outFile.name, prevVoice.step.prefix));
+
+        resultList.push(markExcluded({
           ...outFile,
           trackKey: key,
-          dubberNick: outFile.dubberNick || prevEntry?.dubberNick || this._deriveDubberNickFromFilename(outFile.name, prevStep.prefix),
-          sourceLabel: `Шаг #${i + 1} (${prevStep.moduleId})`
-        });
+          dubberNick: nick,
+          sourceLabel: `Из шага #${prevVoice.stepNumber} (${prevVoice.step.moduleId})`
+        }));
+      }
+    } else {
+      // No preceding voice step has been executed yet -> take source dubber tracks
+      const baseDubbers = manifest.sourceFiles?.dubberTracks || [];
+      for (let idx = 0; idx < baseDubbers.length; idx++) {
+        const tr = baseDubbers[idx];
+        if (!tr || !tr.path) continue;
+        const key = this._getTrackKey(tr);
+        resultList.push(markExcluded({
+          ...tr,
+          trackKey: key,
+          dubberNick: tr.dubberNick || this._deriveDubberNickFromFilename(tr.name),
+          sourceLabel: 'Исходная дорожка'
+        }));
       }
     }
 
-    // Add custom tracks explicitly attached to currentStep
+    // Add custom tracks explicitly attached to currentStep ONLY
     for (const ct of customTracks) {
       if (ct && ct.path && fsSync.existsSync(ct.path)) {
         const cKey = this._getTrackKey(ct);
-        trackMap.set(cKey, {
+        resultList.push(markExcluded({
           ...ct,
           trackKey: cKey,
           dubberNick: ct.dubberNick || this._deriveDubberNickFromFilename(ct.name),
           isCustom: true,
           sourceLabel: 'Добавлена в этот шаг вручную'
-        });
+        }));
       }
     }
 
-    return Array.from(trackMap.values()).map(markExcluded);
+    return resultList;
   }
 
   _resolveInputsForStep(manifest, stepIndex) {
@@ -4653,16 +4849,24 @@ class MixingPipelineService {
       throw new Error(errMsg);
     }
 
-    // 2. ПРОВЕРКА №2: Было ли выполнено склеивание всех голосов в одну дорожку (glue_compress -> voices_master)?
+    // 2. ПРОВЕРКА №2: Берем голосовую дорожку СТРОГО из предыдущего голосового модуля (или склейки голосов)
     let gluedVoicesPath = null;
 
     for (const f of (inputFiles || [])) {
       const p = typeof f === 'string' ? f : f?.path;
       if (!p || !fsSync.existsSync(p)) continue;
       if (p === separatedOriginalVocalsPath) continue;
-      if (f.trackKey === 'voices_master' || AudioAnalysisService.isGluedVoicesMasterTrack(p, manifest)) {
+      if (f.trackKey === 'voices_master' || this._isGluedVoiceBusTrack(f) || AudioAnalysisService.isGluedVoicesMasterTrack(p, manifest)) {
         gluedVoicesPath = p;
         break;
+      }
+    }
+
+    if (!gluedVoicesPath) {
+      const currentIdx = allSteps.findIndex(s => s && this._isAcousticMatchStep(s.moduleId));
+      const prevVoice = this._findLatestCompletedVoiceStep(manifest, currentIdx >= 0 ? currentIdx : allSteps.length);
+      if (prevVoice && prevVoice.outputFiles.length === 1 && prevVoice.outputFiles[0]?.path && fsSync.existsSync(prevVoice.outputFiles[0].path)) {
+        gluedVoicesPath = prevVoice.outputFiles[0].path;
       }
     }
 
@@ -6717,22 +6921,25 @@ class MixingPipelineService {
       manifest.sourceFiles.originalAudio = { name: '00_original_audio.wav', path: origAudioPath, size: fsSync.statSync(origAudioPath).size, exists: true };
     }
 
-    let voicePath = inputFiles.find(f => f.name.includes('voices_master') || f.path.includes('voices_master'))?.path;
+    // Управляющая голосовая дорожка сайдчейна: СТРОГО из входных файлов шага (результат последнего предыдущего голосового модуля)
+    let voicePath = null;
+    const voiceInputCandidate = (inputFiles || []).find(
+      f => f && f.path && fsSync.existsSync(f.path) && f.trackKey !== 'background_audio' && path.resolve(f.path) !== path.resolve(origAudioPath)
+    );
+    if (voiceInputCandidate) {
+      voicePath = voiceInputCandidate.path;
+      logFn(`Управляющая голосовая дорожка для даккинга (${voiceInputCandidate.sourceLabel || 'предыдущий голосовой шаг'}): ${path.basename(voicePath)}`);
+    }
     if (!voicePath) {
-      const acousticStep = [...(manifest.pipeline || [])].reverse().find(s => this._isAcousticMatchStep(s.moduleId) && s.outputFiles?.length > 0);
-      if (acousticStep && acousticStep.outputFiles[0] && fsSync.existsSync(acousticStep.outputFiles[0].path)) {
-        voicePath = acousticStep.outputFiles[0].path;
+      const duckStepIdx = (manifest.pipeline || []).findIndex(s => s && s.moduleId === 'ducking');
+      const prevVoice = this._findLatestCompletedVoiceStep(manifest, duckStepIdx >= 0 ? duckStepIdx : (manifest.pipeline || []).length);
+      if (prevVoice && prevVoice.outputFiles[0]?.path && fsSync.existsSync(prevVoice.outputFiles[0].path)) {
+        voicePath = prevVoice.outputFiles[0].path;
+        logFn(`Управляющая голосовая дорожка для даккинга (из шага #${prevVoice.stepNumber} ${prevVoice.step.moduleId}): ${path.basename(voicePath)}`);
       }
     }
     if (!voicePath) {
-      const glueStep = manifest.pipeline.find(s => s.moduleId === 'glue_compress' && s.outputFiles?.length > 0);
-      if (glueStep && glueStep.outputFiles[0] && fsSync.existsSync(glueStep.outputFiles[0].path)) {
-        voicePath = glueStep.outputFiles[0].path;
-      }
-    }
-    if (!voicePath && inputFiles.length > 0) voicePath = inputFiles[0].path;
-    if (!voicePath) {
-      throw new Error('Голосовая дорожка отсутствует. Сначала выполните склейку или нормализацию.');
+      throw new Error('Голосовая дорожка отсутствует. Сначала выполните предыдущий голосовой модуль.');
     }
 
     const outName = `${prefix}ducked_original.wav`;
@@ -6781,26 +6988,37 @@ class MixingPipelineService {
 
     // 1. Поиск фоновой / оригинальной дорожки (Background / Instrumental)
     let duckedAudioPath = null;
-    const duckingStep = manifest.pipeline.find(s => s.moduleId === 'ducking' && s.outputFiles?.length > 0);
-    if (duckingStep && duckingStep.outputFiles[0] && fsSync.existsSync(duckingStep.outputFiles[0].path)) {
-      duckedAudioPath = duckingStep.outputFiles[0].path;
-      logFn(`Использован результат даккинга как фон: ${path.basename(duckedAudioPath)}`);
-    } else if (manifest.sourceFiles?.originalAudio?.path && fsSync.existsSync(manifest.sourceFiles.originalAudio.path)) {
-      duckedAudioPath = manifest.sourceFiles.originalAudio.path;
-      logFn(`Использована оригинальная аудиодорожка из манифеста: ${path.basename(duckedAudioPath)}`);
+    const explicitBgInput = (inputFiles || []).find(f => f && f.trackKey === 'background_audio' && f.path && fsSync.existsSync(f.path));
+    if (explicitBgInput) {
+      duckedAudioPath = explicitBgInput.path;
+      logFn(`Использована фоновая дорожка (${explicitBgInput.sourceLabel || 'фон'}): ${path.basename(duckedAudioPath)}`);
     }
 
-    // 2. Проверяем готовый инструментал из разделения стемов (Demucs / UVR / MDX)
+    if (!duckedAudioPath) {
+      const duckingStep = [...(manifest.pipeline || [])].reverse().find(s => s && s.enabled && s.moduleId === 'ducking' && s.outputFiles?.length > 0);
+      if (duckingStep && duckingStep.outputFiles[0] && fsSync.existsSync(duckingStep.outputFiles[0].path)) {
+        duckedAudioPath = duckingStep.outputFiles[0].path;
+        logFn(`Использован результат даккинга как фон: ${path.basename(duckedAudioPath)}`);
+      }
+    }
+
+    // 2. Проверяем готовый инструментал из разделения стемов (Demucs / UVR / MDX / RoFormer)
     if (!duckedAudioPath || !fsSync.existsSync(duckedAudioPath)) {
-      const stemSteps = (manifest.pipeline || []).filter(s => ['htdemucs', 'htdemucs_ft', 'uvr_mdx_inst_hq3', 'separate', 'uvr_mdx_voc_ft'].includes(s.moduleId) && s.outputFiles?.length > 0);
-      for (const stStep of stemSteps) {
-        const instFile = (stStep.outputFiles || []).find(f => f.type === 'instrumental' || f.name?.includes('no_vocals') || f.name?.includes('instrumental'));
+      const stemSteps = (manifest.pipeline || []).filter(s => s && s.enabled && this._isOriginalSeparationStep(s.moduleId) && s.outputFiles?.length > 0);
+      for (let i = stemSteps.length - 1; i >= 0; i--) {
+        const stStep = stemSteps[i];
+        const instFile = (stStep.outputFiles || []).find(f => f.type === 'instrumental' || f.name?.includes('no_vocals') || f.name?.includes('instrumental') || f.name?.includes('_ME'));
         if (instFile && fsSync.existsSync(instFile.path)) {
           duckedAudioPath = instFile.path;
           logFn(`Использован инструментальный стем этапа «${stStep.moduleId}» в качестве фона: ${instFile.name}`);
           break;
         }
       }
+    }
+
+    if ((!duckedAudioPath || !fsSync.existsSync(duckedAudioPath)) && manifest.sourceFiles?.originalAudio?.path && fsSync.existsSync(manifest.sourceFiles.originalAudio.path)) {
+      duckedAudioPath = manifest.sourceFiles.originalAudio.path;
+      logFn(`Использована оригинальная аудиодорожка из манифеста: ${path.basename(duckedAudioPath)}`);
     }
 
     // 3. Проверяем наличие аудиофайлов на диске
@@ -6865,78 +7083,61 @@ class MixingPipelineService {
     }
 
     // 5. Поиск мастер-дорожки голосов (Vocals Master)
-    // ВАЖНО: Ни в коем случае не путать голос с даккнутым фоном (duckedAudioPath)!
+    // СТРОГОЕ ПРАВИЛО: Берем результат последнего предшествующего голосового модуля (например, 10-го этапа),
+    // а НЕ перепрыгиваем назад на этап первой склейки (glue_compress), если после склейки шли другие голосовые модули!
     let voicePath = null;
+    const timingMeta = await this.getTimingMetadata(workingDir);
 
-    // Сначала проверяем, был ли выполнен шаг наложения эффектов оригинала (acoustic_matched) поверх склеенной шины голосов
-    const acousticStep = [...(manifest.pipeline || [])].reverse().find(s => this._isAcousticMatchStep(s.moduleId) && s.outputFiles?.length > 0);
-    if (acousticStep && acousticStep.outputFiles[0] && fsSync.existsSync(acousticStep.outputFiles[0].path)) {
-      voicePath = acousticStep.outputFiles[0].path;
-      logFn(`Использована склеенная шина голосов с эффектами оригинала (acoustic_matched): ${path.basename(voicePath)}`);
-    }
+    const voiceInputs = (inputFiles || []).filter(
+      f => f && f.path && fsSync.existsSync(f.path) &&
+           f.trackKey !== 'background_audio' &&
+           path.resolve(f.path) !== path.resolve(duckedAudioPath) &&
+           !(f.name || '').toLowerCase().includes('ducked')
+    );
 
-    // Если нет, ищем склеенный голосовой мастер из glue_compress
-    if (!voicePath) {
-      const glueStep = manifest.pipeline.find(s => s.moduleId === 'glue_compress' && s.outputFiles?.length > 0);
-      if (glueStep && glueStep.outputFiles[0] && fsSync.existsSync(glueStep.outputFiles[0].path)) {
-        voicePath = glueStep.outputFiles[0].path;
-        logFn(`Использован мастер склейки голосов: ${path.basename(voicePath)}`);
+    if (voiceInputs.length === 1) {
+      voicePath = voiceInputs[0].path;
+      logFn(`Использована голосовая дорожка (${voiceInputs[0].sourceLabel || 'предыдущий голосовой этап'}): ${path.basename(voicePath)}`);
+    } else if (voiceInputs.length > 1) {
+      logFn(`Склейка ${voiceInputs.length} входных голосовых дорожек с учетом громкости ролей для мастер-микса...`);
+      const tempVoicePath = path.join(stepFolder, 'temp_combined_voices.wav');
+      let joinCmd = ffmpeg();
+      voiceInputs.forEach(t => { joinCmd = joinCmd.input(t.path); });
+
+      const filterParts = [];
+      const mixInputs = [];
+      for (let i = 0; i < voiceInputs.length; i++) {
+        const tr = voiceInputs[i];
+        const roleVolPct = this._resolveTrackVolumePercent(tr, timingMeta);
+        const userVolGainDb = roleVolPct !== 100 ? (20 * Math.log10(Math.max(10, roleVolPct) / 100)) : 0;
+        if (userVolGainDb !== 0) {
+          filterParts.push(`[${i}:a]volume=${userVolGainDb.toFixed(1)}dB[vol_${i}]`);
+          mixInputs.push(`[vol_${i}]`);
+        } else {
+          mixInputs.push(`[${i}:a]`);
+        }
+      }
+      filterParts.push(`${mixInputs.join('')}amix=inputs=${voiceInputs.length}:dropout_transition=0:normalize=0[mixout]`);
+
+      joinCmd
+        .complexFilter(filterParts.join(';'), ['mixout'])
+        .audioCodec('pcm_s16le')
+        .audioChannels(2)
+        .audioFrequency(48000)
+        .output(tempVoicePath);
+      await this._execFfmpeg(joinCmd, { logFn, outPath: tempVoicePath, description: 'Склейка голосов для мастера' });
+      if (fsSync.existsSync(tempVoicePath)) {
+        voicePath = tempVoicePath;
       }
     }
 
-    // Если нет, ищем в предшествующих этапах голосовой обработки
+    // Фоллбэк: если во входных файлах не оказалось голосовых дорожек, ищем последний выполненный голосовой шаг перед master_audio_mix
     if (!voicePath) {
-      const vocalSteps = (manifest.pipeline || []).filter(s => 
-        ['vocal_eq', 'speech_leveler', 'headroom_recovery', 'phrase_norm', 'auto_norm_phrases', 'silence_gate', 'apply_fixes'].includes(s.moduleId) && 
-        s.outputFiles?.length > 0
-      );
-      for (let i = vocalSteps.length - 1; i >= 0; i--) {
-        const vStep = vocalSteps[i];
-        const vFile = (vStep.outputFiles || []).find(f => f.path && fsSync.existsSync(f.path) && f.path !== duckedAudioPath && !f.name.includes('ducked'));
-        if (vFile) {
-          voicePath = vFile.path;
-          logFn(`Использован результат этапа «${vStep.moduleId}» как голосовой мастер: ${path.basename(voicePath)}`);
-          break;
-        }
-      }
-    }
-
-    // Если на входе отдельные дорожки дабберов (например, если шаг glue_compress пропущен)
-    if (!voicePath && inputFiles.length > 0) {
-      const dubberInputs = inputFiles.filter(f => f.path && fsSync.existsSync(f.path) && f.path !== duckedAudioPath && !f.name.includes('ducked'));
-      if (dubberInputs.length === 1) {
-        voicePath = dubberInputs[0].path;
-      } else if (dubberInputs.length > 1) {
-        logFn(`Склейка ${dubberInputs.length} дорожек дабберов с учетом персональной громкости роли для мастер-микса...`);
-        const tempVoicePath = path.join(stepFolder, 'temp_combined_voices.wav');
-        let joinCmd = ffmpeg();
-        dubberInputs.forEach(t => { joinCmd = joinCmd.input(t.path); });
-        
-        const filterParts = [];
-        const mixInputs = [];
-        for (let i = 0; i < dubberInputs.length; i++) {
-          const tr = dubberInputs[i];
-          const roleVolPct = this._resolveTrackVolumePercent(tr, timingMeta);
-          const userVolGainDb = roleVolPct !== 100 ? (20 * Math.log10(Math.max(10, roleVolPct) / 100)) : 0;
-          if (userVolGainDb !== 0) {
-            filterParts.push(`[${i}:a]volume=${userVolGainDb.toFixed(1)}dB[vol_${i}]`);
-            mixInputs.push(`[vol_${i}]`);
-          } else {
-            mixInputs.push(`[${i}:a]`);
-          }
-        }
-        filterParts.push(`${mixInputs.join('')}amix=inputs=${dubberInputs.length}:dropout_transition=0:normalize=0[mixout]`);
-
-        joinCmd
-          .complexFilter(filterParts.join(';'), ['mixout'])
-          .audioCodec('pcm_s16le')
-          .audioChannels(2)
-          .audioFrequency(48000)
-          .output(tempVoicePath);
-        await this._execFfmpeg(joinCmd, { logFn, outPath: tempVoicePath, description: 'Склейка голосов для мастера' });
-        if (fsSync.existsSync(tempVoicePath)) {
-          voicePath = tempVoicePath;
-        }
+      const mixStepIdx = (manifest.pipeline || []).findIndex(s => s && s.moduleId === 'master_audio_mix');
+      const prevVoice = this._findLatestCompletedVoiceStep(manifest, mixStepIdx >= 0 ? mixStepIdx : (manifest.pipeline || []).length);
+      if (prevVoice && prevVoice.outputFiles[0]?.path && fsSync.existsSync(prevVoice.outputFiles[0].path)) {
+        voicePath = prevVoice.outputFiles[0].path;
+        logFn(`Использован результат последнего голосового шага #${prevVoice.stepNumber} (${prevVoice.step.moduleId}): ${path.basename(voicePath)}`);
       }
     }
 

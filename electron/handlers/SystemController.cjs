@@ -1,6 +1,7 @@
 const { ipcMain, dialog, app, shell, BrowserWindow, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
+const fsSync = require('fs');
 const { exec } = require('child_process');
 const log = require('electron-log');
 const AdmZip = require('adm-zip');
@@ -245,12 +246,60 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     return { path: targetPath };
   }));
 
+  const normalizeLocalMediaPath = (inputPath) => {
+    if (!inputPath || typeof inputPath !== 'string') return '';
+    let raw = inputPath.trim();
+    if (raw.startsWith('custom-media://')) {
+      try {
+        const u = new URL(raw);
+        const qPath = u.searchParams.get('path');
+        if (qPath) {
+          raw = qPath;
+        } else {
+          const singleDrive = raw.match(/^custom-media:\/\/([a-zA-Z])\/(.+)$/);
+          if (singleDrive) {
+            raw = `${singleDrive[1].toUpperCase()}:/${decodeURIComponent(singleDrive[2])}`;
+          } else {
+            raw = decodeURIComponent(raw.replace(/^custom-media:\/\//, '').replace(/^localhost\//, '').replace(/^local\/media\/?/, ''));
+          }
+        }
+      } catch (e) {
+        raw = decodeURIComponent(raw.replace(/^custom-media:\/\//, ''));
+      }
+    } else if (raw.startsWith('file://')) {
+      raw = decodeURIComponent(raw.replace(/^file:\/\//, ''));
+    }
+    if (/^\/[a-zA-Z]:/.test(raw)) {
+      raw = raw.slice(1);
+    }
+    return raw.replace(/\//g, path.sep);
+  };
+
+  ipcMain.handle('file-exists', wrapIpcHandler(async (event, payload) => {
+    const rawPath = typeof payload === 'string' ? payload : (payload?.filePath || payload?.path || '');
+    if (!rawPath) return false;
+    const targetPath = normalizeLocalMediaPath(rawPath);
+    if (!targetPath) return false;
+    if (fsSync.existsSync(targetPath)) return true;
+    // Check if it was a temporary .tmp_ file that finished renaming to its final name
+    const base = path.basename(targetPath);
+    if (base.startsWith('.tmp_')) {
+      const cleanedBase = base.replace(/^\.tmp_[0-9]+_[a-z0-9]+_/i, '');
+      const fallbackPath = path.join(path.dirname(targetPath), cleanedBase);
+      if (fsSync.existsSync(fallbackPath)) return true;
+    }
+    return false;
+  }));
+
   ipcMain.handle('read-file-buffer', wrapIpcHandler(async (event, { filePath }) => {
     if (!filePath) throw new Error('Missing filePath parameter');
-    const cleanPath = filePath.replace(/^file:\/\//, '').replace(/^custom-media:\/\//, '');
-    let targetPath = decodeURIComponent(cleanPath);
-    if (/^\/[a-zA-Z]:/.test(targetPath)) {
-      targetPath = targetPath.slice(1);
+    let targetPath = normalizeLocalMediaPath(filePath);
+    if (!fsSync.existsSync(targetPath)) {
+      const base = path.basename(targetPath);
+      if (base.startsWith('.tmp_')) {
+        const fallbackPath = path.join(path.dirname(targetPath), base.replace(/^\.tmp_[0-9]+_[a-z0-9]+_/i, ''));
+        if (fsSync.existsSync(fallbackPath)) targetPath = fallbackPath;
+      }
     }
     const buf = await fs.readFile(targetPath);
     // Return standard ArrayBuffer

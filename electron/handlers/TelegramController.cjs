@@ -19,14 +19,22 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
   const service = getTelegramService(getData, saveData, userDataPath);
 
   ipcMain.handle('telegram-mtproto-get-status', wrapIpcHandler(async () => {
-    return service.getStatus();
+    return await service.getStatusAsync();
+  }));
+
+  ipcMain.handle('telegram-mtproto-reconnect', wrapIpcHandler(async () => {
+    const ok = await service.connectWithSavedSession();
+    return {
+      success: ok,
+      ...service.getStatus()
+    };
   }));
 
   ipcMain.handle('telegram-mtproto-save-settings', wrapIpcHandler(async (event, newSettings) => {
     return await service.saveSettings(newSettings);
   }));
 
-  ipcMain.handle('telegram-mtproto-send-code', wrapIpcHandler(async (event, { phoneNumber, apiId, apiHash, forceSMS }) => {
+  ipcMain.handle('telegram-mtproto-send-code', wrapIpcHandler(async (event, { phoneNumber, apiId, apiHash, forceSMS } = {}) => {
     if (!phoneNumber) throw new Error('Номер телефона обязателен (напр. +79991234567)');
     return await service.sendCode(phoneNumber, apiId, apiHash, forceSMS);
   }));
@@ -35,7 +43,7 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
     return await service.resendCode(forceSMS !== false);
   }));
 
-  ipcMain.handle('telegram-mtproto-sign-in', wrapIpcHandler(async (event, { phoneCode, password }) => {
+  ipcMain.handle('telegram-mtproto-sign-in', wrapIpcHandler(async (event, { phoneCode, password } = {}) => {
     if (!phoneCode) throw new Error('Код подтверждения обязателен');
     return await service.signIn(phoneCode, password);
   }));
@@ -52,7 +60,7 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
     return service.cancelQrCodeAuth();
   }));
 
-  ipcMain.handle('telegram-mtproto-submit-password', wrapIpcHandler(async (event, { password }) => {
+  ipcMain.handle('telegram-mtproto-submit-password', wrapIpcHandler(async (event, { password } = {}) => {
     if (!password) throw new Error('Пароль обязателен');
     return await service.submit2FAPassword(password);
   }));
@@ -63,7 +71,7 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
 
   ipcMain.handle('telegram-mtproto-get-dialogs', wrapIpcHandler(async (event, { limit } = {}) => {
     try {
-      return await service.getDialogs(limit || 50);
+      return await service.getDialogs(limit || 80);
     } catch (err) {
       if (String(err).includes('AUTH_KEY_UNREGISTERED') || String(err).includes('Сессия Telegram устарела')) {
         return [];
@@ -73,7 +81,9 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
   }));
 
   ipcMain.handle('telegram-mtproto-send-post', wrapIpcHandler(async (event, postParams) => {
-    if (!postParams || !postParams.text) throw new Error('Текст поста обязателен');
+    if (!postParams || (!postParams.text && !postParams.mediaPath)) {
+      throw new Error('Укажите текст поста или прикрепите медиафайл');
+    }
     const targetPeer = postParams.targetPeer || postParams.chatPeer || postParams.chatId || postParams.channelId;
     return await service.sendPost({ ...postParams, targetPeer });
   }));
@@ -98,7 +108,7 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
     if (!peer) throw new Error('Чат обязателен');
     return await service.getChatAudioFiles({
       chatPeer: peer,
-      limit: params?.limit || 50
+      limit: params?.limit || 80
     });
   }));
 
@@ -107,7 +117,7 @@ function registerTelegramHandlers(getData, saveData, userDataPath) {
     if (!peer) throw new Error('Чат обязателен');
     return await service.getChatMessages({
       chatPeer: peer,
-      limit: params?.limit || 40
+      limit: params?.limit || 50
     });
   }));
 

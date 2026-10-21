@@ -42,6 +42,12 @@ const HEAVY_CHANNELS: Record<string, number> = {
   'anime365-start-direct-download': 30000,
   'telegram-download-file': 120000,
   'telegram-upload-file': 120000,
+  'telegram-mtproto-download-audio': 120000,
+  'telegram-mtproto-send-post': 60000,
+  'telegram-mtproto-send-automation': 60000,
+  'telegram-mtproto-start-qr': 25000,
+  'telegram-mtproto-test-connection': 25000,
+  'telegram-mtproto-reconnect': 25000,
   'cloud-push': 60000,
   'cloud-pull': 60000,
 };
@@ -58,7 +64,10 @@ const POLLING_CHANNELS = new Set([
   'check-diarization-status',
   'check-ollama-status',
   'telegram-get-status',
-  'telegram-get-logs'
+  'telegram-get-logs',
+  'telegram-mtproto-get-status',
+  'telegram-mtproto-get-logs',
+  'telegram-mtproto-check-qr'
 ]);
 
 export const ipcSafe = {
