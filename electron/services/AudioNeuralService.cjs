@@ -366,7 +366,7 @@ class AudioNeuralService {
   /**
    * Neural AI Speech Denoising (DeepFilterNet 3 ONNX / VR Architecture Denoise)
    */
-  async denoiseAudio({ inputPath, outputPath, modelPath = null, modelId = 'deepfilternet3', attenuationLimitDb = -100.0, sensitivity = 1.0, wetDryBlend = 100.0, onProgress, onLog, abortSignal }) {
+  async denoiseAudio({ inputPath, outputPath, modelPath = null, modelId = 'deepfilternet3', noiseReductionDb = 18.0, attenuationLimitDb = 24.0, postFilter = false, sensitivity = 5.0, wetDryBlend = 100.0, onProgress, onLog, abortSignal }) {
     if (!fs.existsSync(inputPath)) {
       throw new Error(`Входной файл не существует: ${inputPath}`);
     }
@@ -378,7 +378,9 @@ class AudioNeuralService {
       '--input', inputPath,
       '--output', outputPath,
       '--model_id', String(modelId),
+      '--noise_reduction_db', String(noiseReductionDb),
       '--attenuation_limit_db', String(attenuationLimitDb),
+      '--post_filter', String(Boolean(postFilter)),
       '--sensitivity', String(sensitivity),
       '--wet_dry_blend', String(wetDryBlend)
     ];
@@ -629,7 +631,7 @@ class AudioNeuralService {
   /**
    * Montreal Forced Aligner (MFA) Phonetic Lipsync Analysis
    */
-  async mfaAnalyze({ dubAudioPath, origAudioPath = '', subtitlesJsonPath, outputPath, acousticModel = 'russian_mfa', dictionary = 'russian_mfa', onProgress, onLog, abortSignal }) {
+  async mfaAnalyze({ dubAudioPath, origAudioPath = '', subtitlesJsonPath, outputPath, acousticModel = 'russian_mfa', dictionary = 'russian_mfa', minTimeStretch = 0.75, maxTimeStretch = 1.35, maxDriftMs = 50.0, onProgress, onLog, abortSignal }) {
     if (!fs.existsSync(dubAudioPath)) {
       throw new Error(`Файл дубляжа не существует: ${dubAudioPath}`);
     }
@@ -640,7 +642,10 @@ class AudioNeuralService {
       '--orig_audio', origAudioPath || '',
       '--subtitles_json', subtitlesJsonPath,
       '--acoustic_model', acousticModel,
-      '--dictionary', dictionary
+      '--dictionary', dictionary,
+      '--min_time_stretch', String(minTimeStretch),
+      '--max_time_stretch', String(maxTimeStretch),
+      '--max_drift_ms', String(maxDriftMs)
     ];
 
     if (outputPath) {

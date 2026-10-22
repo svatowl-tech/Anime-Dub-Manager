@@ -206,28 +206,26 @@ const MODULE_DATABASE = [
     defaultParams: {
       targetLufs: -16.0,
       truePeak: -1.0,
-      minSpeechDb: -40.0,
-      maxGainDb: 14.0,
-      fadeEdgeMs: 12
+      maxGainDb: 14.0
     },
     presets: [
       {
         id: 'broadcast_16lufs',
         title: '📺 Стандарт вещания (-16 LUFS, Peak -1.0 dB)',
         description: 'Равномерное звучание всех реплик диалога по стандарту стримингов',
-        params: { targetLufs: -16.0, truePeak: -1.0, minSpeechDb: -40.0, maxGainDb: 14.0, fadeEdgeMs: 12 }
+        params: { targetLufs: -16.0, truePeak: -1.0, maxGainDb: 14.0 }
       },
       {
         id: 'web_punchy_14lufs',
         title: '📢 Громкий веб (-14 LUFS, Peak -0.8 dB)',
         description: 'Максимальная читаемость диалогов на телефонах и планшетах',
-        params: { targetLufs: -14.0, truePeak: -0.8, minSpeechDb: -36.0, maxGainDb: 16.0, fadeEdgeMs: 10 }
+        params: { targetLufs: -14.0, truePeak: -0.8, maxGainDb: 16.0 }
       },
       {
         id: 'whisper_boost',
-        title: '🤫 Вытягивание тихого шепота (Порог -46dB, Max +18dB)',
+        title: '🤫 Вытягивание тихого шепота (Max +18 dB)',
         description: 'Автоматически подтягивает слишком тихие эмоциональные реплики',
-        params: { targetLufs: -16.0, truePeak: -1.0, minSpeechDb: -46.0, maxGainDb: 18.0, fadeEdgeMs: 15 }
+        params: { targetLufs: -16.0, truePeak: -1.0, maxGainDb: 18.0 }
       }
     ]
   },
@@ -251,14 +249,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'denoise_foxjoy_',
     icon: 'ShieldCheck',
     defaultParams: {
-      sensitivity: 1.0,
-      wetDryBlend: 95.0,
-      noiseTraining: false,
       noiseReductionDb: 18.0,
-      noiseFloorDb: -52.0,
-      stationarityWeight: 0.85,
-      frequencySmoothingHz: 120,
-      preserveVoiceFormants: true,
+      sensitivity: 5.0,
+      wetDryBlend: 95.0,
       autoDownloadModel: true
     },
     presets: [
@@ -266,13 +259,13 @@ const MODULE_DATABASE = [
         id: 'foxjoy_studio',
         title: '✨ FoxJoy Вокальный Студийный (18 dB)',
         description: 'Флагманская чистая обработка вокальных и дикторских трактов от FoxJoy',
-        params: { noiseReductionDb: 18.0, noiseFloorDb: -52.0, stationarityWeight: 0.85, frequencySmoothingHz: 120, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { noiseReductionDb: 18.0, sensitivity: 5.0, wetDryBlend: 95.0, autoDownloadModel: true }
       },
       {
         id: 'foxjoy_heavy',
         title: '🛡 FoxJoy Глубокое Очищение (24 dB)',
         description: 'Очистка сильного шума кулеров и уличного гула с сохранением формант',
-        params: { noiseReductionDb: 24.0, noiseFloorDb: -46.0, stationarityWeight: 0.92, frequencySmoothingHz: 160, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { noiseReductionDb: 24.0, sensitivity: 7.0, wetDryBlend: 98.0, autoDownloadModel: true }
       }
     ]
   },
@@ -296,22 +289,23 @@ const MODULE_DATABASE = [
     defaultPrefix: 'deepfilter3_',
     icon: 'ShieldCheck',
     defaultParams: {
-      sensitivity: 1.0,
+      attenuationLimitDb: 24.0,
+      postFilter: false,
       wetDryBlend: 95.0,
-      noiseTraining: false,
-      noiseReductionDb: 20.0,
-      noiseFloorDb: -55.0,
-      stationarityWeight: 0.88,
-      frequencySmoothingHz: 100,
-      preserveVoiceFormants: true,
       autoDownloadModel: true
     },
     presets: [
       {
         id: 'deepfilter3_speech',
-        title: '⚡ DeepFilter 3 Перцептивный (20 dB)',
+        title: '⚡ DeepFilter 3 Перцептивный (Лимит 24 dB)',
         description: 'Инновационная чистка речи без металлического призвука',
-        params: { noiseReductionDb: 20.0, noiseFloorDb: -55.0, stationarityWeight: 0.88, frequencySmoothingHz: 100, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { attenuationLimitDb: 24.0, postFilter: false, wetDryBlend: 95.0, autoDownloadModel: true }
+      },
+      {
+        id: 'deepfilter3_deep_postfilter',
+        title: '🛡 DeepFilter 3 Максимальная чистка (Лимит 60 dB + Post-Filter)',
+        description: 'Глубокое подавление стационарного и нестационарного шума с перцептивным пост-фильтром',
+        params: { attenuationLimitDb: 60.0, postFilter: true, wetDryBlend: 100.0, autoDownloadModel: true }
       }
     ]
   },
@@ -335,14 +329,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'denoise_full_',
     icon: 'ShieldCheck',
     defaultParams: {
-      sensitivity: 1.0,
-      wetDryBlend: 95.0,
-      noiseTraining: false,
       noiseReductionDb: 26.0,
-      noiseFloorDb: -42.0,
-      stationarityWeight: 0.95,
-      frequencySmoothingHz: 200,
-      preserveVoiceFormants: true,
+      sensitivity: 7.0,
+      wetDryBlend: 95.0,
       autoDownloadModel: true
     },
     presets: [
@@ -350,7 +339,7 @@ const MODULE_DATABASE = [
         id: 'full_archive_clean',
         title: '🛡 UVR Full Глубокое удаление (26 dB)',
         description: 'Бескомпромиссная чистка архивного шипения и сильного гула',
-        params: { noiseReductionDb: 26.0, noiseFloorDb: -42.0, stationarityWeight: 0.95, frequencySmoothingHz: 200, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { noiseReductionDb: 26.0, sensitivity: 7.0, wetDryBlend: 95.0, autoDownloadModel: true }
       }
     ]
   },
@@ -375,14 +364,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'denoise_',
     icon: 'ShieldCheck',
     defaultParams: {
-      sensitivity: 1.0,
-      wetDryBlend: 95.0,
-      noiseTraining: false,
       noiseReductionDb: 18.0,
-      noiseFloorDb: -52.0,
-      stationarityWeight: 0.85,
-      frequencySmoothingHz: 120,
-      preserveVoiceFormants: true,
+      sensitivity: 5.0,
+      wetDryBlend: 95.0,
       autoDownloadModel: true
     },
     presets: [
@@ -390,25 +374,25 @@ const MODULE_DATABASE = [
         id: 'balanced_clean',
         title: '✨ Оптимальное подавление (18 dB, естественный тембр)',
         description: 'Убирает кулеры ПК, шум кондиционера и фоновое шипение без искажения согласных',
-        params: { noiseReductionDb: 18.0, noiseFloorDb: -52.0, stationarityWeight: 0.85, frequencySmoothingHz: 120, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { noiseReductionDb: 18.0, sensitivity: 5.0, wetDryBlend: 95.0, autoDownloadModel: true }
       },
       {
         id: 'light_hum_remover',
         title: '🍃 Деликатная чистка (12 dB, прозрачный звук)',
         description: 'Легкое снятие мелкого стационарного фона для чистых студийных записей',
-        params: { noiseReductionDb: 12.0, noiseFloorDb: -60.0, stationarityWeight: 0.70, frequencySmoothingHz: 80, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { noiseReductionDb: 12.0, sensitivity: 3.5, wetDryBlend: 90.0, autoDownloadModel: true }
       },
       {
         id: 'heavy_hiss_killer',
         title: '🛡 Глубокое подавление (26 dB, сильный шум)',
         description: 'Для записей с громким шумом улицы, гудением дросселей и микрофонным перегревом',
-        params: { noiseReductionDb: 26.0, noiseFloorDb: -44.0, stationarityWeight: 0.95, frequencySmoothingHz: 180, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { noiseReductionDb: 26.0, sensitivity: 7.5, wetDryBlend: 100.0, autoDownloadModel: true }
       },
       {
         id: 'usb_mic_stationarity',
         title: '🎙 USB-микрофон (Отсечение фонового писка и шума USB)',
         description: 'Устраняет высокочастотный наводящий свист и электрическое шипение дешевых трактов',
-        params: { noiseReductionDb: 20.0, noiseFloorDb: -50.0, stationarityWeight: 0.90, frequencySmoothingHz: 150, preserveVoiceFormants: true, autoDownloadModel: true }
+        params: { noiseReductionDb: 20.0, sensitivity: 6.0, wetDryBlend: 95.0, autoDownloadModel: true }
       }
     ]
   },
@@ -430,21 +414,16 @@ const MODULE_DATABASE = [
     defaultPrefix: 'dereverb_dsp_',
     icon: 'Radio',
     defaultParams: {
-      sensitivity: 1.0,
-      wetDryBlend: 95.0,
-      noiseTraining: false,
-      deechoReductionDb: 12.0,
-      earlyReflectionsDecay: 0.65,
-      reverbTailSuppress: 0.60,
-      preserveBodyFrequencies: true,
-      autoDownloadModel: true
+      reverbReduction: 0.65,
+      sensitivity: 5.0,
+      wetDryBlend: 95.0
     },
     presets: [
       {
         id: 'dsp_instant',
-        title: '⚡ Быстрое DSP вычитание (12 dB)',
+        title: '⚡ Быстрое DSP вычитание (0.65x)',
         description: 'Легкое устранение гула с нулевой задержкой без нейросетей',
-        params: { deechoReductionDb: 12.0, earlyReflectionsDecay: 0.65, reverbTailSuppress: 0.60, preserveBodyFrequencies: true }
+        params: { reverbReduction: 0.65, sensitivity: 5.0, wetDryBlend: 95.0 }
       }
     ]
   },
@@ -470,21 +449,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'reverb_foxjoy_',
     icon: 'Radio',
     defaultParams: {
-      sensitivity: 1.0,
+      reverbReduction: 0.80,
+      sensitivity: 5.0,
       wetDryBlend: 95.0,
-      noiseTraining: false,
-      deechoReductionDb: 16.0,
-      earlyReflectionsDecay: 0.75,
-      reverbTailSuppress: 0.70,
-      preserveBodyFrequencies: true,
       autoDownloadModel: true
     },
     presets: [
       {
         id: 'foxjoy_studio_dereverb',
-        title: '✨ FoxJoy Студийный DeReverb (16 dB)',
+        title: '✨ FoxJoy Студийный DeReverb (0.80x)',
         description: 'Глубокая пространственная инверсия реверберации от FoxJoy',
-        params: { deechoReductionDb: 16.0, earlyReflectionsDecay: 0.75, reverbTailSuppress: 0.70, preserveBodyFrequencies: true, autoDownloadModel: true }
+        params: { reverbReduction: 0.80, sensitivity: 5.0, wetDryBlend: 95.0, autoDownloadModel: true }
       }
     ]
   },
@@ -510,14 +485,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'deecho_',
     icon: 'Radio',
     defaultParams: {
-      sensitivity: 1.0,
+      reverbReduction: 0.70,
+      sensitivity: 5.0,
       wetDryBlend: 95.0,
-      noiseTraining: false,
-      deechoReductionDb: 14.0,
-      earlyReflectionsDecay: 0.70,
-      reverbTailSuppress: 0.65,
-      roomSizeEstimate: 'medium',
-      preserveBodyFrequencies: true,
       autoDownloadModel: true
     },
     presets: [
@@ -525,13 +495,13 @@ const MODULE_DATABASE = [
         id: 'soft_curtain_room',
         title: '🪟 Комната со шторами (Мягкое снятие ранних отражений)',
         description: 'Убирает порхающее эхо от стен, сохраняя теплоту и глубину низких частот',
-        params: { deechoReductionDb: 12.0, earlyReflectionsDecay: 0.65, reverbTailSuppress: 0.55, roomSizeEstimate: 'small', preserveBodyFrequencies: true, autoDownloadModel: true }
+        params: { reverbReduction: 0.55, sensitivity: 4.0, wetDryBlend: 90.0, autoDownloadModel: true }
       },
       {
         id: 'normal_home_studio',
         title: '🎙 Стандартная домашняя студия (Сбалансированный De-Echo)',
         description: 'Оптимальное подавление комнатного отклика без истончения вокала',
-        params: { deechoReductionDb: 15.0, earlyReflectionsDecay: 0.75, reverbTailSuppress: 0.70, roomSizeEstimate: 'medium', preserveBodyFrequencies: true, autoDownloadModel: true }
+        params: { reverbReduction: 0.75, sensitivity: 5.5, wetDryBlend: 95.0, autoDownloadModel: true }
       }
     ]
   },
@@ -557,21 +527,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'deecho_aggr_',
     icon: 'Radio',
     defaultParams: {
-      sensitivity: 1.0,
+      reverbReduction: 0.90,
+      sensitivity: 7.0,
       wetDryBlend: 95.0,
-      noiseTraining: false,
-      deechoReductionDb: 22.0,
-      earlyReflectionsDecay: 0.88,
-      reverbTailSuppress: 0.82,
-      preserveBodyFrequencies: true,
       autoDownloadModel: true
     },
     presets: [
       {
         id: 'deecho_aggr_preset',
-        title: '🛡 De-Echo Aggressive (22 dB)',
+        title: '🛡 De-Echo Aggressive (0.90x)',
         description: 'Удаление жесткого эха от стекла, плитки и пустых стен',
-        params: { deechoReductionDb: 22.0, earlyReflectionsDecay: 0.88, reverbTailSuppress: 0.82, preserveBodyFrequencies: true, autoDownloadModel: true }
+        params: { reverbReduction: 0.90, sensitivity: 7.0, wetDryBlend: 95.0, autoDownloadModel: true }
       }
     ]
   },
@@ -596,21 +562,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'dereverb_room_',
     icon: 'Radio',
     defaultParams: {
-      sensitivity: 1.0,
+      reverbReduction: 0.80,
+      sensitivity: 6.0,
       wetDryBlend: 95.0,
-      noiseTraining: false,
-      deechoReductionDb: 18.0,
-      earlyReflectionsDecay: 0.80,
-      reverbTailSuppress: 0.75,
-      preserveBodyFrequencies: true,
       autoDownloadModel: true
     },
     presets: [
       {
         id: 'dereverb_room_preset',
-        title: '📦 MDX Room Boxy Resonant Clean (18 dB)',
+        title: '📦 MDX Room Boxy Resonant Clean (0.80x)',
         description: 'Устранение «коробочного» гула маленьких комнат и петличек',
-        params: { deechoReductionDb: 18.0, earlyReflectionsDecay: 0.80, reverbTailSuppress: 0.75, preserveBodyFrequencies: true, autoDownloadModel: true }
+        params: { reverbReduction: 0.80, sensitivity: 6.0, wetDryBlend: 95.0, autoDownloadModel: true }
       }
     ]
   },
@@ -636,20 +598,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_voc_ft_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
-      autoDownloadModel: true,
-      extractVocals: true,
-      extractInstrumental: true
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'both',
+      autoDownloadModel: true
     },
     presets: [
       {
         id: 'voc_ft_standard',
-        title: '🎤 Voc_FT Извлечение вокала',
+        title: '🎤 Voc_FT Извлечение вокала и фона',
         description: 'Золотой стандарт сепарации диалогов и вокала',
-        params: { autoDownloadModel: true, extractVocals: true, extractInstrumental: true }
+        params: { shifts: 1, overlap: 0.25, stems: 'both', autoDownloadModel: true }
       }
     ]
   },
@@ -675,20 +634,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_inst_hq3_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
-      autoDownloadModel: true,
-      extractVocals: false,
-      extractInstrumental: true
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'instrumental_only',
+      autoDownloadModel: true
     },
     presets: [
       {
         id: 'inst_hq3_standard',
         title: '🎶 Inst_HQ_3 Извлечение инструментала (M&E)',
         description: 'Чистый минус и музыкальное сопровождение для дубляжа',
-        params: { autoDownloadModel: true, extractVocals: false, extractInstrumental: true }
+        params: { shifts: 1, overlap: 0.25, stems: 'instrumental_only', autoDownloadModel: true }
       }
     ]
   },
@@ -714,20 +670,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_kim2_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
-      autoDownloadModel: true,
-      extractVocals: true,
-      extractInstrumental: true
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'both',
+      autoDownloadModel: true
     },
     presets: [
       {
         id: 'kim2_dense_mix',
         title: '⚡ Kim Vocal 2 Для плотных миксов',
         description: 'Удаление хоров, синтов и перегруженных битов',
-        params: { autoDownloadModel: true, extractVocals: true, extractInstrumental: true }
+        params: { shifts: 1, overlap: 0.25, stems: 'both', autoDownloadModel: true }
       }
     ]
   },
@@ -751,19 +704,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_htdemucs_ft_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
-      autoDownloadModel: true,
-      stems: 4
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'all',
+      autoDownloadModel: true
     },
     presets: [
       {
         id: 'htdemucs_ft_full',
         title: '🎬 Demucs 4-Stem Full Separation',
         description: 'Многодорожечная сепарация фильма на 4 отдельных стема',
-        params: { autoDownloadModel: true, stems: 4 }
+        params: { shifts: 1, overlap: 0.25, stems: 'all', autoDownloadModel: true }
       }
     ]
   },
@@ -787,19 +738,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_htdemucs_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
-      autoDownloadModel: true,
-      stems: 4
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'both',
+      autoDownloadModel: true
     },
     presets: [
       {
         id: 'htdemucs_std',
-        title: '📺 Demucs Standard 4-Stem',
+        title: '📺 Demucs Standard (Vocals + M&E)',
         description: 'Быстрое разделение сериалов и мультсериалов',
-        params: { autoDownloadModel: true, stems: 4 }
+        params: { shifts: 1, overlap: 0.25, stems: 'both', autoDownloadModel: true }
       }
     ]
   },
@@ -824,19 +773,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_voc_bgm_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
-      autoDownloadModel: true,
-      stems: 2
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'both',
+      autoDownloadModel: true
     },
     presets: [
       {
         id: 'htdemucs_2stem',
         title: '⚡ Demucs 2-Stem Vocals + BGM',
         description: 'Экспресс-изоляция речи от фонового звука',
-        params: { autoDownloadModel: true, stems: 2 }
+        params: { shifts: 1, overlap: 0.25, stems: 'both', autoDownloadModel: true }
       }
     ]
   },
@@ -861,19 +808,17 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_mdx23c_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
-      autoDownloadModel: true,
-      steps: 8
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'both',
+      autoDownloadModel: true
     },
     presets: [
       {
         id: 'mdx23c_8s',
         title: '🔥 MDX23C 8-Step High-Precision',
         description: 'Глубокая многошаговая фильтрация бэк-вокала',
-        params: { autoDownloadModel: true, steps: 8 }
+        params: { shifts: 1, overlap: 0.25, stems: 'both', autoDownloadModel: true }
       }
     ]
   },
@@ -898,10 +843,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_karaoke_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'instrumental_only',
       autoDownloadModel: true
     },
     presets: [
@@ -909,7 +853,7 @@ const MODULE_DATABASE = [
         id: 'karaoke_hp',
         title: '🎤 5_HP Караоке & Фонограмма',
         description: 'Чистое удаление голоса для получения качественной фонограммы',
-        params: { autoDownloadModel: true }
+        params: { shifts: 1, overlap: 0.25, stems: 'instrumental_only', autoDownloadModel: true }
       }
     ]
   },
@@ -934,10 +878,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_roformer_mel_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'both',
       autoDownloadModel: true
     },
     presets: [
@@ -945,7 +888,7 @@ const MODULE_DATABASE = [
         id: 'roformer_sota',
         title: '👑 Mel-Band Roformer SOTA Pure Vocals',
         description: 'Бескомпромиссная чистота голоса и максимальный SNR',
-        params: { autoDownloadModel: true }
+        params: { shifts: 1, overlap: 0.25, stems: 'both', autoDownloadModel: true }
       }
     ]
   },
@@ -970,10 +913,9 @@ const MODULE_DATABASE = [
     defaultPrefix: 'stem_bs_roformer_',
     icon: 'Layers',
     defaultParams: {
-      sensitivity: 1.0,
-      marginDb: 1.5,
-      postProcessThreshold: 0.20,
-      instrumentalBlend: 100.0,
+      shifts: 1,
+      overlap: 0.25,
+      stems: 'both',
       autoDownloadModel: true
     },
     presets: [
@@ -981,7 +923,7 @@ const MODULE_DATABASE = [
         id: 'bs_roformer_cinema',
         title: '🎬 BS-Roformer Viperx Кинематографический',
         description: 'Оптимизированный фазовый отклик для объемных сцен фильма',
-        params: { autoDownloadModel: true }
+        params: { shifts: 1, overlap: 0.25, stems: 'both', autoDownloadModel: true }
       }
     ]
   },
@@ -1068,7 +1010,6 @@ const MODULE_DATABASE = [
       rangeDb: -80.0,
       attackMs: 10,
       releaseMs: 160,
-      holdMs: 50,
       detectionMode: 'rms'
     },
     presets: [
@@ -1076,25 +1017,25 @@ const MODULE_DATABASE = [
         id: 'studio_soft',
         title: '🎙 Стандартная студия (Мягкий гейт)',
         description: 'Естественное и плавное затухание для подготовленных студийных помещений',
-        params: { thresholdDb: -45.0, rangeDb: -80.0, attackMs: 10, releaseMs: 160, holdMs: 50, detectionMode: 'rms' }
+        params: { thresholdDb: -45.0, rangeDb: -80.0, attackMs: 10, releaseMs: 160, detectionMode: 'rms' }
       },
       {
         id: 'home_aggro',
         title: '🏠 Домашняя комната (Глубокое отсечение шума)',
         description: 'Быстрое глушение кулеров ПК, шума улицы и отражений стен в паузах',
-        params: { thresholdDb: -36.0, rangeDb: -90.0, attackMs: 5, releaseMs: 120, holdMs: 30, detectionMode: 'peak' }
+        params: { thresholdDb: -36.0, rangeDb: -90.0, attackMs: 5, releaseMs: 120, detectionMode: 'peak' }
       },
       {
         id: 'sensitive_mic',
         title: '🤫 Чувствительный микрофон (Плавный спад)',
         description: 'Предотвращает щелчки и резкие обрывы тихих согласных и шепота',
-        params: { thresholdDb: -50.0, rangeDb: -65.0, attackMs: 15, releaseMs: 260, holdMs: 80, detectionMode: 'rms' }
+        params: { thresholdDb: -50.0, rangeDb: -65.0, attackMs: 15, releaseMs: 260, detectionMode: 'rms' }
       },
       {
         id: 'fast_speech',
         title: '⚡ Быстрый экшен-гейт (Динамичные диалоги)',
         description: 'Мгновенное открытие и закрытие для быстрой скороговорки и криков',
-        params: { thresholdDb: -40.0, rangeDb: -85.0, attackMs: 3, releaseMs: 90, holdMs: 20, detectionMode: 'peak' }
+        params: { thresholdDb: -40.0, rangeDb: -85.0, attackMs: 3, releaseMs: 90, detectionMode: 'peak' }
       }
     ]
   },
@@ -1189,34 +1130,32 @@ const MODULE_DATABASE = [
     defaultParams: {
       frequencyHz: 6200,
       intensity: 3.5,
-      thresholdDb: -22.0,
-      bandwidthHz: 2000,
-      mode: 'split'
+      maxReduction: 0.5
     },
     presets: [
       {
         id: 'female_voice',
         title: '👩 Женский голос (Высокие сибилянты 6.8 kHz)',
         description: 'Точечное подавление свистящих обертонов женского тембра без глухоты',
-        params: { frequencyHz: 6800, intensity: 3.5, thresholdDb: -22.0, bandwidthHz: 2000, mode: 'split' }
+        params: { frequencyHz: 6800, intensity: 3.5, maxReduction: 0.5 }
       },
       {
         id: 'male_voice',
         title: '👨 Мужской голос (Средние сибилянты 5.5 kHz)',
         description: 'Убирает резкое цыканье и шипение в баритоне и теноре',
-        params: { frequencyHz: 5500, intensity: 3.0, thresholdDb: -20.0, bandwidthHz: 1800, mode: 'split' }
+        params: { frequencyHz: 5500, intensity: 3.0, maxReduction: 0.45 }
       },
       {
         id: 'bright_mic_heavy',
         title: '🔪 Яркий конденсаторный микрофон (Глубокое подавление)',
         description: 'Для микрофонов с завышенным верхом, режущим слух на буквах С и Щ',
-        params: { frequencyHz: 6200, intensity: 5.2, thresholdDb: -25.0, bandwidthHz: 2600, mode: 'wideband' }
+        params: { frequencyHz: 6200, intensity: 5.2, maxReduction: 0.7 }
       },
       {
         id: 'natural_gentle',
         title: '🍃 Естественное деликатное сглаживание',
         description: 'Легкое округление транзиентов без потери воздушности звука',
-        params: { frequencyHz: 7200, intensity: 2.0, thresholdDb: -18.0, bandwidthHz: 1500, mode: 'split' }
+        params: { frequencyHz: 7200, intensity: 2.0, maxReduction: 0.35 }
       }
     ]
   },
@@ -1397,7 +1336,6 @@ const MODULE_DATABASE = [
       duckingAmountDb: -14.0,
       attackMs: 40,
       releaseMs: 320,
-      holdMs: 120,
       threshold: 0.08,
       filterMusicOnly: false
     },
@@ -1406,25 +1344,25 @@ const MODULE_DATABASE = [
         id: 'classic_voiceover',
         title: '🎬 Классический закадр (Фон слышен, но не мешает)',
         description: 'Японская речь и музыка слышны на фоне, русская озвучка читается на 100%',
-        params: { duckingAmountDb: -14.0, attackMs: 40, releaseMs: 350, holdMs: 120, threshold: 0.08, filterMusicOnly: false }
+        params: { duckingAmountDb: -14.0, attackMs: 40, releaseMs: 350, threshold: 0.08, filterMusicOnly: false }
       },
       {
         id: 'deep_focus',
         title: '🎧 Глубокий даккинг (Максимальный акцент на русском голосе)',
         description: 'Оригинальный звук сильно отступает назад во время реплик',
-        params: { duckingAmountDb: -18.0, attackMs: 25, releaseMs: 420, holdMs: 180, threshold: 0.05, filterMusicOnly: false }
+        params: { duckingAmountDb: -18.0, attackMs: 25, releaseMs: 420, threshold: 0.05, filterMusicOnly: false }
       },
       {
         id: 'musical_smooth',
         title: '🎵 Музыкальный даккинг (Плавные и незаметные переходы)',
         description: 'Медленная атака и релиз без резких скачков громкости в ост-треках',
-        params: { duckingAmountDb: -10.0, attackMs: 70, releaseMs: 500, holdMs: 200, threshold: 0.10, filterMusicOnly: true }
+        params: { duckingAmountDb: -10.0, attackMs: 70, releaseMs: 500, threshold: 0.10, filterMusicOnly: true }
       },
       {
         id: 'rapid_dialog',
         title: '⚡ Быстрый диалоговый даккинг (Для частых коротких реплик)',
         description: 'Моментальное реагирование на короткие междометия и реплики',
-        params: { duckingAmountDb: -13.0, attackMs: 20, releaseMs: 220, holdMs: 80, threshold: 0.07, filterMusicOnly: false }
+        params: { duckingAmountDb: -13.0, attackMs: 20, releaseMs: 220, threshold: 0.07, filterMusicOnly: false }
       }
     ]
   },
@@ -4454,13 +4392,16 @@ class MixingPipelineService {
   async _execAutoTiming({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
     const minGapSec = Number(params.minGapSec ?? 0.12);
     const leadInSec = Number(params.leadInSec ?? 0.05);
+    const silenceThresholdDb = Number(params.silenceThresholdDb ?? -45.0);
+    const minSilenceDuration = Number(params.minSilenceDuration ?? 0.20);
+    const preventCollisions = params.preventCollisions !== false;
     const subPath = manifest.sourceFiles?.subtitles?.path || episode?.subPath;
 
     if (inputFiles.length === 0) {
       throw new Error('Нет входных дорожек для выполнения автотайминга.');
     }
 
-    logFn(`Запуск автотайминга для ${inputFiles.length} дорожек (зазор: ${minGapSec}s, предвход: ${leadInSec}s)...`);
+    logFn(`Запуск автотайминга для ${inputFiles.length} дорожек (зазор: ${minGapSec}s, предвход: ${leadInSec}s, порог тишины: ${silenceThresholdDb}dB, мин. пауза: ${minSilenceDuration}s)...`);
 
     // Prepare audio track structures for AutoTimingService
     const audioFiles = inputFiles.map(f => ({
@@ -4485,7 +4426,13 @@ class MixingPipelineService {
       timedResult = await AutoTimingService.alignProjectAndResolveCollisions({
         subPath,
         matchedTracks: matchResult.matchedTracks,
-        options: { minGapSec, leadInSec }
+        options: {
+          minGapSec,
+          leadInSec,
+          silenceThresholdDb,
+          minSilenceDuration,
+          preventCollisions
+        }
       });
     }
 
@@ -4616,6 +4563,8 @@ class MixingPipelineService {
     const results = [];
     const autoApplyStretch = params?.autoApplyStretch !== false;
     const maxDriftMs = Number(params?.maxDriftMs ?? 50.0);
+    const minTimeStretch = Number(params?.minTimeStretch ?? 0.75);
+    const maxTimeStretch = Number(params?.maxTimeStretch ?? 1.35);
     const confidenceThreshold = Number(params?.confidenceThreshold ?? 0.50);
 
     try {
@@ -4640,6 +4589,9 @@ class MixingPipelineService {
           outputPath: reportPath,
           acousticModel: params?.acousticModel || 'russian_mfa',
           dictionary: params?.dictionary || 'russian_mfa',
+          minTimeStretch,
+          maxTimeStretch,
+          maxDriftMs,
           onProgress: (p) => {
             if (onProgress && p && typeof p.percent === 'number') {
               const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
@@ -4673,9 +4625,9 @@ class MixingPipelineService {
           }
 
           if (adjustedCount > 0) {
-            logFn(`  Обнаружен рассинхрон в ${adjustedCount} репликах. Применение сбалансированной подгонки длительности (atempo)...`);
+            logFn(`  Обнаружен рассинхрон в ${adjustedCount} репликах. Применение сбалансированной подгонки длительности (atempo [${minTimeStretch}..${maxTimeStretch}])...`);
             const averageRatio = mfaReport.reduce((acc, cur) => acc + (cur.timeStretchRatio || 1.0), 0) / mfaReport.length;
-            const clampedAvgRatio = Math.max(0.75, Math.min(1.35, averageRatio));
+            const clampedAvgRatio = Math.max(minTimeStretch, Math.min(maxTimeStretch, averageRatio));
 
             if (Math.abs(clampedAvgRatio - 1.0) > 0.01) {
               logFn(`  Применение фильтра FFmpeg atempo=${clampedAvgRatio.toFixed(3)} к дорожке...`);
@@ -4718,13 +4670,17 @@ class MixingPipelineService {
    */
   async _execApplyFixes({ episode, workingDir, stepFolder, prefix, manifest, inputFiles, params, logFn, onProgress }) {
     const minGapSec = Number(params.minGapSec ?? 0.12);
+    const fadeDurationMs = Number(params.fadeDurationMs ?? 8);
+    const cleanLeftoverTails = params.cleanLeftoverTails !== false;
+    const adjustLongerCollisions = params.adjustLongerCollisions !== false;
+    const safetyPaddingMs = Number(params.safetyPaddingMs ?? 45);
     const subPath = manifest.sourceFiles?.subtitles?.path || episode?.subPath;
 
     if (inputFiles.length === 0) {
       throw new Error('Нет входных дорожек для применения фиксов.');
     }
 
-    logFn(`Вшивание фиксов и очистка остаточных хвостов для ${inputFiles.length} дорожек...`);
+    logFn(`Вшивание фиксов и очистка остаточных хвостов для ${inputFiles.length} дорожек (фейд: ${fadeDurationMs}ms, хвосты: ${cleanLeftoverTails ? 'Вкл' : 'Выкл'}, буфер: ${safetyPaddingMs}ms)...`);
 
     const audioFiles = inputFiles.map(f => ({
       path: f.path,
@@ -4748,7 +4704,13 @@ class MixingPipelineService {
         matchedTracks: matchResult.matchedTracks,
         options: { minGapSec }
       });
-      mergedResult = AutoTimingService.smartApplyFixesToTimedTracks(timingResult, { minGapSec });
+      mergedResult = AutoTimingService.smartApplyFixesToTimedTracks(timingResult, {
+        minGapSec,
+        fadeDurationMs,
+        cleanLeftoverTails,
+        adjustLongerCollisions,
+        safetyPaddingMs
+      });
     }
 
     const results = [];
@@ -4769,7 +4731,11 @@ class MixingPipelineService {
           track.path,
           phraseResult.phrases,
           outPath,
-          {}
+          {
+            fadeDurationMs,
+            cleanLeftoverTails,
+            safetyPaddingMs
+          }
         );
       } else {
         await fs.copyFile(track.path, outPath);
@@ -4946,7 +4912,6 @@ class MixingPipelineService {
     const targetLufs = Number(params.targetLufs ?? -16.0);
     const truePeak = Number(params.truePeak ?? -1.0);
     const maxGainDb = Number(params.maxGainDb ?? 14.0);
-    const minSpeechDb = Number(params.minSpeechDb ?? -40.0);
 
     if (inputFiles.length === 0) {
       throw new Error('Нет входных дорожек для пофразовой нормализации.');
@@ -4986,10 +4951,12 @@ class MixingPipelineService {
       const measuredTp = typeof stats.truePeakDb === 'number' ? stats.truePeakDb : -1.0;
       const measuredLra = typeof stats.loudnessRangeDb === 'number' ? stats.loudnessRangeDb : 9.0;
       const measuredThresh = typeof stats.lufsThresholdDb === 'number' ? stats.lufsThresholdDb : -33.0;
-      const rms = typeof stats.speechRmsDb === 'number' ? stats.speechRmsDb : -24.0;
+
+      // Enforce maxGainDb ceiling so overly quiet tracks do not boost background noise beyond maxGainDb
+      const cappedTargetLufs = Math.min(trackTargetLufs, Number((measuredI + maxGainDb).toFixed(1)));
 
       // Intelligent EBU R128 loudness normalization
-      let filter = `loudnorm=I=${trackTargetLufs}:TP=${truePeak}:LRA=10:measured_I=${measuredI}:measured_TP=${measuredTp}:measured_LRA=${measuredLra}:measured_thresh=${measuredThresh}:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
+      let filter = `loudnorm=I=${cappedTargetLufs}:TP=${truePeak}:LRA=10:measured_I=${measuredI}:measured_TP=${measuredTp}:measured_LRA=${measuredLra}:measured_thresh=${measuredThresh}:linear=true,alimiter=limit=${truePeak}dB:attack=1:release=40:level=true`;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -5026,14 +4993,12 @@ class MixingPipelineService {
    */
   async _execUvrDenoiseLite({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
     const nrDb = Number(params.noiseReductionDb ?? 18.0);
-    const floorDb = Number(params.noiseFloorDb ?? -52.0);
-    const weight = Math.max(0.1, Math.min(1.0, Number(params.stationarityWeight ?? 0.85)));
-    const smoothHz = Math.max(20, Math.min(500, Number(params.frequencySmoothingHz ?? 120)));
-    const preserveFormants = params.preserveVoiceFormants !== false;
+    const attenLimDb = Number(params.attenuationLimitDb ?? 100.0);
+    const postFilter = Boolean(params.postFilter);
     const autoDownload = params.autoDownloadModel !== false;
 
     // Custom sensitivity and dry/wet blend controls
-    const sensitivity = Number(params.sensitivity ?? 1.0); // 1.0 to 10.0 scale
+    const sensitivity = Number(params.sensitivity ?? 6.0);
     const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 95.0)));
 
     const activeModelId = params.modelId || 'uvr_denoise_foxjoy';
@@ -5046,7 +5011,7 @@ class MixingPipelineService {
     }
 
     logFn(`[${modelName}] Запуск нейросетевого шумоподавления (модель: ${filename})...`);
-    logFn(`Чувствительность: ${sensitivity}/10, Подмешивание Wet/Dry: ${wetDryBlend}%, Подавление ${nrDb} dB, Порог ${floorDb} dB, Вес стационарности ${weight}, Сглаживание ${smoothHz} Hz, Форманты ${preserveFormants ? 'Вкл' : 'Выкл'}`);
+    logFn(`Параметры: Подавление=${nrDb} dB, Предел DF3=${Math.abs(attenLimDb)} dB, Post-Filter=${postFilter ? 'Вкл' : 'Выкл'}, Чувствительность=${sensitivity}/10, Wet/Dry=${wetDryBlend}%`);
 
     // Ensure model storage folder exists for offline UVR models
     const rootUserData = app ? app.getPath('userData') : process.cwd();
@@ -5098,7 +5063,9 @@ class MixingPipelineService {
         outputPath: outPath,
         modelPath: localModelFile,
         modelId: activeModelId,
-        attenuationLimitDb: Number(params.attenuationLimitDb ?? -100.0),
+        noiseReductionDb: nrDb,
+        attenuationLimitDb: Math.abs(attenLimDb),
+        postFilter,
         sensitivity,
         wetDryBlend,
         onProgress: (p) => {
@@ -5150,7 +5117,7 @@ class MixingPipelineService {
       const sensFactor = sensitivity / 10.0;
       const fftNr = Math.min(45, Math.max(0.1, nrDb * sensFactor));
       const fftFloor = Math.min(-20, Math.max(-85, floorDb));
-      const tnVal = sensitivity > 6.0 ? 1 : 0;
+      const tnVal = params.noiseTraining !== undefined ? (params.noiseTraining ? 1 : 0) : (sensitivity > 6.0 ? 1 : 0);
       const trVal = sensitivity >= 2.0 ? 1 : 0;
 
       let filterChain = '';
@@ -5201,14 +5168,11 @@ class MixingPipelineService {
    * Soft suppression of flutter echo without thinning low and mid frequencies
    */
   async _execUvrDeEchoNormal({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
-    const deechoDb = Number(params.deechoReductionDb ?? 14.0);
-    const earlyDecay = Math.max(0.1, Math.min(1.0, Number(params.earlyReflectionsDecay ?? 0.70)));
-    const tailSuppress = Math.max(0.1, Math.min(1.0, Number(params.reverbTailSuppress ?? 0.65)));
-    const preserveBody = params.preserveBodyFrequencies !== false;
+    const reverbReduction = Number(params.reverbReduction ?? (params.deechoReductionDb ? params.deechoReductionDb / 25.0 : 0.65));
     const autoDownload = params.autoDownloadModel !== false;
 
     // Custom sensitivity and dry/wet blend controls
-    const sensitivity = Number(params.sensitivity ?? 1.0); // 1.0 to 10.0 scale
+    const sensitivity = Number(params.sensitivity ?? 6.5);
     const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 85.0)));
 
     const activeModelId = params.modelId || 'uvr_deecho_normal';
@@ -5221,7 +5185,7 @@ class MixingPipelineService {
     }
 
     logFn(`[${modelName}] Запуск подавления комнатного и порхающего эха (модель: ${filename})...`);
-    logFn(`Чувствительность: ${sensitivity}/10, Подмешивание Wet/Dry: ${wetDryBlend}%, Степень De-Echo ${deechoDb} dB, Ранние отражения: ${earlyDecay}, Подавление хвостов: ${tailSuppress}, Сохранение тела: ${preserveBody ? 'Вкл' : 'Выкл'}`);
+    logFn(`Степень дериверберации: ${(reverbReduction * 100).toFixed(0)}%, Чувствительность: ${sensitivity}/10, Подмешивание Wet/Dry: ${wetDryBlend}%`);
 
     const rootUserData = app ? app.getPath('userData') : process.cwd();
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
@@ -5276,7 +5240,7 @@ class MixingPipelineService {
         outputPath: outPath,
         modelPath: localModelFile,
         modelId: activeModelId,
-        reverbReduction: Number(params.reverbReduction ?? (params.deechoReductionDb ? params.deechoReductionDb / 20.0 : 0.8)),
+        reverbReduction,
         sensitivity,
         wetDryBlend,
         onProgress: (p) => {
@@ -5330,7 +5294,7 @@ class MixingPipelineService {
       const nrAmount = Math.min(22, Math.max(1, Math.round(effectiveDeechoDb * 0.75)));
       const effectiveEarlyDecay = Math.max(0.05, Math.min(1.0, earlyDecay * (0.2 + sensFactor * 0.8)));
       const notchGain = -(effectiveEarlyDecay * 2.2).toFixed(1);
-      const tnVal = sensitivity > 6.0 ? 1 : 0;
+      const tnVal = params.noiseTraining !== undefined ? (params.noiseTraining ? 1 : 0) : (sensitivity > 6.0 ? 1 : 0);
       const trVal = sensitivity >= 2.0 ? 1 : 0;
 
       let filterChain = '';
@@ -5436,50 +5400,19 @@ class MixingPipelineService {
       logFn(`✓ Задействован встроенный движок архитектуры ${modelDef?.engineArchitecture || 'MDX-Net Spectrogram'}`);
     }
 
-    // Produce separated stem outputs: Vocals & Instrumental (M&E / BGM)
-    const sensitivity = Number(params.sensitivity ?? 1.0);
-    const marginDb = Number(params.marginDb ?? 1.5);
-    const gateThreshold = Number(params.postProcessThreshold ?? 0.20);
-    const instBlend = Number(params.instrumentalBlend ?? 100.0);
-
-    logFn(`Параметры разделения: Чувствительность=${sensitivity}/10, Запас вокала=${marginDb} dB, Гейт=${gateThreshold}, Смешивание BGM=${instBlend}%`);
-
-    // Adaptive vocal band extraction based on sensitivity
-    // If sensitivity is low, we keep a broader, richer frequency spectrum
-    const hpVocFreq = Math.round(55 + (sensitivity * 7)); // 55Hz to 125Hz
-    const lpVocFreq = Math.round(16500 - (sensitivity * 750)); // 16500Hz down to 9000Hz
-    
-    let vocFilters = `highpass=f=${hpVocFreq},lowpass=f=${lpVocFreq}`;
-    
-    // Add marginDb vocal equalizers
-    if (marginDb !== 0) {
-      vocFilters += `,equalizer=f=1000:t=q:w=1.0:g=${marginDb.toFixed(1)},equalizer=f=3400:t=q:w=1.5:g=${(marginDb * 0.5).toFixed(1)}`;
-    }
-    
-    // Noise gate (expansion) threshold based on gateThreshold (0.0 to 1.0)
-    if (gateThreshold > 0.0) {
-      const gateDb = -(65 - gateThreshold * 35).toFixed(1); // -65 dB (at 0.0) to -30 dB (at 1.0)
-      vocFilters += `,agate=threshold=${gateDb}dB:range=-15dB:attack=15:release=140`;
-    }
-
-    // Blend original audio back in if instrumentalBlend is less than 100% (dry/wet blend for vocals)
-    if (instBlend < 100.0) {
-      const origWeight = (1.0 - instBlend / 100.0).toFixed(2);
-      const vocWeight = (instBlend / 100.0).toFixed(2);
-      vocFilters = `asplit[orig_audio][to_filt]; [to_filt]${vocFilters}[filtered_vocal]; [orig_audio]volume=${origWeight}[dry]; [filtered_vocal]volume=${vocWeight}[wet]; [dry][wet]amix=inputs=2:duration=first:dropout_transition=0`;
-    }
-
+    const shifts = Number(params.shifts ?? 1);
+    const overlap = Number(params.overlap ?? 0.25);
     const stemsSelection = params.stems || (params.extractVocals && !params.extractInstrumental ? 'vocals_only' : (!params.extractVocals && params.extractInstrumental ? 'instrumental_only' : 'both'));
 
-    logFn(`[Neural AI] Запуск модели «${modelName}» для разделения стемов...`);
+    logFn(`[Neural AI] Запуск модели «${modelName}» для разделения стемов (shifts=${shifts}, overlap=${overlap}, stems=${stemsSelection})...`);
     const neuralStems = await AudioNeuralService.separateStems({
       inputPath: sourceAudioPath,
       outputDir: stepFolder,
       modelName: activeModelId,
       modelPath: localModelFile,
       modelId: activeModelId,
-      shifts: Number(params.shifts ?? 1),
-      overlap: Number(params.overlap ?? 0.25),
+      shifts,
+      overlap,
       stems: stemsSelection,
       prefix,
       onProgress: (p) => {
@@ -5903,12 +5836,13 @@ class MixingPipelineService {
     const rangeDb = Number(params.rangeDb ?? -80.0);
     const attackMs = Number(params.attackMs ?? 10);
     const releaseMs = Number(params.releaseMs ?? 160);
+    const detectionMode = params.detectionMode === 'peak' ? 'peak' : 'rms';
 
     if (inputFiles.length === 0) {
       throw new Error('Нет входных дорожек для применения гейта тишины.');
     }
 
-    logFn(`Применение гейта тишины (Порог: ${thresholdDb} dB, Диапазон: ${rangeDb} dB, Атака: ${attackMs}ms, Спад: ${releaseMs}ms) к ${inputFiles.length} дорожкам...`);
+    logFn(`Применение гейта тишины (Порог: ${thresholdDb} dB, Диапазон: ${rangeDb} dB, Атака: ${attackMs}ms, Спад: ${releaseMs}ms, Детектор: ${detectionMode}) к ${inputFiles.length} дорожкам...`);
     const results = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -5919,7 +5853,7 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] Обработка гейта для «${nick}»...`);
 
-      const filter = `agate=threshold=${thresholdDb}dB:range=${rangeDb}dB:attack=${attackMs}:release=${releaseMs}`;
+      const filter = `agate=threshold=${thresholdDb}dB:range=${rangeDb}dB:attack=${attackMs}:release=${releaseMs}:detection=${detectionMode}`;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -6160,6 +6094,7 @@ class MixingPipelineService {
   async _execDeesser({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
     const rawFreq = Number(params.frequencyHz ?? 6200);
     const rawIntensity = Number(params.intensity ?? 3.5);
+    const rawMaxReduction = Number(params.maxReduction ?? 0.50);
 
     // FFmpeg's deesser filter expects normalized parameters in range [0.0 - 1.0]:
     // f (frequency): float [0.0 - 1.0] relative to Nyquist (24000 Hz for 48kHz audio)
@@ -6169,7 +6104,7 @@ class MixingPipelineService {
     const normI = Math.max(0.0, Math.min(1.0, rawIntensity > 1.0 ? rawIntensity / 10.0 : rawIntensity)).toFixed(2);
 
     // m (max deessing): float [0.0 - 1.0], default 0.5
-    const maxDeess = 0.5;
+    const maxDeess = Math.max(0.05, Math.min(1.0, rawMaxReduction > 1.0 ? rawMaxReduction / 100.0 : rawMaxReduction)).toFixed(2);
 
     // s (output mode): 'o' (output processed audio), 'i' (input), 'e' (ess)
     const outputMode = 'o';
@@ -6181,7 +6116,7 @@ class MixingPipelineService {
       const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i+1}/${inputFiles.length}] Деэссинг для «${nick}» (${rawFreq} Hz -> normF=${normF}, intensity: ${rawIntensity} -> normI=${normI})...`);
+      logFn(`[${i+1}/${inputFiles.length}] Деэссинг для «${nick}» (${rawFreq} Hz -> normF=${normF}, intensity: ${rawIntensity} -> normI=${normI}, maxReduction: ${maxDeess})...`);
 
       const filter = `deesser=f=${normF}:i=${normI}:m=${maxDeess}:s=${outputMode}`;
 
@@ -6221,10 +6156,10 @@ class MixingPipelineService {
     const thresholdDb = Number(params.thresholdDb ?? -24.0);
     const freqLimit = Number(params.frequencyLimitHz ?? 120);
     const depthDb = Number(params.suppressionDepthDb ?? -18.0);
-    const recoveryMs = Number(params.recoveryMs ?? 35);
-    const wetDry = Math.max(0, Math.min(100, Number(params.wetDryPercent ?? 100))) / 100.0;
+    const recoveryMs = Math.max(5, Math.min(500, Number(params.recoveryMs ?? 35)));
+    const wetDry = Math.max(0.1, Math.min(1.0, Number(params.wetDryPercent ?? 100) / 100.0));
 
-    logFn(`Подавление задувов De-Plosive Pro (Срез: ${freqLimit} Hz, Порог: ${thresholdDb} dB, Глубина: ${depthDb} dB, Восстановление: ${recoveryMs} ms)...`);
+    logFn(`Подавление задувов De-Plosive Pro (Срез: ${freqLimit} Hz, Порог: ${thresholdDb} dB, Глубина: ${depthDb} dB, Восстановление: ${recoveryMs} ms, Wet: ${(wetDry * 100).toFixed(0)}%)...`);
     const results = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -6235,8 +6170,12 @@ class MixingPipelineService {
 
       logFn(`[${i+1}/${inputFiles.length}] De-Plosive для «${nick}»...`);
 
-      // Cascaded LR4 filter + dynamic sub-frequency limiter
-      const filter = `highpass=f=45,equalizer=f=${freqLimit}:t=q:w=1.5:g=${depthDb.toFixed(1)},alimiter=limit=-0.5dB`;
+      // Cascaded LR4 highpass (poles=2 twice) + dynamic sub-frequency compressor & notch + dry/wet mix
+      const compRatio = Math.max(2, Math.min(20, Math.round(Math.abs(depthDb) / 3)));
+      const coreFilter = `highpass=f=45:p=2,highpass=f=45:p=2,equalizer=f=${freqLimit}:t=q:w=1.5:g=${depthDb.toFixed(1)},acompressor=threshold=${thresholdDb}dB:ratio=${compRatio}:attack=2:release=${recoveryMs}:knee=3dB,alimiter=limit=-0.5dB`;
+      const filter = wetDry < 0.999
+        ? `asplit[orig][tofilt];[tofilt]${coreFilter}[filt];[orig]volume=${(1.0 - wetDry).toFixed(2)}[dry];[filt]volume=${wetDry.toFixed(2)}[wet];[dry][wet]amix=inputs=2:duration=first:dropout_transition=0`
+        : coreFilter;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -6274,8 +6213,9 @@ class MixingPipelineService {
     const bodyDrive = Number(params.bodyDrivePercent ?? 50) / 100.0;
     const presenceClarity = Number(params.presenceClarityPercent ?? 40) / 100.0;
     const tapeDensity = Number(params.tapeDensityPercent ?? 45) / 100.0;
+    const mixRatio = Math.max(0.1, Math.min(1.0, Number(params.mixPercent ?? 100) / 100.0));
 
-    logFn(`Уплотнение вокала Vocal Thickener (Drive: ${(bodyDrive * 100).toFixed(0)}%, Clarity: ${(presenceClarity * 100).toFixed(0)}%, Tape: ${(tapeDensity * 100).toFixed(0)}%)...`);
+    logFn(`Уплотнение вокала Vocal Thickener (Drive: ${(bodyDrive * 100).toFixed(0)}%, Clarity: ${(presenceClarity * 100).toFixed(0)}%, Tape: ${(tapeDensity * 100).toFixed(0)}%, Mix: ${(mixRatio * 100).toFixed(0)}%)...`);
     const results = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -6290,7 +6230,10 @@ class MixingPipelineService {
       const exciterAmount = (presenceClarity * 4.0).toFixed(1);
       const drive = (1.0 + tapeDensity * 1.5).toFixed(2);
 
-      const filter = `equalizer=f=200:t=q:w=1.2:g=${bodyGain},aexciter=level_in=1:level_out=1:amount=${exciterAmount}:drive=${drive}:freq=3800,alimiter=limit=-0.5dB`;
+      const coreFilter = `equalizer=f=200:t=q:w=1.2:g=${bodyGain},aexciter=level_in=1:level_out=1:amount=${exciterAmount}:drive=${drive}:freq=3800,alimiter=limit=-0.5dB`;
+      const filter = mixRatio < 0.999
+        ? `asplit[orig][tofilt];[tofilt]${coreFilter}[filt];[orig]volume=${(1.0 - mixRatio).toFixed(2)}[dry];[filt]volume=${mixRatio.toFixed(2)}[wet];[dry][wet]amix=inputs=2:duration=first:dropout_transition=0`
+        : coreFilter;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -6326,10 +6269,11 @@ class MixingPipelineService {
    */
   async _execSpectralDeReverb({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
     const reductionDb = Number(params.reductionDb ?? -9.0);
-    const decayTimeEstMs = Number(params.decayTimeEstMs ?? 350.0);
-    const clarity = Number(params.clarityPercent ?? 70.0);
+    const decayTimeEstMs = Math.max(100, Math.min(1500, Number(params.decayTimeEstMs ?? 350.0)));
+    const clarity = Math.max(0, Math.min(100, Number(params.clarityPercent ?? 70.0)));
+    const mixRatio = Math.max(0.1, Math.min(1.0, Number(params.mixPercent ?? 100) / 100.0));
 
-    logFn(`16-полосный Spectral De-Reverb (Подавление: ${reductionDb} dB, Спад: ${decayTimeEstMs} ms, Читаемость: ${clarity}%)...`);
+    logFn(`16-полосный Spectral De-Reverb (Подавление: ${reductionDb} dB, Спад: ${decayTimeEstMs} ms, Читаемость: ${clarity}%, Mix: ${(mixRatio * 100).toFixed(0)}%)...`);
     const results = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -6341,7 +6285,12 @@ class MixingPipelineService {
       logFn(`[${i+1}/${inputFiles.length}] De-Reverb для «${nick}»...`);
 
       const noiseRed = Math.min(25, Math.abs(reductionDb) * 1.5).toFixed(1);
-      const filter = `afftdn=nf=-30:nr=${noiseRed}:nt=w,equalizer=f=500:t=q:w=1.5:g=-2.5,alimiter=limit=-0.5dB`;
+      const boxCut = (-1.5 - (decayTimeEstMs / 600.0)).toFixed(1);
+      const clarityBoost = ((clarity / 100.0) * 2.5).toFixed(1);
+      const coreFilter = `afftdn=nf=-30:nr=${noiseRed}:nt=w,agate=threshold=-44dB:range=-14dB:attack=8:release=${Math.round(decayTimeEstMs * 0.45)},equalizer=f=480:t=q:w=1.5:g=${boxCut},equalizer=f=3200:t=q:w=1.3:g=${clarityBoost},alimiter=limit=-0.5dB`;
+      const filter = mixRatio < 0.999
+        ? `asplit[orig][tofilt];[tofilt]${coreFilter}[filt];[orig]volume=${(1.0 - mixRatio).toFixed(2)}[dry];[filt]volume=${mixRatio.toFixed(2)}[wet];[dry][wet]amix=inputs=2:duration=first:dropout_transition=0`
+        : coreFilter;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -6376,13 +6325,16 @@ class MixingPipelineService {
    * EXEC: Headroom Recovery (safe true peak boost with lookahead limiter)
    */
   async _execHeadroomRecovery({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const autoHeadroom = params.autoHeadroom !== false;
     const targetPeakDb = Number(params.targetPeakDb ?? -6.0);
     const maxBoostDb = Number(params.maxBoostDb ?? 36.0);
     const manualGainDb = Number(params.manualGainDb ?? 0.0);
+    const lookaheadMs = Math.max(0.5, Math.min(20.0, Number(params.lookaheadMs ?? 3.0)));
+    const mixRatio = Math.max(0.1, Math.min(1.0, Number(params.mixPercent ?? 100) / 100.0));
 
     const trackAnalysis = await this.ensureTracksAnalysis(inputFiles, workingDir, logFn);
 
-    logFn(`Разгон громкости Headroom Recovery (Target Peak: ${targetPeakDb} dBFS, Max Boost: ${maxBoostDb} dB)...`);
+    logFn(`Разгон громкости Headroom Recovery (Auto: ${autoHeadroom ? 'Вкл' : 'Выкл'}, Target Peak: ${targetPeakDb} dBFS, Max Boost: ${maxBoostDb} dB, Lookahead: ${lookaheadMs} ms)...`);
     const results = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -6393,12 +6345,15 @@ class MixingPipelineService {
 
       const stats = trackAnalysis[track.path] || trackAnalysis[track.name] || {};
       const currentPeak = typeof stats.peakDb === 'number' ? stats.peakDb : -6.0;
-      const neededHeadroom = Math.max(0, targetPeakDb - currentPeak);
-      const totalGain = Math.min(maxBoostDb, Math.max(0, neededHeadroom + manualGainDb + 3.0)).toFixed(1);
+      const neededHeadroom = autoHeadroom ? Math.max(0, targetPeakDb - currentPeak) : 0;
+      const totalGain = Math.min(maxBoostDb, Math.max(-24, neededHeadroom + manualGainDb + (autoHeadroom ? 3.0 : 0.0))).toFixed(1);
 
       logFn(`[${i+1}/${inputFiles.length}] Headroom Recovery для «${nick}» (Текущий пик: ${currentPeak} dB, Подъем: +${totalGain} dB)...`);
 
-      const filter = `volume=${totalGain}dB,alimiter=limit=${targetPeakDb}dB:attack=3:release=50:level=true`;
+      const coreFilter = `volume=${totalGain}dB,alimiter=limit=${targetPeakDb}dB:attack=${lookaheadMs}:release=50:level=true`;
+      const filter = mixRatio < 0.999
+        ? `asplit[orig][tofilt];[tofilt]${coreFilter}[filt];[orig]volume=${(1.0 - mixRatio).toFixed(2)}[dry];[filt]volume=${mixRatio.toFixed(2)}[wet];[dry][wet]amix=inputs=2:duration=first:dropout_transition=0`
+        : coreFilter;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -6435,11 +6390,15 @@ class MixingPipelineService {
   async _execSpeechLeveler({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
     const targetLevelDb = Number(params.targetLevelDb ?? -18.0);
     const maxBoostDb = Number(params.maxBoostDb ?? 18.0);
+    const maxCutDb = Number(params.maxCutDb ?? -12.0);
+    const levelingSpeedMs = Math.max(50, Math.min(1000, Number(params.levelingSpeedMs ?? 200.0)));
+    const silenceGateDb = Number(params.silenceGateDb ?? -50.0);
     const peakCeilingDb = Number(params.peakCeilingDb ?? -2.0);
+    const mixRatio = Math.max(0.1, Math.min(1.0, Number(params.mixPercent ?? 100) / 100.0));
 
     const trackAnalysis = await this.ensureTracksAnalysis(inputFiles, workingDir, logFn);
 
-    logFn(`Двухступенчатый Speech Leveler (Target: ${targetLevelDb} dB, Max Boost: ${maxBoostDb} dB, Ceiling: ${peakCeilingDb} dBFS)...`);
+    logFn(`Двухступенчатый Speech Leveler (Target: ${targetLevelDb} dB, Max Boost: +${maxBoostDb} dB, Max Cut: ${maxCutDb} dB, Speed: ${levelingSpeedMs} ms, Gate: ${silenceGateDb} dB, Ceiling: ${peakCeilingDb} dBFS)...`);
     const results = [];
 
     for (let i = 0; i < inputFiles.length; i++) {
@@ -6450,11 +6409,15 @@ class MixingPipelineService {
 
       const stats = trackAnalysis[track.path] || trackAnalysis[track.name] || {};
       const currentRms = typeof stats.speechRmsDb === 'number' ? stats.speechRmsDb : -24.0;
-      const gainDelta = Math.max(-12, Math.min(24, targetLevelDb - currentRms));
+      const minAllowedDelta = -Math.abs(maxCutDb);
+      const gainDelta = Math.max(minAllowedDelta, Math.min(maxBoostDb, targetLevelDb - currentRms));
 
-      logFn(`[${i+1}/${inputFiles.length}] Speech Leveler для «${nick}» (RMS: ${currentRms} dB -> пред-усиление: ${gainDelta >= 0 ? '+' : ''}${gainDelta.toFixed(1)} dB, сглаживание: ${maxBoostDb} dB)...`);
+      logFn(`[${i+1}/${inputFiles.length}] Speech Leveler для «${nick}» (RMS: ${currentRms} dB -> пред-усиление: ${gainDelta >= 0 ? '+' : ''}${gainDelta.toFixed(1)} dB, окно: ${levelingSpeedMs} ms)...`);
 
-      const filter = `volume=${gainDelta.toFixed(1)}dB,dynaudnorm=f=200:g=15:p=0.92:m=${maxBoostDb}:s=12,alimiter=limit=${peakCeilingDb}dB:attack=1:release=45:level=true`;
+      const coreFilter = `agate=threshold=${silenceGateDb}dB:range=-24dB:attack=10:release=180,volume=${gainDelta.toFixed(1)}dB,dynaudnorm=f=${Math.round(levelingSpeedMs)}:g=15:p=0.92:m=${maxBoostDb}:s=12,alimiter=limit=${peakCeilingDb}dB:attack=1:release=45:level=true`;
+      const filter = mixRatio < 0.999
+        ? `asplit[orig][tofilt];[tofilt]${coreFilter}[filt];[orig]volume=${(1.0 - mixRatio).toFixed(2)}[dry];[filt]volume=${mixRatio.toFixed(2)}[wet];[dry][wet]amix=inputs=2:duration=first:dropout_transition=0`
+        : coreFilter;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -6490,6 +6453,7 @@ class MixingPipelineService {
    */
   async _execVocalEq({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
     const lowCut = Number(params.lowCutHz ?? 85);
+    const lowCutSlope = params.lowCutSlope || '24dB/oct';
     const bodyGain = Number(params.bodyGainDb ?? 0.5);
     const boxCutGain = Number(params.boxCutGainDb ?? -1.5);
     const presHz = Number(params.presenceHz ?? 3200);
@@ -6503,9 +6467,12 @@ class MixingPipelineService {
       const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
       const outPath = path.join(stepFolder, outName);
 
-      logFn(`[${i+1}/${inputFiles.length}] Параметрический EQ для «${nick}»...`);
+      logFn(`[${i+1}/${inputFiles.length}] Параметрический EQ для «${nick}» (Low-Cut: ${lowCut} Hz @ ${lowCutSlope})...`);
 
-      const filter = `highpass=f=${lowCut},equalizer=f=250:t=q:w=1.2:g=${bodyGain},equalizer=f=500:t=q:w=1.4:g=${boxCutGain},equalizer=f=${presHz}:t=q:w=1.5:g=${presGain},equalizer=f=11000:t=h:g=${airGain}`;
+      const hpStage = lowCutSlope === '24dB/oct'
+        ? `highpass=f=${lowCut}:p=2,highpass=f=${lowCut}:p=2`
+        : `highpass=f=${lowCut}:p=2`;
+      const filter = `${hpStage},equalizer=f=250:t=q:w=1.2:g=${bodyGain},equalizer=f=500:t=q:w=1.4:g=${boxCutGain},equalizer=f=${presHz}:t=q:w=1.5:g=${presGain},equalizer=f=11000:t=h:g=${airGain}`;
 
       const cmd = ffmpeg(track.path)
         .audioFilters(filter)
@@ -6945,9 +6912,17 @@ class MixingPipelineService {
     const outName = `${prefix}ducked_original.wav`;
     const outPath = path.join(stepFolder, outName);
 
-    logFn(`Сайдчейн-даккинг оригинального звука (приглушение: ${duckingAmountDb} dB, Атака: ${attackMs}ms, Спад: ${releaseMs}ms)...`);
+    const filterMusicOnly = params.filterMusicOnly !== false;
+    const absDuckDb = Math.max(1, Math.min(36, Math.abs(duckingAmountDb)));
+    const scRatio = Math.max(1.5, Math.min(20, Number((1.0 + absDuckDb / 3.0).toFixed(1))));
+    const scKnee = Math.max(1.0, Math.min(8.0, Number((absDuckDb / 4.0).toFixed(1))));
+    const safeThreshold = Math.max(0.001, Math.min(0.5, threshold));
 
-    const filter = `[0:a]volume=0.95[orig];[orig][1:a]sidechaincompress=threshold=${threshold}:ratio=4:attack=${attackMs}:release=${releaseMs}:makeup=1[ducked]`;
+    logFn(`Сайдчейн-даккинг оригинального звука (приглушение: -${absDuckDb} dB [Ratio ${scRatio}:1], Атака: ${attackMs}ms, Спад: ${releaseMs}ms, Только СЧ-полоса речи: ${filterMusicOnly ? 'Вкл' : 'Выкл'})...`);
+
+    const filter = filterMusicOnly
+      ? `[0:a]volume=0.95,asplit=2[bg_sub][bg_main];[bg_sub]lowpass=f=220[sub_keep];[bg_main]highpass=f=220[mid_hi];[mid_hi][1:a]sidechaincompress=threshold=${safeThreshold}:ratio=${scRatio}:attack=${attackMs}:release=${releaseMs}:knee=${scKnee}:makeup=1[mid_ducked];[sub_keep][mid_ducked]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[ducked]`
+      : `[0:a]volume=0.95[orig];[orig][1:a]sidechaincompress=threshold=${safeThreshold}:ratio=${scRatio}:attack=${attackMs}:release=${releaseMs}:knee=${scKnee}:makeup=1[ducked]`;
 
     const duckCmd = ffmpeg()
       .input(origAudioPath)

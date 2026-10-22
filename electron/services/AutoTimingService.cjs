@@ -635,11 +635,14 @@ class AutoTimingService {
     matchedTracks,
     options = {}
   }) {
-    const minGapSec = options.minGapSec !== undefined ? options.minGapSec : 0.12; // 120ms
-    const leadInSec = options.leadInSec !== undefined ? options.leadInSec : 0.090; // 90ms adaptive pre-roll
-    const maxShiftEarlySec = options.maxShiftEarlySec !== undefined ? options.maxShiftEarlySec : 0.20;
+    const minGapSec = options.minGapSec !== undefined ? Number(options.minGapSec) : 0.12; // 120ms
+    const leadInSec = options.leadInSec !== undefined ? Number(options.leadInSec) : 0.090; // 90ms adaptive pre-roll
+    const maxShiftEarlySec = options.maxShiftEarlySec !== undefined ? Number(options.maxShiftEarlySec) : 0.20;
+    const silenceThresholdDb = options.silenceThresholdDb !== undefined ? Number(options.silenceThresholdDb) : (options.noiseDb !== undefined ? Number(options.noiseDb) : -45);
+    const minSilenceDuration = options.minSilenceDuration !== undefined ? Number(options.minSilenceDuration) : 0.30;
+    const preventCollisions = options.preventCollisions !== false;
     
-    log.info(`[AutoTiming] Запуск автотайминга с minGap=${minGapSec}с, leadIn=${leadInSec}с`);
+    log.info(`[AutoTiming] Запуск автотайминга с minGap=${minGapSec}с, leadIn=${leadInSec}с, silenceThreshold=${silenceThresholdDb}dB, minSilence=${minSilenceDuration}с, preventCollisions=${preventCollisions}`);
 
     const subData = subPath ? await getRawSubtitles(subPath) : { lines: [] };
     const allSubtitleLines = (subData.lines || []).map(l => ({
@@ -656,8 +659,8 @@ class AutoTimingService {
       let intervals = [];
       try {
         const detectRes = await AutoTimingService.detectSpeechIntervals(track.trackPath, {
-          noiseDb: options.noiseDb || -45,
-          minSilenceDuration: options.minSilenceDuration || 0.30
+          noiseDb: silenceThresholdDb,
+          minSilenceDuration
         });
         intervals = detectRes.speechIntervals || [];
       } catch (err) {
@@ -803,62 +806,64 @@ class AutoTimingService {
     let totalCollisionsResolved = 0;
     let totalIntentionalOverlapsPreserved = 0;
 
-    for (let i = 0; i < allProjectPhrases.length; i++) {
-      const current = allProjectPhrases[i];
+    if (preventCollisions) {
+      for (let i = 0; i < allProjectPhrases.length; i++) {
+        const current = allProjectPhrases[i];
 
-      for (let j = i + 1; j < allProjectPhrases.length; j++) {
-        const next = allProjectPhrases[j];
+        for (let j = i + 1; j < allProjectPhrases.length; j++) {
+          const next = allProjectPhrases[j];
 
-        if (next.targetStartSec >= current.targetEndSec + minGapSec - 0.001) {
-          break;
-        }
-
-        const overlapKey = `${current.subId}:${next.subId}`;
-        const subOriginallyOverlapped = subOverlapMatrix.has(overlapKey);
-
-        if (subOriginallyOverlapped) {
-          totalIntentionalOverlapsPreserved++;
-          next.intentionalOverlapWith = current.id;
-          continue;
-        }
-
-        if (current.dubberNick && current.dubberNick === next.dubberNick && current.trackId !== next.trackId) {
-          totalIntentionalOverlapsPreserved++;
-          next.intentionalOverlapWith = current.id;
-          continue;
-        }
-
-        const collisionOverlapSec = (current.targetEndSec + minGapSec) - next.targetStartSec;
-        // Surgical guard: only auto-resolve small tail overlaps (<= 1.2s); never shove a phrase several seconds away
-        if (collisionOverlapSec > 1.25) {
-          continue;
-        }
-
-        totalCollisionsFound++;
-        const shiftAmount = collisionOverlapSec;
-
-        let earlyShiftSec = 0;
-        if (i > 0) {
-          const prev = allProjectPhrases[i - 1];
-          const availableRoomBefore = current.targetStartSec - (prev.targetEndSec + minGapSec);
-          if (availableRoomBefore > 0.05) {
-            earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, shiftAmount * 0.45);
-            current.targetStartSec = Math.max(0, current.targetStartSec - earlyShiftSec);
-            current.targetEndSec = current.targetStartSec + current.durationSec;
+          if (next.targetStartSec >= current.targetEndSec + minGapSec - 0.001) {
+            break;
           }
-        }
 
-        const finalNextStart = current.targetEndSec + minGapSec;
-        const delta = finalNextStart - next.targetStartSec;
-        if (delta > 0 && delta <= 1.25) {
-          next.targetStartSec = finalNextStart;
-          next.targetEndSec = next.targetStartSec + next.durationSec;
-          next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
-          next.collisionResolved = true;
-          totalCollisionsResolved++;
+          const overlapKey = `${current.subId}:${next.subId}`;
+          const subOriginallyOverlapped = subOverlapMatrix.has(overlapKey);
 
-          const logMsg = `[${formatSeconds(current.targetStartSec)} - ${formatSeconds(next.targetEndSec)}] Хирургически разведена коллизия: фраза «${current.dubberNick}» (${current.characterName}) и «${next.dubberNick}» (${next.characterName}). Сдвиг: +${delta.toFixed(2)}с.`;
-          collisionLogs.push(logMsg);
+          if (subOriginallyOverlapped) {
+            totalIntentionalOverlapsPreserved++;
+            next.intentionalOverlapWith = current.id;
+            continue;
+          }
+
+          if (current.dubberNick && current.dubberNick === next.dubberNick && current.trackId !== next.trackId) {
+            totalIntentionalOverlapsPreserved++;
+            next.intentionalOverlapWith = current.id;
+            continue;
+          }
+
+          const collisionOverlapSec = (current.targetEndSec + minGapSec) - next.targetStartSec;
+          // Surgical guard: only auto-resolve small tail overlaps (<= 1.2s); never shove a phrase several seconds away
+          if (collisionOverlapSec > 1.25) {
+            continue;
+          }
+
+          totalCollisionsFound++;
+          const shiftAmount = collisionOverlapSec;
+
+          let earlyShiftSec = 0;
+          if (i > 0) {
+            const prev = allProjectPhrases[i - 1];
+            const availableRoomBefore = current.targetStartSec - (prev.targetEndSec + minGapSec);
+            if (availableRoomBefore > 0.05) {
+              earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, shiftAmount * 0.45);
+              current.targetStartSec = Math.max(0, current.targetStartSec - earlyShiftSec);
+              current.targetEndSec = current.targetStartSec + current.durationSec;
+            }
+          }
+
+          const finalNextStart = current.targetEndSec + minGapSec;
+          const delta = finalNextStart - next.targetStartSec;
+          if (delta > 0 && delta <= 1.25) {
+            next.targetStartSec = finalNextStart;
+            next.targetEndSec = next.targetStartSec + next.durationSec;
+            next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
+            next.collisionResolved = true;
+            totalCollisionsResolved++;
+
+            const logMsg = `[${formatSeconds(current.targetStartSec)} - ${formatSeconds(next.targetEndSec)}] Хирургически разведена коллизия: фраза «${current.dubberNick}» (${current.characterName}) и «${next.dubberNick}» (${next.characterName}). Сдвиг: +${delta.toFixed(2)}с.`;
+            collisionLogs.push(logMsg);
+          }
         }
       }
     }
@@ -882,7 +887,11 @@ class AutoTimingService {
    * Слияние правок (FIX) с оригинальными дорожками с защитой от хвостов и каскадным сдвигом.
    */
   static smartApplyFixesToTimedTracks(timingResult, options = {}) {
-    const minGapSec = options.minGapSec ?? 0.12;
+    const minGapSec = Number(options.minGapSec ?? 0.12);
+    const cleanLeftoverTails = options.cleanLeftoverTails !== false;
+    const adjustLongerCollisions = options.adjustLongerCollisions !== false;
+    const safetyPaddingMs = Number(options.safetyPaddingMs ?? 80);
+    const fadeDurationMs = Number(options.fadeDurationMs ?? 8);
     const { trackPhraseResults, collisionLogs } = timingResult;
 
     const fixLogs = [];
@@ -948,10 +957,10 @@ class AutoTimingService {
           const fixDuration = fixPhrase.durationSec;
           const durDiff = fixDuration - origDuration;
 
-          if (durDiff < -0.05) {
+          if (cleanLeftoverTails && durDiff < -0.05) {
             leftoverTailsCleanedCount++;
             const tailSec = Math.abs(durDiff);
-            const tailMsg = `Фраза фикса короче оригинала на ${tailSec.toFixed(2)}с. Старая фраза полностью обнулена/заглушена, хвост удален.`;
+            const tailMsg = `Фраза фикса короче оригинала на ${tailSec.toFixed(2)}с. Старая фраза полностью обнулена/заглушена (защитный интервал ${safetyPaddingMs}мс), хвост удален.`;
             fixLogs.push(`[${formatSeconds(oldOrigPhrase.targetStartSec)}] Даббер «${bestOrigItem.track.dubberNick}»: ${tailMsg}`);
           }
 
@@ -967,13 +976,16 @@ class AutoTimingService {
             oldTargetEndSec: oldOrigPhrase.targetEndSec,
             isReplacedByFix: true,
             origDurationSec: origDuration,
-            fixDurationSec: fixDuration
+            fixDurationSec: fixDuration,
+            cleanLeftoverTails,
+            safetyPaddingMs,
+            fadeDurationMs
           };
 
           origPhrases[matchedOrigIdx] = replacedPhrase;
 
           // Каскадный сдвиг (Ripple Shift) при удлинении дубля фикса
-          if (durDiff > 0.05 && matchedOrigIdx + 1 < origPhrases.length) {
+          if (adjustLongerCollisions && durDiff > 0.05 && matchedOrigIdx + 1 < origPhrases.length) {
             const nextPhrase = origPhrases[matchedOrigIdx + 1];
             if (replacedPhrase.targetEndSec + minGapSec > nextPhrase.targetStartSec) {
               longerFixCollisionsAdjustedCount++;
@@ -1252,14 +1264,27 @@ class AutoTimingService {
       // пользователем/детектором тишины. Смещение назад (pre-roll) и вперед (post-roll) отключаются,
       // чтобы фразы не наезжали друг на друга и не создавали искусственных перегрузок звука.
       const isExactTimingExport = Boolean(options.renderFromClips || options.exactTimelineRender);
-      const safetyPreSec = isExactTimingExport ? 0.0 : 0.090; // 90 ms для автотайминга, 0 для ручного/тайминг-экспорта
-      const safetyPostSec = isExactTimingExport ? 0.0 : 0.180; // 180 ms для автотайминга, 0 для ручного/тайминг-экспорта
-      const fadeSamplesIn = isExactTimingExport
-        ? Math.min(384, Math.floor(sampleRate * 0.008)) // 8 ms = 384 samples (чистый микрофейд без щелчков)
-        : Math.min(480, Math.floor(sampleRate * 0.010)); // 10 ms = 480 samples
-      const fadeSamplesOut = isExactTimingExport
-        ? Math.min(384, Math.floor(sampleRate * 0.008)) // 8 ms
-        : Math.min(720, Math.floor(sampleRate * 0.015)); // 15 ms
+      const customSafetySec = options.safetyPaddingMs !== undefined
+        ? Math.max(0.0, Number(options.safetyPaddingMs) / 1000.0)
+        : (isExactTimingExport ? 0.0 : 0.090);
+      const safetyPreSec = customSafetySec;
+      const safetyPostSec = options.safetyPaddingMs !== undefined
+        ? Math.max(0.0, (Number(options.safetyPaddingMs) * 1.8) / 1000.0)
+        : (isExactTimingExport ? 0.0 : 0.180);
+      const customFadeSec = options.fadeDurationMs !== undefined
+        ? Math.max(0.001, Number(options.fadeDurationMs) / 1000.0)
+        : null;
+      const fadeSamplesIn = customFadeSec !== null
+        ? Math.max(48, Math.floor(sampleRate * customFadeSec))
+        : (isExactTimingExport
+            ? Math.min(384, Math.floor(sampleRate * 0.008))
+            : Math.min(480, Math.floor(sampleRate * 0.010)));
+      const fadeSamplesOut = customFadeSec !== null
+        ? Math.max(48, Math.floor(sampleRate * customFadeSec * 1.25))
+        : (isExactTimingExport
+            ? Math.min(384, Math.floor(sampleRate * 0.008))
+            : Math.min(720, Math.floor(sampleRate * 0.015)));
+      const cleanLeftoverTails = options.cleanLeftoverTails !== false;
 
       let totalPcmBytesWritten = 0;
 
@@ -1290,8 +1315,8 @@ class AutoTimingService {
           }
         }
 
-        // Шаг Б: Зануление областей заменяемых правок (start - 0.09s до end + 0.18s) в таймлайн-дорожках
-        if (isTimelineTrack) {
+        // Шаг Б: Зануление областей заменяемых правок в таймлайн-дорожках
+        if (isTimelineTrack && cleanLeftoverTails) {
           for (const p of phrases) {
             if (p.isReplacedByFix || (p.collisionResolved && Math.abs(p.shiftDeltaSec) > 0.03)) {
               const oldStartSec = Math.max(0, (p.oldTargetStartSec ?? p.sourceStartSec) - safetyPreSec);
