@@ -503,37 +503,44 @@ class AutoTimingService {
         continue;
       }
 
-      const mainTracks = actorTracks.filter(t => !t.isFix);
-      const fixTracks = actorTracks.filter(t => t.isFix);
+      // Enrich tracks with file sizes from disk
+      for (const t of actorTracks) {
+        if (!t.size && t.trackPath) {
+          try { t.size = fs.statSync(t.trackPath).size; } catch (_) {}
+        }
+      }
+
+      // Sort files by size descending (largest file is original main track)
+      const sortedBySize = [...actorTracks].sort((a, b) => (b.size || 0) - (a.size || 0));
+      const maxTrack = sortedBySize[0];
+      const otherTracks = sortedBySize.slice(1);
+
+      const mainTracks = sortedBySize.filter(t => t.trackPath === maxTrack.trackPath || (!t.isFix && maxTrack.size > 0 && t.size >= maxTrack.size * 0.95));
+      const fixTracks = sortedBySize.filter(t => t.trackPath !== maxTrack.trackPath && (t.isFix || (maxTrack.size > 0 && t.size < maxTrack.size * 0.95)));
 
       // СЦЕНАРИЙ 1: У даббера 1 основная дорожка (или только фиксы)
       if (mainTracks.length <= 1) {
-        const newestMain = mainTracks[0] || null;
+        const newestMain = mainTracks[0] || maxTrack;
         const newestFix = fixTracks.length > 0 ? fixTracks[fixTracks.length - 1] : null;
 
-        if (newestMain && newestFix) {
-          let mainSize = 0;
-          let fixSize = 0;
-          try { mainSize = fs.statSync(newestMain.trackPath).size; } catch (e) {}
-          try { fixSize = fs.statSync(newestFix.trackPath).size; } catch (e) {}
+        if (newestMain && newestFix && newestFix.trackPath !== newestMain.trackPath) {
+          const mainSize = newestMain.size || 1;
+          const fixSize = newestFix.size || 0;
 
-          const ratio = (mainSize > 0 && fixSize > 0) ? (fixSize / mainSize) : 0;
-          const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
-
-          // Тип 1: Цельный фикс (плюс-минус как оригинал по размеру, >= 70% или разница <= 3 МБ)
+          // Тип 1: Цельный фикс (строго по размеру файла в байтах, >= 95% размера оригинала)
           // Заменяет предыдущую дорожку целиком, вшивание не требуется!
-          if (ratio >= 0.70 || sizeDiffMb <= 3.0 || fixSize === 0) {
+          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.95) {
             newestFix.isFix = false;
             deduplicatedMatchedTracks.push(newestFix);
           } else {
-            // Тип 2: Фиксы частями (отдельные фразы, гораздо легче оригинала) — вшиваются в оригинал
+            // Тип 2: Фиксы частями (отдельные фразы, меньше оригинала) — вшиваются в оригинал
             if (!newestMain.fixTargetLines || newestMain.fixTargetLines.length === 0) {
               newestMain.fixTargetLines = newestFix.fixTargetLines;
             }
             newestMain.patchSnippetPath = newestFix.trackPath;
             deduplicatedMatchedTracks.push(newestMain);
           }
-        } else if (newestFix) {
+        } else if (newestFix && !newestMain) {
           newestFix.isFix = false;
           deduplicatedMatchedTracks.push(newestFix);
         } else if (newestMain) {
@@ -553,15 +560,10 @@ class AutoTimingService {
         }) || (mIdx === 0 && fixTracks.length === 1 ? fixTracks[0] : null);
 
         if (assignedFix) {
-          let mainSize = 0;
-          let fixSize = 0;
-          try { mainSize = fs.statSync(mainTr.trackPath).size; } catch (e) {}
-          try { fixSize = fs.statSync(assignedFix.trackPath).size; } catch (e) {}
+          const mainSize = mainTr.size || 1;
+          const fixSize = assignedFix.size || 0;
 
-          const ratio = (mainSize > 0 && fixSize > 0) ? (fixSize / mainSize) : 0;
-          const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
-
-          if (ratio >= 0.70 || sizeDiffMb <= 3.0) {
+          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.95) {
             // Цельный фикс заменяет данную дорожку целиком
             assignedFix.isFix = false;
             deduplicatedMatchedTracks.push(assignedFix);
@@ -590,6 +592,31 @@ class AutoTimingService {
       unassignedTracks,
       allCharacters: Array.from(charactersMap.values())
     };
+  }
+
+  static normalizeSubPhraseText(text) {
+    return String(text || '')
+      .replace(/\{[^}]*\}/g, '')
+      .replace(/\\N/gi, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  static isSameSubtitlePhrase(a, b) {
+    if (!a || !b) return false;
+    const hasRealSubA = a.subId && !String(a.subId).startsWith('track_');
+    const hasRealSubB = b.subId && !String(b.subId).startsWith('track_');
+    if (hasRealSubA && hasRealSubB && String(a.subId) === String(b.subId)) {
+      return true;
+    }
+    const normA = this.normalizeSubPhraseText(a.subText);
+    const normB = this.normalizeSubPhraseText(b.subText);
+    if (normA && normB && normA === normB && Math.abs((a.subStartSec || 0) - (b.subStartSec || 0)) <= 0.08) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -783,7 +810,9 @@ class AutoTimingService {
           targetEndSec: initialEnd,
           shiftDeltaSec: initialStart - interval.startSec,
           collisionResolved: false,
-          collisionDetails: null
+          collisionDetails: null,
+          isUnisonPhrase: false,
+          isIntentionalSubOverlap: false
         };
 
         phrases.push(phraseObj);
@@ -798,86 +827,219 @@ class AutoTimingService {
       });
     }
 
-    // Разведение коллизий между разными актерами (хирургически, без агрессивных далеких сдвигов)
-    allProjectPhrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
-
     const collisionLogs = [];
     let totalCollisionsFound = 0;
     let totalCollisionsResolved = 0;
     let totalIntentionalOverlapsPreserved = 0;
+    let unisonPhrasesCount = 0;
 
-    if (preventCollisions) {
-      for (let i = 0; i < allProjectPhrases.length; i++) {
-        const current = allProjectPhrases[i];
+    // ПРАВИЛО 1: Если в сабах назначена на несколько дабберов ОДНА И ТА ЖЕ ФРАЗА,
+    // такие фразы НЕ считаются конфликтами и должны быть оттаймлены в абсолютном синхроне.
+    const visitedUnison = new Set();
+    for (let i = 0; i < allProjectPhrases.length; i++) {
+      const pA = allProjectPhrases[i];
+      if (visitedUnison.has(pA.id)) continue;
 
-        for (let j = i + 1; j < allProjectPhrases.length; j++) {
-          const next = allProjectPhrases[j];
+      const unisonGroup = [pA];
+      for (let j = i + 1; j < allProjectPhrases.length; j++) {
+        const pB = allProjectPhrases[j];
+        if (pB.trackId === pA.trackId) continue;
+        if (this.isSameSubtitlePhrase(pA, pB)) {
+          unisonGroup.push(pB);
+        }
+      }
 
-          if (next.targetStartSec >= current.targetEndSec + minGapSec - 0.001) {
-            break;
+      if (unisonGroup.length >= 2) {
+        const syncStartSec = Number(Math.max(0, pA.subStartSec).toFixed(3));
+        for (const p of unisonGroup) {
+          visitedUnison.add(p.id);
+          const trResult = trackPhraseResults.find(tr => tr.track.trackId === p.trackId);
+          const trPhrases = trResult ? trResult.phrases : [];
+          const idx = p.indexInTrack;
+          const prevEnd = idx > 0 && trPhrases[idx - 1] ? (trPhrases[idx - 1].targetEndSec + 0.03) : 0;
+          const nextStart = (idx + 1 < trPhrases.length && trPhrases[idx + 1]) ? (trPhrases[idx + 1].targetStartSec - 0.03) : Infinity;
+
+          if (syncStartSec >= prevEnd && syncStartSec + p.durationSec <= nextStart && Math.abs(syncStartSec - p.sourceStartSec) <= 2.2) {
+            p.targetStartSec = syncStartSec;
+            p.targetEndSec = Number((syncStartSec + p.durationSec).toFixed(3));
+            p.shiftDeltaSec = Number((p.targetStartSec - p.sourceStartSec).toFixed(3));
           }
+          p.isUnisonPhrase = true;
+        }
+        unisonPhrasesCount += unisonGroup.length;
+        const dubbersList = unisonGroup.map(u => `${u.dubberNick} (${u.characterName})`).join(', ');
+        collisionLogs.push(`[${formatSeconds(syncStartSec)}] 🔗 Синхронный унисон (одна фраза в сабах): «${(pA.subText || '').slice(0, 45)}» синхронизирована в абсолютный унисон для: ${dubbersList}.`);
+      }
+    }
 
-          const overlapKey = `${current.subId}:${next.subId}`;
-          const subOriginallyOverlapped = subOverlapMatrix.has(overlapKey);
+    // Сортируем все фразы хронологически после синхронизации унисонов
+    allProjectPhrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
 
-          if (subOriginallyOverlapped) {
-            totalIntentionalOverlapsPreserved++;
-            next.intentionalOverlapWith = current.id;
-            continue;
-          }
+    // ПРАВИЛО 2: Если РАЗНЫЕ фразы разных людей накладываются друг на друга и ЭТО ТАК В САБАХ —
+    // это НЕ считается конфликтом, таймится в обычном порядке, но записывается и передается в модуль сведения.
+    const intentionalOverlapsMap = new Map();
 
-          if (current.dubberNick && current.dubberNick === next.dubberNick && current.trackId !== next.trackId) {
-            totalIntentionalOverlapsPreserved++;
-            next.intentionalOverlapWith = current.id;
-            continue;
-          }
+    for (let i = 0; i < allProjectPhrases.length; i++) {
+      const current = allProjectPhrases[i];
 
-          const collisionOverlapSec = (current.targetEndSec + minGapSec) - next.targetStartSec;
-          // Surgical guard: only auto-resolve small tail overlaps (<= 1.2s); never shove a phrase several seconds away
-          if (collisionOverlapSec > 1.25) {
-            continue;
-          }
+      for (let j = i + 1; j < allProjectPhrases.length; j++) {
+        const next = allProjectPhrases[j];
 
-          totalCollisionsFound++;
-          const shiftAmount = collisionOverlapSec;
+        if (next.targetStartSec >= current.targetEndSec + minGapSec - 0.001) {
+          break;
+        }
 
-          let earlyShiftSec = 0;
-          if (i > 0) {
-            const prev = allProjectPhrases[i - 1];
-            const availableRoomBefore = current.targetStartSec - (prev.targetEndSec + minGapSec);
-            if (availableRoomBefore > 0.05) {
-              earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, shiftAmount * 0.45);
-              current.targetStartSec = Math.max(0, current.targetStartSec - earlyShiftSec);
-              current.targetEndSec = current.targetStartSec + current.durationSec;
+        if (current.trackId === next.trackId) continue;
+
+        // 1. Проверка на одну и ту же фразу (Унисон) — не конфликт и не раздвигаем
+        if (this.isSameSubtitlePhrase(current, next) || (current.isUnisonPhrase && next.isUnisonPhrase && Math.abs(current.subStartSec - next.subStartSec) <= 0.08)) {
+          next.targetStartSec = current.targetStartSec;
+          next.targetEndSec = Number((next.targetStartSec + next.durationSec).toFixed(3));
+          next.shiftDeltaSec = Number((next.targetStartSec - next.sourceStartSec).toFixed(3));
+          current.isUnisonPhrase = true;
+          next.isUnisonPhrase = true;
+          continue;
+        }
+
+        // 2. Проверка на наложение разных фраз в исходных субтитрах
+        const overlapKey = `${current.subId}:${next.subId}`;
+        const directSubOverlap = Math.min(current.subEndSec, next.subEndSec) - Math.max(current.subStartSec, next.subStartSec) > 0.05;
+        const subOriginallyOverlapped = subOverlapMatrix.has(overlapKey) || directSubOverlap;
+
+        if (subOriginallyOverlapped) {
+          totalIntentionalOverlapsPreserved++;
+          current.isIntentionalSubOverlap = true;
+          next.isIntentionalSubOverlap = true;
+          next.intentionalOverlapWith = current.id;
+
+          const ovStart = Number(Math.max(current.targetStartSec, next.targetStartSec).toFixed(2));
+          const ovEnd = Number(Math.min(current.targetEndSec, next.targetEndSec).toFixed(2));
+          const subOvStart = Number(Math.min(current.subStartSec, next.subStartSec).toFixed(2));
+          const subOvEnd = Number(Math.max(current.subEndSec, next.subEndSec).toFixed(2));
+
+          let matchedGroup = null;
+          for (const grp of intentionalOverlapsMap.values()) {
+            if (Math.min(grp.endSec, ovEnd) > Math.max(grp.startSec, ovStart) - 0.25) {
+              matchedGroup = grp;
+              break;
             }
           }
 
-          const finalNextStart = current.targetEndSec + minGapSec;
-          const delta = finalNextStart - next.targetStartSec;
-          if (delta > 0 && delta <= 1.25) {
-            next.targetStartSec = finalNextStart;
-            next.targetEndSec = next.targetStartSec + next.durationSec;
-            next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
-            next.collisionResolved = true;
-            totalCollisionsResolved++;
+          const entryA = {
+            trackId: current.trackId,
+            dubberNick: current.dubberNick || 'Даббер 1',
+            characterName: current.characterName || current.dubberNick || 'Персонаж 1',
+            phraseId: current.id,
+            subId: current.subId,
+            text: current.subText || '',
+            phraseStartSec: Number(current.targetStartSec.toFixed(2)),
+            phraseEndSec: Number(current.targetEndSec.toFixed(2))
+          };
+          const entryB = {
+            trackId: next.trackId,
+            dubberNick: next.dubberNick || 'Даббер 2',
+            characterName: next.characterName || next.dubberNick || 'Персонаж 2',
+            phraseId: next.id,
+            subId: next.subId,
+            text: next.subText || '',
+            phraseStartSec: Number(next.targetStartSec.toFixed(2)),
+            phraseEndSec: Number(next.targetEndSec.toFixed(2))
+          };
 
-            const logMsg = `[${formatSeconds(current.targetStartSec)} - ${formatSeconds(next.targetEndSec)}] Хирургически разведена коллизия: фраза «${current.dubberNick}» (${current.characterName}) и «${next.dubberNick}» (${next.characterName}). Сдвиг: +${delta.toFixed(2)}с.`;
-            collisionLogs.push(logMsg);
+          if (!matchedGroup) {
+            const groupId = `sub_overlap_${Math.round(subOvStart * 10)}_${current.subId}_${next.subId}`;
+            matchedGroup = {
+              id: groupId,
+              startSec: Math.min(entryA.phraseStartSec, entryB.phraseStartSec),
+              endSec: Math.max(entryA.phraseEndSec, entryB.phraseEndSec),
+              overlapStartSec: ovStart,
+              overlapEndSec: ovEnd,
+              subStartSec: subOvStart,
+              subEndSec: subOvEnd,
+              priorityTrackKey: null,
+              attenuationDb: -10,
+              tracks: [entryA, entryB]
+            };
+            intentionalOverlapsMap.set(groupId, matchedGroup);
+          } else {
+            matchedGroup.startSec = Math.min(matchedGroup.startSec, entryA.phraseStartSec, entryB.phraseStartSec);
+            matchedGroup.endSec = Math.max(matchedGroup.endSec, entryA.phraseEndSec, entryB.phraseEndSec);
+            matchedGroup.overlapStartSec = Math.min(matchedGroup.overlapStartSec, ovStart);
+            matchedGroup.overlapEndSec = Math.max(matchedGroup.overlapEndSec, ovEnd);
+            if (!matchedGroup.tracks.some(t => t.dubberNick === entryA.dubberNick && t.phraseId === entryA.phraseId)) {
+              matchedGroup.tracks.push(entryA);
+            }
+            if (!matchedGroup.tracks.some(t => t.dubberNick === entryB.dubberNick && t.phraseId === entryB.phraseId)) {
+              matchedGroup.tracks.push(entryB);
+            }
+          }
+          continue;
+        }
+
+        if (current.dubberNick && current.dubberNick === next.dubberNick && current.trackId !== next.trackId) {
+          totalIntentionalOverlapsPreserved++;
+          next.intentionalOverlapWith = current.id;
+          continue;
+        }
+
+        if (!preventCollisions) {
+          continue;
+        }
+
+        const collisionOverlapSec = (current.targetEndSec + minGapSec) - next.targetStartSec;
+        // Surgical guard: only auto-resolve small tail overlaps (<= 1.2s); never shove a phrase several seconds away
+        if (collisionOverlapSec > 1.25) {
+          continue;
+        }
+
+        totalCollisionsFound++;
+        const shiftAmount = collisionOverlapSec;
+
+        let earlyShiftSec = 0;
+        if (i > 0) {
+          const prev = allProjectPhrases[i - 1];
+          const availableRoomBefore = current.targetStartSec - (prev.targetEndSec + minGapSec);
+          if (availableRoomBefore > 0.05) {
+            earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, shiftAmount * 0.45);
+            current.targetStartSec = Math.max(0, current.targetStartSec - earlyShiftSec);
+            current.targetEndSec = current.targetStartSec + current.durationSec;
           }
         }
+
+        const finalNextStart = current.targetEndSec + minGapSec;
+        const delta = finalNextStart - next.targetStartSec;
+        if (delta > 0 && delta <= 1.25) {
+          next.targetStartSec = finalNextStart;
+          next.targetEndSec = next.targetStartSec + next.durationSec;
+          next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
+          next.collisionResolved = true;
+          totalCollisionsResolved++;
+
+          const logMsg = `[${formatSeconds(current.targetStartSec)} - ${formatSeconds(next.targetEndSec)}] Хирургически разведена коллизия: фраза «${current.dubberNick}» (${current.characterName}) и «${next.dubberNick}» (${next.characterName}). Сдвиг: +${delta.toFixed(2)}с.`;
+          collisionLogs.push(logMsg);
+        }
       }
+    }
+
+    const intentionalOverlaps = Array.from(intentionalOverlapsMap.values()).sort((a, b) => a.startSec - b.startSec);
+    if (intentionalOverlaps.length > 0) {
+      collisionLogs.push(`📋 Зафиксировано ${intentionalOverlaps.length} моментов наложения разных фраз по субтитрам — переданы в Сведение для выбора приоритетной дорожки (-10 дБ остальным).`);
     }
 
     return {
       trackPhraseResults,
       allProjectPhrases,
       subOverlapMatrix,
+      intentionalOverlaps,
+      unisonPhrasesCount,
       stats: {
         totalTracks: matchedTracks.length,
         totalPhrases: allProjectPhrases.length,
         totalCollisionsFound,
         totalCollisionsResolved,
-        totalIntentionalOverlapsPreserved
+        totalIntentionalOverlapsPreserved,
+        unisonPhrasesCount,
+        intentionalOverlapsCount: intentionalOverlaps.length
       },
       collisionLogs
     };
@@ -1677,10 +1839,33 @@ class AutoTimingService {
 
     // Генерация timing_metadata.json & phrase_volume_map.json
     try {
+      const timingJsonPath = path.join(targetDir, 'timing_metadata.json');
+      let existingPriorities = {};
+      if (fs.existsSync(timingJsonPath)) {
+        try {
+          const prevMeta = JSON.parse(await fs.promises.readFile(timingJsonPath, 'utf-8'));
+          if (Array.isArray(prevMeta.intentionalOverlaps)) {
+            for (const ov of prevMeta.intentionalOverlaps) {
+              if (ov && ov.id && ov.priorityTrackKey) {
+                existingPriorities[ov.id] = ov.priorityTrackKey;
+              }
+            }
+          }
+        } catch (e) {}
+      }
+
+      const intentionalOverlaps = (timingResult.intentionalOverlaps || []).map(ov => ({
+        ...ov,
+        priorityTrackKey: ov.priorityTrackKey || existingPriorities[ov.id] || null,
+        attenuationDb: -10
+      }));
+
       const timingMetadata = {
         version: '1.0',
         updatedAt: new Date().toISOString(),
         baseVideoName,
+        unisonPhrasesCount: timingResult.unisonPhrasesCount || 0,
+        intentionalOverlaps,
         rolesVolumeMap: tracksToRender.reduce((acc, tr) => {
           const nick = tr.track?.dubberNick || 'Даббер';
           const roleName = tr.track?.characterName || nick;
@@ -1701,6 +1886,8 @@ class AutoTimingService {
               startSec: Number((p.targetStartSec || p.sourceStartSec || 0).toFixed(2)),
               endSec: Number((p.targetEndSec || p.sourceEndSec || 0).toFixed(2)),
               text: p.subText || '',
+              isUnisonPhrase: Boolean(p.isUnisonPhrase),
+              isIntentionalSubOverlap: Boolean(p.isIntentionalSubOverlap),
               volumePercent: volPct,
               volumeGainDb: Number((20 * Math.log10(Math.max(10, volPct) / 100)).toFixed(2))
             };
@@ -1708,14 +1895,13 @@ class AutoTimingService {
         })
       };
 
-      const timingJsonPath = path.join(targetDir, 'timing_metadata.json');
       const volumeJsonPath = path.join(targetDir, 'phrase_volume_map.json');
       const analysisJsonPath = path.join(targetDir, 'timing_project.analysis.json');
       await fs.promises.writeFile(timingJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
       await fs.promises.writeFile(volumeJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
       await fs.promises.writeFile(analysisJsonPath, JSON.stringify(timingMetadata, null, 2), 'utf-8');
-      log.info(`[AutoTiming] Сохранены timing_metadata.json, phrase_volume_map.json и timing_project.analysis.json в: ${targetDir}`);
-      if (onLog) onLog(`Карта громкостей фраз сохранена в сведение: timing_metadata.json`);
+      log.info(`[AutoTiming] Сохранены timing_metadata.json, phrase_volume_map.json и timing_project.analysis.json в: ${targetDir} (пересечений фраз: ${intentionalOverlaps.length})`);
+      if (onLog) onLog(`Карта громкостей фраз и ${intentionalOverlaps.length} моментов наложения субтитров сохранены в сведение: timing_metadata.json`);
     } catch (metaErr) {
       log.warn(`[AutoTiming] Предупреждение при сохранении timing_metadata.json:`, metaErr);
     }

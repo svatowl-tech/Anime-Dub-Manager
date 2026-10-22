@@ -839,6 +839,8 @@ interface DecodedTrackContext {
   audioUrl: string;
   audioBuffer: AudioBuffer;
   assignedCharacters: Set<string>;
+  fixBuffer?: AudioBuffer | null;
+  fixAudioUrl?: string | null;
 }
 
 /**
@@ -970,15 +972,34 @@ export async function detectEpisodeGaps(
       `Загрузка и декодирование дорожки [${i + 1}/${totalTracks}]: ${track.participant}...`
     );
 
-    const selectedFile = track.files.find(f => f.id === track.selectedFileId) || track.files[0];
-    if (!selectedFile || !selectedFile.path) continue;
+    // Sort files of this track by byte size descending (largest file = original main track)
+    const sortedFiles = [...track.files].sort((a, b) => (b.size || 0) - (a.size || 0));
+    const mainFile = sortedFiles[0] || track.files.find(f => f.id === track.selectedFileId) || track.files[0];
+    if (!mainFile || !mainFile.path) continue;
 
-    const audioUrl = resolveAudioUrl(selectedFile.path);
+    // Check if there is an attached patchSnippet or secondary fix file
+    const fixFileCandidate = track.patchSnippet || sortedFiles.find(f => f.path !== mainFile.path);
+
+    const audioUrl = resolveAudioUrl(mainFile.path);
     if (!audioUrl) continue;
 
     try {
       const audioBuffer = await decodeAudioFile(audioUrl);
       if (audioBuffer && audioBuffer.length > 0) {
+        let fixBuffer: AudioBuffer | null = null;
+        let fixAudioUrl: string | null = null;
+
+        if (fixFileCandidate && fixFileCandidate.path && fixFileCandidate.path !== mainFile.path) {
+          try {
+            fixAudioUrl = resolveAudioUrl(fixFileCandidate.path);
+            if (fixAudioUrl) {
+              fixBuffer = await decodeAudioFile(fixAudioUrl);
+            }
+          } catch (fixErr) {
+            console.warn(`Не удалось декодировать фикс-дорожку для ${track.participant}:`, fixErr);
+          }
+        }
+
         const assignedCharacters = new Set<string>();
         (episode.assignments || []).forEach(as => {
           const assignedId = as.substituteId || as.dubberId;
@@ -995,7 +1016,9 @@ export async function detectEpisodeGaps(
           track,
           audioUrl,
           audioBuffer,
-          assignedCharacters
+          assignedCharacters,
+          fixBuffer,
+          fixAudioUrl
         });
       }
     } catch (err) {
@@ -1076,7 +1099,36 @@ export async function detectEpisodeGaps(
 
     // Analyze each candidate track for speech in this subtitle window
     const trackAnalyses = matchingTracks.map(ctx => {
-      const { track, audioBuffer } = ctx;
+      const { track, audioBuffer, fixBuffer } = ctx;
+
+      // 1. If a fix buffer is available, check if this line is voiced in the fix first
+      if (fixBuffer && fixBuffer.length > 0) {
+        const fixEndSec = Math.min(fixBuffer.duration, line.endSec);
+        const fixDur = fixEndSec - startSec;
+        if (fixDur >= minDurationSec) {
+          const fixMetrics = analyzeSegmentDynamics(fixBuffer, startSec, fixEndSec);
+          const fixSilence = fixMetrics.peakDb <= silencePeakThresholdDb || fixMetrics.rmsDb <= silenceRmsThresholdDb;
+          const fixStationary = 
+            fixMetrics.dynamicRangeDb < speechDynamicThresholdDb &&
+            fixMetrics.peakToMinDb < (speechDynamicThresholdDb + 1.2) &&
+            fixMetrics.stdDevDb < 1.0 &&
+            fixMetrics.peakDb < -24;
+          if (!fixSilence && !fixStationary) {
+            return {
+              ctx: { ...ctx, audioBuffer: fixBuffer, audioUrl: ctx.fixAudioUrl || ctx.audioUrl },
+              isVoiced: true,
+              isAbsoluteSilence: false,
+              isStationaryNoise: false,
+              metrics: fixMetrics,
+              durationSec: fixDur,
+              startSec,
+              endSec: fixEndSec
+            };
+          }
+        }
+      }
+
+      // 2. Otherwise analyze base original track
       const endSec = Math.min(audioBuffer.duration, line.endSec);
       const durationSec = endSec - startSec;
 
@@ -1467,6 +1519,32 @@ export async function detectEpisodeGaps(
       const rawCharName = (line.name || '').trim();
       const resolvedCharName = (aliases[rawCharName] || rawCharName).trim();
 
+      // Gather all character tokens on this subtitle line AND any concurrent identical-text subtitle line (±0.08s)
+      const cleanedLineText = (line.text || '').replace(/\{[^}]+\}/g, '').replace(/\\N/gi, ' ').trim().toLowerCase();
+      const splitTokens = (str: string) =>
+        str.split(/[,/&+]|(?:\s+и\s+)/i).map(s => s.trim().toLowerCase()).filter(Boolean);
+
+      const lineAssignedCharTokens = new Set<string>([
+        rawCharName.toLowerCase(),
+        resolvedCharName.toLowerCase(),
+        ...splitTokens(rawCharName),
+        ...splitTokens(resolvedCharName)
+      ]);
+
+      for (const otherSub of validSubLines) {
+        if (Math.abs(otherSub.startSec - lineStart) <= 0.08) {
+          const otherCleaned = (otherSub.text || '').replace(/\{[^}]+\}/g, '').replace(/\\N/gi, ' ').trim().toLowerCase();
+          if (otherCleaned && otherCleaned === cleanedLineText) {
+            const oRaw = (otherSub.name || '').trim();
+            const oRes = (aliases[oRaw] || oRaw).trim();
+            if (oRaw) lineAssignedCharTokens.add(oRaw.toLowerCase());
+            if (oRes) lineAssignedCharTokens.add(oRes.toLowerCase());
+            splitTokens(oRaw).forEach(t => lineAssignedCharTokens.add(t));
+            splitTokens(oRes).forEach(t => lineAssignedCharTokens.add(t));
+          }
+        }
+      }
+
       const collidingActors: {
         track: Track;
         audioBuffer: AudioBuffer;
@@ -1505,9 +1583,13 @@ export async function detectEpisodeGaps(
           boundaries.peakDb > -38;
 
         if (isTrueVoiceAcrossSub) {
-          const isAssigned = 
-            assignedCharacters.has(rawCharName.toLowerCase()) || 
-            assignedCharacters.has(resolvedCharName.toLowerCase());
+          let isAssigned = false;
+          for (const tok of lineAssignedCharTokens) {
+            if (tok && assignedCharacters.has(tok)) {
+              isAssigned = true;
+              break;
+            }
+          }
 
           const metrics = analyzeSegmentDynamics(
             audioBuffer,
@@ -1529,6 +1611,13 @@ export async function detectEpisodeGaps(
       if (collidingActors.length >= 2) {
         const distinctDubbers = new Set(collidingActors.map(a => a.track.participant?.trim().toLowerCase() || a.track.id));
         if (distinctDubbers.size < 2) continue;
+
+        // ПРАВИЛО 1: Если в сабах назначена на несколько дабберов ОДНА И ТА ЖЕ ФРАЗА,
+        // то такие фразы НЕ считаются конфликтами (это намеренный синхрон / унисон).
+        const assignedCount = collidingActors.filter(a => a.isAssigned).length;
+        if (assignedCount >= 2) {
+          continue;
+        }
 
         // Place the officially assigned dubber first (or the louder one if neither/both)
         collidingActors.sort((a, b) => (b.isAssigned ? 1 : 0) - (a.isAssigned ? 1 : 0));

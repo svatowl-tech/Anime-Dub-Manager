@@ -264,41 +264,114 @@ export function prepareQATracksForTiming(
       return merged;
     };
 
-    const originals = mergeUploadAndManifest(rawUploadOriginals, rawManifestOriginals);
-    const fixes = mergeUploadAndManifest(rawUploadFixes, rawManifestFixes);
+    const allMergedFiles = mergeUploadAndManifest(
+      [...rawUploadOriginals, ...rawUploadFixes],
+      [...rawManifestOriginals, ...rawManifestFixes]
+    );
 
-    // Deduplicate originals by explicit trackIndex (keep newest take per trackIndex)
-    // If no explicit trackIndex exists on originals, check if multiple distinct files were uploaded
-    let mainCandidates: FileEntry[] = [];
-    if (originals.length <= 1) {
-      mainCandidates = originals;
-    } else {
-      const hasExplicitIndices = originals.some(o => o.trackIndex !== null);
-      if (hasExplicitIndices) {
-        const byIdx = new Map<number, FileEntry>();
-        originals.forEach((o, i) => {
-          const idxKey = o.trackIndex ?? (i + 1);
-          byIdx.set(idxKey, o);
-        });
-        mainCandidates = Array.from(byIdx.entries()).sort((a, b) => a[0] - b[0]).map(e => e[1]);
+    // Group files by explicit trackIndex (e.g. Дорожка 1, Дорожка 2 for multi-layer overlap recordings)
+    const filesByTrackIndex = new Map<number, FileEntry[]>();
+    const unindexedFiles: FileEntry[] = [];
+
+    for (const f of allMergedFiles) {
+      if (f.trackIndex !== null) {
+        if (!filesByTrackIndex.has(f.trackIndex)) filesByTrackIndex.set(f.trackIndex, []);
+        filesByTrackIndex.get(f.trackIndex)!.push(f);
       } else {
-        // Deduplicate by identical size or basename; keep distinct takes if truly different layers
-        const uniqueOriginals: FileEntry[] = [];
-        for (const o of originals) {
-          const dupIdx = uniqueOriginals.findIndex(x => x.path === o.path || (x.size > 0 && o.size > 0 && x.size === o.size));
-          if (dupIdx >= 0) {
-            uniqueOriginals[dupIdx] = o; // keep newest
-          } else {
-            uniqueOriginals.push(o);
-          }
-        }
-        mainCandidates = uniqueOriginals;
+        unindexedFiles.push(f);
       }
     }
 
-    const sortedAllFiles = [...mainCandidates, ...fixes];
+    // Helper: determines if a fix file is a FULL track replacement vs a FRAGMENTARY phrase fix
+    // CRITICAL: Strictly based on file byte size, NEVER on duration!
+    const isFullReplacementFix = (fixFile: FileEntry, mainFile: FileEntry | null): boolean => {
+      if (!mainFile) return true;
+      if (mainFile.size > 0 && fixFile.size > 0) {
+        return fixFile.size >= mainFile.size * 0.95;
+      }
+      return false;
+    };
 
-    if (sortedAllFiles.length === 0) {
+    // Helper to process a group of files belonging to the same actor track/layer
+    // Identifies the largest file as the main original track, and smaller files as fixes
+    const processFileGroup = (groupFiles: FileEntry[], subTrackNum?: number) => {
+      if (groupFiles.length === 0) return;
+
+      // Sort files by size descending (largest file first = original main track)
+      // If sizes are equal, prefer older as original and newer as candidate fix
+      const sortedBySize = [...groupFiles].sort((a, b) => {
+        if (b.size !== a.size) return b.size - a.size;
+        return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
+      });
+
+      const largestFile = sortedBySize[0];
+      const otherFiles = sortedBySize.slice(1);
+
+      let selectedFile: FileEntry = largestFile;
+      let patchSnippet: FileEntry | null = null;
+
+      // If other files exist, find candidate fix
+      if (otherFiles.length > 0) {
+        // Look for explicitly tagged fix or any file smaller than the largest file (< 95%)
+        const candidateFix = otherFiles.find(f => f.type === 'FIXES' || (largestFile.size > 0 && f.size < largestFile.size * 0.95)) || otherFiles[otherFiles.length - 1];
+        if (candidateFix) {
+          if (isFullReplacementFix(candidateFix, largestFile)) {
+            // Full replacement fix (>= 95% of byte size)
+            selectedFile = { ...candidateFix, type: 'DUBBER_FILE' };
+            patchSnippet = null;
+          } else {
+            // Fragmentary fix snippet (< 95% of byte size)
+            selectedFile = largestFile;
+            patchSnippet = candidateFix;
+          }
+        }
+      }
+
+      const trackNum = subTrackNum;
+      const trackLabel = trackNum ? `${dubberNick} (Дорожка ${trackNum})` : dubberNick;
+      const trackId = trackNum 
+        ? (dubberId ? `${dubberId}__${normKey}_${trackNum}` : `track_${normKey}_${trackNum}`)
+        : (dubberId ? `${dubberId}__${normKey}` : `track_${normKey}`);
+
+      // Ensure all files for this actor layer are preserved in track.files (selectedFile first)
+      const allTrackFiles = [
+        selectedFile,
+        ...groupFiles.filter(f => f.path !== selectedFile.path)
+      ].map(f => ({
+        id: f.id,
+        name: f.name,
+        path: f.path,
+        size: f.size,
+        createdAt: f.createdAt || new Date().toISOString(),
+        type: f.path === selectedFile.path ? 'DUBBER_FILE' : (patchSnippet && f.path === patchSnippet.path ? 'FIXES' : f.type)
+      }));
+
+      finalTracks.push({
+        id: trackId,
+        projectId: episode.projectId,
+        episodeId: episode.id,
+        participant: trackLabel,
+        character: charStr,
+        dubberName: dubberNick,
+        characterName: charStr,
+        subTrackIndex: trackNum,
+        filePath: selectedFile.path,
+        role: 'dubber',
+        status: (actor.assignmentStatus?.toLowerCase() || (patchSnippet ? 'fixes_needed' : 'recorded')) as Track['status'],
+        files: allTrackFiles as any,
+        selectedFileId: selectedFile.id,
+        fileSize: selectedFile.size,
+        comments: actor.comments || [],
+        patchSnippet: patchSnippet ? {
+          id: patchSnippet.id,
+          name: patchSnippet.name,
+          path: patchSnippet.path,
+          size: patchSnippet.size
+        } : undefined
+      } as any);
+    };
+
+    if (allMergedFiles.length === 0) {
       const trackId = dubberId ? `${dubberId}__${normKey}` : `track_${normKey}`;
       finalTracks.push({
         id: trackId,
@@ -317,133 +390,22 @@ export function prepareQATracksForTiming(
       return;
     }
 
-    // Helper: determines if a fix file is a FULL track replacement vs a FRAGMENTARY phrase fix
-    const isFullReplacementFix = (fixFile: FileEntry, mainFile: FileEntry | null): boolean => {
-      if (!mainFile) return true;
-      if (mainFile.size > 0 && fixFile.size > 0) {
-        const ratio = fixFile.size / mainFile.size;
-        const diffMb = Math.abs(mainFile.size - fixFile.size) / (1024 * 1024);
-        // If fix is >= 65% of main track size OR within 3.5 MB of main track size -> full replacement!
-        return ratio >= 0.65 || diffMb <= 3.5;
+    if (splitMultiTracks && filesByTrackIndex.size > 1) {
+      // Multiple explicit tracks (e.g. Дорожка 1, Дорожка 2)
+      const sortedIndices = Array.from(filesByTrackIndex.keys()).sort((a, b) => a - b);
+      for (const idx of sortedIndices) {
+        processFileGroup(filesByTrackIndex.get(idx)!, idx);
       }
-      return false;
-    };
-
-    // Helper to test if a fix file is intended for a specific track by name / suffix
-    const isFixForTrack = (fixFile: FileEntry, trackName: string, trackIdx: number): boolean => {
-      const fName = fixFile.name.toLowerCase();
-      const tName = trackName.toLowerCase();
-      const trNum = trackIdx + 1;
-      if (fixFile.trackIndex !== null) {
-        return fixFile.trackIndex === trNum;
-      }
-      const patterns = [
-        `дорожка${trNum}`, `дорожка_${trNum}`, `track${trNum}`, `track_${trNum}`,
-        `tr${trNum}`, `take${trNum}`, `take_${trNum}`, `layer${trNum}`, `слой${trNum}`
-      ];
-      if (patterns.some(p => fName.includes(p))) return true;
-      if (tName && fName.includes(tName.replace(/\.[^/.]+$/, ''))) return true;
-      return false;
-    };
-
-    // СЦЕНАРИЙ 1: У даббера ровно 1 основная дорожка (или только фикс)
-    if (mainCandidates.length <= 1 || !splitMultiTracks) {
-      const newestMain = mainCandidates.length > 0 ? mainCandidates[mainCandidates.length - 1] : null;
-      const newestFix = fixes.length > 0 ? fixes[fixes.length - 1] : null;
-
-      let selectedFile: FileEntry | null = null;
-      let patchSnippet: FileEntry | null = null;
-
-      if (newestMain && newestFix) {
-        if (isFullReplacementFix(newestFix, newestMain)) {
-          // ЦЕЛЬНЫЙ ФИКС: полностью переписывает основную дорожку! Берется в работу ТОЛЬКО фикс!
-          selectedFile = { ...newestFix, type: 'DUBBER_FILE' };
-          patchSnippet = null;
-        } else {
-          // ЧАСТИЧНЫЙ ФИКС (отдельные фразы): экспортируется и основная дорога, и фикс для вшивания по кнопке
-          selectedFile = newestMain;
-          patchSnippet = newestFix;
-        }
-      } else if (newestFix) {
-        selectedFile = { ...newestFix, type: 'DUBBER_FILE' };
-        patchSnippet = null;
-      } else {
-        selectedFile = newestMain;
-      }
-
-      if (!selectedFile) return;
-
-      const trackId = dubberId ? `${dubberId}__${normKey}` : `track_${normKey}`;
-
-      finalTracks.push({
-        id: trackId,
-        projectId: episode.projectId,
-        episodeId: episode.id,
-        participant: dubberNick,
-        character: charStr,
-        dubberName: dubberNick,
-        characterName: charStr,
-        filePath: selectedFile.path,
-        role: 'dubber',
-        status: (actor.assignmentStatus?.toLowerCase() || (patchSnippet ? 'fixes_needed' : 'recorded')) as Track['status'],
-        files: [selectedFile] as any,
-        selectedFileId: selectedFile.id,
-        comments: actor.comments || [],
-        patchSnippet: patchSnippet ? {
-          id: patchSnippet.id,
-          name: patchSnippet.name,
-          path: patchSnippet.path
-        } : undefined
-      } as any);
-      return;
-    }
-
-    // СЦЕНАРИЙ 2: У даббера ДВЕ (или более) основных дорожек (например, Дорожка 1 и Дорожка 2 для нахлестов)
-    for (let tIdx = 0; tIdx < mainCandidates.length; tIdx++) {
-      const mainFile = mainCandidates[tIdx];
-      const trackNum = tIdx + 1;
-      const trackLabel = `${dubberNick} (Дорожка ${trackNum})`;
-
-      const matchingFixes = fixes.filter(f => isFixForTrack(f, mainFile.name, tIdx));
-      let assignedFix = matchingFixes.length > 0 ? matchingFixes[matchingFixes.length - 1] : null;
-      if (!assignedFix && fixes.length > 0) {
-        if (tIdx === 0 && !fixes.some(f => isFixForTrack(f, '', 1))) {
-          assignedFix = fixes[fixes.length - 1];
+      if (unindexedFiles.length > 0) {
+        // If there are unindexed files, associate them with track 1 or process separately
+        const tr1Files = filesByTrackIndex.get(1);
+        if (tr1Files) {
+          tr1Files.push(...unindexedFiles);
         }
       }
-
-      let effectiveFile = mainFile;
-      let effectivePatchSnippet: FileEntry | null = assignedFix;
-
-      if (assignedFix && isFullReplacementFix(assignedFix, mainFile)) {
-        // Цельный фикс для этой дорожки — берем только фикс вместо старой дорожки!
-        effectiveFile = { ...assignedFix, type: 'DUBBER_FILE' };
-        effectivePatchSnippet = null;
-      }
-
-      const trackId = dubberId ? `${dubberId}__${normKey}_${trackNum}` : `track_${normKey}_${trackNum}`;
-
-      finalTracks.push({
-        id: trackId,
-        projectId: episode.projectId,
-        episodeId: episode.id,
-        participant: trackLabel,
-        character: charStr,
-        dubberName: dubberNick,
-        characterName: charStr,
-        subTrackIndex: trackNum,
-        filePath: effectiveFile.path,
-        role: 'dubber',
-        status: (actor.assignmentStatus?.toLowerCase() || (effectivePatchSnippet ? 'fixes_needed' : 'recorded')) as Track['status'],
-        files: [effectiveFile] as any,
-        selectedFileId: effectiveFile.id,
-        comments: actor.comments || [],
-        patchSnippet: effectivePatchSnippet ? {
-          id: effectivePatchSnippet.id,
-          name: effectivePatchSnippet.name,
-          path: effectivePatchSnippet.path
-        } : undefined
-      } as any);
+    } else {
+      // Single track for this dubber: all files evaluated together by byte size
+      processFileGroup(allMergedFiles);
     }
   });
 

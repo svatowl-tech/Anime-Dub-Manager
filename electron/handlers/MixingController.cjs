@@ -187,7 +187,7 @@ function registerMixingHandlers(getData, mainWindow) {
     });
   }));
 
-  ipcMain.handle('mixing-update-step-tracks', wrapIpcHandler(async (event, { episode, targetDir, stepId, action, trackKey, trackPaths, excludedTrackKeys, customInputTracks, applyToAllSteps }) => {
+  ipcMain.handle('mixing-update-step-tracks', wrapIpcHandler(async (event, { episode, targetDir, stepId, action, trackKey, trackPaths, slotId, excludedTrackKeys, customInputTracks, applyToAllSteps }) => {
     if (!episode || !stepId) throw new Error('Не указаны обязательные параметры (episode, stepId)');
     const config = await getData('config.json');
     const baseDir = config.baseDir || app.getPath('userData');
@@ -199,6 +199,7 @@ function registerMixingHandlers(getData, mainWindow) {
       action,
       trackKey,
       trackPaths,
+      slotId,
       excludedTrackKeys,
       customInputTracks,
       applyToAllSteps

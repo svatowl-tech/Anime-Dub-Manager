@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   PlaySquare, Send, Copy, MessageSquare, Sparkles, CheckCircle2, Globe, Link2, Save, 
-  Package, Loader2, Download, Upload, Plus, Trash2, Edit3, Check,
+  Package, Loader2, Download, Upload, Plus, Trash2, Edit3, Check, X,
   Table, ExternalLink, Columns, Eye, Code
 } from 'lucide-react';
 import { getParticipants } from '../services/dbService';
@@ -10,6 +10,9 @@ import { ipcSafe, isWeb } from '../lib/ipcSafe';
 import { safeCopyToClipboard } from '../lib/clipboard';
 import { DesktopRequiredMessage } from './DesktopRequiredMessage';
 import { TelegramClientPanel } from './TelegramClientPanel';
+import AnimeSourcesModal from './AnimeSourcesModal';
+import TemplateVariablesBar from './TemplateVariablesBar';
+import TemplateBlockConfiguratorModal from './TemplateBlockConfiguratorModal';
 import { 
   generateTGPostMessage, 
   generateVKPostMessage, 
@@ -73,6 +76,131 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
   const [vkPostLink, setVkPostLink] = useState('');
   const [isTelegramModalOpen, setIsTelegramModalOpen] = useState(false);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
+
+  // AnimeParsers State
+  const [isAnimeSourcesModalOpen, setIsAnimeSourcesModalOpen] = useState(false);
+  const [isAutoFillingLinks, setIsAutoFillingLinks] = useState(false);
+  const [autoFillFeedback, setAutoFillFeedback] = useState<string | null>(null);
+
+  // Template Block Configurator State
+  const [isTemplateBlockConfiguratorOpen, setIsTemplateBlockConfiguratorOpen] = useState(false);
+
+  const handleApplyConfiguratorTemplate = async (generatedTplStr: string, saveForProject: boolean) => {
+    setEditingTemplateStr(generatedTplStr);
+    setPostContent(applyTemplate(generatedTplStr, getTemplateVariables(currentEpisode!, participants)));
+    
+    if (currentEpisode) {
+      if (saveForProject && currentEpisode.project) {
+        try {
+          const tplKey = activeTemplate === 'TG' ? 'tgPostTemplate' :
+                         activeTemplate === 'VK' ? 'vkPostTemplate' :
+                         activeTemplate === 'TG_ARTICLE' ? 'tgArticleTemplate' :
+                         activeTemplate === 'FINAL_TG' ? 'finalTgPostTemplate' : 'linksTemplate';
+          const updatedProject = {
+            ...currentEpisode.project,
+            [tplKey]: generatedTplStr
+          };
+          await ipcSafe.invoke('save-project', updatedProject);
+          onRefresh();
+        } catch (e) {
+          console.error('Failed to save project template', e);
+        }
+      } else {
+        try {
+          const tplKey = activeTemplate === 'TG' ? 'tgPostTemplate' :
+                         activeTemplate === 'VK' ? 'vkPostTemplate' :
+                         activeTemplate === 'TG_ARTICLE' ? 'tgArticleTemplate' :
+                         activeTemplate === 'FINAL_TG' ? 'finalTgPostTemplate' : 'linksTemplate';
+          const updatedEp = {
+            ...currentEpisode,
+            [tplKey]: generatedTplStr
+          };
+          await ipcSafe.invoke('save-episode', updatedEp);
+          onRefresh();
+        } catch (e) {
+          console.error('Failed to save episode template', e);
+        }
+      }
+    }
+    setIsTemplateBlockConfiguratorOpen(false);
+  };
+
+  const handleQuickAutoFill = async () => {
+    if (!currentEpisode?.project) return;
+    setIsAutoFillingLinks(true);
+    setAutoFillFeedback(null);
+    try {
+      const res = await ipcSafe.invoke('anime-parsers:auto-fill-release-links', {
+        projectId: currentEpisode.project.id,
+        episodeId: currentEpisode.id,
+        title: currentEpisode.project.title,
+        originalTitle: currentEpisode.project.originalTitle,
+        episodeNumber: currentEpisode.number,
+        saveToProject: true
+      });
+
+      if (res && res.releaseLinks) {
+        const merged = { ...links, ...res.releaseLinks };
+        setLinks(merged);
+        updateLinksAndSync(merged);
+        const count = Object.keys(res.releaseLinks).length;
+        setAutoFillFeedback(`Автоматически найдено ${count} ссылок: Kodik, Shikimori, AniLibria, Jut.su!`);
+        setTimeout(() => setAutoFillFeedback(null), 4000);
+        onRefresh();
+      }
+    } catch (e: any) {
+      console.error('Quick autofill error:', e);
+      setAutoFillFeedback('Не удалось автозаполнить ссылки: ' + (e.message || 'Ошибка'));
+    } finally {
+      setIsAutoFillingLinks(false);
+    }
+  };
+
+  const handleApplySourcesModalLinks = async (newFoundLinks: Record<string, string>) => {
+    const merged = { ...links, ...newFoundLinks };
+    setLinks(merged);
+    updateLinksAndSync(merged);
+    if (currentEpisode?.project) {
+      try {
+        const updatedProject = {
+          ...currentEpisode.project,
+          links: JSON.stringify({ ...merged, quickUploadLinks: quickLinks })
+        };
+        await ipcSafe.invoke('save-project', updatedProject);
+        onRefresh();
+      } catch (err) {
+        console.error('Failed to auto-save project links from modal', err);
+      }
+    }
+  };
+
+  const handleSelectVideoSource = async (streamUrl: string, label: string) => {
+    if (!currentEpisode) return;
+    try {
+      const updatedEpisode = {
+        ...currentEpisode,
+        rawPath: streamUrl
+      };
+      await ipcSafe.invoke('save-episode', updatedEpisode);
+      onRefresh();
+    } catch (err) {
+      console.error('Failed to set episode stream source', err);
+    }
+  };
+
+  const handleSelectSubtitleSource = async (subUrl: string, label: string) => {
+    if (!currentEpisode) return;
+    try {
+      const updatedEpisode = {
+        ...currentEpisode,
+        subPath: subUrl
+      };
+      await ipcSafe.invoke('save-episode', updatedEpisode);
+      onRefresh();
+    } catch (err) {
+      console.error('Failed to set episode subtitle source', err);
+    }
+  };
 
   const loadProjects = useCallback(async () => {
     try {
@@ -929,7 +1057,26 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
             <Link2 className="w-4 h-4 text-purple-400" />
             <span className="text-sm font-bold text-white uppercase tracking-wider">Ссылки на платформы</span>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handleQuickAutoFill}
+              disabled={isAutoFillingLinks}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-purple-500/20 disabled:opacity-50"
+              title="Автоматически найти Kodik, Shikimori, AniLibria, Jut.su ссылки"
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${isAutoFillingLinks ? 'animate-spin' : ''}`} />
+              <span>{isAutoFillingLinks ? 'Ищем ссылки...' : 'Магический автопоиск'}</span>
+            </button>
+
+            <button
+              onClick={() => setIsAnimeSourcesModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 rounded-lg text-xs font-bold transition-all"
+              title="Открыть хаб видео, субтитров и аниме-источников"
+            >
+              <Globe className="w-3.5 h-3.5" />
+              <span>Хаб источников</span>
+            </button>
+
             <button
               onClick={() => {
                 setLinksTemplateStr(currentEpisode?.linksTemplate || currentEpisode?.project?.linksTemplate || '');
@@ -951,6 +1098,18 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
             </button>
           </div>
         </div>
+
+        {autoFillFeedback && (
+          <div className="p-3 bg-purple-500/10 border-b border-purple-500/20 text-xs font-semibold text-purple-300 flex items-center justify-between animate-in fade-in">
+            <span className="flex items-center gap-2">
+              <Sparkles className="w-4 h-4 text-purple-400" />
+              {autoFillFeedback}
+            </span>
+            <button onClick={() => setAutoFillFeedback(null)} className="text-neutral-400 hover:text-white">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
         
         {isEditingLinksTemplate && (
           <div className="p-6 bg-neutral-900 border-b border-neutral-800 space-y-4">
@@ -1133,6 +1292,15 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
               {!isEditingTemplate ? (
                 <>
                   <button
+                    onClick={() => setIsTemplateBlockConfiguratorOpen(true)}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 rounded-lg text-xs font-bold transition-all shadow-sm"
+                    title="Настроить содержимое блоков (актеры, роли, ссылки, форматы)"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+                    <span>Конструктор блоков</span>
+                  </button>
+
+                  <button
                     onClick={() => {
                       if (activeTemplate) {
                         setEditingTemplateStr(getTemplateString(currentEpisode, activeTemplate));
@@ -1142,7 +1310,7 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
                     className="flex items-center gap-2 px-3.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-bold transition-all"
                   >
                     <Edit3 className="w-3.5 h-3.5 text-purple-400" />
-                    Редактировать шаблон
+                    Редактировать код
                   </button>
 
                   {activeTemplate === 'TG_ARTICLE' && (
@@ -1331,12 +1499,18 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
             )}
 
             {isEditingTemplate ? (
-              <textarea
-                value={editingTemplateStr}
-                onChange={e => setEditingTemplateStr(e.target.value)}
-                onKeyDown={e => handleTextareaKeyDown(e, setEditingTemplateStr)}
-                className="w-full bg-black/50 border border-neutral-800 rounded-xl p-6 text-sm text-neutral-300 font-mono leading-relaxed min-h-[400px] focus:outline-none focus:ring-2 focus:ring-purple-500/50"
-              />
+              <div className="border border-neutral-800 rounded-xl overflow-hidden shadow-inner">
+                <TemplateVariablesBar
+                  onInsertVariable={(varSyntax) => setEditingTemplateStr(prev => prev + '\n' + varSyntax)}
+                  onOpenBlockConfigurator={() => setIsTemplateBlockConfiguratorOpen(true)}
+                />
+                <textarea
+                  value={editingTemplateStr}
+                  onChange={e => setEditingTemplateStr(e.target.value)}
+                  onKeyDown={e => handleTextareaKeyDown(e, setEditingTemplateStr)}
+                  className="w-full bg-black/50 p-6 text-sm text-neutral-300 font-mono leading-relaxed min-h-[400px] focus:outline-none focus:ring-2 focus:ring-purple-500/50 border-0"
+                />
+              </div>
             ) : activeTemplate === 'TG_ARTICLE' && articleViewMode === 'visual' ? (
               <div 
                 className="bg-[#0e1621] border border-[#233d5d] rounded-2xl p-6 overflow-x-auto shadow-inner flex justify-center cursor-default"
@@ -1384,6 +1558,24 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
           </div>
         </div>
       )}
+
+      <AnimeSourcesModal
+        isOpen={isAnimeSourcesModalOpen}
+        onClose={() => setIsAnimeSourcesModalOpen(false)}
+        currentEpisode={currentEpisode}
+        project={currentEpisode?.project}
+        onApplyLinks={handleApplySourcesModalLinks}
+        onSelectVideoSource={handleSelectVideoSource}
+        onSelectSubtitleSource={handleSelectSubtitleSource}
+      />
+
+      <TemplateBlockConfiguratorModal
+        isOpen={isTemplateBlockConfiguratorOpen}
+        onClose={() => setIsTemplateBlockConfiguratorOpen(false)}
+        currentEpisode={currentEpisode}
+        activeTemplateType={activeTemplate || 'TG'}
+        onApplyTemplate={handleApplyConfiguratorTemplate}
+      />
     </div>
   );
 }

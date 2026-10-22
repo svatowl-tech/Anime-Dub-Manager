@@ -1327,6 +1327,92 @@ function registerApiHandlers(getData, saveData, mainWindow, taskQueue) {
     const { saveTranslatedSubtitles } = require('../services/subtitleService.cjs');
     return await saveTranslatedSubtitles(assFilePath, translatedLines);
   }));
+
+  // AnimeParsers (Kodik, AniLibria, Shikimori, Jut.su, AnimeGO, Subtitles)
+  ipcMain.handle('anime-parsers:search-all', wrapIpcHandler(async (event, params = {}) => {
+    const animeParsersService = require('../services/animeParsersService.cjs');
+    return await animeParsersService.searchAllSources(params);
+  }));
+
+  ipcMain.handle('anime-parsers:get-video-sources', wrapIpcHandler(async (event, params = {}) => {
+    const animeParsersService = require('../services/animeParsersService.cjs');
+    const res = await animeParsersService.searchAllSources(params);
+    return {
+      videoSources: res.videoSources || [],
+      animeInfo: res.animeInfo || null
+    };
+  }));
+
+  ipcMain.handle('anime-parsers:get-subtitles', wrapIpcHandler(async (event, params = {}) => {
+    const animeParsersService = require('../services/animeParsersService.cjs');
+    const res = await animeParsersService.searchAllSources(params);
+    return {
+      subtitleSources: res.subtitleSources || [],
+      animeInfo: res.animeInfo || null
+    };
+  }));
+
+  ipcMain.handle('anime-parsers:auto-fill-release-links', wrapIpcHandler(async (event, { projectId, episodeId, title, originalTitle, episodeNumber, saveToProject = false }) => {
+    const animeParsersService = require('../services/animeParsersService.cjs');
+    let effectiveTitle = title;
+    let effectiveOrig = originalTitle;
+    let effectiveShikimoriId = null;
+
+    let targetProject = null;
+    let projects = [];
+    if (projectId) {
+      projects = await getData('projects.json');
+      targetProject = projects.find(p => p.id === projectId);
+      if (targetProject) {
+        effectiveTitle = effectiveTitle || targetProject.title;
+        effectiveOrig = effectiveOrig || targetProject.originalTitle;
+        if (targetProject.links) {
+          try {
+            const parsed = JSON.parse(targetProject.links);
+            if (parsed.shikimori) {
+              const m = parsed.shikimori.match(/animes\/([0-9]+)/);
+              if (m) effectiveShikimoriId = m[1];
+            }
+          } catch(e) {}
+        }
+      }
+    }
+
+    const searchResult = await animeParsersService.searchAllSources({
+      title: effectiveTitle,
+      originalTitle: effectiveOrig,
+      episodeNumber: episodeNumber || 1,
+      shikimoriId: effectiveShikimoriId
+    });
+
+    let mergedLinks = { ...(searchResult.releaseLinks || {}) };
+
+    if (saveToProject && targetProject) {
+      let existingLinks = {};
+      try {
+        if (targetProject.links) existingLinks = JSON.parse(targetProject.links);
+      } catch(e) {}
+
+      // Merge new links into existing, preserving existing custom values if present
+      mergedLinks = {
+        ...existingLinks,
+        ...searchResult.releaseLinks
+      };
+
+      targetProject.links = JSON.stringify(mergedLinks);
+      targetProject.updatedAt = new Date().toISOString();
+      await saveData('projects.json', projects);
+    }
+
+    return {
+      success: true,
+      releaseLinks: mergedLinks,
+      videoSources: searchResult.videoSources || [],
+      subtitleSources: searchResult.subtitleSources || [],
+      animeInfo: searchResult.animeInfo || {},
+      torrents: searchResult.torrents || []
+    };
+  }));
 }
 
 function filterProfanity(text) {

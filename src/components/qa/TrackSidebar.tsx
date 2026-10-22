@@ -249,11 +249,14 @@ export const TrackSidebar: React.FC<TrackSidebarProps> = ({
                     }}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {track.files.map((f, idx) => (
-                      <option key={f.id} value={f.id}>
-                        {f.type === 'FIXES' ? 'Фикс' : 'Версия'} {idx + 1} ({new Date(f.createdAt).toLocaleTimeString()})
-                      </option>
-                    ))}
+                    {track.files.map((f, idx) => {
+                      const sizeStr = f.size ? ` • ${(f.size / (1024 * 1024)).toFixed(1)} МБ` : '';
+                      return (
+                        <option key={f.id} value={f.id}>
+                          {f.type === 'FIXES' ? 'Фикс' : 'Версия'} {idx + 1} ({new Date(f.createdAt).toLocaleTimeString()}{sizeStr})
+                        </option>
+                      );
+                    })}
                   </select>
                   <button 
                     onClick={(e) => {

@@ -554,6 +554,8 @@ export interface AudioClip {
   rawSourceEndSec?: number;   // Detected end before any manual trim/expansion
   isSelfOverlap?: boolean;    // Intentional parallel layer between 2 tracks of same dubber
   isIntentionalOverlap?: boolean; // Intentional overlap specified in original subtitles
+  isUnisonPhrase?: boolean;   // Same subtitle phrase assigned to multiple dubbers (timed in absolute sync)
+  matchedSubId?: string;      // ID of matched subtitle line
   sourceAudioTrackId?: string; // Track ID of audio buffer if spliced from fix track
   sourceAudioPath?: string;    // Direct file path on disk for export / mixing
   // Two-Stage Auto-Timing Problem Tracking
@@ -563,6 +565,30 @@ export interface AudioClip {
   targetSubEndSec?: number;
   timeDiffSec?: number;       // Difference in seconds from subtitle start (positive = late, negative = early)
   overlappingClipId?: string;
+}
+
+export interface IntentionalOverlapTrackEntry {
+  trackId: string;
+  dubberNick: string;
+  characterName: string;
+  phraseId: string;
+  subId: string;
+  text: string;
+  phraseStartSec: number;
+  phraseEndSec: number;
+}
+
+export interface IntentionalOverlapMoment {
+  id: string;
+  startSec: number;
+  endSec: number;
+  overlapStartSec: number;
+  overlapEndSec: number;
+  subStartSec: number;
+  subEndSec: number;
+  priorityTrackKey: string | null;
+  attenuationDb: number;
+  tracks: IntentionalOverlapTrackEntry[];
 }
 
 export type TimingIssueType = 'overlap' | 'desync' | 'missing' | 'orphan';
@@ -633,6 +659,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   const [tracks, setTracks] = useState<Track[]>([]);
   const [audioClips, setAudioClips] = useState<Record<string, AudioClip[]>>({}); // trackId -> AudioClip[]
   const [collisions, setCollisions] = useState<VoiceCollisionMarker[]>([]);
+  const [intentionalOverlaps, setIntentionalOverlaps] = useState<IntentionalOverlapMoment[]>([]);
   const [qaPassportLoaded, setQaPassportLoaded] = useState<{
     loaded: boolean;
     summary: TimingProjectData['summary'];
@@ -820,6 +847,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   const timeRulerContainerRef = useRef<HTMLDivElement | null>(null);
   const audioElementsRef = useRef<Record<string, HTMLAudioElement>>({});
   const audioBuffersRef = useRef<Record<string, AudioBuffer>>({});
+  const trackFileSizesRef = useRef<Record<string, number>>({});
 
   const [aiProcessingTrackId, setAiProcessingTrackId] = useState<string | null>(null);
   const [activeAiMenuTrackId, setActiveAiMenuTrackId] = useState<string | null>(null);
@@ -1312,11 +1340,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             try {
               const resp = await fetch(playableUrl);
               const arrayBuf = await resp.arrayBuffer();
+              trackFileSizesRef.current[tr.id] = arrayBuf.byteLength;
               if (sharedAudioCtx) {
                 const decodedBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
                 audioBuffersRef.current[tr.id] = decodedBuf;
                 setDuration(prev => Math.max(prev, decodedBuf.duration));
-                addLog(`📈 Реальная аудиоволна декодирована для «${tr.participant}» (${decodedBuf.duration.toFixed(1)}s)`, 'success');
+                addLog(`📈 Реальная аудиоволна декодирована для «${tr.participant}» (${decodedBuf.duration.toFixed(1)}s, ${(arrayBuf.byteLength / (1024*1024)).toFixed(1)} МБ)`, 'success');
                 setImportDecodedTracks(prev => prev.map(item => 
                   item.id === tr.id ? { ...item, status: 'done', duration: decodedBuf.duration } : item
                 ));
@@ -1331,26 +1360,25 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
       }
 
-      // 3B. Post-decode check: if any _fix track has full episode duration (>= 65% of main track or diff <= 15s),
+      // 3B. Post-decode check: if any _fix track has full file size weight (>= 95% of main track byte size),
       // it completely rewrites the main track! Replace the main track with the fix and remove the separate _fix track.
+      // CRITICAL: Strictly based on file byte size, NEVER on duration!
       const fullFixIdsToRemove = new Set<string>();
       for (const fixTr of fetchedTracks.filter(t => isFixTrack(t))) {
         const mainTr = fetchedTracks.find(t => !isFixTrack(t) && (t.id === fixTr.id.replace(/_fix$/, '') || normalizeName(t.dubberName) === normalizeName(fixTr.dubberName)));
         if (!mainTr) continue;
         const fixBuf = audioBuffersRef.current[fixTr.id];
-        const mainBuf = audioBuffersRef.current[mainTr.id];
-        if (fixBuf && mainBuf && mainBuf.duration > 0) {
-          const ratio = fixBuf.duration / mainBuf.duration;
-          const diffSec = Math.abs(mainBuf.duration - fixBuf.duration);
-          if (ratio >= 0.65 || diffSec <= 15.0) {
-            mainTr.filePath = fixTr.filePath;
-            audioBuffersRef.current[mainTr.id] = fixBuf;
-            if (audioElementsRef.current[fixTr.id]) {
-              audioElementsRef.current[mainTr.id] = audioElementsRef.current[fixTr.id];
-            }
-            fullFixIdsToRemove.add(fixTr.id);
-            addLog(`⚡ Фикс «${fixTr.participant}» (${fixBuf.duration.toFixed(1)}с) полностью переписывает основную дорожку (${mainBuf.duration.toFixed(1)}с) — в работу взят только чистовой фикс!`, 'success');
+        const fixSize = trackFileSizesRef.current[fixTr.id] || fixTr.fileSize || (fixTr.files?.[0]?.size) || 0;
+        const mainSize = trackFileSizesRef.current[mainTr.id] || mainTr.fileSize || (mainTr.files?.[0]?.size) || 0;
+
+        if (fixSize > 0 && mainSize > 0 && fixSize >= mainSize * 0.95) {
+          mainTr.filePath = fixTr.filePath;
+          if (fixBuf) audioBuffersRef.current[mainTr.id] = fixBuf;
+          if (audioElementsRef.current[fixTr.id]) {
+            audioElementsRef.current[mainTr.id] = audioElementsRef.current[fixTr.id];
           }
+          fullFixIdsToRemove.add(fixTr.id);
+          addLog(`⚡ Цельный фикс «${fixTr.participant}» (${(fixSize / (1024*1024)).toFixed(1)} МБ >= ${(mainSize / (1024*1024)).toFixed(1)} МБ) полностью переписывает основную дорожку — в работу взят чистовой фикс!`, 'success');
         }
       }
       if (fullFixIdsToRemove.size > 0) {
@@ -1948,20 +1976,20 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             }
           }
 
-          const targetMainBuf = audioBuffersRef.current[bestMainTrackForFull.id];
-          const targetMainDur = targetMainBuf ? targetMainBuf.duration : 0;
-          const ratio = (fixDuration && targetMainDur) ? fixDuration / targetMainDur : 0;
-          const durDiffSec = Math.abs(fixDuration - targetMainDur);
           const targetClips = updatedClips[bestMainTrackForFull.id] || [];
 
-          // Тип 1: Цельный фикс (плюс-минус как оригинал по длине, >= 70% или разница <= 15с)
+          const fixTrackSize = trackFileSizesRef.current[fixTrack.id] || fixTrack.fileSize || (fixTrack.files?.[0]?.size) || 0;
+          const targetMainSize = trackFileSizesRef.current[bestMainTrackForFull.id] || bestMainTrackForFull.fileSize || (bestMainTrackForFull.files?.[0]?.size) || 0;
+
+          // Тип 1: Цельный фикс (строго по размеру файла в байтах, >= 95% размера оригинала)
           // Даббер переписал реплики и отрендерил полную готовую дорожку серии.
           // В этом случае вшивать отдельные фразы не нужно — чистовик полностью заменяет черновик.
-          const isFullReplacement = ratio >= 0.70 || durDiffSec <= 15.0 || (targetClips.length > 0 && fixClips.length >= targetClips.length * 0.7 && fixClips.length >= 3);
+          // CRITICAL: Если размер меньше 95% (например фиксы отдельных фраз той же длительности) — НИКОГДА не заменять!
+          const isFullReplacement = fixTrackSize > 0 && targetMainSize > 0 && fixTrackSize >= targetMainSize * 0.95;
 
           if (isFullReplacement) {
             // Case 1: Цельный фикс — полностью заменяет оригинальную дорожку, вшивание отдельных фраз НЕ ТРЕБУЕТСЯ!
-            addLog(`⚡ Цельный фикс (${(ratio * 100).toFixed(0)}% длины) для «${actorNick}». Дорожка «${bestMainTrackForFull.participant}» полностью заменена на чистовик без пофразового вшивания.`, 'success');
+            addLog(`⚡ Цельный фикс (${(fixTrackSize / (1024*1024)).toFixed(1)} МБ >= ${(targetMainSize / (1024*1024)).toFixed(1)} МБ) для «${actorNick}». Дорожка «${bestMainTrackForFull.participant}» полностью заменена на чистовик без пофразового вшивания.`, 'success');
             if (fixBuf) {
               audioBuffersRef.current[bestMainTrackForFull.id] = fixBuf;
             }
@@ -2324,6 +2352,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             const effectiveShift = Math.abs(surgicalTarget - cStart);
 
             clip.text = bestSub.text;
+            clip.matchedSubId = String(bestSub.id ?? bestSubIdx);
             clip.targetSubStartSec = surgicalTarget;
             clip.targetSubEndSec = bestSub.endSec;
             clip.timeDiffSec = Number(rawTimeDiff.toFixed(2));
@@ -2470,8 +2499,92 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
       }
 
-      // 3B. Inter-track collisions between different dubbers (ONLY when NOT specified in original subtitles!)
+      // 3B. Inter-track analysis between different dubbers:
+      // ПРАВИЛО 1: Если в сабах назначена на несколько дабберов ОДНА И ТА ЖЕ ФРАЗА -> это НЕ конфликт, ставим в абсолютный синхрон!
+      // ПРАВИЛО 2: Если РАЗНЫЕ фразы разных людей накладываются друг на друга и ЭТО ТАК В САБАХ -> это НЕ конфликт, записываем и передаём в модуль Сведения!
       const trackIds = Object.keys(updatedClips);
+      const detectedIntentionalOverlapsMap = new Map<string, IntentionalOverlapMoment>();
+      const existingPriorityById: Record<string, string | null> = {};
+      intentionalOverlaps.forEach(ov => {
+        if (ov.id && ov.priorityTrackKey) existingPriorityById[ov.id] = ov.priorityTrackKey;
+      });
+      let unisonSyncedCount = 0;
+
+      // Helper to resolve matched subtitle for a clip
+      const findSubForClip = (trId: string, clip: AudioClip) => {
+        const list = trackSubLinesMap[trId] || [];
+        if (clip.matchedSubId) {
+          const byId = list.find(s => String(s.id) === clip.matchedSubId);
+          if (byId) return byId;
+        }
+        return list.find(s =>
+          s.text === clip.text ||
+          (typeof clip.targetSubStartSec === 'number' && Math.abs(s.startSec - clip.targetSubStartSec) < 0.25)
+        );
+      };
+
+      // Step 3B-1: Synchronize all Unison phrases (same subtitle phrase assigned to multiple dubbers) even if they don't yet overlap
+      for (let i = 0; i < trackIds.length; i++) {
+        for (let j = i + 1; j < trackIds.length; j++) {
+          const tr1Clips = updatedClips[trackIds[i]] || [];
+          const tr2Clips = updatedClips[trackIds[j]] || [];
+          for (let idx1 = 0; idx1 < tr1Clips.length; idx1++) {
+            const c1 = tr1Clips[idx1];
+            const sub1 = findSubForClip(trackIds[i], c1);
+            if (!sub1) continue;
+            for (let idx2 = 0; idx2 < tr2Clips.length; idx2++) {
+              const c2 = tr2Clips[idx2];
+              const sub2 = findSubForClip(trackIds[j], c2);
+              if (!sub2) continue;
+
+              const normT1 = normalizeSpeechText(sub1.text);
+              const normT2 = normalizeSpeechText(sub2.text);
+              const isSameSubPhrase =
+                (sub1.id !== undefined && sub2.id !== undefined && String(sub1.id) === String(sub2.id)) ||
+                (normT1 !== '' && normT1 === normT2 && Math.abs(sub1.startSec - sub2.startSec) <= 0.08);
+
+              if (isSameSubPhrase) {
+                const syncTarget = Number(Math.max(0, sub1.startSec).toFixed(3));
+                // Check corridor in track 1
+                const prev1End = idx1 > 0 ? (tr1Clips[idx1 - 1].clipStartSec + (tr1Clips[idx1 - 1].offsetSec || 0) + tr1Clips[idx1 - 1].durationSec + 0.02) : 0;
+                const next1Start = idx1 + 1 < tr1Clips.length ? (tr1Clips[idx1 + 1].clipStartSec + (tr1Clips[idx1 + 1].offsetSec || 0) - 0.02) : Infinity;
+                // Check corridor in track 2
+                const prev2End = idx2 > 0 ? (tr2Clips[idx2 - 1].clipStartSec + (tr2Clips[idx2 - 1].offsetSec || 0) + tr2Clips[idx2 - 1].durationSec + 0.02) : 0;
+                const next2Start = idx2 + 1 < tr2Clips.length ? (tr2Clips[idx2 + 1].clipStartSec + (tr2Clips[idx2 + 1].offsetSec || 0) - 0.02) : Infinity;
+
+                if (syncTarget >= prev1End && syncTarget + c1.durationSec <= next1Start) {
+                  c1.clipStartSec = syncTarget;
+                  c1.offsetSec = 0;
+                }
+                if (syncTarget >= prev2End && syncTarget + c2.durationSec <= next2Start) {
+                  c2.clipStartSec = c1.clipStartSec;
+                  c2.offsetSec = 0;
+                }
+                c1.isUnisonPhrase = true;
+                c2.isUnisonPhrase = true;
+                c1.hasCollision = false;
+                c2.hasCollision = false;
+                if (c1.timingIssue === 'desync' || c1.timingIssue === 'overlap') {
+                  c1.timingIssue = null;
+                  c1.timingIssueText = undefined;
+                }
+                if (c2.timingIssue === 'desync' || c2.timingIssue === 'overlap') {
+                  c2.timingIssue = null;
+                  c2.timingIssueText = undefined;
+                }
+                // Remove any desync issue created earlier for c1/c2 since they are now synced in unison
+                const rmIds = new Set([`issue_desync_${c1.id}`, `issue_desync_${c2.id}`]);
+                for (let k = newIssues.length - 1; k >= 0; k--) {
+                  if (rmIds.has(newIssues[k].id)) newIssues.splice(k, 1);
+                }
+                unisonSyncedCount++;
+              }
+            }
+          }
+        }
+      }
+
+      // Step 3B-2: Check overlapping clips across tracks
       for (let i = 0; i < trackIds.length; i++) {
         for (let j = i + 1; j < trackIds.length; j++) {
           const tr1Clips = updatedClips[trackIds[i]] || [];
@@ -2490,14 +2603,33 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               const overlapDur = overlapEnd - overlapStart;
 
               if (overlapDur > 0.08) {
-                // Check if original subtitles for these two phrases overlap in the script
-                const sub1 = trackSubLinesMap[trackIds[i]]?.find(s => 
-                  s.text === c1.text || (typeof c1.targetSubStartSec === 'number' && Math.abs(s.startSec - c1.targetSubStartSec) < 0.15)
-                );
-                const sub2 = trackSubLinesMap[trackIds[j]]?.find(s => 
-                  s.text === c2.text || (typeof c2.targetSubStartSec === 'number' && Math.abs(s.startSec - c2.targetSubStartSec) < 0.15)
-                );
+                const sub1 = findSubForClip(trackIds[i], c1);
+                const sub2 = findSubForClip(trackIds[j], c2);
 
+                const normT1 = normalizeSpeechText(sub1?.text || c1.text || '');
+                const normT2 = normalizeSpeechText(sub2?.text || c2.text || '');
+                const isSamePhrase =
+                  Boolean(c1.isUnisonPhrase && c2.isUnisonPhrase && Math.abs(c1Start - c2Start) <= 0.08) ||
+                  Boolean(sub1 && sub2 && (
+                    (sub1.id !== undefined && sub2.id !== undefined && String(sub1.id) === String(sub2.id)) ||
+                    (normT1 !== '' && normT1 === normT2 && Math.abs(sub1.startSec - sub2.startSec) <= 0.08)
+                  ));
+
+                // ПРАВИЛО 1: Одна и та же фраза на нескольких дабберов — абсолютный синхрон, НЕ конфликт
+                if (isSamePhrase) {
+                  const syncPos = Number(Math.max(0, sub1 ? sub1.startSec : c1Start).toFixed(3));
+                  c1.clipStartSec = syncPos;
+                  c1.offsetSec = 0;
+                  c2.clipStartSec = syncPos;
+                  c2.offsetSec = 0;
+                  c1.isUnisonPhrase = true;
+                  c2.isUnisonPhrase = true;
+                  c1.hasCollision = false;
+                  c2.hasCollision = false;
+                  continue;
+                }
+
+                // ПРАВИЛО 2: Разные фразы разных людей накладываются друг на друга в сабах — НЕ конфликт, передаём в Сведение
                 let isSpecifiedInSubtitles = false;
                 if (sub1 && sub2) {
                   const subOverlapStart = Math.max(sub1.startSec, sub2.startSec);
@@ -2507,10 +2639,71 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                   }
                 }
 
-                // If specified in subtitles, this is intentional simultaneous dialogue! Not an issue!
-                if (isSpecifiedInSubtitles) {
+                if (isSpecifiedInSubtitles && sub1 && sub2) {
                   c1.isIntentionalOverlap = true;
                   c2.isIntentionalOverlap = true;
+
+                  const subOvStart = Number(Math.min(sub1.startSec, sub2.startSec).toFixed(2));
+                  const subOvEnd = Number(Math.max(sub1.endSec, sub2.endSec).toFixed(2));
+                  const ovStart = Number(overlapStart.toFixed(2));
+                  const ovEnd = Number(overlapEnd.toFixed(2));
+
+                  let matchedGroup: IntentionalOverlapMoment | undefined;
+                  for (const grp of detectedIntentionalOverlapsMap.values()) {
+                    if (Math.min(grp.endSec, Math.max(c1End, c2End)) > Math.max(grp.startSec, Math.min(c1Start, c2Start)) - 0.25) {
+                      matchedGroup = grp;
+                      break;
+                    }
+                  }
+
+                  const entry1: IntentionalOverlapTrackEntry = {
+                    trackId: trackIds[i],
+                    dubberNick: c1.dubberName,
+                    characterName: c1.characterName,
+                    phraseId: c1.id,
+                    subId: String(sub1.id ?? ''),
+                    text: sub1.text || c1.text,
+                    phraseStartSec: Number(c1Start.toFixed(2)),
+                    phraseEndSec: Number(c1End.toFixed(2))
+                  };
+                  const entry2: IntentionalOverlapTrackEntry = {
+                    trackId: trackIds[j],
+                    dubberNick: c2.dubberName,
+                    characterName: c2.characterName,
+                    phraseId: c2.id,
+                    subId: String(sub2.id ?? ''),
+                    text: sub2.text || c2.text,
+                    phraseStartSec: Number(c2Start.toFixed(2)),
+                    phraseEndSec: Number(c2End.toFixed(2))
+                  };
+
+                  if (!matchedGroup) {
+                    const groupId = `sub_overlap_${Math.round(subOvStart * 10)}_${sub1.id ?? i}_${sub2.id ?? j}`;
+                    matchedGroup = {
+                      id: groupId,
+                      startSec: Math.min(entry1.phraseStartSec, entry2.phraseStartSec),
+                      endSec: Math.max(entry1.phraseEndSec, entry2.phraseEndSec),
+                      overlapStartSec: ovStart,
+                      overlapEndSec: ovEnd,
+                      subStartSec: subOvStart,
+                      subEndSec: subOvEnd,
+                      priorityTrackKey: existingPriorityById[groupId] || null,
+                      attenuationDb: -10,
+                      tracks: [entry1, entry2]
+                    };
+                    detectedIntentionalOverlapsMap.set(groupId, matchedGroup);
+                  } else {
+                    matchedGroup.startSec = Math.min(matchedGroup.startSec, entry1.phraseStartSec, entry2.phraseStartSec);
+                    matchedGroup.endSec = Math.max(matchedGroup.endSec, entry1.phraseEndSec, entry2.phraseEndSec);
+                    matchedGroup.overlapStartSec = Math.min(matchedGroup.overlapStartSec, ovStart);
+                    matchedGroup.overlapEndSec = Math.max(matchedGroup.overlapEndSec, ovEnd);
+                    if (!matchedGroup.tracks.some(t => t.dubberNick === entry1.dubberNick && t.phraseId === entry1.phraseId)) {
+                      matchedGroup.tracks.push(entry1);
+                    }
+                    if (!matchedGroup.tracks.some(t => t.dubberNick === entry2.dubberNick && t.phraseId === entry2.phraseId)) {
+                      matchedGroup.tracks.push(entry2);
+                    }
+                  }
                   continue;
                 }
 
@@ -2563,6 +2756,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
       }
 
+      const detectedIntentionalOverlaps = Array.from(detectedIntentionalOverlapsMap.values()).sort((a, b) => a.startSec - b.startSec);
+      setIntentionalOverlaps(detectedIntentionalOverlaps);
       setAudioClips(updatedClips);
       setTimingIssues(newIssues);
       setMissingSubtitles(newMissingMarkers);
@@ -2575,6 +2770,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       const missingCount = newIssues.filter(i => i.type === 'missing').length;
       const orphanCount = newIssues.filter(i => i.type === 'orphan').length;
 
+      if (unisonSyncedCount > 0) {
+        addLog(`🔗 Синхронизировано общих фраз (унисон нескольких дабберов по сабам): ${unisonSyncedCount} шт. в абсолютный синхрон.`, 'success');
+      }
+      if (detectedIntentionalOverlaps.length > 0) {
+        addLog(`📋 Зафиксировано ${detectedIntentionalOverlaps.length} моментов наложения разных фраз по субтитрам — переданы в Сведение для выбора приоритета громкости (-10 дБ неприоритетным).`, 'info');
+      }
       addLog(`✓ Этап 1 (Анализ) завершен! Найдено проблем: наездов — ${overlapCount}, рассинхронов — ${desyncCount}, пропущенных — ${missingCount}, висящих в воздухе — ${orphanCount}.`, newIssues.length > 0 ? 'warn' : 'success');
 
       if (newIssues.length === 0) {
@@ -3020,6 +3221,142 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     }
   };
 
+  const buildExportIntentionalOverlapsAndSyncUnison = (
+    clipsMap: Record<string, AudioClip[]>
+  ): IntentionalOverlapMoment[] => {
+    const trackIds = Object.keys(clipsMap);
+    const existingPriorityById: Record<string, string | null> = {};
+    intentionalOverlaps.forEach(ov => {
+      if (ov.id && ov.priorityTrackKey) existingPriorityById[ov.id] = ov.priorityTrackKey;
+    });
+
+    const findSub = (trId: string, clip: AudioClip) => {
+      const list = trackSubLinesMap[trId] || [];
+      const cStart = clip.clipStartSec + (clip.offsetSec || 0);
+      if (clip.matchedSubId) {
+        const byId = list.find(s => String(s.id) === clip.matchedSubId);
+        if (byId) return byId;
+      }
+      return list.find(s =>
+        s.text === clip.text ||
+        (typeof clip.targetSubStartSec === 'number' && Math.abs(s.startSec - clip.targetSubStartSec) < 0.25) ||
+        Math.abs(s.startSec - cStart) < 1.2
+      );
+    };
+
+    const overlapsMap = new Map<string, IntentionalOverlapMoment>();
+
+    for (let i = 0; i < trackIds.length; i++) {
+      for (let j = i + 1; j < trackIds.length; j++) {
+        const tr1Clips = clipsMap[trackIds[i]] || [];
+        const tr2Clips = clipsMap[trackIds[j]] || [];
+
+        for (const c1 of tr1Clips) {
+          const c1Start = c1.clipStartSec + (c1.offsetSec || 0);
+          const c1End = c1Start + c1.durationSec;
+          const sub1 = findSub(trackIds[i], c1);
+
+          for (const c2 of tr2Clips) {
+            const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
+            const c2End = c2Start + c2.durationSec;
+            const sub2 = findSub(trackIds[j], c2);
+
+            if (!sub1 || !sub2) continue;
+
+            const normT1 = normalizeSpeechText(sub1.text || c1.text || '');
+            const normT2 = normalizeSpeechText(sub2.text || c2.text || '');
+            const isSamePhrase =
+              (sub1.id !== undefined && sub2.id !== undefined && String(sub1.id) === String(sub2.id)) ||
+              (normT1 !== '' && normT1 === normT2 && Math.abs(sub1.startSec - sub2.startSec) <= 0.08);
+
+            // ПРАВИЛО 1: Одна и та же фраза в сабах на нескольких дабберов — абсолютный синхрон
+            if (isSamePhrase) {
+              const syncStart = Number(Math.max(0, sub1.startSec).toFixed(3));
+              c1.clipStartSec = syncStart;
+              c1.offsetSec = 0;
+              c2.clipStartSec = syncStart;
+              c2.offsetSec = 0;
+              c1.isUnisonPhrase = true;
+              c2.isUnisonPhrase = true;
+              continue;
+            }
+
+            // ПРАВИЛО 2: Разные фразы разных дабберов накладываются друг на друга в сабах
+            const subOvStart = Math.max(sub1.startSec, sub2.startSec);
+            const subOvEnd = Math.min(sub1.endSec, sub2.endSec);
+            if (subOvEnd > subOvStart + 0.05) {
+              c1.isIntentionalOverlap = true;
+              c2.isIntentionalOverlap = true;
+
+              const ovStart = Number(Math.max(c1Start, c2Start).toFixed(2));
+              const ovEnd = Number(Math.min(c1End, c2End).toFixed(2));
+              const sStart = Number(Math.min(sub1.startSec, sub2.startSec).toFixed(2));
+              const sEnd = Number(Math.max(sub1.endSec, sub2.endSec).toFixed(2));
+
+              let matchedGroup: IntentionalOverlapMoment | undefined;
+              for (const grp of overlapsMap.values()) {
+                if (Math.min(grp.endSec, Math.max(c1End, c2End)) > Math.max(grp.startSec, Math.min(c1Start, c2Start)) - 0.25) {
+                  matchedGroup = grp;
+                  break;
+                }
+              }
+
+              const entry1: IntentionalOverlapTrackEntry = {
+                trackId: trackIds[i],
+                dubberNick: c1.dubberName,
+                characterName: c1.characterName,
+                phraseId: c1.id,
+                subId: String(sub1.id ?? ''),
+                text: sub1.text || c1.text,
+                phraseStartSec: Number(c1Start.toFixed(2)),
+                phraseEndSec: Number(c1End.toFixed(2))
+              };
+              const entry2: IntentionalOverlapTrackEntry = {
+                trackId: trackIds[j],
+                dubberNick: c2.dubberName,
+                characterName: c2.characterName,
+                phraseId: c2.id,
+                subId: String(sub2.id ?? ''),
+                text: sub2.text || c2.text,
+                phraseStartSec: Number(c2Start.toFixed(2)),
+                phraseEndSec: Number(c2End.toFixed(2))
+              };
+
+              if (!matchedGroup) {
+                const groupId = `sub_overlap_${Math.round(sStart * 10)}_${sub1.id ?? i}_${sub2.id ?? j}`;
+                matchedGroup = {
+                  id: groupId,
+                  startSec: Math.min(entry1.phraseStartSec, entry2.phraseStartSec),
+                  endSec: Math.max(entry1.phraseEndSec, entry2.phraseEndSec),
+                  overlapStartSec: ovStart,
+                  overlapEndSec: Math.max(ovStart + 0.1, ovEnd),
+                  subStartSec: sStart,
+                  subEndSec: sEnd,
+                  priorityTrackKey: existingPriorityById[groupId] || null,
+                  attenuationDb: -10,
+                  tracks: [entry1, entry2]
+                };
+                overlapsMap.set(groupId, matchedGroup);
+              } else {
+                matchedGroup.startSec = Math.min(matchedGroup.startSec, entry1.phraseStartSec, entry2.phraseStartSec);
+                matchedGroup.endSec = Math.max(matchedGroup.endSec, entry1.phraseEndSec, entry2.phraseEndSec);
+                if (!matchedGroup.tracks.some(t => t.dubberNick === entry1.dubberNick && t.phraseId === entry1.phraseId)) {
+                  matchedGroup.tracks.push(entry1);
+                }
+                if (!matchedGroup.tracks.some(t => t.dubberNick === entry2.dubberNick && t.phraseId === entry2.phraseId)) {
+                  matchedGroup.tracks.push(entry2);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const result = Array.from(overlapsMap.values()).sort((a, b) => a.startSec - b.startSec);
+    return result.length > 0 ? result : intentionalOverlaps;
+  };
+
   const handleExportToMixing = async () => {
     if (!currentEpisode) return;
     try {
@@ -3038,6 +3375,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           sourceAudioPath: c.sourceAudioPath || tr?.filePath
         }));
       }
+
+      const exportIntentionalOverlaps = buildExportIntentionalOverlapsAndSyncUnison(enrichedAudioClips);
+      setIntentionalOverlaps(exportIntentionalOverlaps);
 
       // Explicitly resolve canonical target directory for mixing (Episode folder -> Сведения)
       let targetDir = '';
@@ -3059,12 +3399,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
       }
 
-      // Save updated timing metadata (with all deleted phrases excluded and 100% original levels preserved)
+      // Save updated timing metadata (with all deleted phrases excluded, intentional overlaps recorded, and 100% original levels preserved)
       const timingMetadata = {
         version: '1.0',
         updatedAt: new Date().toISOString(),
         episodeNumber: currentEpisode?.number || 1,
         defaultVolumePercent: 100,
+        intentionalOverlaps: exportIntentionalOverlaps,
         rolesVolumeMap: tracks.reduce((acc, tr) => {
           const roleName = tr.character || tr.characterName || tr.participant || 'Персонаж';
           const dubberNick = tr.participant || tr.dubberName || 'Даббер';
@@ -3072,8 +3413,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           acc[dubberNick] = 100;
           return acc;
         }, {} as Record<string, number>),
-        phrases: Object.keys(audioClips).flatMap(trId => {
-          const clips = audioClips[trId] || [];
+        phrases: Object.keys(enrichedAudioClips).flatMap(trId => {
+          const clips = enrichedAudioClips[trId] || [];
           return clips.map(b => {
             return {
               id: b.id,
@@ -3083,6 +3424,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               endSec: Number((b.clipStartSec + (b.offsetSec || 0) + b.durationSec).toFixed(2)),
               durationSec: Number(b.durationSec.toFixed(2)),
               text: b.text,
+              isUnisonPhrase: Boolean(b.isUnisonPhrase),
+              isIntentionalOverlap: Boolean(b.isIntentionalOverlap),
               volumePercent: 100,
               volumeGainDb: 0,
               pan: 0,
@@ -3150,11 +3493,14 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       setStatusMessage('Экспорт оттаймленного комплекта файлов для звукорежиссёра...');
       addLog(`Старт экспорта для звукорежиссёра в директорию: ${targetDir}`, 'info');
 
+      const exportIntentionalOverlaps = buildExportIntentionalOverlapsAndSyncUnison(audioClips);
+
       const timingMetadata = {
         version: '1.0',
         updatedAt: new Date().toISOString(),
         episodeNumber: currentEpisode?.number || 1,
         defaultVolumePercent: 100,
+        intentionalOverlaps: exportIntentionalOverlaps,
         rolesVolumeMap: tracks.reduce((acc, tr) => {
           const roleName = tr.character || tr.characterName || tr.participant || 'Персонаж';
           const dubberNick = tr.participant || tr.dubberName || 'Даббер';
@@ -3173,6 +3519,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               endSec: Number((b.clipStartSec + (b.offsetSec || 0) + b.durationSec).toFixed(2)),
               durationSec: Number(b.durationSec.toFixed(2)),
               text: b.text,
+              isUnisonPhrase: Boolean(b.isUnisonPhrase),
+              isIntentionalOverlap: Boolean(b.isIntentionalOverlap),
               volumePercent: 100,
               volumeGainDb: 0,
               pan: 0,

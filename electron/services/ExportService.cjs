@@ -434,9 +434,23 @@ class ExportService {
         if (upload.type === 'DUBBER_FILE' || upload.type === 'FIXES') {
           const nick = getNick(upload.uploadedById || upload.participantId || upload.dubberId, upload);
           const key = upload.uploadedById || upload.participantId || upload.dubberId || nick;
-          if (!dubberFiles[key]) dubberFiles[key] = { original: [], fixes: [], nick };
-          if (upload.type === 'DUBBER_FILE') dubberFiles[key].original.push(upload);
-          else dubberFiles[key].fixes.push(upload);
+          if (!dubberFiles[key]) dubberFiles[key] = { allFiles: [], original: [], fixes: [], nick };
+          let size = upload.size;
+          if (!size && upload.path && fsSync.existsSync(upload.path)) {
+            try { size = fsSync.statSync(upload.path).size; } catch (_) {}
+          }
+          dubberFiles[key].allFiles.push({ ...upload, size: size || 0 });
+        }
+      }
+
+      // Classify files strictly by byte size: largest file is the original track, smaller files (< 95%) are fixes
+      for (const key in dubberFiles) {
+        const group = dubberFiles[key];
+        const sorted = [...group.allFiles].sort((a, b) => (b.size || 0) - (a.size || 0));
+        if (sorted.length > 0) {
+          const maxFile = sorted[0];
+          group.original = [maxFile];
+          group.fixes = sorted.slice(1);
         }
       }
 
@@ -549,8 +563,7 @@ class ExportService {
               const mainSize = origStat.size || 1;
               const fixSize = fixStat.size || 0;
               const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
-              const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
-              const isFullReplacement = (ratio >= 0.70 || sizeDiffMb <= 3.0) && fixSize > 0;
+              const isFullReplacement = mainSize > 0 && fixSize > 0 && (fixSize >= mainSize * 0.95);
 
               if (!isFullReplacement) {
                 await logStep(`[Фикс] Даббер «${nick}»: фрагментарный фикс отдельными фразами (${(fixStat.size / (1024*1024)).toFixed(2)} МБ < ${(origStat.size / (1024*1024)).toFixed(2)} МБ). Сведение с оригиналом...`, 'info', dubberPercent);
@@ -616,8 +629,7 @@ class ExportService {
               const mainSize = origStat.size || 1;
               const fixSize = fixStat.size || 0;
               const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
-              const sizeDiffMb = Math.abs(fixSize - mainSize) / (1024 * 1024);
-              const isFullReplacement = (ratio >= 0.65 || sizeDiffMb <= 3.5) && fixSize > 0;
+              const isFullReplacement = mainSize > 0 && fixSize > 0 && (fixSize >= mainSize * 0.95);
 
               if (!isFullReplacement) {
                 const origOut = path.join(targetDir, getExportName(latestOriginal, false));

@@ -65,7 +65,7 @@ function registerExportHandlers(getData, mainWindow) {
         try {
           const origStat = await fs.stat(latestOriginal.path);
           const fixStat = await fs.stat(latestFix.path);
-          const isSnippet = fixStat.size < origStat.size;
+          const isSnippet = fixStat.size < origStat.size * 0.95;
           if (isSnippet) {
             snippetCount++;
           }
@@ -389,12 +389,11 @@ function registerExportHandlers(getData, mainWindow) {
         try { if (bestMainTr?.filePath && require('fs').existsSync(bestMainTr.filePath)) mSize = require('fs').statSync(bestMainTr.filePath).size; } catch (e) {}
 
         const ratio = (mSize > 0 && fSize > 0) ? (fSize / mSize) : 0;
-        const sizeDiffMb = Math.abs(fSize - mSize) / (1024 * 1024);
-        const isFullReplacement = (ratio >= 0.70 || sizeDiffMb <= 3.0) && fSize > 0;
+        const isFullReplacement = mSize > 0 && fSize > 0 && (fSize >= mSize * 0.95);
 
         if (isFullReplacement && bestMainTr) {
           fullReplacementFixes.set(bestMainTr.id, fTr);
-          log.info(`[ExportController] Даббер «${nick}»: фикс «${path.basename(fTr.filePath || '')}» является цельным (${(ratio * 100).toFixed(0)}% размера, разница ${sizeDiffMb.toFixed(1)} МБ) — заменяет дорожку целиком, вшивание не требуется.`);
+          log.info(`[ExportController] Даббер «${nick}»: фикс «${path.basename(fTr.filePath || '')}» является цельным (${(ratio * 100).toFixed(0)}% размера) — заменяет дорожку целиком, вшивание не требуется.`);
         } else {
           const fClips = (clipsMap[fTr.id] || []).filter(c => !c.isDeleted);
           for (const c of fClips) {

@@ -407,6 +407,39 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [trackVolume, setTrackVolume] = useState<number>(0.95);
   const [isTrackMuted, setIsTrackMuted] = useState<boolean>(false);
   const [rolesVolumeMap, setRolesVolumeMap] = useState<Record<string, number>>({});
+  const [intentionalOverlaps, setIntentionalOverlaps] = useState<any[]>([]);
+  const [isOverlapPriorityModalOpen, setIsOverlapPriorityModalOpen] = useState<boolean>(false);
+  const [pendingNormExecution, setPendingNormExecution] = useState<{ mode: 'step' | 'all'; stepId?: string } | null>(null);
+
+  const isPhraseNormModule = useCallback((moduleId?: string) => {
+    if (!moduleId) return false;
+    return [
+      'phrase_norm',
+      'auto_norm_phrases',
+      'stage_loudness_norm',
+      'loudness_norm',
+      'ffmpeg_loudnorm'
+    ].includes(moduleId);
+  }, []);
+
+  const handleSelectOverlapPriority = useCallback(async (overlapId: string, priorityTrackKey: string) => {
+    setIntentionalOverlaps(prev => {
+      const updated = prev.map(ov =>
+        ov.id === overlapId ? { ...ov, priorityTrackKey, attenuationDb: -10 } : ov
+      );
+      if (currentEpisode) {
+        ipcSafe.invoke('mixing-save-timing-metadata', {
+          episode: currentEpisode,
+          targetDir: workingDir || undefined,
+          timingMetadata: {
+            intentionalOverlaps: updated,
+            updatedAt: new Date().toISOString()
+          }
+        }).catch(() => {});
+      }
+      return updated;
+    });
+  }, [currentEpisode, workingDir]);
 
   const handleUpdateDubberVolume = useCallback(async (trackKey: string, newPct: number) => {
     setRolesVolumeMap(prev => {
@@ -525,6 +558,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         }
         if (res.rolesVolumeMap) {
           setRolesVolumeMap(res.rolesVolumeMap);
+        }
+        if (Array.isArray(res.timingMetadata?.intentionalOverlaps)) {
+          setIntentionalOverlaps(res.timingMetadata.intentionalOverlaps);
         }
         mixLog('info', 'Статус', `Состояние загружено: «${res.workingDir || ''}». Модулей: ${res.manifest.pipeline?.length || 0}. Исходных дорожек: ${res.manifest.sourceFiles?.dubberTracks?.length || 0}`, {
           manifest: res.manifest,
@@ -1759,10 +1795,23 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   };
 
   // Execute single step
-  const handleRunStep = async (stepId: string) => {
+  const handleRunStep = async (stepId: string, skipPriorityCheck: boolean = false) => {
     if (!currentEpisode) return;
-    releasePlayerAudioLocks();
     const targetStep = manifest?.pipeline?.find(s => s.stepId === stepId);
+
+    // ПРАВИЛО 3: На этапе сведения в модулях пофразовой нормализации, если есть наложения разных фраз из сабов,
+    // спрашиваем у пользователя, какой дорожке в каждом таком моменте отдавать приоритет по громкости (остальным -10 дБ)
+    if (!skipPriorityCheck && targetStep && isPhraseNormModule(targetStep.moduleId) && intentionalOverlaps.length > 0) {
+      const hasUnassignedPriority = intentionalOverlaps.some(ov => !ov.priorityTrackKey);
+      if (hasUnassignedPriority) {
+        setPendingNormExecution({ mode: 'step', stepId });
+        setIsOverlapPriorityModalOpen(true);
+        toast.info('Выберите приоритетную дорожку для моментов наложения разных фраз в субтитрах (неприоритетным будет понижена громкость на -10 дБ)');
+        return;
+      }
+    }
+
+    releasePlayerAudioLocks();
     const stepMeta = targetStep ? getModuleMeta(targetStep.moduleId) : undefined;
     const stepTitle = stepMeta?.title || targetStep?.moduleId || stepId;
     try {
@@ -1803,8 +1852,20 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   };
 
   // Execute all enabled steps
-  const handleRunAllSteps = async () => {
+  const handleRunAllSteps = async (skipPriorityCheck: boolean = false) => {
     if (!currentEpisode) return;
+
+    const hasEnabledNormStep = (manifest?.pipeline || []).some(s => s.enabled && isPhraseNormModule(s.moduleId));
+    if (!skipPriorityCheck && hasEnabledNormStep && intentionalOverlaps.length > 0) {
+      const hasUnassignedPriority = intentionalOverlaps.some(ov => !ov.priorityTrackKey);
+      if (hasUnassignedPriority) {
+        setPendingNormExecution({ mode: 'all' });
+        setIsOverlapPriorityModalOpen(true);
+        toast.info('Перед запуском нормализации выберите приоритетную дорожку для моментов наложения разных фраз в субтитрах (-10 дБ неприоритетным)');
+        return;
+      }
+    }
+
     releasePlayerAudioLocks();
     const enabledCount = manifest?.pipeline?.filter(s => s.enabled)?.length || 0;
     try {
@@ -1832,6 +1893,40 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     } finally {
       setActiveProcessingStepId(null);
       await loadStatus();
+    }
+  };
+
+  const handleConfirmOverlapPrioritiesAndRun = async () => {
+    // Auto-assign first track in any still-unselected overlap if user clicks confirm directly
+    const finalized = intentionalOverlaps.map(ov => ({
+      ...ov,
+      priorityTrackKey: ov.priorityTrackKey || ov.tracks?.[0]?.dubberNick || null,
+      attenuationDb: -10
+    }));
+    setIntentionalOverlaps(finalized);
+    if (currentEpisode) {
+      try {
+        await ipcSafe.invoke('mixing-save-timing-metadata', {
+          episode: currentEpisode,
+          targetDir: workingDir || undefined,
+          timingMetadata: {
+            intentionalOverlaps: finalized,
+            updatedAt: new Date().toISOString()
+          }
+        });
+      } catch (e) {}
+    }
+    setIsOverlapPriorityModalOpen(false);
+    const pending = pendingNormExecution;
+    setPendingNormExecution(null);
+    if (pending) {
+      if (pending.mode === 'step' && pending.stepId) {
+        await handleRunStep(pending.stepId, true);
+      } else if (pending.mode === 'all') {
+        await handleRunAllSteps(true);
+      }
+    } else {
+      toast.success('Приоритеты дорожек при наложении фраз сохранены (-10 дБ для неприоритетных)!');
     }
   };
 
@@ -1886,12 +1981,13 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }
   };
 
-  // Update per-step input tracks (include/exclude or add/remove custom tracks)
+  // Update per-step input tracks (include/exclude or add/remove custom tracks per slot)
   const handleUpdateStepTracks = async (
     stepId: string,
     action: 'toggle_exclude' | 'clear_exclusions' | 'add_custom' | 'remove_custom',
     trackKey?: string,
-    trackPaths?: string[]
+    trackPaths?: string[],
+    slotId?: string
   ) => {
     if (!currentEpisode) return;
     try {
@@ -1901,7 +1997,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         stepId,
         action,
         trackKey,
-        trackPaths
+        trackPaths,
+        slotId
       });
       if (res && res.manifest) {
         setManifest(res.manifest);
@@ -1913,15 +2010,24 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }
   };
 
-  const handleAddCustomTrackToStep = async (stepId: string) => {
+  const handleAddCustomTrackToStep = async (
+    stepId: string,
+    slotId?: string,
+    fileType: 'audio' | 'video' | 'subtitles' = 'audio',
+    slotTitle?: string
+  ) => {
     try {
-      const res: any = await ipcSafe.invoke('mixing-select-external-files', { type: 'audio' });
+      const res: any = await ipcSafe.invoke('mixing-select-external-files', { type: fileType });
       if (res && !res.canceled && Array.isArray(res.filePaths) && res.filePaths.length > 0) {
-        await handleUpdateStepTracks(stepId, 'add_custom', undefined, res.filePaths);
-        toast.success(`Добавлено дорожек в шаг: ${res.filePaths.length}`);
+        await handleUpdateStepTracks(stepId, 'add_custom', undefined, res.filePaths, slotId);
+        toast.success(
+          slotTitle
+            ? `Добавлено в «${slotTitle}»: ${res.filePaths.length} файл(ов)`
+            : `Добавлено дорожек в шаг: ${res.filePaths.length}`
+        );
       }
     } catch (e: any) {
-      toast.error(`Ошибка выбора аудиофайла: ${e.message || String(e)}`);
+      toast.error(`Ошибка выбора файла: ${e.message || String(e)}`);
     }
   };
 
@@ -2313,7 +2419,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
           </button>
 
           <button
-            onClick={handleRunAllSteps}
+            onClick={() => handleRunAllSteps()}
             disabled={!manifest?.isImported || activeProcessingStepId !== null}
             className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded-lg text-xs font-medium flex items-center gap-2 transition"
             title="Выполнить все активные шаги конвейера по порядку"
@@ -2734,10 +2840,83 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                 </span>
                               </span>
                             )}
+                            {/* Intentional Subtitle Overlaps Priority Button for Phrase Norm Modules */}
+                            {isPhraseNormModule(step.moduleId) && intentionalOverlaps.length > 0 && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setPendingNormExecution(null);
+                                  setIsOverlapPriorityModalOpen(true);
+                                }}
+                                className={`text-[10px] px-2 py-0.5 font-semibold rounded-md border flex items-center gap-1 shadow-sm transition ${
+                                  intentionalOverlaps.some(ov => !ov.priorityTrackKey)
+                                    ? 'bg-amber-950/90 hover:bg-amber-900 text-amber-200 border-amber-500/70 animate-pulse'
+                                    : 'bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 border-cyan-600/60'
+                                }`}
+                                title="Выбрать приоритетную дорожку для моментов наложения разных фраз в сабах (неприоритетным -10 дБ)"
+                              >
+                                <Volume2 className="w-2.5 h-2.5 text-amber-400" />
+                                <span>
+                                  Приоритет наложений сабов ({intentionalOverlaps.filter(ov => !!ov.priorityTrackKey).length}/{intentionalOverlaps.length}) • -10 дБ
+                                </span>
+                              </button>
+                            )}
                           </div>
                           <p className="text-[11px] text-neutral-400 leading-relaxed mt-0.5">
                             {meta?.description || ''}
                           </p>
+                          {/* Input Slots Separation Badges on Step Card */}
+                          {(() => {
+                            const slotsToDisplay = (step.inputSlots && step.inputSlots.length > 0)
+                              ? step.inputSlots
+                              : (meta?.inputSlotsSummary || []);
+                            const hasSpecialOrMultiSlots =
+                              slotsToDisplay.length > 1 ||
+                              slotsToDisplay.some((s: any) => s.slotType && s.slotType !== 'dubber_tracks');
+                            if (!hasSpecialOrMultiSlots) return null;
+                            return (
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1.5 pt-1 border-t border-neutral-800/70">
+                                <span className="text-[9px] uppercase tracking-wider font-bold text-neutral-400">
+                                  Принимаемые слоты ({slotsToDisplay.length}):
+                                </span>
+                                {slotsToDisplay.map((sl: any, sIdx: number) => {
+                                  const slotTracks = Array.isArray(sl.tracks) ? sl.tracks.filter((t: any) => !t.excluded) : [];
+                                  const hasTracksInfo = Array.isArray(sl.tracks);
+                                  const isReady = !hasTracksInfo || slotTracks.length > 0 || !sl.required;
+                                  const slotColor =
+                                    sl.slotType === 'original_audio' || sl.slotType === 'original_vocals'
+                                      ? 'bg-amber-950/60 text-amber-200 border-amber-700/50'
+                                      : sl.slotType === 'background_audio'
+                                        ? 'bg-emerald-950/60 text-emerald-200 border-emerald-700/50'
+                                        : sl.slotType === 'voices_master' || sl.slotType === 'sidechain_voice' || sl.slotType === 'master_audio'
+                                          ? 'bg-purple-950/60 text-purple-200 border-purple-700/50'
+                                          : sl.slotType === 'video_stream'
+                                            ? 'bg-blue-950/60 text-blue-200 border-blue-700/50'
+                                            : sl.slotType === 'subtitles'
+                                              ? 'bg-pink-950/60 text-pink-200 border-pink-700/50'
+                                              : sl.slotType === 'fix_tracks'
+                                                ? 'bg-orange-950/60 text-orange-200 border-orange-700/50'
+                                                : 'bg-cyan-950/60 text-cyan-200 border-cyan-700/50';
+                                  return (
+                                    <span
+                                      key={sl.slotId || sIdx}
+                                      onClick={() => setExpandedTracks(prev => ({ ...prev, [step.stepId]: true }))}
+                                      className={`text-[10px] px-2 py-0.5 rounded-md border flex items-center gap-1 cursor-pointer transition hover:brightness-110 ${slotColor}`}
+                                      title={`${sl.title}: принимает «${sl.acceptedTypeLabel}». Нажмите, чтобы открыть управление слотами.`}
+                                    >
+                                      <span className="font-bold">Слот {sl.slotNumber || sIdx + 1}:</span>
+                                      <span>{sl.acceptedTypeLabel}</span>
+                                      {hasTracksInfo && (
+                                        <span className={`ml-0.5 px-1 rounded text-[9px] font-mono ${isReady ? 'bg-black/30 text-emerald-300' : 'bg-red-950/80 text-red-300'}`}>
+                                          {slotTracks.length > 0 ? `✓ ${slotTracks.length}` : (sl.required ? '⚠ 0' : 'опц.')}
+                                        </span>
+                                      )}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                         </div>
                       </div>
 
@@ -2759,12 +2938,14 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           </button>
                         )}
 
-                        {/* Toggle Step Input Tracks Manager */}
+                        {/* Toggle Step Input Tracks & Slots Manager */}
                         {(() => {
                           const candidates = step.candidateInputs || manifest?.sourceFiles?.dubberTracks || [];
                           const activeCount = candidates.filter(t => !t.excluded).length;
                           const hasExclusions = candidates.some(t => t.excluded) || (step.customInputTracks && step.customInputTracks.length > 0);
-                          const isTracksOpen = expandedTracks[step.stepId] ?? (idx === 0);
+                          const slotsCount = step.inputSlots?.length || meta?.inputSlotsSummary?.length || 1;
+                          const hasSpecialSlots = slotsCount > 1 || (step.inputSlots || meta?.inputSlotsSummary || []).some((s: any) => s.slotType && s.slotType !== 'dubber_tracks');
+                          const isTracksOpen = expandedTracks[step.stepId] ?? (idx === 0 || hasSpecialSlots);
                           return (
                             <button
                               onClick={() => setExpandedTracks(prev => ({ ...prev, [step.stepId]: !isTracksOpen }))}
@@ -2775,10 +2956,12 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     ? 'bg-cyan-950/60 text-cyan-300 border-cyan-700/60'
                                     : 'bg-neutral-800/80 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
                               }`}
-                              title="Выбрать, какие дорожки обрабатывать в этом шаге (исключить или добавить дорожку)"
+                              title="Управление входными слотами и дорожками этого модуля (просмотр типов дорожек по слотам, отключение или добавление файлов в каждый слот)"
                             >
                               <Headphones className="w-3 h-3 text-cyan-400" />
-                              <span>Дорожки ({activeCount}/{candidates.length})</span>
+                              <span>
+                                {slotsCount > 1 ? `Слоты (${slotsCount}) • ` : ''}Дорожки ({activeCount}/{candidates.length})
+                              </span>
                             </button>
                           );
                         })()}
@@ -2895,106 +3078,262 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                       </div>
                     )}
 
-                    {/* Per-Step Input Tracks Control Panel */}
-                    {(expandedTracks[step.stepId] ?? (idx === 0)) && (
-                      <div className="p-2.5 bg-neutral-950/70 rounded-lg border border-neutral-800/90 space-y-2">
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <span className="text-[10px] uppercase font-semibold tracking-wider text-cyan-400 flex items-center gap-1.5">
-                            <Headphones className="w-3 h-3" />
-                            <span>Входные дорожки для обработки в этом шаге:</span>
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            {(step.excludedTrackKeys && step.excludedTrackKeys.length > 0) && (
-                              <button
-                                onClick={() => handleUpdateStepTracks(step.stepId, 'clear_exclusions')}
-                                className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded text-[10px] font-medium transition border border-amber-700/40"
-                              >
-                                Включить все дорожки
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleAddCustomTrackToStep(step.stepId)}
-                              className="px-2 py-0.5 bg-cyan-950/70 hover:bg-cyan-900/80 text-cyan-300 rounded text-[10px] font-medium flex items-center gap-1 border border-cyan-800/60 transition"
-                              title="Добавить дополнительный аудиофайл с диска в обработку именно этого шага"
-                            >
-                              <Plus className="w-3 h-3" />
-                              <span>Добавить дорожку в шаг</span>
-                            </button>
-                          </div>
-                        </div>
+                    {/* Per-Step Input Slots & Tracks Control Panel */}
+                    {(() => {
+                      const slotsCount = step.inputSlots?.length || meta?.inputSlotsSummary?.length || 1;
+                      const hasSpecialSlots = slotsCount > 1 || (step.inputSlots || meta?.inputSlotsSummary || []).some((s: any) => s.slotType && s.slotType !== 'dubber_tracks');
+                      const isTracksPanelOpen = expandedTracks[step.stepId] ?? (idx === 0 || hasSpecialSlots);
+                      if (!isTracksPanelOpen) return null;
 
-                        {(() => {
-                          const candidates = step.candidateInputs || manifest?.sourceFiles?.dubberTracks || [];
-                          if (candidates.length === 0) {
-                            return (
-                              <div className="text-[11px] text-neutral-500 italic py-1">
-                                Нет входных дорожек. Импортируйте файлы звукорежиссера или добавьте дорожку вручную.
-                              </div>
-                            );
-                          }
-                          return (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-40 overflow-y-auto pr-1">
-                              {candidates.map((cand, cIdx) => {
-                                const tKey = cand.trackKey || cand.path || cand.name;
-                                const isExcluded = !!cand.excluded;
-                                const isInspecting = selectedAudioTrack?.id === cand.path;
-                                return (
-                                  <div
-                                    key={`${tKey}_${cIdx}`}
-                                    className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] transition ${
-                                      isExcluded
-                                        ? 'bg-neutral-950/40 border-neutral-800/50 text-neutral-500 opacity-60'
-                                        : isInspecting
-                                          ? 'bg-cyan-950/40 border-cyan-600/60 text-cyan-100'
-                                          : 'bg-neutral-900/80 border-neutral-800 text-neutral-200 hover:border-neutral-700'
-                                    }`}
-                                  >
-                                    <label className="flex items-center gap-2 truncate cursor-pointer flex-1">
-                                      <input
-                                        type="checkbox"
-                                        checked={!isExcluded}
-                                        onChange={() => handleUpdateStepTracks(step.stepId, 'toggle_exclude', tKey)}
-                                        className="rounded accent-cyan-500 cursor-pointer shrink-0"
-                                        title={isExcluded ? 'Включить дорожку в обработку этого шага' : 'Исключить дорожку из обработки в этом шаге'}
-                                      />
-                                      <div className="truncate">
-                                        <span className={`font-medium ${isExcluded ? 'line-through text-neutral-500' : 'text-neutral-100'}`}>
-                                          {cand.dubberNick || cand.name}
-                                        </span>
-                                        {cand.sourceLabel && (
-                                          <span className="text-[9px] text-neutral-400 ml-1.5 px-1 py-0.2 bg-neutral-800 rounded">
-                                            {cand.sourceLabel}
+                      const resolvedSlots = (step.inputSlots && step.inputSlots.length > 0)
+                        ? step.inputSlots
+                        : [
+                            {
+                              slotId: 'dubber_tracks',
+                              slotNumber: 1,
+                              title: 'Дорожки дабберов (Голосовые дорожки)',
+                              acceptedTypeLabel: 'Голосовые дорожки дабберов (.wav/.flac/.mp3)',
+                              description: 'Индивидуальные голосовые дорожки дабберов (или результат предыдущего голосового модуля).',
+                              slotType: 'dubber_tracks' as const,
+                              fileDialogType: 'audio' as const,
+                              allowMultiple: true,
+                              required: true,
+                              emptyHint: 'Импортируйте файлы звукорежиссера или добавьте дорожки дабберов вручную.',
+                              tracks: step.candidateInputs || manifest?.sourceFiles?.dubberTracks || []
+                            }
+                          ];
+
+                      return (
+                        <div className="p-3 bg-neutral-950/80 rounded-xl border border-neutral-800/90 space-y-2.5">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-400 flex items-center gap-1.5">
+                                <Headphones className="w-3.5 h-3.5" />
+                                <span>
+                                  {resolvedSlots.length > 1
+                                    ? `Разделение входов по слотам (${resolvedSlots.length} слота разных типов дорожек):`
+                                    : 'Входной слот дорожек для обработки в этом шаге:'}
+                                </span>
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              {(step.excludedTrackKeys && step.excludedTrackKeys.length > 0) && (
+                                <button
+                                  onClick={() => handleUpdateStepTracks(step.stepId, 'clear_exclusions')}
+                                  className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded text-[10px] font-medium transition border border-amber-700/40"
+                                >
+                                  Включить все дорожки во всех слотах
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className={`grid grid-cols-1 ${resolvedSlots.length > 1 ? 'lg:grid-cols-2' : ''} gap-2.5`}>
+                            {resolvedSlots.map((slot, slotIdx) => {
+                              const slotTracks = slot.tracks || [];
+                              const activeSlotTracks = slotTracks.filter(t => !t.excluded);
+                              const isSlotSatisfied = activeSlotTracks.length > 0 || !slot.required;
+
+                              const slotTheme =
+                                slot.slotType === 'original_audio' || slot.slotType === 'original_vocals'
+                                  ? {
+                                      border: 'border-amber-800/60',
+                                      bg: 'bg-amber-950/20',
+                                      headerBg: 'bg-amber-950/50 border-amber-800/50',
+                                      badge: 'bg-amber-500/20 text-amber-200 border-amber-500/40',
+                                      btn: 'bg-amber-950/80 hover:bg-amber-900 text-amber-200 border-amber-700/60'
+                                    }
+                                  : slot.slotType === 'background_audio'
+                                    ? {
+                                        border: 'border-emerald-800/60',
+                                        bg: 'bg-emerald-950/20',
+                                        headerBg: 'bg-emerald-950/50 border-emerald-800/50',
+                                        badge: 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40',
+                                        btn: 'bg-emerald-950/80 hover:bg-emerald-900 text-emerald-200 border-emerald-700/60'
+                                      }
+                                    : slot.slotType === 'voices_master' || slot.slotType === 'sidechain_voice' || slot.slotType === 'master_audio'
+                                      ? {
+                                          border: 'border-purple-800/60',
+                                          bg: 'bg-purple-950/20',
+                                          headerBg: 'bg-purple-950/50 border-purple-800/50',
+                                          badge: 'bg-purple-500/20 text-purple-200 border-purple-500/40',
+                                          btn: 'bg-purple-950/80 hover:bg-purple-900 text-purple-200 border-purple-700/60'
+                                        }
+                                      : slot.slotType === 'video_stream'
+                                        ? {
+                                            border: 'border-blue-800/60',
+                                            bg: 'bg-blue-950/20',
+                                            headerBg: 'bg-blue-950/50 border-blue-800/50',
+                                            badge: 'bg-blue-500/20 text-blue-200 border-blue-500/40',
+                                            btn: 'bg-blue-950/80 hover:bg-blue-900 text-blue-200 border-blue-700/60'
+                                          }
+                                        : slot.slotType === 'subtitles'
+                                          ? {
+                                              border: 'border-pink-800/60',
+                                              bg: 'bg-pink-950/20',
+                                              headerBg: 'bg-pink-950/50 border-pink-800/50',
+                                              badge: 'bg-pink-500/20 text-pink-200 border-pink-500/40',
+                                              btn: 'bg-pink-950/80 hover:bg-pink-900 text-pink-200 border-pink-700/60'
+                                            }
+                                          : slot.slotType === 'fix_tracks'
+                                            ? {
+                                                border: 'border-orange-800/60',
+                                                bg: 'bg-orange-950/20',
+                                                headerBg: 'bg-orange-950/50 border-orange-800/50',
+                                                badge: 'bg-orange-500/20 text-orange-200 border-orange-500/40',
+                                                btn: 'bg-orange-950/80 hover:bg-orange-900 text-orange-200 border-orange-700/60'
+                                              }
+                                            : {
+                                                border: 'border-cyan-800/50',
+                                                bg: 'bg-cyan-950/15',
+                                                headerBg: 'bg-cyan-950/40 border-cyan-800/40',
+                                                badge: 'bg-cyan-500/20 text-cyan-200 border-cyan-500/40',
+                                                btn: 'bg-cyan-950/80 hover:bg-cyan-900 text-cyan-200 border-cyan-700/60'
+                                              };
+
+                              return (
+                                <div
+                                  key={slot.slotId || slotIdx}
+                                  className={`rounded-xl border ${slotTheme.border} ${slotTheme.bg} overflow-hidden flex flex-col justify-between`}
+                                >
+                                  <div>
+                                    {/* Slot Header */}
+                                    <div className={`px-3 py-2 border-b ${slotTheme.headerBg} flex items-start justify-between gap-2`}>
+                                      <div className="space-y-1 min-w-0">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className="text-[10px] font-extrabold uppercase tracking-wider px-1.5 py-0.5 rounded bg-black/40 text-white border border-white/10">
+                                            Слот #{slot.slotNumber || slotIdx + 1}
                                           </span>
+                                          <span className="text-xs font-bold text-neutral-100">
+                                            {slot.title}
+                                          </span>
+                                          {slotTracks.length > 0 ? (
+                                            <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-700/60 font-semibold">
+                                              ✓ Подключено ({activeSlotTracks.length}/{slotTracks.length})
+                                            </span>
+                                          ) : (
+                                            <span
+                                              className={`text-[9px] px-1.5 py-0.5 rounded font-semibold border ${
+                                                slot.required
+                                                  ? 'bg-amber-950/80 text-amber-300 border-amber-700/60'
+                                                  : 'bg-neutral-900 text-neutral-400 border-neutral-700'
+                                              }`}
+                                            >
+                                              {slot.required ? '⚠ Ожидает дорожку' : 'Опционально (нет файлов)'}
+                                            </span>
+                                          )}
+                                        </div>
+
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${slotTheme.badge}`}>
+                                            Принимает: {slot.acceptedTypeLabel}
+                                          </span>
+                                        </div>
+
+                                        {slot.description && (
+                                          <p className="text-[10px] text-neutral-400 leading-snug">
+                                            {slot.description}
+                                          </p>
                                         )}
                                       </div>
-                                    </label>
 
-                                    <div className="flex items-center gap-1 shrink-0">
                                       <button
-                                        onClick={() => selectTrackForInspection(cand, `Вход шага #${idx + 1}: ${cand.dubberNick || cand.name}`, step.stepId)}
-                                        className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-emerald-400 rounded text-[10px] transition"
-                                        title={`Прослушать входную дорожку: ${cand.name}`}
+                                        onClick={() =>
+                                          handleAddCustomTrackToStep(
+                                            step.stepId,
+                                            slot.slotId,
+                                            slot.fileDialogType || 'audio',
+                                            slot.title
+                                          )
+                                        }
+                                        className={`px-2 py-1 rounded-lg text-[10px] font-semibold flex items-center gap-1 border shrink-0 transition shadow-sm ${slotTheme.btn}`}
+                                        title={`Выбрать файл с диска специально для слота «${slot.title}» (${slot.acceptedTypeLabel})`}
                                       >
-                                        🎧
+                                        <Plus className="w-3 h-3" />
+                                        <span>{slot.allowMultiple ? 'Добавить в слот' : 'Выбрать файл в слот'}</span>
                                       </button>
-                                      {cand.isCustom && (
-                                        <button
-                                          onClick={() => handleUpdateStepTracks(step.stepId, 'remove_custom', cand.path || tKey)}
-                                          className="px-1.5 py-0.5 bg-neutral-800 hover:bg-red-900/70 text-neutral-400 hover:text-red-300 rounded text-[10px] transition"
-                                          title="Удалить добавленную вручную дорожку из этого шага"
-                                        >
-                                          ✕
-                                        </button>
+                                    </div>
+
+                                    {/* Slot Tracks List */}
+                                    <div className="p-2.5 space-y-1.5 max-h-44 overflow-y-auto">
+                                      {slotTracks.length === 0 ? (
+                                        <div className="text-[11px] text-neutral-400 italic py-2 px-2 bg-neutral-950/50 rounded-lg border border-dashed border-neutral-800">
+                                          {slot.emptyHint || (isSlotSatisfied ? 'В этом слоте пока нет дорожек.' : 'Дорожка для этого слота еще не создана или не выбрана.')}
+                                        </div>
+                                      ) : (
+                                        slotTracks.map((cand, cIdx) => {
+                                          const tKey = cand.trackKey || cand.path || cand.name;
+                                          const isExcluded = !!cand.excluded;
+                                          const isInspecting = selectedAudioTrack?.id === cand.path;
+                                          const isPlayableAudio =
+                                            slot.fileDialogType !== 'subtitles' &&
+                                            slot.fileDialogType !== 'video' &&
+                                            !/\.(ass|srt|vtt|json|mp4|mkv|mov|avi|webm)$/i.test(cand.name || cand.path || '');
+
+                                          return (
+                                            <div
+                                              key={`${slot.slotId}_${tKey}_${cIdx}`}
+                                              className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border text-[11px] transition ${
+                                                isExcluded
+                                                  ? 'bg-neutral-950/40 border-neutral-800/50 text-neutral-500 opacity-60'
+                                                  : isInspecting
+                                                    ? 'bg-cyan-950/50 border-cyan-500/70 text-cyan-100'
+                                                    : 'bg-neutral-900/90 border-neutral-800 text-neutral-200 hover:border-neutral-700'
+                                              }`}
+                                            >
+                                              <label className="flex items-center gap-2 truncate cursor-pointer flex-1">
+                                                <input
+                                                  type="checkbox"
+                                                  checked={!isExcluded}
+                                                  onChange={() => handleUpdateStepTracks(step.stepId, 'toggle_exclude', tKey, undefined, slot.slotId)}
+                                                  className="rounded accent-cyan-500 cursor-pointer shrink-0"
+                                                  title={isExcluded ? 'Включить дорожку в этом слоте' : 'Отключить дорожку в этом слоте'}
+                                                />
+                                                <div className="truncate">
+                                                  <span className={`font-medium ${isExcluded ? 'line-through text-neutral-500' : 'text-neutral-100'}`}>
+                                                    {cand.dubberNick || cand.name}
+                                                  </span>
+                                                  {cand.sourceLabel && (
+                                                    <span className="text-[9px] text-neutral-300 ml-1.5 px-1.5 py-0.5 bg-neutral-800/90 rounded border border-neutral-700/60">
+                                                      {cand.sourceLabel}
+                                                    </span>
+                                                  )}
+                                                </div>
+                                              </label>
+
+                                              <div className="flex items-center gap-1 shrink-0">
+                                                {isPlayableAudio && (
+                                                  <button
+                                                    onClick={() => selectTrackForInspection(cand, `Слот «${slot.title}» шага #${idx + 1}: ${cand.dubberNick || cand.name}`, step.stepId)}
+                                                    className="px-1.5 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-emerald-400 rounded text-[10px] transition"
+                                                    title={`Прослушать дорожку из слота «${slot.title}»: ${cand.name}`}
+                                                  >
+                                                    🎧
+                                                  </button>
+                                                )}
+                                                {cand.isCustom && (
+                                                  <button
+                                                    onClick={() => handleUpdateStepTracks(step.stepId, 'remove_custom', cand.path || tKey, undefined, slot.slotId)}
+                                                    className="px-1.5 py-0.5 bg-neutral-800 hover:bg-red-900/70 text-neutral-400 hover:text-red-300 rounded text-[10px] transition"
+                                                    title="Удалить добавленный вручную файл из этого слота"
+                                                  >
+                                                    ✕
+                                                  </button>
+                                                )}
+                                              </div>
+                                            </div>
+                                          );
+                                        })
                                       )}
                                     </div>
                                   </div>
-                                );
-                              })}
-                            </div>
-                          );
-                        })()}
-                      </div>
-                    )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     {/* Settings & Presets Accordion */}
                     {isExpanded && (
@@ -3142,6 +3481,87 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                 >
                                   {preset.title}
                                 </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Intentional Subtitle Overlaps Priority Block inside Phrase Normalization Settings */}
+                        {isPhraseNormModule(step.moduleId) && intentionalOverlaps.length > 0 && (
+                          <div className="p-3 bg-amber-950/20 border border-amber-700/50 rounded-xl space-y-2.5">
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-2">
+                                <Volume2 className="w-4 h-4 text-amber-400 shrink-0" />
+                                <div>
+                                  <span className="text-xs font-bold text-amber-200 block">
+                                    Приоритет громкости при наложении разных фраз по субтитрам ({intentionalOverlaps.length} моментов)
+                                  </span>
+                                  <span className="text-[11px] text-neutral-400">
+                                    Приоритетная дорожка сохраняет обычную громкость (0 дБ), а неприоритетные дорожки в этот момент понижаются на -10 дБ
+                                  </span>
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => {
+                                  setPendingNormExecution(null);
+                                  setIsOverlapPriorityModalOpen(true);
+                                }}
+                                className="px-2.5 py-1 bg-amber-600/30 hover:bg-amber-600/50 text-amber-200 border border-amber-500/50 rounded-lg text-[11px] font-semibold transition"
+                              >
+                                Открыть в окне ({intentionalOverlaps.filter(o => !!o.priorityTrackKey).length}/{intentionalOverlaps.length})
+                              </button>
+                            </div>
+
+                            <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                              {intentionalOverlaps.map((ov, ovIdx) => (
+                                <div key={ov.id || ovIdx} className="p-2.5 bg-neutral-950/90 border border-neutral-800 rounded-lg space-y-2">
+                                  <div className="flex items-center justify-between text-[11px]">
+                                    <span className="font-mono text-amber-300 font-semibold">
+                                      #{ovIdx + 1} • [{formatTime(ov.startSec || 0)} – {formatTime(ov.endSec || 0)}]
+                                    </span>
+                                    <button
+                                      onClick={() => handleSeek(ov.startSec || 0)}
+                                      className="px-2 py-0.5 bg-neutral-800 hover:bg-neutral-700 text-emerald-400 rounded text-[10px] font-mono transition"
+                                    >
+                                      ▶ Слушать в плеере
+                                    </button>
+                                  </div>
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                                    {(ov.tracks || []).map((tItem: any, tIdx: number) => {
+                                      const tKey = tItem.dubberNick || tItem.characterName || tItem.trackId;
+                                      const isPrio = ov.priorityTrackKey === tKey;
+                                      return (
+                                        <button
+                                          key={tIdx}
+                                          onClick={() => handleSelectOverlapPriority(ov.id, tKey)}
+                                          className={`p-2 rounded-lg border text-left transition flex flex-col justify-between gap-1 ${
+                                            isPrio
+                                              ? 'bg-emerald-950/60 border-emerald-500 text-emerald-100 shadow-sm'
+                                              : 'bg-neutral-900/70 border-neutral-800 hover:border-neutral-600 text-neutral-300'
+                                          }`}
+                                        >
+                                          <div className="flex items-center justify-between gap-1 w-full">
+                                            <span className="font-bold text-[11px] truncate">
+                                              {tItem.dubberNick} {tItem.characterName && tItem.characterName !== tItem.dubberNick ? `(${tItem.characterName})` : ''}
+                                            </span>
+                                            <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold shrink-0 ${
+                                              isPrio
+                                                ? 'bg-emerald-600 text-white'
+                                                : ov.priorityTrackKey
+                                                  ? 'bg-red-950/80 text-red-300 border border-red-800/60'
+                                                  : 'bg-neutral-800 text-neutral-400'
+                                            }`}>
+                                              {isPrio ? '★ Приоритет (0 дБ)' : ov.priorityTrackKey ? '-10 дБ' : 'Выбрать'}
+                                            </span>
+                                          </div>
+                                          <div className="text-[10px] text-neutral-400 italic truncate" title={tItem.text}>
+                                            «{tItem.text || 'Реплика'}»
+                                          </div>
+                                        </button>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
                               ))}
                             </div>
                           </div>
@@ -4443,6 +4863,23 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                       <p className="text-[11px] text-neutral-400 leading-relaxed">
                         {modDef.description}
                       </p>
+                      {modDef.inputSlotsSummary && modDef.inputSlotsSummary.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          <span className="text-[9px] uppercase tracking-wider font-bold text-neutral-500">
+                            Входные слоты ({modDef.inputSlotsSummary.length}):
+                          </span>
+                          {modDef.inputSlotsSummary.map((sl, sIdx) => (
+                            <span
+                              key={sl.slotId || sIdx}
+                              className="text-[10px] px-2 py-0.5 rounded bg-neutral-900 text-cyan-200 border border-neutral-700/80 flex items-center gap-1"
+                              title={(sl as any).description || sl.acceptedTypeLabel}
+                            >
+                              <span className="font-bold text-purple-300">Слот {sl.slotNumber}:</span>
+                              <span>{sl.acceptedTypeLabel}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       {modDef.recommended_for && (
                         <p className="text-[10px] text-amber-400/90 pt-0.5">
                           💡 {modDef.recommended_for}
@@ -5312,6 +5749,139 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                       <span>Наложить эффекты по кривой автоматизации сейчас</span>
                     </>
                   )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Выбор приоритетной дорожки в моменты наложения разных фраз по субтитрам (-10 дБ остальным) */}
+      {isOverlapPriorityModalOpen && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-amber-500/40 rounded-2xl w-full max-w-3xl overflow-hidden shadow-2xl flex flex-col max-h-[90vh]">
+            <div className="px-6 py-4 border-b border-neutral-800 flex items-center justify-between bg-gradient-to-r from-amber-950/50 via-neutral-900 to-neutral-900">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-500/20 text-amber-400 rounded-xl border border-amber-500/30">
+                  <Volume2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>Приоритет дорожек при наложении разных фраз в субтитрах</span>
+                    <span className="text-[10px] px-2 py-0.5 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded-full font-mono">
+                      0 дБ Приоритет / -10 дБ Остальным
+                    </span>
+                  </h2>
+                  <p className="text-xs text-neutral-400">
+                    Выберите, какой дорожке отдать приоритет по громкости в каждом моменте пересечения разных реплик из тайминга
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setIsOverlapPriorityModalOpen(false);
+                  setPendingNormExecution(null);
+                }}
+                className="p-1.5 text-neutral-400 hover:text-white rounded-lg hover:bg-neutral-800 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-4 flex-1">
+              {intentionalOverlaps.map((ov, idx) => (
+                <div key={ov.id || idx} className="p-4 bg-neutral-950 border border-neutral-800 rounded-xl space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 bg-amber-500/20 text-amber-300 rounded font-mono text-xs font-bold border border-amber-500/30">
+                        Момент #{idx + 1}: {formatTime(ov.startSec || 0)} – {formatTime(ov.endSec || 0)}
+                      </span>
+                      <span className="text-xs text-neutral-400">
+                        (Пересечение в сабах: {formatTime(ov.subStartSec || ov.startSec || 0)} – {formatTime(ov.subEndSec || ov.endSec || 0)})
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => handleSeek(ov.startSec || 0)}
+                      className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 text-emerald-400 rounded-lg text-xs font-mono transition flex items-center gap-1"
+                    >
+                      <Play className="w-3 h-3 fill-current" />
+                      <span>Прослушать момент</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {(ov.tracks || []).map((tItem: any, tIdx: number) => {
+                      const tKey = tItem.dubberNick || tItem.characterName || tItem.trackId;
+                      const isPriority = ov.priorityTrackKey === tKey;
+                      return (
+                        <button
+                          key={tIdx}
+                          onClick={() => handleSelectOverlapPriority(ov.id, tKey)}
+                          className={`p-3 rounded-xl border text-left transition flex flex-col justify-between gap-2 ${
+                            isPriority
+                              ? 'bg-emerald-950/60 border-emerald-500 text-emerald-100 ring-1 ring-emerald-500/50 shadow-md'
+                              : 'bg-neutral-900/90 border-neutral-800 hover:border-neutral-600 text-neutral-200'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2 w-full">
+                            <div className="truncate">
+                              <span className="font-bold text-xs text-white">{tItem.dubberNick}</span>
+                              {tItem.characterName && tItem.characterName !== tItem.dubberNick && (
+                                <span className="text-[11px] text-neutral-400 ml-1.5">({tItem.characterName})</span>
+                              )}
+                            </div>
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold shrink-0 ${
+                              isPriority
+                                ? 'bg-emerald-600 text-white'
+                                : ov.priorityTrackKey
+                                  ? 'bg-red-950/90 text-red-300 border border-red-800/70'
+                                  : 'bg-neutral-800 text-amber-300 border border-amber-700/40'
+                            }`}>
+                              {isPriority
+                                ? '★ ПРИОРИТЕТ (0 дБ)'
+                                : ov.priorityTrackKey
+                                  ? 'Понижение -10 дБ'
+                                  : 'Нажмите для приоритета'}
+                            </span>
+                          </div>
+                          <div className="text-xs text-neutral-300 bg-neutral-950/80 p-2 rounded-lg border border-neutral-800/80 leading-snug">
+                            «{tItem.text || 'Реплика даббера'}»
+                          </div>
+                          <div className="text-[10px] font-mono text-neutral-500">
+                            Тайминг фразы: {formatTime(tItem.phraseStartSec ?? ov.startSec ?? 0)} – {formatTime(tItem.phraseEndSec ?? ov.endSec ?? 0)}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="px-6 py-4 border-t border-neutral-800 bg-neutral-950 flex items-center justify-between gap-3">
+              <span className="text-xs text-neutral-400">
+                Выбрано приоритетов: <strong className="text-amber-300">{intentionalOverlaps.filter(o => !!o.priorityTrackKey).length} из {intentionalOverlaps.length}</strong>
+              </span>
+              <div className="flex items-center gap-2.5">
+                <button
+                  onClick={() => {
+                    setIsOverlapPriorityModalOpen(false);
+                    setPendingNormExecution(null);
+                  }}
+                  className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-xl text-xs font-medium transition"
+                >
+                  Отмена
+                </button>
+                <button
+                  onClick={handleConfirmOverlapPrioritiesAndRun}
+                  className="px-5 py-2 bg-amber-600 hover:bg-amber-500 text-white rounded-xl text-xs font-bold flex items-center gap-2 transition shadow-lg shadow-amber-900/30"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>
+                    {pendingNormExecution
+                      ? 'Подтвердить приоритеты и запустить нормализацию (-10 дБ остальным)'
+                      : 'Сохранить приоритеты дорожек'}
+                  </span>
                 </button>
               </div>
             </div>

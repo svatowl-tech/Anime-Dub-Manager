@@ -1,4 +1,5 @@
 const { ipcMain, dialog } = require('electron');
+const fs = require('fs');
 const { wrapIpcHandler } = require('../lib/IpcWrapper.cjs');
 
 function registerProjectHandlers(getData, saveData, mainWindow) {
@@ -165,7 +166,15 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
         });
         const uploads = (ep.uploads || []).map(upload => {
           const uploadedBy = upload.uploadedById ? participantMap.get(upload.uploadedById) : undefined;
-          return { ...upload, uploadedBy };
+          let size = upload.size;
+          if (!size && upload.path) {
+            try {
+              if (fs.existsSync(upload.path)) {
+                size = fs.statSync(upload.path).size;
+              }
+            } catch (_) {}
+          }
+          return { ...upload, uploadedBy, ...(size !== undefined ? { size } : {}) };
         });
         return { ...ep, assignments, uploads };
       });
@@ -217,7 +226,15 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
         });
         const uploads = (ep.uploads || []).map(upload => {
           const uploadedBy = upload.uploadedById ? participantMap.get(upload.uploadedById) : undefined;
-          return { ...upload, uploadedBy };
+          let size = upload.size;
+          if (!size && upload.path) {
+            try {
+              if (fs.existsSync(upload.path)) {
+                size = fs.statSync(upload.path).size;
+              }
+            } catch (_) {}
+          }
+          return { ...upload, uploadedBy, ...(size !== undefined ? { size } : {}) };
         });
         return { ...ep, assignments, uploads };
       });

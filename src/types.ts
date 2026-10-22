@@ -151,6 +151,7 @@ export interface UploadedFile {
   assignmentId?: string;
   type: "DUBBER_FILE" | "FIXES" | "SOUND_ENGINEER_FILE";
   path: string;
+  size?: number;
   uploadedById: string;
   uploadedBy?: Participant;
   role?: string; // e.g. "SOUND_ENGINEER"
@@ -255,13 +256,20 @@ export interface Track {
   dubberName?: string;
   characterName?: string;
   filePath?: string;
+  fileSize?: number;
   projectId?: string;
   episodeId?: string;
   role?: string;
   status: 'pending' | 'approved' | 'rejected' | 'fixes_needed' | 'recorded';
-  files?: { id: string; path: string; createdAt: string; type?: 'DUBBER_FILE' | 'FIXES' | 'SOUND_ENGINEER_FILE' }[];
+  files?: { id: string; name?: string; path: string; createdAt: string; type?: 'DUBBER_FILE' | 'FIXES' | 'SOUND_ENGINEER_FILE'; size?: number }[];
   selectedFileId?: string;
   comments?: Comment[];
+  patchSnippet?: {
+    id: string;
+    name: string;
+    path: string;
+    size?: number;
+  };
 }
 
 export interface MixingFileItem {
@@ -277,6 +285,35 @@ export interface MixingFileItem {
   excluded?: boolean;
   isCustom?: boolean;
   sourceLabel?: string;
+  type?: string;
+  slotId?: string;
+  slotTitle?: string;
+  slotType?: string;
+  acceptedTypeLabel?: string;
+}
+
+export interface MixingInputSlot {
+  slotId: string;
+  slotNumber: number;
+  title: string;
+  acceptedTypeLabel: string;
+  description: string;
+  slotType:
+    | 'dubber_tracks'
+    | 'fix_tracks'
+    | 'voices_master'
+    | 'original_audio'
+    | 'original_vocals'
+    | 'background_audio'
+    | 'sidechain_voice'
+    | 'master_audio'
+    | 'video_stream'
+    | 'subtitles';
+  fileDialogType: 'audio' | 'video' | 'subtitles';
+  allowMultiple: boolean;
+  required: boolean;
+  emptyHint?: string;
+  tracks: MixingFileItem[];
 }
 
 export interface MixingModuleState {
@@ -314,6 +351,13 @@ export interface MixingModuleDef {
   defaultParams: Record<string, any>;
   presets?: MixingModulePreset[];
   icon?: string;
+  inputSlotsSummary?: {
+    slotId: string;
+    slotNumber: number;
+    label: string;
+    acceptedTypeLabel: string;
+    slotType: string;
+  }[];
 }
 
 export interface PipelineStep {
@@ -325,6 +369,7 @@ export interface PipelineStep {
   status: 'idle' | 'processing' | 'completed' | 'error';
   progress?: number;
   outputFiles: MixingFileItem[];
+  inputSlots?: MixingInputSlot[];
   candidateInputs?: MixingFileItem[];
   excludedTrackKeys?: string[];
   customInputTracks?: MixingFileItem[];
