@@ -525,7 +525,9 @@ def process_deepfilternet(args):
         output_path = f"{base}_denoised.wav"
 
     mode = args.mode
-    atten_limit = float(args.attenuation_limit_db) if args.attenuation_limit_db is not None else -100.0
+    raw_atten = float(args.attenuation_limit_db) if args.attenuation_limit_db is not None else 24.0
+    atten_limit = abs(raw_atten) if raw_atten != 0 else 24.0
+    post_filter = str(getattr(args, "post_filter", "false")).lower() in ["true", "1", "yes"]
     reverb_reduction = float(args.reverb_reduction) if args.reverb_reduction is not None else (0.8 if mode == 'dereverb' else 0.0)
     sensitivity = float(args.sensitivity) if args.sensitivity is not None else 1.0
     wet_dry_blend = float(args.wet_dry_blend) if args.wet_dry_blend is not None else 100.0
@@ -543,9 +545,12 @@ def process_deepfilternet(args):
             pass
         from df.enhance import init_df, enhance
         try:
-            model, df_state, _ = init_df(log_level="ERROR", log_file=None)
+            model, df_state, _ = init_df(log_level="ERROR", log_file=None, post_filter=post_filter)
         except TypeError:
-            model, df_state, _ = init_df()
+            try:
+                model, df_state, _ = init_df(log_level="ERROR", log_file=None)
+            except TypeError:
+                model, df_state, _ = init_df()
         model = model.to(device)
         model.eval()
     except ImportError as e:
@@ -569,9 +574,9 @@ def process_deepfilternet(args):
     )
     orig_num_samples = audio_data.shape[-1]
 
-    emit_progress(35.0, f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, atten_limit={atten_limit} dB)...")
+    eff_atten = None if atten_limit >= 100.0 else float(atten_limit)
+    emit_progress(35.0, f"Нейросетевая фильтрация спектрограммы (DeepFilterNet3, atten_lim_db={eff_atten or '∞'} dB, post_filter={post_filter})...")
     
-    eff_atten = atten_limit if sensitivity >= 3.0 else max(-40.0, atten_limit * (sensitivity / 3.0))
     import torch
 
     def _run_df_chunk(chunk_stereo_or_mono, chunk_sr):
@@ -583,6 +588,11 @@ def process_deepfilternet(args):
             with torch.no_grad():
                 enhanced_ch = enhance(model, df_state, ch_tensor, atten_lim_db=eff_atten)
             enh_np = _match_audio_length(enhanced_ch.cpu().numpy(), chunk_target_len)
+            if post_filter:
+                # Perceptual post-filter attenuation of low-energy residual noise bins
+                env = np.abs(enh_np)
+                pf_mask = np.clip(env / (np.percentile(env, 65) + 1e-6), 0.35, 1.0)
+                enh_np = enh_np * pf_mask
             ch_list.append(enh_np)
         return np.concatenate(ch_list, axis=0)
 
@@ -632,7 +642,15 @@ def process_demucs(args):
     model_name = args.model_name or "htdemucs"
     shifts = int(args.shifts) if args.shifts is not None else 1
     overlap = float(args.overlap) if args.overlap is not None else 0.25
-    stems_mode = args.stems or "both"
+    raw_stems = str(args.stems or "both").strip().lower()
+    if raw_stems in ["2", "both"]:
+        stems_mode = "both"
+    elif raw_stems in ["4", "all"]:
+        stems_mode = "all"
+    elif raw_stems in ["vocals_only", "instrumental_only"]:
+        stems_mode = raw_stems
+    else:
+        stems_mode = "both"
     prefix = args.prefix or ""
 
     hf_token = os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_HUB_TOKEN')
@@ -725,6 +743,14 @@ def process_demucs(args):
                 shutil.copyfile(inst_out_path, alt_inst)
             except Exception: pass
         exported_files.append({"type": "instrumental", "path": inst_out_path})
+
+    if stems_mode == "all":
+        for stem_key in ["drums", "bass", "other"]:
+            s_arr = sources_dict.get(stem_key)
+            if s_arr is not None:
+                s_path = os.path.join(output_dir, f"{prefix}{stem_key}.wav")
+                AudioConditioner.save_audio(s_path, s_arr, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
+                exported_files.append({"type": stem_key, "path": s_path})
 
     emit_progress(100.0, f"Разделение Demucs v4 завершено ({len(exported_files)} стемов создано)!")
     sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
@@ -2274,12 +2300,15 @@ def process_uvr_inference(args):
     )
 
     reverb_reduction = float(getattr(args, 'reverb_reduction', 0.8) or 0.8)
-    sensitivity = float(getattr(args, 'sensitivity', 1.0) or 1.0)
+    noise_reduction_db = float(getattr(args, 'noise_reduction_db', 18.0) or 18.0)
+    sensitivity = max(0.1, min(10.0, float(getattr(args, 'sensitivity', 5.0) or 5.0)))
     wet_dry_blend = float(getattr(args, 'wet_dry_blend', 100.0) or 100.0)
-    is_aggressive = ('aggressive' in model_id.lower() or 'aggressive' in str(model_path).lower())
+    is_denoise_mode = (getattr(args, 'mode', '') == 'denoise' or 'denoise' in model_id.lower())
+    is_aggressive = ('aggressive' in model_id.lower() or 'aggressive' in str(model_path).lower() or 'full' in model_id.lower())
 
-    fade_decay = 0.88 if is_aggressive else 0.68
-    aggression_multiplier = 1.45 if is_aggressive else 1.0
+    sens_norm = sensitivity / 5.0  # 1.0 at default sensitivity=5.0
+    fade_decay = min(0.95, (0.86 if is_aggressive else 0.66) * (0.75 + 0.25 * sens_norm))
+    aggression_multiplier = (1.45 if is_aggressive else 1.0) * (0.65 + 0.35 * sens_norm)
 
     def _run_uvr_chunk(chunk_stereo, chunk_sr):
         n_fft = 2048
@@ -2296,24 +2325,49 @@ def process_uvr_inference(args):
             out_sig = np.zeros(len(sig_padded), dtype=np.float32)
             norm_win = np.zeros(len(sig_padded), dtype=np.float32)
             prev_mag = np.zeros(n_fft // 2 + 1, dtype=np.float32)
-            
-            for f_idx in range(num_frames):
-                st = f_idx * hop_length
-                w_frame = sig_padded[st:st + n_fft] * window
-                spec = np.fft.rfft(w_frame)
-                mag = np.abs(spec)
-                phase = np.angle(spec)
-                
-                flux = np.maximum(0.0, mag - prev_mag * fade_decay)
-                suppression_mask = (flux / (mag + 1e-6)) ** (reverb_reduction * aggression_multiplier)
-                suppression_mask = np.clip(suppression_mask, 0.04 if is_aggressive else 0.10, 1.0)
-                
-                cleaned_spec = (mag * suppression_mask) * np.exp(1j * phase)
-                cleaned_frame = np.fft.irfft(cleaned_spec) * window
-                
-                out_sig[st:st + n_fft] += cleaned_frame
-                norm_win[st:st + n_fft] += window ** 2
-                prev_mag = mag
+
+            if is_denoise_mode:
+                # Spectral Wiener / VR Denoise parameterized by noise_reduction_db and sensitivity
+                stft_frames = []
+                for f_idx in range(num_frames):
+                    st = f_idx * hop_length
+                    w_frame = sig_padded[st:st + n_fft] * window
+                    stft_frames.append(np.fft.rfft(w_frame))
+                if len(stft_frames) > 0:
+                    spec_mat = np.stack(stft_frames, axis=0)
+                    mag_mat = np.abs(spec_mat)
+                    phase_mat = np.angle(spec_mat)
+                    noise_percentile = min(45.0, max(10.0, 15.0 + sensitivity * 2.5))
+                    noise_profile = np.percentile(mag_mat, noise_percentile, axis=0) * (0.7 + 0.3 * sens_norm)
+                    min_gain = 10.0 ** (-abs(noise_reduction_db) / 20.0)
+                    snr = mag_mat / (noise_profile[None, :] + 1e-7)
+                    wiener_exponent = max(0.5, (abs(noise_reduction_db) / 18.0) * (0.7 + 0.3 * sens_norm))
+                    gain_mask = np.clip((np.maximum(0.0, snr - 1.0) / (snr + 1e-7)) ** wiener_exponent, min_gain, 1.0)
+                    for f_idx in range(num_frames):
+                        st = f_idx * hop_length
+                        cleaned_spec = (mag_mat[f_idx] * gain_mask[f_idx]) * np.exp(1j * phase_mat[f_idx])
+                        cleaned_frame = np.fft.irfft(cleaned_spec) * window
+                        out_sig[st:st + n_fft] += cleaned_frame
+                        norm_win[st:st + n_fft] += window ** 2
+            else:
+                for f_idx in range(num_frames):
+                    st = f_idx * hop_length
+                    w_frame = sig_padded[st:st + n_fft] * window
+                    spec = np.fft.rfft(w_frame)
+                    mag = np.abs(spec)
+                    phase = np.angle(spec)
+                    
+                    flux = np.maximum(0.0, mag - prev_mag * fade_decay)
+                    suppression_mask = (flux / (mag + 1e-6)) ** max(0.15, reverb_reduction * aggression_multiplier)
+                    min_floor = max(0.02, (0.04 if is_aggressive else 0.10) / max(0.5, sens_norm))
+                    suppression_mask = np.clip(suppression_mask, min_floor, 1.0)
+                    
+                    cleaned_spec = (mag * suppression_mask) * np.exp(1j * phase)
+                    cleaned_frame = np.fft.irfft(cleaned_spec) * window
+                    
+                    out_sig[st:st + n_fft] += cleaned_frame
+                    norm_win[st:st + n_fft] += window ** 2
+                    prev_mag = mag
 
             valid_m = norm_win > 1e-4
             out_sig[valid_m] /= norm_win[valid_m]
@@ -2453,10 +2507,16 @@ def main():
     parser.add_argument("--limiter_release", type=float, default=40.0)
 
     # DeepFilterNet & UVR Denoise/Dereverb
-    parser.add_argument("--attenuation_limit_db", type=float, default=-100.0)
+    parser.add_argument("--noise_reduction_db", type=float, default=18.0)
+    parser.add_argument("--attenuation_limit_db", type=float, default=24.0)
+    parser.add_argument("--post_filter", default="false")
     parser.add_argument("--reverb_reduction", type=float, default=None)
-    parser.add_argument("--sensitivity", type=float, default=1.0)
+    parser.add_argument("--sensitivity", type=float, default=5.0)
     parser.add_argument("--wet_dry_blend", type=float, default=100.0)
+    parser.add_argument("--noise_floor_db", type=float, default=-52.0)
+    parser.add_argument("--stationarity_weight", type=float, default=0.85)
+    parser.add_argument("--frequency_smoothing_hz", type=float, default=120.0)
+    parser.add_argument("--preserve_voice_formants", default="true")
 
     # Demucs & Separation
     parser.add_argument("--model_name", default="htdemucs")
@@ -2493,7 +2553,7 @@ def main():
     parser.add_argument("--language", default="ru")
     parser.add_argument("--hf_token", default="")
 
-    args = parser.parse_args()
+    args, _unknown = parser.parse_known_args()
 
     if args.mode == "check_env":
         check_env()

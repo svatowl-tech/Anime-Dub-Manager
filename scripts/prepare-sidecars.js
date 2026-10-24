@@ -334,6 +334,15 @@ async function prepareYtDlp() {
 function preparePythonSidecars() {
   console.log('\n🐍 Шаг 4: Проверка и валидация Python Sidecar модулей...');
 
+  // Синхронизация мастер-скрипта audio_ai_processor.py между electron/services и electron/sidecars
+  const masterAudioAi = path.join(ROOT_DIR, 'electron', 'services', 'audio_ai_processor.py');
+  const sidecarAudioAi = path.join(ROOT_DIR, 'electron', 'sidecars', 'audio_ai_processor.py');
+  if (fs.existsSync(masterAudioAi)) {
+    fs.mkdirSync(path.dirname(sidecarAudioAi), { recursive: true });
+    fs.copyFileSync(masterAudioAi, sidecarAudioAi);
+    console.log('  ✓ Синхронизирован audio_ai_processor.py -> electron/sidecars/audio_ai_processor.py');
+  }
+
   const checkFile = (relPath, desc) => {
     const full = path.join(ROOT_DIR, relPath);
     if (fs.existsSync(full)) {

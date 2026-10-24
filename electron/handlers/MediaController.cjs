@@ -40,6 +40,20 @@ function registerMediaHandlers(getData, mainWindow, taskQueue) {
       }
       case 'transcode-video': {
         const { videoPath, outputPath, options } = payload;
+        if (taskQueue && Array.isArray(taskQueue.queue)) {
+          const existingTask = taskQueue.queue.find(t =>
+            t.type === 'transcode-video' &&
+            (t.status === 'running' || t.status === 'pending') &&
+            (
+              (outputPath && (t.metadata?.outputPath === outputPath || (Array.isArray(t.args) && t.args[1] === outputPath))) ||
+              (metadata?.episodeId && t.metadata?.episodeId === metadata.episodeId)
+            )
+          );
+          if (existingTask) {
+            log.info(`Skipping duplicate transcode-video task (already active as ${existingTask.id}) for ${outputPath || metadata?.episodeId}`);
+            return existingTask.id;
+          }
+        }
         taskFn = (id, v, o, opts, onProgress, onCommand) => 
           MediaWorker.execute(transcodeToMp4, [v, o, onProgress, onCommand, opts]); 
         args = [videoPath, outputPath, options || {}];

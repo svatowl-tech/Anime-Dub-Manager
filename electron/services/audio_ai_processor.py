@@ -2513,6 +2513,10 @@ def main():
     parser.add_argument("--reverb_reduction", type=float, default=None)
     parser.add_argument("--sensitivity", type=float, default=5.0)
     parser.add_argument("--wet_dry_blend", type=float, default=100.0)
+    parser.add_argument("--noise_floor_db", type=float, default=-52.0)
+    parser.add_argument("--stationarity_weight", type=float, default=0.85)
+    parser.add_argument("--frequency_smoothing_hz", type=float, default=120.0)
+    parser.add_argument("--preserve_voice_formants", default="true")
 
     # Demucs & Separation
     parser.add_argument("--model_name", default="htdemucs")
@@ -2549,7 +2553,7 @@ def main():
     parser.add_argument("--language", default="ru")
     parser.add_argument("--hf_token", default="")
 
-    args = parser.parse_args()
+    args, _unknown = parser.parse_known_args()
 
     if args.mode == "check_env":
         check_env()

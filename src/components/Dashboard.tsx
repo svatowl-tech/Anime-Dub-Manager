@@ -525,7 +525,10 @@ export default function Dashboard({
       }
 
       // CASE 2: Subtitle-only extraction from MKV
-      if (type === 'SUB' && ext === 'mkv' && selectedSubtitleStreamIndex !== undefined) {
+      if (type === 'SUB' && ext === 'mkv') {
+        if (selectedSubtitleStreamIndex === undefined) {
+          return;
+        }
         setStatus("Извлечение субтитров из MKV...");
         const tempSubPath = filePath.replace(/\.mkv$/i, `_track${selectedSubtitleStreamIndex}.ass`);
         let finalSubPath = '';
@@ -549,6 +552,14 @@ export default function Dashboard({
         }
 
         if (finalSubPath) {
+          try {
+            const proj: Project | null = await ipcSafe.invoke('get-project', selectedProject?.id);
+            if (proj && Array.isArray(proj.episodes)) {
+              const found = proj.episodes.find((e: any) => e.id === latestEp.id);
+              if (found) latestEp = found;
+            }
+          } catch (e) {}
+
           updateData.subPath = finalSubPath;
           updateData.assignments = await extractActorsAndAssign(finalSubPath);
           if (latestEp.rawPath) {

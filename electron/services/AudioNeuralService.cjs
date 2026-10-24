@@ -37,44 +37,54 @@ class AudioNeuralService {
 
     // 1. Look for the application's latest bundled sidecar script
     const appBundledCandidates = [
-      path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
       path.join(__dirname, 'audio_ai_processor.py'),
-      path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
+      path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
       path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py'),
+      path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
     ];
 
     if (process.resourcesPath) {
       appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
       appBundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'services', 'audio_ai_processor.py'));
+      appBundledCandidates.push(path.join(process.resourcesPath, 'electron', 'services', 'audio_ai_processor.py'));
       appBundledCandidates.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
       appBundledCandidates.push(path.join(process.resourcesPath, 'audio_ai_processor.py'));
     }
 
     let sourceContent = null;
+    let fallbackContent = null;
     for (const cand of appBundledCandidates) {
       if (cand && fs.existsSync(cand)) {
         try {
-          const content = fs.readFileSync(cand);
+          const content = fs.readFileSync(cand, 'utf8');
           if (content && content.length > 500) {
-            sourceContent = content;
-            break;
+            if (!fallbackContent || content.length > fallbackContent.length) {
+              fallbackContent = content;
+            }
+            if (content.includes('--noise_reduction_db') && content.includes('--post_filter')) {
+              sourceContent = content;
+              break;
+            }
           }
         } catch (e) {}
       }
+    }
+    if (!sourceContent && fallbackContent) {
+      sourceContent = fallbackContent;
     }
 
     // 2. If bundled master source found, sync to disk so Python can run the latest code
     if (sourceContent) {
       try {
         fs.mkdirSync(path.dirname(targetScript), { recursive: true });
-        fs.writeFileSync(targetScript, sourceContent);
+        fs.writeFileSync(targetScript, sourceContent, 'utf8');
         log.info(`[AudioNeuralService] Synchronized sidecar script to ${targetScript}`);
       } catch (e) {}
 
       // Also overwrite the stale copy in ai_env/sidecars if it exists
       try {
         if (fs.existsSync(path.dirname(aiEnvSidecarScript))) {
-          fs.writeFileSync(aiEnvSidecarScript, sourceContent);
+          fs.writeFileSync(aiEnvSidecarScript, sourceContent, 'utf8');
           log.info(`[AudioNeuralService] Updated ai_env sidecar script at ${aiEnvSidecarScript}`);
         }
       } catch (e) {}
@@ -96,31 +106,42 @@ class AudioNeuralService {
   }
 
   /**
-   * Очищает целевой скрипт на диске от устаревших meta_path хуков (_TorchTestingFinder),
-   * которые вызывали AttributeError: 'function' object has no attribute 'endswith' в inspect.py.
+   * Очищает целевой скрипт на диске от устаревших meta_path хуков (_TorchTestingFinder)
+   * и гарантирует наличие актуальных аргументов CLI (--noise_reduction_db, --post_filter, parse_known_args).
    */
   _sanitizeSidecarScript(scriptPath) {
     if (!scriptPath || !fs.existsSync(scriptPath)) return;
     try {
       const code = fs.readFileSync(scriptPath, 'utf8');
-      if (code.includes('_TorchTestingFinder') || code.includes('_TestingDynamicShim') || code.includes('process_func(chunk, sr)') || !code.includes('airwindows_restore') || !code.includes('loudness_norm') || !code.includes('_match_audio_length') || code.includes('choices=[')) {
+      if (
+        code.includes('_TorchTestingFinder') ||
+        code.includes('_TestingDynamicShim') ||
+        code.includes('process_func(chunk, sr)') ||
+        !code.includes('airwindows_restore') ||
+        !code.includes('loudness_norm') ||
+        !code.includes('_match_audio_length') ||
+        !code.includes('--noise_reduction_db') ||
+        !code.includes('--post_filter') ||
+        !code.includes('parse_known_args')
+      ) {
         const bundledCandidates = [
-          path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
           path.join(__dirname, 'audio_ai_processor.py'),
-          path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py'),
-          path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py')
+          path.join(__dirname, '..', 'sidecars', 'audio_ai_processor.py'),
+          path.join(process.cwd(), 'electron', 'services', 'audio_ai_processor.py'),
+          path.join(process.cwd(), 'electron', 'sidecars', 'audio_ai_processor.py')
         ];
         if (process.resourcesPath) {
           bundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'sidecars', 'audio_ai_processor.py'));
-          bundledCandidates.unshift(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
+          bundledCandidates.unshift(path.join(process.resourcesPath, 'app.asar.unpacked', 'electron', 'services', 'audio_ai_processor.py'));
+          bundledCandidates.push(path.join(process.resourcesPath, 'electron', 'sidecars', 'audio_ai_processor.py'));
         }
         for (const c of bundledCandidates) {
           if (fs.existsSync(c)) {
             try {
               const fresh = fs.readFileSync(c, 'utf8');
-              if (fresh && !fresh.includes('_TorchTestingFinder')) {
+              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('--noise_reduction_db')) {
                 fs.writeFileSync(scriptPath, fresh, 'utf8');
-                log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на чистую версию без meta_path хуков.`);
+                log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на актуальную версию.`);
                 break;
               }
             } catch (e) {}

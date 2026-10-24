@@ -427,7 +427,7 @@ export const DashboardModalsAndTorrent: React.FC<any> = (props) => {
             setAudioTracks([]);
             setPendingMkvUpload({
               filePath: torrentMkvDetected.filePath,
-              type: 'RAW',
+              type: 'SUB',
               episodeId: torrentMkvDetected.targetEpisode?.id || currentEpisode?.id
             });
             setTorrentMkvDetected(null);

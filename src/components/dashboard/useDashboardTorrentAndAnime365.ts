@@ -605,7 +605,9 @@ export function useDashboardTorrentAndAnime365(params: {
            if (bgRes && bgRes.downloadId && selectedProject) {
              let attempts = 0;
              let errorCount = 0;
+             let isHandlingCompletion = false;
              const poll = setInterval(async () => {
+               if (isHandlingCompletion) return;
                attempts++;
                if (attempts > 400) {
                  clearInterval(poll);
@@ -616,6 +618,8 @@ export function useDashboardTorrentAndAnime365(params: {
                try {
                  const st = await ipcSafe.invoke('get-torrent-download-status', { downloadId: bgRes.downloadId });
                  if (st && st.status === 'completed') {
+                   if (isHandlingCompletion) return;
+                   isHandlingCompletion = true;
                    clearInterval(poll);
                    torrentPollIntervalsRef.current.delete(poll);
                    
@@ -637,7 +641,7 @@ export function useDashboardTorrentAndAnime365(params: {
                      if (linkRes && linkRes.detectedSubtitleTracks && linkRes.detectedSubtitleTracks.length > 0) {
                        setTorrentMkvDetected({
                          episodeNumber: linkRes.episodeNumber,
-                         filePath: st.filePath,
+                         filePath: linkRes.filePath || st.filePath,
                          subtitleTracks: linkRes.detectedSubtitleTracks,
                          targetEpisode: linkRes.targetEpisode
                        });
