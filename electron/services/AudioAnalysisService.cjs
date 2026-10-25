@@ -216,7 +216,7 @@ class AudioAnalysisService {
     // чтобы тихие ненормализованные дорожки (например, речь -55..-60 dB при шуме -91 dB) не съедались порогом -42/-55 dB
     const adaptiveVadNoiseDb = options.noiseDb !== undefined
       ? options.noiseDb
-      : Math.min(-38, Math.max(-76, Math.round(Math.min(rawSpeechRms - 7, rawPeak - 24))));
+      : Math.min(-45, Math.max(-78, Math.round(Math.min(rawSpeechRms - 12, rawPeak - 28))));
 
     // VAD & Silences
     if (onProgress) onProgress({ status: 'detecting_speech', progress: 35 });
@@ -229,10 +229,10 @@ class AudioAnalysisService {
     const noiseFloorDb = await measureNoiseFloor(audioPath, silences);
 
     // Автоматический рекомендованный порог гейта с учётом реальной громкости речи и шумовой полки (без жёсткого отсечения на -55 dB)
-    const safeAboveNoise = Math.round(noiseFloorDb + 7);
-    const safeBelowSpeech = Math.round(Math.min(rawSpeechRms - 5, rawPeak - 22));
+    const safeAboveNoise = Math.round(noiseFloorDb + 6);
+    const safeBelowSpeech = Math.round(Math.min(rawSpeechRms - 12, rawPeak - 28));
     const rawGate = Math.max(safeAboveNoise, safeBelowSpeech);
-    const suggestedGateThresholdDb = Math.min(-28, Math.max(-78, rawGate));
+    const suggestedGateThresholdDb = Math.min(-42, Math.max(-78, rawGate));
 
     const energyProfile = {
       noiseFloorDb,
@@ -241,7 +241,7 @@ class AudioAnalysisService {
       suggestedGateThresholdDb
     };
 
-    // 3. Формирование списка фраз (VAD: +80ms attack, +150ms decay)
+    // 3. Формирование списка фраз (VAD: +180ms attack, +280ms decay)
     if (onProgress) onProgress({ status: 'segmenting_phrases', progress: 50 });
     const rawSpeech = vadResult.speechIntervals || [];
     const totalDuration = meta.durationSec || 0;
@@ -260,8 +260,8 @@ class AudioAnalysisService {
     const phrases = [];
     for (let i = 0; i < rawSpeech.length; i++) {
       const seg = rawSpeech[i];
-      const startSec = Number(Math.max(0, seg.startSec - 0.08).toFixed(3));
-      const endSec = Number(Math.min(totalDuration > 0 ? totalDuration : seg.endSec + 0.15, seg.endSec + 0.15).toFixed(3));
+      const startSec = Number(Math.max(0, seg.startSec - 0.18).toFixed(3));
+      const endSec = Number(Math.min(totalDuration > 0 ? totalDuration : seg.endSec + 0.28, seg.endSec + 0.28).toFixed(3));
       const durationSec = Number(Math.max(0.1, endSec - startSec).toFixed(3));
 
       // Сопоставление с субтитрами по времени

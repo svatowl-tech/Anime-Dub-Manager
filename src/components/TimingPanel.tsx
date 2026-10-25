@@ -317,31 +317,47 @@ export function analyzeTrackAudioNoiseFloor(
 
   rmsDbValues.sort((a, b) => a - b);
 
-  // Real noise floor from lowest percentiles (excluding digital absolute nulls if non-null noise exists)
-  const nonNullWindows = rmsDbValues.filter(v => v > -90);
-  const effectiveNoiseWindows = nonNullWindows.length > 50 ? nonNullWindows : rmsDbValues;
-  const noiseFloorDb = effectiveNoiseWindows[Math.floor(effectiveNoiseWindows.length * 0.15)];
-  const isShortFile = audioBuffer.duration < 45;
-  const noiseUpperPct = isShortFile ? 0.45 : 0.78;
-  const noiseUpperDb = effectiveNoiseWindows[Math.floor(effectiveNoiseWindows.length * noiseUpperPct)];
+  // Real noise floor estimation that NEVER mistakes gated speech clips for room noise:
+  // In DAW-exported or gated dubber tracks, 80-98% of windows are digital silence (<= -88 dB),
+  // so nonNullWindows contains almost exclusively the dubber's active speech phrases!
+  const nonNullWindows = rmsDbValues.filter(v => v > -88);
+  const activeFraction = nonNullWindows.length / Math.max(1, rmsDbValues.length);
+  const isGatedOrSparseTrack = activeFraction < 0.55;
+
+  let noiseFloorDb: number;
+  let noiseUpperDb: number;
+
+  if (isGatedOrSparseTrack) {
+    // Track already has silent pauses between phrases: lowest 8% of non-null windows is clip room-tone tail
+    const rawClipNoise = nonNullWindows.length > 20
+      ? nonNullWindows[Math.floor(nonNullWindows.length * 0.08)]
+      : -72;
+    noiseFloorDb = Math.max(-86, Math.min(-50, rawClipNoise));
+    noiseUpperDb = Math.min(-46, noiseFloorDb + 3.0);
+  } else {
+    // Continuous open-mic recording: lowest 15% of all windows is ambient room noise, capped by file median
+    const rawRoomNoise = rmsDbValues[Math.floor(rmsDbValues.length * 0.15)];
+    const medianDb = rmsDbValues[Math.floor(rmsDbValues.length * 0.50)];
+    noiseFloorDb = Math.max(-86, Math.min(-45, rawRoomNoise));
+    noiseUpperDb = Math.min(-42, medianDb, noiseFloorDb + 3.5);
+  }
 
   // Top 0.5% energy windows represent true vocal peaks (immune to 95%+ silence/room-tone in 24-min dubbing tracks)
   const topPeakIdx = Math.min(rmsDbValues.length - 1, Math.max(0, Math.floor(rmsDbValues.length * 0.995)));
   const topVoicePeakDb = rmsDbValues[topPeakIdx];
 
-  // Active speech windows: adaptively scaled to the track's own vocal peak and noise floor (NO -58 dB hard clamp!)
-  // This ensures quieter unnormalized tracks (e.g. speech at -55 dB to -68 dB, noise at -91 dB) are measured accurately.
+  // Active speech windows: adaptively scaled above true room noise
   const minSpeechCandDb = Math.max(
-    -82,
-    noiseUpperDb + 4.2,
-    noiseFloorDb + 6.5,
-    topVoicePeakDb - 28.0
+    -80,
+    noiseUpperDb + 4.0,
+    noiseFloorDb + 7.0,
+    topVoicePeakDb - 34.0
   );
   const activeSpeechWindows = rmsDbValues.filter(v => v >= minSpeechCandDb);
 
   const speechFloorDb = activeSpeechWindows.length > 0
-    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.22)]
-    : Math.max(noiseUpperDb + 5.0, topVoicePeakDb - 18.0);
+    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.25)]
+    : Math.max(noiseUpperDb + 6.0, topVoicePeakDb - 18.0);
   const speechPeakDb = activeSpeechWindows.length > 0
     ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.90)]
     : Math.max(speechFloorDb + 4.0, topVoicePeakDb);
@@ -350,13 +366,15 @@ export function analyzeTrackAudioNoiseFloor(
   if (manualThresholdDb !== undefined && manualThresholdDb !== null && !isNaN(manualThresholdDb)) {
     calculatedThresholdDb = manualThresholdDb;
   } else {
-    // Ensure threshold is safely above room-noise upper tail while scaling 1:1 with the track's actual recording level
-    const safeNoiseMarginDb = Math.max(noiseUpperDb + 4.0, noiseFloorDb + 6.2);
-    const voiceEntryDb = Math.min(speechFloorDb - 4.5, speechPeakDb - 21.0);
+    // Trigger threshold must sit well below speechFloorDb (-13 dB below average speech, -28 dB below peak)
+    // while staying safely above the true room noise floor (+6.5 dB above noiseFloorDb)
+    const safeNoiseMarginDb = Math.max(-78, noiseUpperDb + 3.5, noiseFloorDb + 6.5);
+    const voiceEntryDb = Math.min(speechFloorDb - 13.0, speechPeakDb - 28.0);
     calculatedThresholdDb = Math.max(safeNoiseMarginDb, voiceEntryDb);
 
     // If assigned subtitle windows are known on a full-length track, calibrate against the quietest recorded subtitle windows
     // so quiet phrases, whispers, or unnormalized syllables are never eaten
+    const isShortFile = audioBuffer.duration < 45;
     if (subLines && subLines.length > 0 && !isShortFile) {
       const subPhraseEnergyDbs: number[] = [];
       for (const sub of subLines) {
@@ -380,15 +398,14 @@ export function analyzeTrackAudioNoiseFloor(
             if (r > maxRms) maxRms = r;
           }
           const db = maxRms > 3.16e-5 ? 20 * Math.log10(maxRms) : -91;
-          if (db >= noiseFloorDb + 5.5 && db >= noiseUpperDb + 3.5) {
+          if (db >= noiseFloorDb + 5.0 && db >= noiseUpperDb + 3.0) {
             winDbs.push(db);
           }
         }
-        // Require at least 5 active 20ms windows (100ms) in the subtitle window to count as a recorded phrase
-        if (winDbs.length >= 5) {
+        if (winDbs.length >= 4) {
           winDbs.sort((a, b) => a - b);
-          const p65 = winDbs[Math.floor(winDbs.length * 0.65)];
-          subPhraseEnergyDbs.push(p65);
+          const p50 = winDbs[Math.floor(winDbs.length * 0.50)];
+          subPhraseEnergyDbs.push(p50);
         }
       }
 
@@ -396,15 +413,15 @@ export function analyzeTrackAudioNoiseFloor(
         subPhraseEnergyDbs.sort((a, b) => a - b);
         const quietestSubPhraseDb = subPhraseEnergyDbs[Math.floor(subPhraseEnergyDbs.length * 0.05)];
         const subGuidedThresholdDb = Math.max(
-          noiseUpperDb + 3.6,
-          noiseFloorDb + 5.8,
-          quietestSubPhraseDb - 5.0
+          safeNoiseMarginDb,
+          quietestSubPhraseDb - 9.0
         );
         calculatedThresholdDb = Math.min(calculatedThresholdDb, subGuidedThresholdDb);
       }
     }
 
-    calculatedThresholdDb = Math.max(-82, Math.min(-26, calculatedThresholdDb));
+    // Never allow auto-threshold to exceed -42 dB (a threshold of -26..-35 dB chops off consonants and phrase endings)
+    calculatedThresholdDb = Math.max(-82, Math.min(-42, calculatedThresholdDb));
   }
 
   const thresholdAmp = Math.pow(10, calculatedThresholdDb / 20);
@@ -423,10 +440,12 @@ export function analyzeTrackAudioNoiseFloor(
 }
 
 /**
- * Speech interval detection algorithm on decoded AudioBuffer.
- * Identifies speech phrases and silences with noise calibration, intra-word pause smoothing,
- * adaptive lead-in / lead-out padding, and local subtitle-window quiet phrase recovery
- * so quiet consonants, whispers, and unnormalized phrases are NEVER cut.
+ * Dual-Threshold (Hysteresis) Speech Interval Detection on decoded AudioBuffer.
+ * 1. Core Speech Trigger (`thresholdAmp`) detects real vocal phrases (RMS + consonant peak transients).
+ * 2. Subtitle-Window Quiet Phrase Recovery ensures soft/whispered subtitle lines are never skipped.
+ * 3. Hysteresis Boundary Expansion (`edgeThresholdAmp` = noiseFloor + 3 dB) traces backwards and forwards
+ *    from every phrase until true room silence ("от тишины до тишины"), capturing all soft consonant attacks,
+ *    stop-consonant closures, breaths, and trailing vocal fade-outs before adding lead-in/lead-out padding.
  */
 function detectSpeechIntervals(
   audioBuffer: AudioBuffer,
@@ -442,11 +461,11 @@ function detectSpeechIntervals(
   } = {}
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
   const {
-    minSilenceDurationSec = 0.30,
-    leadInPaddingSec = 0.15,
-    leadOutPaddingSec = 0.22,
-    minSpeechDurationSec = 0.20,
-    mergeCloseGapsSec = 0.35,
+    minSilenceDurationSec = 0.32,
+    leadInPaddingSec = 0.20,
+    leadOutPaddingSec = 0.30,
+    minSpeechDurationSec = 0.18,
+    mergeCloseGapsSec = 0.40,
     manualThresholdDb,
     subLines,
     onCalibration
@@ -463,41 +482,57 @@ function detectSpeechIntervals(
   const sampleRate = audioBuffer.sampleRate;
   const totalSamples = channels[0].length;
   const duration = audioBuffer.duration;
-  const thresholdAmp = calib.thresholdAmp;
+  const triggerThresholdAmp = calib.thresholdAmp;
+
+  // Lower boundary threshold ("от тишины до тишины") sits just 3.0 dB above the room noise floor
+  // (and at least 7.5 dB below the trigger threshold) so phrase starts and ends are traced all the way to true silence.
+  const edgeThresholdDb = Math.max(
+    -86,
+    Math.min(calib.calculatedThresholdDb - 7.5, calib.noiseFloorDb + 3.0)
+  );
+  const edgeThresholdAmp = Math.pow(10, edgeThresholdDb / 20);
 
   const chunkSize = Math.max(128, Math.floor(sampleRate * 0.02)); // 20ms chunks
   const totalChunks = Math.floor(totalSamples / chunkSize);
   const chunkRmsValues = new Float32Array(totalChunks);
+  const chunkPeakValues = new Float32Array(totalChunks);
   const isSpeechChunk = new Uint8Array(totalChunks);
 
   for (let i = 0; i < totalChunks; i++) {
     const offset = i * chunkSize;
     let maxRms = 0;
+    let maxPeak = 0;
     for (let c = 0; c < numChannels; c++) {
       const ch = channels[c];
       let sumSquares = 0;
+      let chPeak = 0;
       for (let j = 0; j < chunkSize; j++) {
         const s = ch[offset + j];
+        const absS = Math.abs(s);
+        if (absS > chPeak) chPeak = absS;
         sumSquares += s * s;
       }
       const chRms = Math.sqrt(sumSquares / chunkSize);
       if (chRms > maxRms) maxRms = chRms;
+      if (chPeak > maxPeak) maxPeak = chPeak;
     }
     chunkRmsValues[i] = maxRms;
-    if (maxRms >= thresholdAmp) {
+    chunkPeakValues[i] = maxPeak;
+    // Trigger on either RMS above threshold OR sharp consonant/plosive peak transient above 2.1x threshold
+    if (maxRms >= triggerThresholdAmp || (maxPeak >= triggerThresholdAmp * 2.1 && maxRms >= edgeThresholdAmp)) {
       isSpeechChunk[i] = 1;
     }
   }
 
   // Subtitle-Window Quiet Phrase Recovery:
   // On full-length tracks (>= 45s) when subtitle windows are known, check if any subtitle window
-  // has no detected speech chunks at the global threshold, and if there is clear vocal energy above the noise floor
-  // inside [sub.startSec - 1.0, sub.endSec + 1.2], activate those chunks with a local adaptive threshold.
+  // has no detected speech chunks at the global threshold, and if there is vocal energy above the noise floor
+  // inside [sub.startSec - 1.2, sub.endSec + 1.5], activate those chunks with a local adaptive threshold.
   if (subLines && subLines.length > 0 && duration >= 45 && manualThresholdDb === undefined) {
-    const minLocalNoiseAmp = Math.pow(10, Math.max(-84, calib.noiseFloorDb + 5.5) / 20);
+    const minLocalNoiseAmp = Math.pow(10, Math.max(-85, calib.noiseFloorDb + 4.5) / 20);
     for (const sub of subLines) {
-      const wStartSec = Math.max(0, sub.startSec - 1.0);
-      const wEndSec = Math.min(duration, sub.endSec + 1.2);
+      const wStartSec = Math.max(0, sub.startSec - 1.2);
+      const wEndSec = Math.min(duration, sub.endSec + 1.5);
       const startChunk = Math.max(0, Math.floor((wStartSec * sampleRate) / chunkSize));
       const endChunk = Math.min(totalChunks - 1, Math.floor((wEndSec * sampleRate) / chunkSize));
       if (endChunk <= startChunk + 4) continue;
@@ -509,14 +544,13 @@ function detectSpeechIntervals(
         if (chunkRmsValues[cIdx] > localMaxRms) localMaxRms = chunkRmsValues[cIdx];
       }
 
-      // If fewer than 4 chunks (80ms) were detected in this subtitle window, check if a quieter phrase exists here
-      if (activeCount < 4 && localMaxRms >= minLocalNoiseAmp * 1.35) {
-        const localThreshAmp = Math.max(minLocalNoiseAmp, localMaxRms * 0.28);
+      if (activeCount < 4 && localMaxRms >= minLocalNoiseAmp * 1.25) {
+        const localThreshAmp = Math.max(minLocalNoiseAmp, localMaxRms * 0.22);
         let candidateCount = 0;
         for (let cIdx = startChunk; cIdx <= endChunk; cIdx++) {
           if (chunkRmsValues[cIdx] >= localThreshAmp) candidateCount++;
         }
-        if (candidateCount >= 5) {
+        if (candidateCount >= 4) {
           for (let cIdx = startChunk; cIdx <= endChunk; cIdx++) {
             if (chunkRmsValues[cIdx] >= localThreshAmp) {
               isSpeechChunk[cIdx] = 1;
@@ -527,8 +561,9 @@ function detectSpeechIntervals(
     }
   }
 
-  // Smooth short micro-pauses inside words (e.g. stop consonants like p, t, k < mergeCloseGapsSec)
-  const minSilenceChunks = Math.floor(mergeCloseGapsSec / 0.02);
+  // Pass 1: Smooth short micro-pauses inside words (stop consonants like p, t, k, brief breath pauses)
+  const effectiveMergeSec = Math.max(0.38, mergeCloseGapsSec);
+  const minSilenceChunks = Math.floor(effectiveMergeSec / 0.02);
   let gapCount = 0;
   for (let i = 0; i < totalChunks; i++) {
     if (isSpeechChunk[i] === 0) {
@@ -543,6 +578,81 @@ function detectSpeechIntervals(
     }
   }
 
+  // Pass 2: Hysteresis Edge Expansion ("От тишины до тишины")
+  // For every detected speech segment, trace backwards and forwards down to `edgeThresholdAmp`
+  // so soft consonant attacks, inhalations, trailing syllables, and word endings are 100% preserved.
+  const maxBackwardExpandChunks = Math.floor(0.90 / 0.02); // up to 900ms backwards
+  const maxForwardExpandChunks = Math.floor(1.30 / 0.02);  // up to 1300ms forwards
+  const isAboveEdge = (idx: number) =>
+    chunkRmsValues[idx] >= edgeThresholdAmp || chunkPeakValues[idx] >= edgeThresholdAmp * 1.85;
+
+  let segIdx = 0;
+  while (segIdx < totalChunks) {
+    if (isSpeechChunk[segIdx] === 1) {
+      const segStart = segIdx;
+      while (segIdx < totalChunks && isSpeechChunk[segIdx] === 1) {
+        segIdx++;
+      }
+      const segEnd = segIdx - 1;
+
+      // Expand backwards to true silence (allowing up to 4 chunks = 80ms stop-consonant closure dip)
+      let newStart = segStart;
+      let backSilentRun = 0;
+      const minBackLimit = Math.max(0, segStart - maxBackwardExpandChunks);
+      for (let b = segStart - 1; b >= minBackLimit; b--) {
+        if (isAboveEdge(b)) {
+          newStart = b;
+          backSilentRun = 0;
+        } else {
+          backSilentRun++;
+          if (backSilentRun > 4) break;
+        }
+      }
+      for (let k = newStart; k < segStart; k++) {
+        isSpeechChunk[k] = 1;
+      }
+
+      // Expand forwards to true silence (allowing up to 5 chunks = 100ms final stop-consonant closure dip)
+      let newEnd = segEnd;
+      let fwdSilentRun = 0;
+      const maxFwdLimit = Math.min(totalChunks - 1, segEnd + maxForwardExpandChunks);
+      for (let f = segEnd + 1; f <= maxFwdLimit; f++) {
+        if (isAboveEdge(f)) {
+          newEnd = f;
+          fwdSilentRun = 0;
+        } else {
+          fwdSilentRun++;
+          if (fwdSilentRun > 5) break;
+        }
+      }
+      for (let k = segEnd + 1; k <= newEnd; k++) {
+        isSpeechChunk[k] = 1;
+      }
+
+      segIdx = newEnd + 1;
+    } else {
+      segIdx++;
+    }
+  }
+
+  // Pass 3: Re-smooth any micro-gaps after edge expansion
+  gapCount = 0;
+  for (let i = 0; i < totalChunks; i++) {
+    if (isSpeechChunk[i] === 0) {
+      gapCount++;
+    } else {
+      if (gapCount > 0 && gapCount < minSilenceChunks) {
+        for (let k = i - gapCount; k < i; k++) {
+          isSpeechChunk[k] = 1;
+        }
+      }
+      gapCount = 0;
+    }
+  }
+
+  const effectiveLeadInSec = Math.max(0.18, leadInPaddingSec);
+  const effectiveLeadOutSec = Math.max(0.26, leadOutPaddingSec);
+
   const rawIntervals: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
   let inSpeech = false;
   let intervalStartSec = 0;
@@ -551,10 +661,10 @@ function detectSpeechIntervals(
     const chunkTime = (i * chunkSize) / sampleRate;
     if (isSpeechChunk[i] === 1 && !inSpeech) {
       inSpeech = true;
-      intervalStartSec = Math.max(0, chunkTime - leadInPaddingSec);
+      intervalStartSec = Math.max(0, chunkTime - effectiveLeadInSec);
     } else if (isSpeechChunk[i] === 0 && inSpeech) {
       inSpeech = false;
-      const intervalEndSec = Math.min(duration, chunkTime + leadOutPaddingSec);
+      const intervalEndSec = Math.min(duration, chunkTime + effectiveLeadOutSec);
       if (intervalEndSec - intervalStartSec >= minSpeechDurationSec) {
         rawIntervals.push({
           startSec: Number(intervalStartSec.toFixed(2)),
@@ -697,18 +807,19 @@ function scanBufferWindowForSpeech(
   audioBuffer: AudioBuffer,
   windowStartSec: number,
   windowEndSec: number,
-  leadInSec = 0.14,
-  leadOutSec = 0.20
+  leadInSec = 0.20,
+  leadOutSec = 0.30
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
   if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') return [];
   const calib = analyzeTrackAudioNoiseFloor(audioBuffer);
-  // Lower threshold by 4.5 dB (down to -84 dB on clean unnormalized tracks) to catch softer phrases that initial VAD may have missed
+  // Lower threshold by 6 dB (down to -84 dB on clean unnormalized tracks) to catch softer phrases that initial VAD may have missed
   const sensitiveDb = Math.max(
     -84,
-    calib.noiseFloorDb + 5.0,
-    Math.min(-32, calib.calculatedThresholdDb - 4.5)
+    calib.noiseFloorDb + 4.0,
+    Math.min(-44, calib.calculatedThresholdDb - 6.0)
   );
   const thresholdAmp = Math.pow(10, sensitiveDb / 20);
+  const edgeAmp = Math.pow(10, Math.max(-86, calib.noiseFloorDb + 2.8) / 20);
 
   const channelData = audioBuffer.getChannelData(0);
   const sampleRate = audioBuffer.sampleRate;
@@ -722,6 +833,7 @@ function scanBufferWindowForSpeech(
   const numChunks = Math.floor((eSample - sSample) / chunkSize);
   if (numChunks <= 0) return [];
 
+  const chunkRms = new Float32Array(numChunks);
   const isSpeech = new Uint8Array(numChunks);
   for (let i = 0; i < numChunks; i++) {
     let sumSq = 0;
@@ -731,11 +843,12 @@ function scanBufferWindowForSpeech(
       sumSq += v * v;
     }
     const rms = Math.sqrt(sumSq / chunkSize);
+    chunkRms[i] = rms;
     if (rms >= thresholdAmp) isSpeech[i] = 1;
   }
 
-  // Smooth micro-gaps < 300ms
-  const smoothChunks = Math.floor(0.30 / 0.02);
+  // Smooth micro-gaps < 380ms
+  const smoothChunks = Math.floor(0.38 / 0.02);
   let gap = 0;
   for (let i = 0; i < numChunks; i++) {
     if (isSpeech[i] === 0) {
@@ -745,6 +858,22 @@ function scanBufferWindowForSpeech(
         for (let k = i - gap; k < i; k++) isSpeech[k] = 1;
       }
       gap = 0;
+    }
+  }
+
+  // Expand edges to edgeAmp ("от тишины до тишины")
+  for (let i = 0; i < numChunks; i++) {
+    if (isSpeech[i] === 1) {
+      for (let b = i - 1; b >= Math.max(0, i - 25); b--) {
+        if (chunkRms[b] >= edgeAmp) isSpeech[b] = 1;
+        else break;
+      }
+      while (i < numChunks && isSpeech[i] === 1) i++;
+      const endIdx = i - 1;
+      for (let f = endIdx + 1; f < Math.min(numChunks, endIdx + 35); f++) {
+        if (chunkRms[f] >= edgeAmp) isSpeech[f] = 1;
+        else break;
+      }
     }
   }
 
@@ -2764,14 +2893,15 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           }
           const curMainClips = updatedClips[mTrk.id] || [];
           if (curMainClips.length <= 1 && mBuf) {
+            const mSubs = trackSubLinesMap[mTrk.id] || [];
             const mIntervals = detectSpeechIntervals(mBuf, {
               minSilenceDurationSec: timingSettings.minSilenceDurationSec,
               leadInPaddingSec: timingSettings.leadInPaddingSec,
               leadOutPaddingSec: timingSettings.leadOutPaddingSec,
               minSpeechDurationSec: timingSettings.minSpeechDurationSec,
-              mergeCloseGapsSec: timingSettings.mergeCloseGapsSec
+              mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
+              subLines: mSubs
             });
-            const mSubs = trackSubLinesMap[mTrk.id] || [];
             if (mIntervals.length > 0) {
               updatedClips[mTrk.id] = mIntervals.map((iv, idx) => {
                 const nearSub = mSubs.find(s => Math.abs(s.startSec - iv.startSec) <= 2.2);
@@ -2820,15 +2950,16 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           }
 
           if (fixClips.length <= 1 && fixBuf) {
+            const trSubs = trackSubLinesMap[fixTrack.id] || trackSubLinesMap[mainTracks[0].id] || [];
             const fixIntervals = detectSpeechIntervals(fixBuf, {
               minSilenceDurationSec: timingSettings.minSilenceDurationSec,
               leadInPaddingSec: timingSettings.leadInPaddingSec,
               leadOutPaddingSec: timingSettings.leadOutPaddingSec,
               minSpeechDurationSec: timingSettings.minSpeechDurationSec,
-              mergeCloseGapsSec: timingSettings.mergeCloseGapsSec
+              mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
+              subLines: trSubs
             });
             if (fixIntervals.length > 0) {
-              const trSubs = trackSubLinesMap[fixTrack.id] || [];
               fixClips = fixIntervals.map((iv, idx) => ({
                 id: `clip_${fixTrack.id}_${idx}`,
                 trackId: fixTrack.id,
@@ -2918,6 +3049,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             }
             if (audioElementsRef.current[fixTrack.id]) {
               audioElementsRef.current[bestMainTrackForFull.id] = audioElementsRef.current[fixTrack.id];
+            }
+            if (normalizationMetrics[fixTrack.id]) {
+              setNormalizationMetrics(prev => ({
+                ...prev,
+                [bestMainTrackForFull.id]: prev[fixTrack.id] || normalizationMetrics[fixTrack.id]
+              }));
             }
             bestMainTrackForFull.filePath = fixTrack.filePath || bestMainTrackForFull.filePath;
             const replacedClips = fixClips.map((fc, idx) => {
@@ -3310,14 +3447,15 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             } catch (e) {}
           }
           if (audioBuf) {
+            const trSubs = trackSubLinesMap[track.id] || [];
             const intervals = detectSpeechIntervals(audioBuf, {
               minSilenceDurationSec: timingSettings.minSilenceDurationSec,
               leadInPaddingSec: timingSettings.leadInPaddingSec,
               leadOutPaddingSec: timingSettings.leadOutPaddingSec,
               minSpeechDurationSec: timingSettings.minSpeechDurationSec,
-              mergeCloseGapsSec: timingSettings.mergeCloseGapsSec
+              mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
+              subLines: trSubs
             });
-            const trSubs = trackSubLinesMap[track.id] || [];
             currentClips[track.id] = intervals.map((iv, idx) => {
               const sub = trSubs[idx];
               return {
