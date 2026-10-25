@@ -45,12 +45,12 @@ export interface TimingSettings {
 
 export const DEFAULT_TIMING_SETTINGS: TimingSettings = {
   autoAnalyzeNoiseFloor: true,
-  silenceThresholdDb: -48,
-  minSilenceDurationSec: 0.32,
-  leadInPaddingSec: 0.20,
-  leadOutPaddingSec: 0.30,
-  minSpeechDurationSec: 0.18,
-  mergeCloseGapsSec: 0.40,
+  silenceThresholdDb: -44,
+  minSilenceDurationSec: 0.24,
+  leadInPaddingSec: 0.08,
+  leadOutPaddingSec: 0.12,
+  minSpeechDurationSec: 0.16,
+  mergeCloseGapsSec: 0.18,
 
   fullRetakeThresholdPct: 80,
   fixSearchWindowSec: 6.0,
