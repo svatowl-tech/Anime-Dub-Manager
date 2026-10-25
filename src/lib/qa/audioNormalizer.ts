@@ -198,6 +198,85 @@ export async function analyzeAudioForPreview(
 }
 
 /**
+ * Computes preview normalization metrics directly from an already-decoded AudioBuffer
+ * using the exact same -18 dBFS RMS target and -0.7 dBFS peak limiter as QA preview.
+ */
+export function analyzeAudioBufferForPreview(
+  audioBuffer: AudioBuffer,
+  cacheKey?: string
+): NormalizationMetrics {
+  if (cacheKey && normalizationCache.has(cacheKey)) {
+    const cached = normalizationCache.get(cacheKey)!;
+    if (cached.status === 'ready') return cached;
+  }
+
+  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
+    return {
+      gain: 1.0,
+      gainDb: 0,
+      peak: 0.5,
+      peakDb: -6,
+      rms: 0.125,
+      rmsDb: -18,
+      status: 'ready',
+    };
+  }
+
+  const numChannels = audioBuffer.numberOfChannels;
+  const length = audioBuffer.length;
+
+  let globalMaxPeak = 0.0001;
+  let sumSquaresActive = 0;
+  let activeSampleCount = 0;
+
+  const voiceThreshold = 0.0056; // ~ -45 dBFS
+  const step = length > 500000 ? Math.ceil(length / 250000) : 1;
+
+  for (let c = 0; c < numChannels; c++) {
+    const channelData = audioBuffer.getChannelData(c);
+    for (let i = 0; i < length; i += step) {
+      const absVal = Math.abs(channelData[i]);
+      if (absVal > globalMaxPeak) {
+        globalMaxPeak = absVal;
+      }
+      if (absVal >= voiceThreshold) {
+        sumSquaresActive += absVal * absVal;
+        activeSampleCount++;
+      }
+    }
+  }
+
+  const activeRms = activeSampleCount > 0
+    ? Math.sqrt(sumSquaresActive / activeSampleCount)
+    : globalMaxPeak * 0.5;
+
+  let computedGain = TARGET_SPEECH_RMS / Math.max(0.01, activeRms);
+  if (globalMaxPeak * computedGain > TARGET_MAX_PEAK) {
+    computedGain = TARGET_MAX_PEAK / Math.max(0.001, globalMaxPeak);
+  }
+  computedGain = Math.max(MIN_CUT_GAIN, Math.min(MAX_BOOST_GAIN, computedGain));
+
+  const gainDb = Math.round((20 * Math.log10(computedGain)) * 10) / 10;
+  const peakDb = Math.round((20 * Math.log10(Math.max(0.0001, globalMaxPeak))) * 10) / 10;
+  const rmsDb = Math.round((20 * Math.log10(Math.max(0.0001, activeRms))) * 10) / 10;
+
+  const result: NormalizationMetrics = {
+    gain: computedGain,
+    gainDb,
+    peak: globalMaxPeak,
+    peakDb,
+    rms: activeRms,
+    rmsDb,
+    status: 'ready',
+  };
+
+  if (cacheKey) {
+    normalizationCache.set(cacheKey, result);
+  }
+  return result;
+}
+
+/**
  * Retrieves cached metrics if already computed.
  */
 export function getCachedNormalization(cacheKey: string): NormalizationMetrics | undefined {
@@ -210,3 +289,4 @@ export function getCachedNormalization(cacheKey: string): NormalizationMetrics |
 export function clearNormalizationCache(): void {
   normalizationCache.clear();
 }
+
