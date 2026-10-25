@@ -175,14 +175,14 @@ function registerExportHandlers(getData, mainWindow) {
     
     let exportDir = targetDir;
     if (!exportDir || typeof exportDir !== 'string' || !exportDir.trim()) {
-      if (episode && episode.projectId && episode.number !== undefined) {
-        exportDir = path.join(baseDir, 'projects', String(episode.projectId), `Episode_${episode.number}`, 'mixing');
-      } else {
-        exportDir = MixingPipelineService.getDefaultTargetDir(episode, baseDir);
-      }
+      const epDir = MixingPipelineService.getEpisodeDir(episode, baseDir);
+      const projDir = path.dirname(epDir);
+      const epName = path.basename(epDir) || `Episode_${episode.number || 1}`;
+      exportDir = path.join(projDir, `${epName} для звукорежиссёра`);
     } else if (!path.isAbsolute(exportDir.trim())) {
       const epDir = MixingPipelineService.getEpisodeDir(episode, baseDir);
-      exportDir = path.resolve(epDir, exportDir.trim());
+      const projDir = path.dirname(epDir);
+      exportDir = path.resolve(projDir, exportDir.trim());
     } else {
       exportDir = exportDir.trim();
     }
@@ -211,6 +211,34 @@ function registerExportHandlers(getData, mainWindow) {
       participantsData,
       onProgress
     });
+  }));
+
+  ipcMain.handle('export-get-default-dir', wrapIpcHandler(async (event, { episode, role } = {}) => {
+    if (!episode) return { success: true, defaultDir: '' };
+    const config = await getData('config.json').catch(() => ({}));
+    const baseDir = (config && config.baseDir) ? config.baseDir : app.getPath('userData');
+    const projectsData = await getData('projects.json').catch(() => []);
+    const project = Array.isArray(projectsData) ? projectsData.find(p => p.id === episode.projectId) : null;
+    const enrichedEpisode = {
+      ...episode,
+      project: episode.project || project || { title: 'Project' }
+    };
+    const MixingPipelineService = require('../services/MixingPipelineService.cjs');
+    const epDir = MixingPipelineService.getEpisodeDir(enrichedEpisode, baseDir);
+    const projDir = path.dirname(epDir);
+    const epName = path.basename(epDir) || `Episode_${episode.number || 1}`;
+
+    let defaultDir;
+    if (role === 'DABBER') {
+      const { sanitizeFolderName } = require('../lib/pathSanitizer.cjs');
+      const projectTitle = sanitizeFolderName(enrichedEpisode.project?.title || '');
+      const epNum = enrichedEpisode.number !== undefined ? `_Ep${enrichedEpisode.number}` : '';
+      const prefix = projectTitle ? `${projectTitle}${epNum}_` : (epNum ? `Ep${enrichedEpisode.number}_` : '');
+      defaultDir = path.join(epDir, `${prefix}Для_даберов`);
+    } else {
+      defaultDir = path.join(projDir, `${epName} для звукорежиссёра`);
+    }
+    return { success: true, defaultDir, epDir, projDir };
   }));
 
   ipcMain.handle('timing-export-to-mixing', wrapIpcHandler(async (event, { episode, targetDir, tracks, audioClips, volumes, timingMetadata }) => {
@@ -360,15 +388,21 @@ function registerExportHandlers(getData, mainWindow) {
       const isFixTr = (t) =>
         t.role === 'fix' ||
         t.isFix === true ||
-        t.id.endsWith('_fix') ||
-        t.id.includes('_fix_') ||
-        (t.participant || '').toLowerCase().includes('фикс');
+        t.type === 'FIXES' ||
+        (t.id && (t.id.startsWith('fix_') || t.id.endsWith('_fix') || t.id.includes('_fix_'))) ||
+        (t.participant || '').toLowerCase().includes('фикс') ||
+        /(?:_fix|фикс|\[fix\]|\[фикс\])/i.test(t.filePath || '');
       const mainTrs = actorTrs.filter(t => !isFixTr(t));
       const fixTrs = actorTrs.filter(t => isFixTr(t));
-      const effectiveMainTrs = mainTrs.length > 0 ? mainTrs : actorTrs;
+      const effectiveMainTrs = mainTrs.length > 0 ? mainTrs : (actorTrs.length > 0 ? [actorTrs[0]] : []);
       const isMultiTrack = effectiveMainTrs.length > 1;
 
-      // Сортировка фиксов ТОЛЬКО при экспорте:
+      // Проверяем, были ли фиксы уже вшиты в основные дорожки на этапе Тайминга
+      const alreadyStitchedInMain = effectiveMainTrs.some(mt =>
+        (clipsMap[mt.id] || []).some(c => !c.isDeleted && c.isFix)
+      );
+
+      // Сортировка фиксов ТОЛЬКО при экспорте (если они еще не были вшиты в Тайминге):
       // 1. Цельный фикс (перезапись всей дорожки, >= 75% размера оригинала):
       //    полностью заменяет черновую дорожку, вшивание отдельных фраз НЕ ТРЕБУЕТСЯ!
       // 2. Фрагментарные фиксы (отдельные фразы, легче оригинала):
@@ -376,33 +410,35 @@ function registerExportHandlers(getData, mainWindow) {
       const snippetFixClips = [];
       const fullReplacementFixes = new Map();
 
-      for (const fTr of fixTrs) {
-        let fSize = 0;
-        try { if (fTr.filePath && require('fs').existsSync(fTr.filePath)) fSize = require('fs').statSync(fTr.filePath).size; } catch (e) {}
+      if (!alreadyStitchedInMain) {
+        for (const fTr of fixTrs) {
+          let fSize = 0;
+          try { if (fTr.filePath && require('fs').existsSync(fTr.filePath)) fSize = require('fs').statSync(fTr.filePath).size; } catch (e) {}
 
-        let bestMainTr = effectiveMainTrs.find(mt => mt.id === fTr.targetMainTrackId || mt.id === fTr.id.replace(/_fix$/, '')) || effectiveMainTrs[0];
-        if (!bestMainTr && effectiveMainTrs.length > 1) {
-          const fName = (fTr.filePath || fTr.participant || '').toLowerCase();
-          const matched = effectiveMainTrs.find((mt, idx) => {
-            const trNum = idx + 1;
-            return fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`);
-          });
-          if (matched) bestMainTr = matched;
-        }
+          let bestMainTr = effectiveMainTrs.find(mt => mt.id === fTr.targetMainTrackId || mt.id === fTr.id.replace(/_fix$/, '')) || effectiveMainTrs[0];
+          if (!bestMainTr && effectiveMainTrs.length > 1) {
+            const fName = (fTr.filePath || fTr.participant || '').toLowerCase();
+            const matched = effectiveMainTrs.find((mt, idx) => {
+              const trNum = idx + 1;
+              return fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`);
+            });
+            if (matched) bestMainTr = matched;
+          }
 
-        let mSize = 0;
-        try { if (bestMainTr?.filePath && require('fs').existsSync(bestMainTr.filePath)) mSize = require('fs').statSync(bestMainTr.filePath).size; } catch (e) {}
+          let mSize = 0;
+          try { if (bestMainTr?.filePath && require('fs').existsSync(bestMainTr.filePath)) mSize = require('fs').statSync(bestMainTr.filePath).size; } catch (e) {}
 
-        const ratio = (mSize > 0 && fSize > 0) ? (fSize / mSize) : 0;
-        const isFullReplacement = mSize > 0 && fSize > 0 && (fSize >= mSize * 0.75);
+          const ratio = (mSize > 0 && fSize > 0) ? (fSize / mSize) : 0;
+          const isFullReplacement = mSize > 0 && fSize > 0 && (fSize >= mSize * 0.75);
 
-        if (isFullReplacement && bestMainTr) {
-          fullReplacementFixes.set(bestMainTr.id, fTr);
-          log.info(`[ExportController] Даббер «${nick}»: фикс «${path.basename(fTr.filePath || '')}» является цельным (${(ratio * 100).toFixed(0)}% размера) — заменяет дорожку целиком, вшивание не требуется.`);
-        } else {
-          const fClips = (clipsMap[fTr.id] || []).filter(c => !c.isDeleted);
-          for (const c of fClips) {
-            snippetFixClips.push({ ...c, trackFilePath: fTr.filePath, targetMainTrackId: bestMainTr?.id });
+          if (isFullReplacement && bestMainTr) {
+            fullReplacementFixes.set(bestMainTr.id, fTr);
+            log.info(`[ExportController] Даббер «${nick}»: фикс «${path.basename(fTr.filePath || '')}» является цельным (${(ratio * 100).toFixed(0)}% размера) — заменяет дорожку целиком, вшивание не требуется.`);
+          } else {
+            const fClips = (clipsMap[fTr.id] || []).filter(c => !c.isDeleted);
+            for (const c of fClips) {
+              snippetFixClips.push({ ...c, trackFilePath: fTr.filePath, targetMainTrackId: bestMainTr?.id });
+            }
           }
         }
       }
@@ -457,7 +493,7 @@ function registerExportHandlers(getData, mainWindow) {
             targetEndSec,
             durationSec: phraseDuration,
             volumePercent: 100, // Строго сохраняем 100% исходный уровень без нормализации и изменения громкости в тайминге!
-            isFix: Boolean(fullFixTrack)
+            isFix: Boolean(fullFixTrack || c.isFix)
           });
         }
 
@@ -591,16 +627,51 @@ function registerExportHandlers(getData, mainWindow) {
       onProgress({ percent: Math.round(((aIdx + 1) / Math.max(1, actorEntries.length)) * 100) });
     }
 
-    // Clean up any leftover slice files or temporary artifacts from mixing directory and 00_исходные
+    // Strictly keep ONLY the rendered master tracks from this Timing export!
+    // Remove any stale 00_timed_*_дорожка1.wav, 00_timed_*_дорожка2.wav, old untimed dubber tracks, or slice artifacts
+    const validRenderedFiles = new Set(renderedTracks.map(rt => path.basename(rt.outputPath).toLowerCase()));
+    const singleTrackActorNicks = new Set(
+      renderedTracks
+        .filter(rt => !/_дорожка\d+\.wav$/i.test(rt.outputPath))
+        .map(rt => String(rt.baseNick || '').toLowerCase())
+        .filter(Boolean)
+    );
+
     const cleanupDirs = [exportDir, rawDir];
     for (const dir of cleanupDirs) {
       if (require('fs').existsSync(dir)) {
         const files = await fs.readdir(dir).catch(() => []);
         for (const f of files) {
           const lower = f.toLowerCase();
-          if (lower.includes('slice') || lower.startsWith('temp_') || lower.endsWith('.raw')) {
-            if (!f.startsWith('00_timed_')) {
-              await fs.unlink(path.join(dir, f)).catch(() => {});
+          if (lower === '00_original_audio.wav' || lower === 'original_audio.wav' || lower.startsWith('original_')) {
+            continue;
+          }
+          const isAudioFile = /\.(wav|mp3|flac|ogg|m4a|aac)$/i.test(f);
+          const isTempArtifact = lower.includes('slice') || lower.startsWith('temp_') || lower.endsWith('.raw');
+          const isStaleAudio = isAudioFile && validRenderedFiles.size > 0 && !validRenderedFiles.has(lower);
+          if (isTempArtifact || isStaleAudio) {
+            await fs.unlink(path.join(dir, f)).catch(() => {});
+          }
+        }
+      }
+    }
+
+    // Also clean up any stale *_дорожка1.wav / *_дорожка2.wav files inside pipeline step folders for single-track actors
+    if (singleTrackActorNicks.size > 0 && require('fs').existsSync(exportDir)) {
+      const entries = await fs.readdir(exportDir, { withFileTypes: true }).catch(() => []);
+      for (const ent of entries) {
+        if (ent.isDirectory() && /^\d{2}_/.test(ent.name) && ent.name !== '00_исходные') {
+          const stepDir = path.join(exportDir, ent.name);
+          const stepFiles = await fs.readdir(stepDir).catch(() => []);
+          for (const sf of stepFiles) {
+            const lowerSf = sf.toLowerCase();
+            if (/_дорожка\d+\.wav$/i.test(lowerSf)) {
+              for (const actorLower of singleTrackActorNicks) {
+                if (lowerSf.includes(actorLower)) {
+                  await fs.unlink(path.join(stepDir, sf)).catch(() => {});
+                  break;
+                }
+              }
             }
           }
         }
@@ -632,6 +703,126 @@ function registerExportHandlers(getData, mainWindow) {
       success: true,
       targetDir: exportDir,
       renderedTracksCount: renderedTracks.length
+    };
+  }));
+
+  const resolveEpisodeTimingDir = async (episode) => {
+    if (!episode) throw new Error('Missing required parameter: episode');
+    const config = await getData('config.json').catch(() => ({}));
+    const baseDir = (config && config.baseDir) ? config.baseDir : app.getPath('userData');
+    const projectsData = await getData('projects.json').catch(() => []);
+    const project = Array.isArray(projectsData) ? projectsData.find(p => p.id === episode.projectId) : null;
+    const enrichedEpisode = {
+      ...episode,
+      project: episode.project || project || { title: 'Project' }
+    };
+    const MixingPipelineService = require('../services/MixingPipelineService.cjs');
+    const epDir = MixingPipelineService.getEpisodeDir(enrichedEpisode, baseDir);
+    const rawTimingDir = path.join(epDir, 'Тайминг');
+    const timingDir = await MixingPipelineService.ensureDirectory(rawTimingDir).catch(() => rawTimingDir);
+    return { epDir, timingDir, enrichedEpisode };
+  };
+
+  ipcMain.handle('timing-load-state', wrapIpcHandler(async (event, { episode } = {}) => {
+    if (!episode) return { success: true, exists: false, state: null };
+    const { timingDir } = await resolveEpisodeTimingDir(episode);
+    const stateFilePath = path.join(timingDir, 'timing_state.json');
+    if (require('fs').existsSync(stateFilePath)) {
+      try {
+        const raw = await fs.readFile(stateFilePath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.tracks) && parsed.tracks.length > 0 && parsed.audioClips) {
+          log.info(`[TimingState] Загружено сохраненное состояние вкладки «Тайминг» из: ${stateFilePath}`);
+          return {
+            success: true,
+            exists: true,
+            timingDir,
+            filePath: stateFilePath,
+            state: parsed
+          };
+        }
+      } catch (err) {
+        log.warn(`[TimingState] Ошибка чтения файла состояния тайминга ${stateFilePath}:`, err.message);
+      }
+    }
+    return {
+      success: true,
+      exists: false,
+      timingDir,
+      filePath: stateFilePath,
+      state: null
+    };
+  }));
+
+  ipcMain.handle('timing-save-state', wrapIpcHandler(async (event, { episode, state } = {}) => {
+    if (!episode || !state) throw new Error('Missing required parameters: episode, state');
+    const { timingDir } = await resolveEpisodeTimingDir(episode);
+    await fs.mkdir(timingDir, { recursive: true });
+
+    const stateFilePath = path.join(timingDir, 'timing_state.json');
+    const statusFilePath = path.join(timingDir, 'timing_status.json');
+    const updatedAt = new Date().toISOString();
+
+    const payloadToSave = {
+      version: '1.0',
+      episodeId: episode.id,
+      projectId: episode.projectId,
+      episodeNumber: episode.number,
+      projectTitle: episode.project?.title || '',
+      updatedAt,
+      ...state
+    };
+
+    const tracksList = Array.isArray(state.tracks) ? state.tracks : [];
+    const clipsMap = state.audioClips && typeof state.audioClips === 'object' ? state.audioClips : {};
+    const totalClipsCount = Object.values(clipsMap).reduce((acc, arr) => acc + (Array.isArray(arr) ? arr.length : 0), 0);
+
+    const statusSummary = {
+      episodeId: episode.id,
+      projectId: episode.projectId,
+      episodeNumber: episode.number,
+      updatedAt,
+      timingDir,
+      status: {
+        isSilenceRemoved: Boolean(state.isSilenceRemoved),
+        isFixesStitched: Boolean(state.isFixesStitched),
+        isTimingAnalyzed: Boolean(state.isTimingAnalyzed),
+        tracksCount: tracksList.length,
+        totalClipsCount,
+        issuesCount: Array.isArray(state.timingIssues) ? state.timingIssues.length : 0,
+        collisionsCount: Array.isArray(state.collisions) ? state.collisions.length : 0,
+        missingSubtitlesCount: Array.isArray(state.missingSubtitles) ? state.missingSubtitles.length : 0
+      }
+    };
+
+    await fs.writeFile(stateFilePath, JSON.stringify(payloadToSave, null, 2), 'utf8');
+    await fs.writeFile(statusFilePath, JSON.stringify(statusSummary, null, 2), 'utf8');
+
+    return {
+      success: true,
+      timingDir,
+      filePath: stateFilePath,
+      updatedAt
+    };
+  }));
+
+  ipcMain.handle('timing-reset-state', wrapIpcHandler(async (event, { episode } = {}) => {
+    if (!episode) throw new Error('Missing required parameter: episode');
+    const { timingDir } = await resolveEpisodeTimingDir(episode);
+    const stateFilePath = path.join(timingDir, 'timing_state.json');
+    const statusFilePath = path.join(timingDir, 'timing_status.json');
+
+    if (require('fs').existsSync(stateFilePath)) {
+      await fs.unlink(stateFilePath).catch(() => {});
+    }
+    if (require('fs').existsSync(statusFilePath)) {
+      await fs.unlink(statusFilePath).catch(() => {});
+    }
+
+    log.info(`[TimingState] Состояние вкладки «Тайминг» сброшено (очищена папка: ${timingDir})`);
+    return {
+      success: true,
+      timingDir
     };
   }));
 

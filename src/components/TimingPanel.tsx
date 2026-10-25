@@ -1221,6 +1221,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     savedAt: string;
   } | null>(null);
   const savedPassportRef = useRef<TimingProjectData | null>(null);
+  const allCatalogTracksRef = useRef<Track[]>([]);
+  const isStateRestoredRef = useRef<boolean>(false);
+  const [savedTimingStateInfo, setSavedTimingStateInfo] = useState<{
+    savedAt: string;
+    filePath?: string;
+  } | null>(null);
+  const [isResetConfirmOpen, setIsResetConfirmOpen] = useState<boolean>(false);
   
   // Pipeline status flags
   const [isSilenceRemoved, setIsSilenceRemoved] = useState<boolean>(false);
@@ -2134,7 +2141,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   }, [isPlaying, duration, addLog, stopAllScheduledClips]);
 
   // Load Subtitles, Original Video & Dubber Tracks from Episode
-  const loadEpisodeData = useCallback(async (isImportFlow = false) => {
+  const loadEpisodeData = useCallback(async (isImportFlow = false, forceReset = false) => {
     if (!currentEpisode) return;
     try {
       setIsLoading(true);
@@ -2218,6 +2225,148 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           3,
           5
         );
+      }
+
+      // 1C. Check for Saved Timing State in <EpisodeDir>/Тайминг/timing_state.json
+      if (!isImportFlow && !forceReset) {
+        try {
+          const savedStateRes: any = await ipcSafe.invoke('timing-load-state', { episode: currentEpisode }).catch(() => null);
+          if (
+            savedStateRes &&
+            savedStateRes.exists &&
+            savedStateRes.state &&
+            Array.isArray(savedStateRes.state.tracks) &&
+            savedStateRes.state.tracks.length > 0 &&
+            savedStateRes.state.audioClips
+          ) {
+            const st = savedStateRes.state;
+            addLog(`💾 Загружено сохраненное состояние тайминга из «${savedStateRes.timingDir || 'Тайминг'}» (${st.updatedAt ? new Date(st.updatedAt).toLocaleString('ru-RU') : ''}). Восстановление...`, 'info');
+            updateProcess('Загрузка проекта тайминга', 'Восстановление сохраненного таймлайна и декодирование аудиоволн...', 25, 3, 5);
+
+            const restoredTracks: Track[] = st.tracks;
+            const catalogTracks: Track[] = Array.isArray(st.allCatalogTracks) && st.allCatalogTracks.length > 0
+              ? st.allCatalogTracks
+              : restoredTracks;
+
+            allCatalogTracksRef.current = catalogTracks;
+            setTracks(restoredTracks);
+            setAudioClips(st.audioClips || {});
+            if (st.trackSubLinesMap) setTrackSubLinesMap(st.trackSubLinesMap);
+            setIsSilenceRemoved(Boolean(st.isSilenceRemoved));
+            setIsFixesStitched(Boolean(st.isFixesStitched));
+            setIsTimingAnalyzed(Boolean(st.isTimingAnalyzed));
+            setCollisions(Array.isArray(st.collisions) ? st.collisions : []);
+            setIntentionalOverlaps(Array.isArray(st.intentionalOverlaps) ? st.intentionalOverlaps : []);
+            setTimingIssues(Array.isArray(st.timingIssues) ? st.timingIssues : []);
+            setMissingSubtitles(Array.isArray(st.missingSubtitles) ? st.missingSubtitles : []);
+            if (st.qaPassportLoaded) setQaPassportLoaded(st.qaPassportLoaded);
+            if (st.finalVerificationReport) setFinalVerificationReport(st.finalVerificationReport);
+            if (st.calibrationsByTrack) setCalibrationsByTrack(st.calibrationsByTrack);
+            if (st.volumes) setVolumes(st.volumes);
+            if (Array.isArray(st.mutedTracks)) setMutedTracks(new Set(st.mutedTracks));
+            if (typeof st.originalVolume === 'number') setOriginalVolume(st.originalVolume);
+            if (typeof st.isOriginalMuted === 'boolean') setIsOriginalMuted(st.isOriginalMuted);
+            if (typeof st.zoomLevel === 'number') setZoomLevel(st.zoomLevel);
+            if (st.trackHeightMode) setTrackHeightMode(st.trackHeightMode);
+            if (st.timingSettings) setTimingSettings(prev => ({ ...prev, ...st.timingSettings }));
+
+            setSavedTimingStateInfo({
+              savedAt: st.updatedAt || new Date().toISOString(),
+              filePath: savedStateRes.filePath
+            });
+
+            // Decode AudioBuffers for all catalog tracks + any extra source audio referenced in clips
+            const sharedAudioCtx = getSharedAudioContext();
+            const sourcesToDecode = new Map<string, { id: string; filePath: string; participant: string; isFix?: boolean; dubberName?: string }>();
+
+            catalogTracks.forEach(t => {
+              if (t.filePath) {
+                sourcesToDecode.set(t.id, {
+                  id: t.id,
+                  filePath: t.filePath,
+                  participant: t.participant,
+                  isFix: isFixTrack(t),
+                  dubberName: t.dubberName
+                });
+              }
+            });
+
+            // Also check audioClips for any sourceAudioPath not yet in sourcesToDecode (e.g. stitched fix clips or uploaded clips)
+            Object.values(st.audioClips as Record<string, AudioClip[]>).forEach(cList => {
+              (cList || []).forEach(c => {
+                if (c.sourceAudioTrackId && c.sourceAudioPath && !sourcesToDecode.has(c.sourceAudioTrackId)) {
+                  sourcesToDecode.set(c.sourceAudioTrackId, {
+                    id: c.sourceAudioTrackId,
+                    filePath: c.sourceAudioPath,
+                    participant: `${c.dubberName || 'Даббер'} (${c.isFix ? 'Фикс' : 'Аудио'})`,
+                    isFix: Boolean(c.isFix),
+                    dubberName: c.dubberName
+                  });
+                }
+              });
+            });
+
+            const decodeList = Array.from(sourcesToDecode.values());
+            setImportDecodedTracks(decodeList.map(t => ({ id: t.id, name: t.participant, status: 'pending' })));
+
+            const computedNormMetrics: Record<string, NormalizationMetrics> = {};
+            let dIdx = 0;
+            for (const item of decodeList) {
+              dIdx++;
+              const curPct = Math.round(30 + (65 * dIdx / Math.max(1, decodeList.length)));
+              updateProcess('Восстановление тайминга', `Декодирование аудиоволн [${dIdx}/${decodeList.length}]: «${item.participant}» (${curPct}%)...`, curPct, dIdx, decodeList.length);
+
+              setImportDecodedTracks(prev => prev.map(p => p.id === item.id ? { ...p, status: 'decoding' } : p));
+              const playableUrl = await getPlayableAudioUrl(item.filePath);
+              if (playableUrl) {
+                const audio = new Audio(playableUrl);
+                audio.preload = 'metadata';
+                audioElementsRef.current[item.id] = audio;
+
+                try {
+                  const resp = await fetch(playableUrl);
+                  const arrayBuf = await resp.arrayBuffer();
+                  const fileByteLength = arrayBuf.byteLength || 0;
+                  trackFileSizesRef.current[item.id] = fileByteLength;
+
+                  if (sharedAudioCtx) {
+                    const decodedBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
+                    audioBuffersRef.current[item.id] = decodedBuf;
+
+                    if (item.isFix) {
+                      const actorNorm = normalizeName(item.dubberName || item.participant || 'Даббер');
+                      if (!fixBuffersByActorRef.current[actorNorm]) fixBuffersByActorRef.current[actorNorm] = [];
+                      const existingIdx = fixBuffersByActorRef.current[actorNorm].findIndex(f => f.sourceTrackId === item.id);
+                      const fEntry = { buffer: decodedBuf, filePath: item.filePath, sourceTrackId: item.id, participant: item.participant };
+                      if (existingIdx >= 0) fixBuffersByActorRef.current[actorNorm][existingIdx] = fEntry;
+                      else fixBuffersByActorRef.current[actorNorm].push(fEntry);
+                    } else {
+                      const origKey = `orig_${item.id}`;
+                      audioBuffersRef.current[origKey] = decodedBuf;
+                      origBuffersByTrackRef.current[item.id] = { buffer: decodedBuf, filePath: item.filePath, sourceTrackId: origKey };
+                    }
+
+                    setDuration(prev => Math.max(prev, decodedBuf.duration));
+                    const norm = analyzeAudioBufferForPreview(decodedBuf, item.id);
+                    computedNormMetrics[item.id] = norm;
+                    setImportDecodedTracks(prev => prev.map(p => p.id === item.id ? { ...p, status: 'done', duration: decodedBuf.duration } : p));
+                  }
+                } catch (decodeErr) {
+                  console.warn(`[AudioDecode] Не удалось декодировать ${item.id}:`, decodeErr);
+                  setImportDecodedTracks(prev => prev.map(p => p.id === item.id ? { ...p, status: 'error' } : p));
+                }
+              }
+            }
+
+            setNormalizationMetrics(computedNormMetrics);
+            isStateRestoredRef.current = true;
+            addLog(`✓ Состояние вкладки «Тайминг» успешно восстановлено из файла! Загружено ${restoredTracks.length} дорожек, клипов: ${Object.values(st.audioClips).flat().length}. Повторный автотайминг/нарезка не требуются.`, 'success');
+            toast.success(`Тайминг серии успешно загружен из сохраненного файла («Тайминг»)! 💾`);
+            return;
+          }
+        } catch (loadErr: any) {
+          console.warn('[TimingState] Ошибка при автозагрузке сохраненного состояния:', loadErr);
+        }
       }
 
       // 2. Fetch Dubber Tracks from Manifest or Sound Engineer Files
@@ -2608,8 +2757,49 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         console.warn('Failed to auto-load QA timing passport:', passportErr);
       }
 
+      allCatalogTracksRef.current = fetchedTracks;
+      isStateRestoredRef.current = true;
+
+      // Save initial fresh state to <EpisodeDir>/Тайминг/timing_state.json
+      try {
+        const freshStatePayload = {
+          tracks: fetchedTracks,
+          allCatalogTracks: fetchedTracks,
+          audioClips: initialClips,
+          trackSubLinesMap: trackSubMap,
+          isSilenceRemoved: false,
+          isFixesStitched: false,
+          isTimingAnalyzed: false,
+          collisions: [],
+          intentionalOverlaps: [],
+          timingIssues: [],
+          missingSubtitles: [],
+          calibrationsByTrack: {},
+          volumes: {},
+          mutedTracks: [],
+          originalVolume: 0.4,
+          isOriginalMuted: false,
+          zoomLevel: 30,
+          trackHeightMode: 'standard',
+          timingSettings
+        };
+        const saveRes: any = await ipcSafe.invoke('timing-save-state', {
+          episode: currentEpisode,
+          state: freshStatePayload
+        });
+        if (saveRes?.success) {
+          setSavedTimingStateInfo({
+            savedAt: saveRes.updatedAt || new Date().toISOString(),
+            filePath: saveRes.filePath
+          });
+          addLog(`💾 Состояние тайминга инициализировано и сохранено в папку «${saveRes.timingDir || 'Тайминг'}» серии.`, 'info');
+        }
+      } catch (saveErr) {
+        console.warn('Initial timing state save warning:', saveErr);
+      }
+
       if (fetchedTracks.length > 0) {
-        toast.success(`Загружено ${fetchedTracks.length} дорожек дабберов с реальными аудиоволнами и нормализацией!`);
+        toast.success(`Загружено ${fetchedTracks.length} дорожек дабберов с реальными аудиоволнами и сохранено в «Тайминг»!`);
       }
     } catch (err: any) {
       addLog(`❌ Ошибка загрузки данных тайминга: ${err.message || String(err)}`, 'error');
@@ -2987,6 +3177,135 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   useEffect(() => {
     loadEpisodeData();
   }, [currentEpisode?.id]);
+
+  // Reset timing state and restart from scratch
+  const handleResetTimingToStart = async () => {
+    if (!currentEpisode) return;
+    try {
+      setIsLoading(true);
+      setIsResetConfirmOpen(false);
+      setIsPlaying(false);
+      stopAllScheduledClips();
+      if (videoRef.current) {
+        try { videoRef.current.pause(); videoRef.current.currentTime = 0; } catch (e) {}
+      }
+      setCurrentTime(0);
+      currentTimeRef.current = 0;
+      updateProcess('Сброс тайминга', 'Очистка сохраненного состояния и удаление файла из папки «Тайминг»...', 20, 1, 2);
+      addLog('Запуск сброса состояния тайминга серии...', 'warn');
+
+      await ipcSafe.invoke('timing-reset-state', { episode: currentEpisode });
+      isStateRestoredRef.current = false;
+      setSavedTimingStateInfo(null);
+      setIsSilenceRemoved(false);
+      setIsFixesStitched(false);
+      setIsTimingAnalyzed(false);
+      setCollisions([]);
+      setIntentionalOverlaps([]);
+      setTimingIssues([]);
+      setMissingSubtitles([]);
+      setFinalVerificationReport(null);
+      setCalibrationsByTrack({});
+      setSelectedClipId(null);
+      setQaPassportLoaded(null);
+
+      updateProcess('Сброс тайминга', 'Перезагрузка исходных дорожек серии...', 50, 2, 2);
+      await loadEpisodeData(false, true);
+
+      toast.success('Тайминг серии успешно сброшен! Загружены исходные дорожки с начала.');
+      addLog('✓ Тайминг серии сброшен к исходному состоянию.', 'success');
+    } catch (err: any) {
+      toast.error(`Ошибка при сбросе: ${err.message || String(err)}`);
+      addLog(`❌ Ошибка сброса тайминга: ${err.message || String(err)}`, 'error');
+    } finally {
+      setIsLoading(false);
+      clearProcess();
+    }
+  };
+
+  // Debounced auto-save of Timing tab state to <EpisodeDir>/Тайминг/timing_state.json
+  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (!isStateRestoredRef.current || isLoading || !currentEpisode || tracks.length === 0) {
+      return;
+    }
+
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    saveTimeoutRef.current = setTimeout(async () => {
+      try {
+        const statePayload = {
+          tracks,
+          allCatalogTracks: allCatalogTracksRef.current.length > 0 ? allCatalogTracksRef.current : tracks,
+          audioClips,
+          trackSubLinesMap,
+          isSilenceRemoved,
+          isFixesStitched,
+          isTimingAnalyzed,
+          collisions,
+          intentionalOverlaps,
+          timingIssues,
+          missingSubtitles,
+          qaPassportLoaded,
+          finalVerificationReport,
+          calibrationsByTrack,
+          volumes,
+          mutedTracks: Array.from(mutedTracks),
+          originalVolume,
+          isOriginalMuted,
+          zoomLevel,
+          trackHeightMode,
+          timingSettings
+        };
+
+        const res: any = await ipcSafe.invoke('timing-save-state', {
+          episode: currentEpisode,
+          state: statePayload
+        });
+
+        if (res && res.success) {
+          setSavedTimingStateInfo({
+            savedAt: res.updatedAt || new Date().toISOString(),
+            filePath: res.filePath
+          });
+        }
+      } catch (err) {
+        console.warn('[TimingAutoSave] Error saving state:', err);
+      }
+    }, 600);
+
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+    };
+  }, [
+    currentEpisode?.id,
+    tracks,
+    audioClips,
+    trackSubLinesMap,
+    isSilenceRemoved,
+    isFixesStitched,
+    isTimingAnalyzed,
+    collisions,
+    intentionalOverlaps,
+    timingIssues,
+    missingSubtitles,
+    qaPassportLoaded,
+    finalVerificationReport,
+    calibrationsByTrack,
+    volumes,
+    mutedTracks,
+    originalVolume,
+    isOriginalMuted,
+    zoomLevel,
+    trackHeightMode,
+    timingSettings,
+    isLoading
+  ]);
 
   // PIPELINE STEP 1: Import all tracks from QA
   const handleImportFromQA = async () => {
@@ -3629,7 +3948,17 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
       }
 
-      setTracks(prev => prev.filter(t => !isFixTrack(t)));
+      setTracks(prev =>
+        prev
+          .filter(t => !isFixTrack(t))
+          .map(t => {
+            const firstFixClip = (updatedClips[t.id] || []).find(c => c.isFix && c.sourceAudioPath && c.id.includes('_fullfix_'));
+            if (firstFixClip && firstFixClip.sourceAudioPath) {
+              return { ...t, filePath: firstFixClip.sourceAudioPath };
+            }
+            return t;
+          })
+      );
       setAudioClips(updatedClips);
       setIsFixesStitched(true);
 
@@ -4446,8 +4775,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                 }
 
                 if (isSpecifiedInSubtitles && (sub1 || sub2 || earlyC)) {
-                  const effSub1 = sub1 || { id: earlyC.id, startSec: earlyS, endSec: earlyE, text: earlyC.text } as SubtitleLine;
-                  const effSub2 = sub2 || { id: lateC.id, startSec: lateS, endSec: lateE, text: lateC.text } as SubtitleLine;
+                  const effSub1 = sub1 || ({ id: earlyC.id, startSec: earlyS, endSec: earlyE, text: earlyC.text } as unknown as SubtitleLine);
+                  const effSub2 = sub2 || ({ id: lateC.id, startSec: lateS, endSec: lateE, text: lateC.text } as unknown as SubtitleLine);
                   const subOvStart = Number(Math.min(effSub1.startSec, effSub2.startSec).toFixed(2));
                   const subOvEnd = Number(Math.max(effSub1.endSec, effSub2.endSec).toFixed(2));
                   const ovStart = Number(overlapStart.toFixed(2));
@@ -5836,7 +6165,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       const remainingUnvoicedSubIds = new Set(report.unvoicedSubs.map(u => `${u.trackId}_${u.subId}`));
       const remainingIssues = timingIssues.filter(issue => {
         if (issue.type === 'desync' && (typeFilter === 'all' || typeFilter === 'desync')) return false;
-        if (issue.type === 'overlap' && (typeFilter === 'all' || typeFilter === 'overlap')) return false;
+        if (issue.type === 'overlap' && typeFilter === 'all') return false;
         if (issue.type === 'orphan' && (typeFilter === 'all' || typeFilter === 'orphan')) {
           const targetClip = Object.values(healedClips).flat().find(c => c.id === issue.clipId);
           return targetClip?.timingIssue === 'orphan';
@@ -6314,8 +6643,10 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       updateProcess('Экспорт в Сведение', 'Подготовка метаданных и рендеринг оттаймленных мастер-дорожек...', 15, 1, 2);
       addLog('🎬 Старт экспорта в Сведение: рендеринг всех готовых дорожек каждого даббера...', 'info');
 
+      const activeTrackIds = new Set(tracks.map(t => t.id));
       const enrichedAudioClips: Record<string, AudioClip[]> = {};
       for (const trId of Object.keys(audioClips)) {
+        if (!activeTrackIds.has(trId)) continue;
         const tr = tracks.find(t => t.id === trId);
         const clips = audioClips[trId] || [];
         enrichedAudioClips[trId] = clips.map(c => ({
@@ -6585,6 +6916,15 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               <span className="bg-amber-950/80 text-amber-300 font-mono tabular-nums text-[11px] px-1.5 py-0.5 rounded border border-amber-800/50 font-medium">
                 Серия #{currentEpisode?.number || 1}
               </span>
+              {savedTimingStateInfo && (
+                <span
+                  className="bg-emerald-950/80 text-emerald-300 font-mono text-[10px] px-1.5 py-0.5 rounded border border-emerald-800/50 font-medium inline-flex items-center gap-1 shadow-sm"
+                  title={`Сохранено в папку ${savedTimingStateInfo.filePath || 'Тайминг/timing_state.json'}\nВремя: ${new Date(savedTimingStateInfo.savedAt).toLocaleTimeString('ru-RU')}`}
+                >
+                  <Check className="w-2.5 h-2.5 text-emerald-400" />
+                  <span>Сохранено в /Тайминг</span>
+                </span>
+              )}
             </div>
             <p className="text-[11px] text-neutral-400 hidden xl:block">
               Реалтайм-прослушивание клипов, звук и окно видео, нормализация -18 dBFS
@@ -6594,6 +6934,17 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
         {/* Uniform Compact Action Buttons Bar (all h-8 px-2.5 text-xs) */}
         <div className="flex flex-wrap items-center gap-1.5">
+          {/* Reset / Start Over Button */}
+          <button
+            onClick={() => setIsResetConfirmOpen(true)}
+            disabled={isLoading}
+            className="h-8 px-2.5 bg-neutral-800 hover:bg-neutral-700 text-rose-300 hover:text-rose-200 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 border border-rose-800/50 hover:border-rose-600 transition disabled:opacity-50 shrink-0"
+            title="Сбросить состояние тайминга и начать сначала с исходных дорожек серии"
+          >
+            <RotateCcw className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+            <span>Начать сначала</span>
+          </button>
+
           <button
             onClick={() => setIsSettingsModalOpen(true)}
             className="h-8 px-2.5 bg-neutral-800 hover:bg-neutral-700 text-amber-300 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 border border-amber-600/40 transition shrink-0"
@@ -7136,7 +7487,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                 {finalVerificationReport.unvoicedSubs.slice(0, 5).map(u => (
                   <button
                     key={u.id}
-                    onClick={() => jumpToTime(u.startSec, u.trackId)}
+                    onClick={() => jumpToTime(u.startSec)}
                     className="px-1.5 py-0.5 rounded bg-amber-900/70 hover:bg-amber-800 text-amber-100 border border-amber-700/60 text-[10px] font-mono shrink-0 transition"
                     title={`${u.dubberName} (${u.characterName}): «${u.text}»`}
                   >
@@ -7904,7 +8255,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleSetOverlapMainClip(clip.overlapGroupId!, clip.id);
+                                      handleSetOverlapMainClip(clip.overlapGroupId!, clip.id, clip.dubberName);
                                     }}
                                     className={`px-1.5 py-0.2 rounded text-[8px] font-black transition border ${
                                       clip.overlapRole === 'main'
@@ -7962,7 +8313,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                                   <button
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      handleSetOverlapMainClip(clip.overlapGroupId!, clip.id);
+                                      handleSetOverlapMainClip(clip.overlapGroupId!, clip.id, clip.dubberName);
                                     }}
                                     className={`px-1.5 py-0.5 rounded font-bold transition shadow mr-0.5 ${
                                       clip.overlapRole === 'main'
@@ -8320,6 +8671,43 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         settings={timingSettings}
         onSave={handleSaveSettings}
       />
+
+      {/* Reset Timing Confirmation Modal */}
+      {isResetConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-neutral-900 border border-neutral-700 rounded-xl max-w-md w-full p-5 shadow-2xl flex flex-col gap-4 text-neutral-100">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-lg bg-rose-950/80 border border-rose-700/60 flex items-center justify-center text-rose-400 shrink-0 shadow-sm">
+                <RotateCcw className="w-5 h-5" />
+              </div>
+              <div className="flex-1">
+                <h3 className="text-sm font-bold text-white">Сбросить тайминг серии и начать сначала?</h3>
+                <p className="text-xs text-neutral-300 mt-1.5 leading-relaxed">
+                  Файл сохранённого состояния в папке серии <strong className="text-amber-300 font-mono">«Тайминг/timing_state.json»</strong> будет удалён. Вкладка будет перезагружена с исходными мастер-дорожками, чтобы вы могли выполнить разметку и удаление тишины заново с чистого листа.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-neutral-800">
+              <button
+                type="button"
+                onClick={() => setIsResetConfirmOpen(false)}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-neutral-300 hover:text-white bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 transition"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleResetTimingToStart}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-white bg-rose-600 hover:bg-rose-500 rounded-lg flex items-center gap-1.5 transition shadow"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Сбросить и начать сначала</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

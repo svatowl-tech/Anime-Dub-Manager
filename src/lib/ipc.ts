@@ -1508,5 +1508,47 @@ function handleIpcMock(channel: string, args: any[]): any {
     return { success: true };
   }
 
+  if (channel === 'timing-load-state') {
+    const ep = args?.[0]?.episode;
+    const key = `timing_state_ep_${ep?.projectId || 'p'}_${ep?.id || ep?.number || '1'}`;
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return { success: true, exists: true, timingDir: 'Тайминг', filePath: 'Тайминг/timing_state.json', state: parsed };
+      }
+    } catch (e) {}
+    return { success: true, exists: false, timingDir: 'Тайминг', filePath: 'Тайминг/timing_state.json', state: null };
+  }
+
+  if (channel === 'timing-save-state') {
+    const ep = args?.[0]?.episode;
+    const state = args?.[0]?.state;
+    const key = `timing_state_ep_${ep?.projectId || 'p'}_${ep?.id || ep?.number || '1'}`;
+    try {
+      if (state) {
+        localStorage.setItem(key, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }));
+      }
+    } catch (e) {}
+    return { success: true, timingDir: 'Тайминг', filePath: 'Тайминг/timing_state.json', updatedAt: new Date().toISOString() };
+  }
+
+  if (channel === 'timing-reset-state') {
+    const ep = args?.[0]?.episode;
+    const key = `timing_state_ep_${ep?.projectId || 'p'}_${ep?.id || ep?.number || '1'}`;
+    try {
+      localStorage.removeItem(key);
+    } catch (e) {}
+    return { success: true, timingDir: 'Тайминг' };
+  }
+
+  if (channel === 'export-get-default-dir') {
+    const ep = args?.[0]?.episode;
+    const role = args?.[0]?.role;
+    const epName = `Episode_${ep?.number || 1}`;
+    const defaultDir = role === 'DABBER' ? `${epName}_Для_даберов` : `${epName} для звукорежиссёра`;
+    return { success: true, defaultDir, epDir: epName, projDir: '' };
+  }
+
   return { success: true, mocked: true };
 }

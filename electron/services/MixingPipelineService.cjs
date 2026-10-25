@@ -3233,6 +3233,8 @@ class MixingPipelineService {
           dubberNick: displayNick.trim(),
           baseDubberNick: dubberNick.trim(),
           trackNumber: trackNum ? parseInt(trackNum, 10) : 1,
+          hasExplicitTrackSuffix: Boolean(trackMatch),
+          mtimeMs: st.mtimeMs || 0,
           path: fullP,
           size: st.size,
           exists: true,
@@ -3267,6 +3269,10 @@ class MixingPipelineService {
           id: f,
           name: f,
           dubberNick: dubberNick || 'Даббер',
+          baseDubberNick: baseNick || 'Даббер',
+          trackNumber: trackMatch ? (parseInt(trackMatch[1].replace(/\D+/g, ''), 10) || 1) : 1,
+          hasExplicitTrackSuffix: Boolean(trackMatch),
+          mtimeMs: st.mtimeMs || 0,
           path: u.path,
           size: st.size,
           exists: true,
@@ -3277,9 +3283,78 @@ class MixingPipelineService {
 
     // If 00_timed_ master tracks are present, strictly prefer ONLY 00_timed_ master tracks!
     let filteredDubberTracks = foundDubberTracks;
-    const timedMasters = foundDubberTracks.filter(t => t.isTimedMaster);
+    let timedMasters = foundDubberTracks.filter(t => t.isTimedMaster);
     if (timedMasters.length > 0) {
-      filteredDubberTracks = timedMasters;
+      // Check timing_project.analysis.json for exact renderedTracks list from the latest Timing export
+      try {
+        const analysisPath = path.join(workingDir, 'timing_project.analysis.json');
+        if (fsSync.existsSync(analysisPath)) {
+          const analysisData = JSON.parse(fsSync.readFileSync(analysisPath, 'utf8'));
+          if (Array.isArray(analysisData?.renderedTracks) && analysisData.renderedTracks.length > 0) {
+            const validRenderedNames = new Set(
+              analysisData.renderedTracks
+                .map(rt => path.basename(rt.outputPath || '').toLowerCase())
+                .filter(Boolean)
+            );
+            const matchedMasters = timedMasters.filter(t => validRenderedNames.has((t.name || '').toLowerCase()));
+            if (matchedMasters.length > 0) {
+              // Remove any stale 00_timed_ files on disk that are not in validRenderedNames
+              for (const t of timedMasters) {
+                if (!validRenderedNames.has((t.name || '').toLowerCase())) {
+                  try { if (t.path && fsSync.existsSync(t.path)) fsSync.unlinkSync(t.path); } catch (_) {}
+                  try {
+                    const altRootPath = path.join(workingDir, t.name);
+                    if (fsSync.existsSync(altRootPath)) fsSync.unlinkSync(altRootPath);
+                  } catch (_) {}
+                }
+              }
+              timedMasters = matchedMasters;
+            }
+          }
+        }
+      } catch (_) {}
+
+      // Conflict resolution: never allow both single-track (00_timed_Actor.wav) AND multi-track (00_timed_Actor_дорожка1/2.wav) for the same actor
+      const byBaseActor = new Map();
+      for (const t of timedMasters) {
+        const actorKey = (t.baseDubberNick || t.dubberNick || '').toLowerCase().trim();
+        if (!byBaseActor.has(actorKey)) byBaseActor.set(actorKey, []);
+        byBaseActor.get(actorKey).push(t);
+      }
+
+      const resolvedTimedMasters = [];
+      for (const actorGroup of byBaseActor.values()) {
+        const singleTracks = actorGroup.filter(t => !t.hasExplicitTrackSuffix);
+        const multiTracks = actorGroup.filter(t => t.hasExplicitTrackSuffix);
+        if (singleTracks.length > 0 && multiTracks.length > 0) {
+          const newestSingleMtime = Math.max(...singleTracks.map(t => t.mtimeMs || 0));
+          const newestMultiMtime = Math.max(...multiTracks.map(t => t.mtimeMs || 0));
+          if (newestSingleMtime >= newestMultiMtime - 2000) {
+            // Single stitched track is current — purge stale _дорожка1 / _дорожка2 files
+            resolvedTimedMasters.push(...singleTracks);
+            for (const stale of multiTracks) {
+              try { if (stale.path && fsSync.existsSync(stale.path)) fsSync.unlinkSync(stale.path); } catch (_) {}
+              try {
+                const altRoot = path.join(workingDir, stale.name);
+                if (fsSync.existsSync(altRoot)) fsSync.unlinkSync(altRoot);
+              } catch (_) {}
+            }
+          } else {
+            resolvedTimedMasters.push(...multiTracks);
+            for (const stale of singleTracks) {
+              try { if (stale.path && fsSync.existsSync(stale.path)) fsSync.unlinkSync(stale.path); } catch (_) {}
+              try {
+                const altRoot = path.join(workingDir, stale.name);
+                if (fsSync.existsSync(altRoot)) fsSync.unlinkSync(altRoot);
+              } catch (_) {}
+            }
+          }
+        } else {
+          resolvedTimedMasters.push(...actorGroup);
+        }
+      }
+
+      filteredDubberTracks = resolvedTimedMasters;
     }
 
     // Deduplicate so each unique audio track appears once, and if a full replacement fix exists alongside a draft track for the same actor/layer, keep ONLY the full fix

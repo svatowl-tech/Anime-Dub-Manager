@@ -80,15 +80,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   useEffect(() => {
     if (isOpen && episode) {
-      if (role !== 'DABBER') {
-        // Query mixing status to get canonical episode Сведения folder
-        ipcSafe.invoke('mixing-get-status', { episode }).then((res: any) => {
-          if (res && res.workingDir) {
-            setTargetDir(res.workingDir);
-          }
-        }).catch(() => {});
-      }
-
       const baseFile = episode.rawPath || episode.subPath;
       if (baseFile) {
         const isWin = baseFile.includes('\\');
@@ -96,23 +87,38 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         const lastSlashIndex = Math.max(baseFile.lastIndexOf('/'), baseFile.lastIndexOf('\\'));
         if (lastSlashIndex >= 0) {
           const dir = baseFile.substring(0, lastSlashIndex);
+          const dirBasename = dir.split(/[/\\]/).pop() || '';
+          const isEpDir = /^(episode|ep|серия|выпуск)[\s_.-]*\d+/i.test(dirBasename) ||
+                          /^\d+$/.test(dirBasename) ||
+                          dirBasename.includes(String(episode.number || ''));
+
+          const epDir = isEpDir ? dir : `${dir}${sep}Episode_${episode.number || 1}`;
+          const epFolderName = isEpDir ? dirBasename : `Episode_${episode.number || 1}`;
+          const parentDir = isEpDir ? dir.substring(0, Math.max(dir.lastIndexOf('/'), dir.lastIndexOf('\\'))) : dir;
+
           const projectTitle = sanitizeFolderName(episode.project?.title || '');
           const epNum = episode.number !== undefined ? `_Ep${episode.number}` : '';
           const prefix = projectTitle ? `${projectTitle}${epNum}_` : (epNum ? `Ep${episode.number}_` : '');
 
           if (role === 'DABBER') {
             const subDirName = `${prefix}Для_даберов`;
-            setTargetDir(`${dir}${sep}${subDirName}`);
+            setTargetDir(`${epDir}${sep}${subDirName}`);
           } else {
-            const dirBasename = dir.split(/[/\\]/).pop() || '';
-            const isEpDir = /^(episode|ep|серия|выпуск)[\s_.-]*\d+/i.test(dirBasename) ||
-                            /^\d+$/.test(dirBasename) ||
-                            dirBasename.includes(String(episode.number || ''));
-            const epDir = isEpDir ? dir : `${dir}${sep}Episode_${episode.number || 1}`;
-            setTargetDir(`${epDir}${sep}Сведения`);
+            // SOUND_ENGINEER: Default to "<Episode Name> для звукорежиссёра" in the project directory
+            const soundEngineerDirName = `${epFolderName} для звукорежиссёра`;
+            setTargetDir(`${parentDir}${sep}${soundEngineerDirName}`);
           }
         }
       }
+
+      // Also query backend canonical default directory if needed
+      ipcSafe.invoke('export-get-default-dir', { episode, role })
+        .then((res: any) => {
+          if (res && res.defaultDir) {
+            setTargetDir(prev => prev || res.defaultDir);
+          }
+        })
+        .catch(() => {});
     } else if (!isOpen) {
       setTargetDir('');
     }

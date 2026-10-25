@@ -25,6 +25,7 @@ const HEAVY_CHANNELS: Record<string, number> = {
   'ollama-chat': 45000,
   
   // Media / Video / Transcoding
+  'timing-export-to-mixing': 120000,
   'transcode-video': 180000,
   'render-final-video': 240000,
   'export-mix-audio': 120000,
@@ -67,7 +68,8 @@ const POLLING_CHANNELS = new Set([
   'telegram-get-logs',
   'telegram-mtproto-get-status',
   'telegram-mtproto-get-logs',
-  'telegram-mtproto-check-qr'
+  'telegram-mtproto-check-qr',
+  'timing-save-state'
 ]);
 
 export const ipcSafe = {
