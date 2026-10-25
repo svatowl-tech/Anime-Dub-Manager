@@ -215,10 +215,12 @@ function registerMediaHandlers(getData, mainWindow, taskQueue) {
     return { path: outputPath };
   }));
 
-  ipcMain.handle('extract-audio-peaks', wrapIpcHandler(async (event, { videoPath, pointsPerSecond = 10 }) => {
-    if (!videoPath) throw new Error('Missing videoPath');
+  ipcMain.handle('extract-audio-peaks', wrapIpcHandler(async (event, payload = {}) => {
+    const targetPath = payload.videoPath || payload.filePath;
+    const pointsPerSecond = payload.pointsPerSecond || 10;
+    if (!targetPath) throw new Error('Missing videoPath');
     const { extractAudioPeaks } = require('../services/ffmpegService.cjs');
-    return await extractAudioPeaks(videoPath, pointsPerSecond);
+    return await extractAudioPeaks(targetPath, pointsPerSecond);
   }));
 
   ipcMain.handle('extract-hardsub', wrapIpcHandler(async (event, { videoPath, outputAssPath, language, preprocess, crop }) => {

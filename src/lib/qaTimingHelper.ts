@@ -282,45 +282,44 @@ export function prepareQATracksForTiming(
       }
     }
 
-    // Helper: determines if a fix file is a FULL track replacement vs a FRAGMENTARY phrase fix
-    // CRITICAL: Strictly based on file byte size, NEVER on duration!
-    const isFullReplacementFix = (fixFile: FileEntry, mainFile: FileEntry | null): boolean => {
-      if (!mainFile) return true;
-      if (mainFile.size > 0 && fixFile.size > 0) {
-        return fixFile.size >= mainFile.size * 0.95;
-      }
-      return false;
-    };
-
     // Helper to process a group of files belonging to the same actor track/layer
     // Identifies the largest file as the main original track, and smaller files as fixes
     const processFileGroup = (groupFiles: FileEntry[], subTrackNum?: number) => {
       if (groupFiles.length === 0) return;
 
-      // Sort files by size descending (largest file first = original main track)
-      // If sizes are equal, prefer older as original and newer as candidate fix
-      const sortedBySize = [...groupFiles].sort((a, b) => {
-        if (b.size !== a.size) return b.size - a.size;
-        return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
-      });
+      // Separate explicit original recordings vs explicit fix files first
+      const explicitOriginals = groupFiles.filter(f => f.type !== 'FIXES');
+      const explicitFixes = groupFiles.filter(f => f.type === 'FIXES');
 
-      const largestFile = sortedBySize[0];
-      const otherFiles = sortedBySize.slice(1);
-
-      let selectedFile: FileEntry = largestFile;
+      let selectedFile: FileEntry;
       let patchSnippet: FileEntry | null = null;
 
-      // If other files exist, find candidate fix
-      if (otherFiles.length > 0) {
-        // Look for explicitly tagged fix or any file smaller than the largest file (< 95%)
-        const candidateFix = otherFiles.find(f => f.type === 'FIXES' || (largestFile.size > 0 && f.size < largestFile.size * 0.95)) || otherFiles[otherFiles.length - 1];
-        if (candidateFix) {
-          if (isFullReplacementFix(candidateFix, largestFile)) {
-            // Full replacement fix (>= 95% of byte size)
-            selectedFile = { ...candidateFix, type: 'DUBBER_FILE' };
-            patchSnippet = null;
-          } else {
-            // Fragmentary fix snippet (< 95% of byte size)
+      if (explicitOriginals.length > 0 && explicitFixes.length > 0) {
+        // Both original track and fix track exist: keep newest/largest original as main track
+        // and newest fix as patchSnippet so TimingPanel can inspect real speech coverage (Scenario 1 vs Scenario 2)
+        const sortedOrig = [...explicitOriginals].sort((a, b) => {
+          if (b.size !== a.size) return b.size - a.size;
+          return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+        });
+        const sortedFixes = [...explicitFixes].sort((a, b) => {
+          return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+        });
+        selectedFile = sortedOrig[0];
+        patchSnippet = sortedFixes[0];
+      } else {
+        // Sort files by size descending (largest file first = original main track)
+        const sortedBySize = [...groupFiles].sort((a, b) => {
+          if (b.size !== a.size) return b.size - a.size;
+          return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
+        });
+
+        const largestFile = sortedBySize[0];
+        const otherFiles = sortedBySize.slice(1);
+        selectedFile = largestFile;
+
+        if (otherFiles.length > 0) {
+          const candidateFix = otherFiles.find(f => f.type === 'FIXES' || (largestFile.size > 0 && f.size < largestFile.size * 0.95)) || otherFiles[otherFiles.length - 1];
+          if (candidateFix) {
             selectedFile = largestFile;
             patchSnippet = candidateFix;
           }

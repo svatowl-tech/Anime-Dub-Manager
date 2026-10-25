@@ -311,28 +311,35 @@ export function analyzeTrackAudioNoiseFloor(
   const nonNullWindows = rmsDbValues.filter(v => v > -90);
   const effectiveNoiseWindows = nonNullWindows.length > 50 ? nonNullWindows : rmsDbValues;
   const noiseFloorDb = effectiveNoiseWindows[Math.floor(effectiveNoiseWindows.length * 0.15)];
+  const isShortFile = audioBuffer.duration < 45;
+  const noiseUpperPct = isShortFile ? 0.45 : 0.80;
+  const noiseUpperDb = effectiveNoiseWindows[Math.floor(effectiveNoiseWindows.length * noiseUpperPct)];
 
-  // Active speech windows: windows noticeably above the noise floor
-  const activeSpeechWindows = rmsDbValues.filter(v => v > Math.max(-80, noiseFloorDb + 2.5));
+  // Top 0.5% energy windows represent true vocal peaks (immune to 95%+ silence/room-tone in 24-min dubbing tracks)
+  const topPeakIdx = Math.min(rmsDbValues.length - 1, Math.max(0, Math.floor(rmsDbValues.length * 0.995)));
+  const topVoicePeakDb = rmsDbValues[topPeakIdx];
+
+  // Active speech windows: strictly above upper room-noise fluctuations AND within 24 dB of true vocal peak
+  const minSpeechCandDb = Math.max(-58, noiseUpperDb + 5.0, noiseFloorDb + 7.5, topVoicePeakDb - 24.0);
+  const activeSpeechWindows = rmsDbValues.filter(v => v >= minSpeechCandDb);
+
   const speechFloorDb = activeSpeechWindows.length > 0
-    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.40)]
-    : (nonNullWindows.length > 0 ? nonNullWindows[Math.floor(nonNullWindows.length * 0.75)] : -28.0);
+    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.30)]
+    : Math.max(noiseUpperDb + 6.0, topVoicePeakDb - 14.0);
   const speechPeakDb = activeSpeechWindows.length > 0
-    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.95)]
-    : (nonNullWindows.length > 0 ? nonNullWindows[Math.floor(nonNullWindows.length * 0.98)] : -6.0);
+    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.90)]
+    : Math.max(speechFloorDb + 4.0, topVoicePeakDb);
 
   let calculatedThresholdDb: number;
   if (manualThresholdDb !== undefined && manualThresholdDb !== null && !isNaN(manualThresholdDb)) {
     calculatedThresholdDb = manualThresholdDb;
   } else {
-    const snr = speechFloorDb - noiseFloorDb;
-    if (snr > 14) {
-      const margin = Math.min(8.0, Math.max(3.5, snr * 0.20));
-      calculatedThresholdDb = Math.min(-34, noiseFloorDb + margin);
-    } else {
-      calculatedThresholdDb = Math.min(-32, noiseFloorDb + 2.5);
-    }
-    calculatedThresholdDb = Math.max(-65, Math.min(-30, calculatedThresholdDb));
+    // Ensure threshold is ALWAYS safely above room-noise upper tail (noiseUpperDb + 4.5 dB and noiseFloorDb + 7.0 dB)
+    // so sparse fix tracks with 99% room tone never generate false speech intervals out of background noise
+    const safeNoiseMarginDb = Math.max(noiseUpperDb + 4.5, noiseFloorDb + 7.0);
+    const voiceEntryDb = Math.min(speechFloorDb - 2.5, speechPeakDb - 17.0);
+    calculatedThresholdDb = Math.max(safeNoiseMarginDb, voiceEntryDb);
+    calculatedThresholdDb = Math.max(-56, Math.min(-26, calculatedThresholdDb));
   }
 
   const thresholdAmp = Math.pow(10, calculatedThresholdDb / 20);
@@ -1904,12 +1911,16 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
         try {
           const peaksRes: any = await ipcSafe.invoke('extract-audio-peaks', {
+            videoPath: currentEpisode.rawPath,
             filePath: currentEpisode.rawPath,
-            numPeaks: 2400
+            pointsPerSecond: 5
           });
-          if (peaksRes && peaksRes.success && Array.isArray(peaksRes.peaks) && peaksRes.peaks.length > 0) {
-            setOriginalPeaks(peaksRes.peaks);
-            if (typeof peaksRes.duration === 'number' && peaksRes.duration > 0) {
+          const extractedPeaks = Array.isArray(peaksRes)
+            ? peaksRes
+            : (peaksRes && Array.isArray(peaksRes.peaks) ? peaksRes.peaks : []);
+          if (extractedPeaks.length > 0) {
+            setOriginalPeaks(extractedPeaks);
+            if (peaksRes && typeof peaksRes.duration === 'number' && peaksRes.duration > 0) {
               setDuration(prev => Math.max(prev, peaksRes.duration));
             }
           }
@@ -2038,7 +2049,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             try {
               const resp = await fetch(playableUrl);
               const arrayBuf = await resp.arrayBuffer();
-              trackFileSizesRef.current[tr.id] = arrayBuf.byteLength;
+              // Capture byteLength BEFORE decodeAudioData detaches/transfers the ArrayBuffer!
+              const fileByteLength = arrayBuf.byteLength || tr.fileSize || (tr.files?.[0]?.size) || 0;
+              trackFileSizesRef.current[tr.id] = fileByteLength;
               if (sharedAudioCtx) {
                 const decodedBuf = await sharedAudioCtx.decodeAudioData(arrayBuf);
                 audioBuffersRef.current[tr.id] = decodedBuf;
@@ -2072,7 +2085,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                 // Compute QA preview normalization (-18 dBFS RMS target, -0.7 dBFS peak ceiling)
                 const norm = analyzeAudioBufferForPreview(decodedBuf, tr.id);
                 computedNormMetrics[tr.id] = norm;
-                addLog(`📈 Аудиоволна декодирована для «${tr.participant}» (${decodedBuf.duration.toFixed(1)}s, ${(arrayBuf.byteLength / (1024*1024)).toFixed(1)} МБ, норм.: ${norm.gainDb >= 0 ? '+' : ''}${norm.gainDb} dB)`, 'success');
+                addLog(`📈 Аудиоволна декодирована для «${tr.participant}» (${decodedBuf.duration.toFixed(1)}s, ${(fileByteLength / (1024*1024)).toFixed(1)} МБ, норм.: ${norm.gainDb >= 0 ? '+' : ''}${norm.gainDb} dB)`, 'success');
                 setImportDecodedTracks(prev => prev.map(item => 
                   item.id === tr.id ? { ...item, status: 'done', duration: decodedBuf.duration } : item
                 ));
@@ -2091,53 +2104,21 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
       }
 
-      // 3B. Post-decode check: Distinguish Scenario 1 (Full Track Retake) vs Scenario 2 (Targeted Fix in a full-length WAV).
-      // A full-length uncompressed WAV fix with only 2 phrases has the same byte size as the main track,
-      // so we MUST verify active speech interval count & active speech duration before replacing the entire track!
-      const fullFixIdsToRemove = new Set<string>();
+      // 3B. Keep both Main Track and Fix Track visible on initial load so the user can inspect both
+      // and run «Удалить тишину» ➔ «Вшить фиксы» (which classifies Scenario 1 Full Replacement vs Scenario 2 Targeted Fix).
       for (const fixTr of fetchedTracks.filter(t => isFixTrack(t))) {
         const mainTr = fetchedTracks.find(t => !isFixTrack(t) && (t.id === fixTr.id.replace(/_fix$/, '') || normalizeName(t.dubberName) === normalizeName(fixTr.dubberName)));
         if (!mainTr) continue;
         const fixBuf = audioBuffersRef.current[fixTr.id];
         const mainBuf = audioBuffersRef.current[mainTr.id];
-        const fixSize = trackFileSizesRef.current[fixTr.id] || fixTr.fileSize || (fixTr.files?.[0]?.size) || 0;
-        const mainSize = trackFileSizesRef.current[mainTr.id] || mainTr.fileSize || (mainTr.files?.[0]?.size) || 0;
-
-        let isTrueFullRetake = false;
         if (fixBuf && mainBuf) {
           const fixIvs = detectSpeechIntervals(fixBuf);
           const mainIvs = detectSpeechIntervals(mainBuf);
-          const fixSpeechSec = fixIvs.reduce((acc, iv) => acc + iv.durationSec, 0);
-          const mainSpeechSec = mainIvs.reduce((acc, iv) => acc + iv.durationSec, 0);
-          if (
-            mainIvs.length > 0 &&
-            fixIvs.length >= Math.max(1, Math.ceil(mainIvs.length * 0.80)) &&
-            fixSpeechSec >= mainSpeechSec * 0.75
-          ) {
-            isTrueFullRetake = true;
-          }
-        } else if (fixSize > 0 && mainSize > 0 && fixSize >= mainSize * 0.95 && !fixBuf && !mainBuf) {
-          isTrueFullRetake = true;
+          addLog(
+            `🛠 Дорожка фикса «${fixTr.participant}» подготовлена (${fixIvs.length} речевых фраз в фиксе vs ${mainIvs.length} в основной дорожке) — готова к операции «Вшить фиксы».`,
+            'info'
+          );
         }
-
-        if (isTrueFullRetake) {
-          mainTr.filePath = fixTr.filePath;
-          if (fixBuf) audioBuffersRef.current[mainTr.id] = fixBuf;
-          if (computedNormMetrics[fixTr.id]) computedNormMetrics[mainTr.id] = computedNormMetrics[fixTr.id];
-          if (audioElementsRef.current[fixTr.id]) {
-            audioElementsRef.current[mainTr.id] = audioElementsRef.current[fixTr.id];
-          }
-          fullFixIdsToRemove.add(fixTr.id);
-          addLog(`⚡ Цельный фикс «${fixTr.participant}» (полная перезапись роли >= 80% фраз) полностью заменяет основную дорожку — в работу взят чистовой фикс!`, 'success');
-        } else if (fixSize > 0 && mainSize > 0 && fixSize >= mainSize * 0.85) {
-          addLog(`🎯 Фикс «${fixTr.participant}» сдан полной по длине дорожкой с тишиной, но содержит точечные фразы — сохранён для точечного вшивания по таймкоду!`, 'info');
-        }
-      }
-      if (fullFixIdsToRemove.size > 0) {
-        const cleanedTracks = fetchedTracks.filter(t => !fullFixIdsToRemove.has(t.id));
-        fetchedTracks.length = 0;
-        fetchedTracks.push(...cleanedTracks);
-        setTracks([...fetchedTracks]);
       }
 
       setNormalizationMetrics(computedNormMetrics);
@@ -2824,12 +2805,33 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           const mainActiveSpeechSec = targetClips.reduce((acc, c) => acc + c.durationSec, 0);
 
           // Scenario 1 vs Scenario 2 Classification:
-          // A fix track is a Full Replacement ONLY if its active speech phrases cover >= 80% of the main track's phrases/subtitles
-          // and >= 75% of active speech duration. (A full-length WAV containing mostly silence and 2 fix phrases is Scenario 2!)
+          // Check how many of the character's subtitles are voiced in the main track vs in the fix track.
+          // If the main track has voiced subtitles that are SILENT in the fix track, the fix track is GUARANTEED
+          // to be a Targeted Fix (Scenario 2), because replacing the whole track would lose those un-recorded subtitles!
+          let voicedInMainSubs = 0;
+          let voicedInFixSubs = 0;
+          let voicedOnlyInMainSubs = 0;
+          for (const sub of mainSubs) {
+            const hasMainVoice = targetClips.some(mc => {
+              const s = mc.clipStartSec + (mc.offsetSec || 0);
+              const e = s + mc.durationSec;
+              return e >= sub.startSec - 1.8 && s <= sub.endSec + 1.8;
+            });
+            const hasFixVoice = fixClips.some(fc => {
+              const s = fc.clipStartSec + (fc.offsetSec || 0);
+              const e = s + fc.durationSec;
+              return e >= sub.startSec - 1.8 && s <= sub.endSec + 1.8;
+            });
+            if (hasMainVoice) voicedInMainSubs++;
+            if (hasFixVoice) voicedInFixSubs++;
+            if (hasMainVoice && !hasFixVoice) voicedOnlyInMainSubs++;
+          }
+
           const referencePhraseCount = Math.max(mainSubs.length, targetClips.filter(c => !c.isPhysics).length, 1);
           const isFullReplacement =
-            fixClips.length >= Math.max(2, Math.ceil(referencePhraseCount * 0.80)) &&
-            fixActiveSpeechSec >= mainActiveSpeechSec * 0.72;
+            fixClips.length >= Math.max(2, Math.ceil(referencePhraseCount * 0.82)) &&
+            fixActiveSpeechSec >= mainActiveSpeechSec * 0.75 &&
+            (mainSubs.length === 0 || (voicedInFixSubs >= Math.ceil(Math.max(1, voicedInMainSubs) * 0.85) && voicedOnlyInMainSubs <= 1));
 
           if (isFullReplacement) {
             // SCENARIO 1: Full Track Replacement — replace the entire track cleanly without splicing into the old track
