@@ -392,7 +392,7 @@ export function applyTimingPassportToClips(
       let overlappingClipId = clip.overlappingClipId;
 
       if (hasCollision && isSliced && clip.durationSec < 90) {
-        // Find actual overlapping partner clip on the timeline right now
+        // Find actual overlapping partner clip on the timeline right now (only genuine tail-to-head overlaps <= 0.48s)
         let partnerClip: any = null;
         for (const otherTrkId of allTrackIds) {
           for (const other of (clipsByTrack[otherTrkId] || [])) {
@@ -401,8 +401,22 @@ export function applyTimingPassportToClips(
             const oEnd = oStart + other.durationSec;
             const ov = Math.min(clipEnd, oEnd) - Math.max(clipStart, oStart);
             if (ov > 0.015) {
-              partnerClip = other;
-              break;
+              const earlyStart = Math.min(clipStart, oStart);
+              const lateStart = Math.max(clipStart, oStart);
+              const earlyEnd = clipStart <= oStart ? clipEnd : oEnd;
+              const lateEnd = clipStart <= oStart ? oEnd : clipEnd;
+              const minDur = Math.min(clip.durationSec, other.durationSec);
+              // Ignore simultaneous dialogue (where one clip is inside the other, started together, or overlap > 0.48s)
+              const isContainedOrSimultaneous =
+                otherTrkId !== trackId &&
+                (lateStart - earlyStart <= 0.10 ||
+                  lateEnd <= earlyEnd + 0.18 ||
+                  ov > 0.48 ||
+                  ov > minDur * 0.42);
+              if (!isContainedOrSimultaneous) {
+                partnerClip = other;
+                break;
+              }
             }
           }
           if (partnerClip) break;
@@ -416,7 +430,7 @@ export function applyTimingPassportToClips(
               ? `Наезд: «${matchingCol.dubber1Name}» и «${matchingCol.dubber2Name}» (${matchingCol.overlapDurationSec}с)`
               : `Наезд с «${partnerClip.dubberName}»`);
         } else {
-          // If tracks are sliced and no clip actually overlaps this clip anymore, the collision is already resolved
+          // If tracks are sliced and no separable tail-to-head overlap exists, clear the collision flag
           hasCollision = false;
           if (timingIssue === 'overlap') {
             timingIssue = null;
