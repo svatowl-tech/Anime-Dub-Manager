@@ -510,26 +510,27 @@ class AutoTimingService {
         }
       }
 
-      // Sort files by size descending (largest file is original main track)
-      const sortedBySize = [...actorTracks].sort((a, b) => (b.size || 0) - (a.size || 0));
-      const maxTrack = sortedBySize[0];
-      const otherTracks = sortedBySize.slice(1);
-
-      const mainTracks = sortedBySize.filter(t => t.trackPath === maxTrack.trackPath || (!t.isFix && maxTrack.size > 0 && t.size >= maxTrack.size * 0.95));
-      const fixTracks = sortedBySize.filter(t => t.trackPath !== maxTrack.trackPath && (t.isFix || (maxTrack.size > 0 && t.size < maxTrack.size * 0.95)));
+      // Separate main tracks and fix tracks strictly by explicit QA type (t.isFix):
+      // - Tracks uploaded as DUBBER_FILE (!t.isFix) are always main tracks (supporting 1, 2, or more tracks per dubber).
+      // - Tracks uploaded via "Загрузить фикс" (t.isFix) are always fixes.
+      // Size comparison is used ONLY on fixes to distinguish:
+      //   Type 1: Full-track replacement fix (size comparable to original, >= 75% of main track) -> replaces main track without splicing
+      //   Type 2: Partial phrase fix (smaller than original) -> stitched into main track via patchSnippetPath
+      const mainTracks = actorTracks.filter(t => !t.isFix);
+      const fixTracks = actorTracks.filter(t => t.isFix);
 
       // СЦЕНАРИЙ 1: У даббера 1 основная дорожка (или только фиксы)
       if (mainTracks.length <= 1) {
-        const newestMain = mainTracks[0] || maxTrack;
+        const newestMain = mainTracks[0] || null;
         const newestFix = fixTracks.length > 0 ? fixTracks[fixTracks.length - 1] : null;
 
         if (newestMain && newestFix && newestFix.trackPath !== newestMain.trackPath) {
           const mainSize = newestMain.size || 1;
           const fixSize = newestFix.size || 0;
 
-          // Тип 1: Цельный фикс (строго по размеру файла в байтах, >= 95% размера оригинала)
+          // Тип 1: Цельный фикс (перезапись всей дорожки, >= 75% размера оригинала)
           // Заменяет предыдущую дорожку целиком, вшивание не требуется!
-          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.95) {
+          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.75) {
             newestFix.isFix = false;
             deduplicatedMatchedTracks.push(newestFix);
           } else {
@@ -550,10 +551,11 @@ class AutoTimingService {
       }
 
       // СЦЕНАРИЙ 2: У даббера 2 (или более) основных дорожек
-      // Обе дорожки сохраняются, а цельный фикс заменяет соответствующую дорожку, либо сниппет вшивается в неё
+      // Все основные дорожки сохраняются как отдельные дорожки, а фикс применяется к своей целевой дорожке
       for (let mIdx = 0; mIdx < mainTracks.length; mIdx++) {
         const mainTr = mainTracks[mIdx];
         const assignedFix = fixTracks.find(f => {
+          if (f.targetTrackId && mainTr.id && f.targetTrackId === mainTr.id) return true;
           const fName = (f.trackPath || '').toLowerCase();
           const trNum = mIdx + 1;
           return fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`);
@@ -563,7 +565,7 @@ class AutoTimingService {
           const mainSize = mainTr.size || 1;
           const fixSize = assignedFix.size || 0;
 
-          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.95) {
+          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.75) {
             // Цельный фикс заменяет данную дорожку целиком
             assignedFix.isFix = false;
             deduplicatedMatchedTracks.push(assignedFix);

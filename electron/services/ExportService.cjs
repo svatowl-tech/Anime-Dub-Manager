@@ -443,15 +443,15 @@ class ExportService {
         }
       }
 
-      // Classify files strictly by byte size: largest file is the original track, smaller files (< 95%) are fixes
+      // Classify files into original vs fixes strictly by how they were uploaded in QA:
+      // - DUBBER_FILE -> original track(s)
+      // - FIXES -> fix track(s)
       for (const key in dubberFiles) {
         const group = dubberFiles[key];
-        const sorted = [...group.allFiles].sort((a, b) => (b.size || 0) - (a.size || 0));
-        if (sorted.length > 0) {
-          const maxFile = sorted[0];
-          group.original = [maxFile];
-          group.fixes = sorted.slice(1);
-        }
+        const isExplicitFix = (f) =>
+          f.type === 'FIXES' || f.isFix === true;
+        group.fixes = group.allFiles.filter(isExplicitFix);
+        group.original = group.allFiles.filter(f => !isExplicitFix(f));
       }
 
       const getExportName = (upload, isFix) => {
@@ -562,8 +562,8 @@ class ExportService {
 
               const mainSize = origStat.size || 1;
               const fixSize = fixStat.size || 0;
-              const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
-              const isFullReplacement = mainSize > 0 && fixSize > 0 && (fixSize >= mainSize * 0.95);
+              const sizeDiffMb = Math.abs(mainSize - fixSize) / (1024 * 1024);
+              const isFullReplacement = mainSize > 0 && fixSize > 0 && (fixSize >= mainSize * 0.75);
 
               if (!isFullReplacement) {
                 await logStep(`[Фикс] Даббер «${nick}»: фрагментарный фикс отдельными фразами (${(fixStat.size / (1024*1024)).toFixed(2)} МБ < ${(origStat.size / (1024*1024)).toFixed(2)} МБ). Сведение с оригиналом...`, 'info', dubberPercent);
@@ -628,8 +628,7 @@ class ExportService {
 
               const mainSize = origStat.size || 1;
               const fixSize = fixStat.size || 0;
-              const ratio = fixSize > 0 ? (fixSize / mainSize) : 0;
-              const isFullReplacement = mainSize > 0 && fixSize > 0 && (fixSize >= mainSize * 0.95);
+              const isFullReplacement = mainSize > 0 && fixSize > 0 && (fixSize >= mainSize * 0.75);
 
               if (!isFullReplacement) {
                 const origOut = path.join(targetDir, getExportName(latestOriginal, false));
@@ -655,19 +654,16 @@ class ExportService {
           } else {
             if (original && original.length > 0) {
               const sortedOriginals = [...original].sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
-              // Keep only newest take unless explicit multi-track markers exist
-              const hasMultiLayers = sortedOriginals.some(o => /(?:дорожка|слой|track|take|layer)[_\s-]*\d+/i.test(o.path || o.fileName || ''));
-              const effectiveOriginals = hasMultiLayers ? sortedOriginals : [sortedOriginals[sortedOriginals.length - 1]];
-              for (let oIdx = 0; oIdx < effectiveOriginals.length; oIdx++) {
-                const origFile = effectiveOriginals[oIdx];
+              for (let oIdx = 0; oIdx < sortedOriginals.length; oIdx++) {
+                const origFile = sortedOriginals[oIdx];
                 const ext = path.extname(origFile.path) || '.wav';
                 const safeNick = sanitizeDubberNick(nick);
-                const origName = effectiveOriginals.length === 1
+                const origName = sortedOriginals.length === 1
                   ? `${baseVideoName}_[${safeNick}]${ext}`
                   : `${baseVideoName}_[${safeNick}]_дорожка${oIdx + 1}${ext}`;
                 const origOut = path.join(targetDir, origName);
                 await fs.copyFile(origFile.path, origOut);
-                await logStep(`[Экспорт] Дорожка даббера «${safeNick}» ${effectiveOriginals.length > 1 ? `(слой ${oIdx + 1})` : ''}: ${path.basename(origOut)}`, 'info', dubberPercent);
+                await logStep(`[Экспорт] Дорожка даббера «${safeNick}» ${sortedOriginals.length > 1 ? `(слой ${oIdx + 1})` : ''}: ${path.basename(origOut)}`, 'info', dubberPercent);
               }
             }
 

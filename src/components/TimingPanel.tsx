@@ -256,7 +256,8 @@ export interface NoiseCalibration {
  */
 export function analyzeTrackAudioNoiseFloor(
   audioBuffer: AudioBuffer,
-  manualThresholdDb?: number
+  manualThresholdDb?: number,
+  subLines?: Array<{ startSec: number; endSec: number }>
 ): NoiseCalibration {
   if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
     const floorDb = manualThresholdDb !== undefined ? manualThresholdDb : -42;
@@ -270,9 +271,13 @@ export function analyzeTrackAudioNoiseFloor(
       snrDb: 18
     };
   }
-  const channelData = audioBuffer.getChannelData(0);
+  const numChannels = Math.max(1, audioBuffer.numberOfChannels || 1);
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < numChannels; c++) {
+    channels.push(audioBuffer.getChannelData(c));
+  }
   const sampleRate = audioBuffer.sampleRate;
-  const totalSamples = channelData.length;
+  const totalSamples = channels[0].length;
   
   const windowSize = Math.max(128, Math.floor(sampleRate * 0.02)); // 20ms windows
   const totalWindows = Math.floor(totalSamples / windowSize);
@@ -283,13 +288,18 @@ export function analyzeTrackAudioNoiseFloor(
 
   for (let w = 0; w < totalWindows; w += step) {
     const offset = w * windowSize;
-    let sumSquares = 0;
-    for (let j = 0; j < windowSize; j++) {
-      const s = channelData[offset + j];
-      sumSquares += s * s;
+    let maxRms = 0;
+    for (let c = 0; c < numChannels; c++) {
+      const ch = channels[c];
+      let sumSquares = 0;
+      for (let j = 0; j < windowSize; j++) {
+        const s = ch[offset + j];
+        sumSquares += s * s;
+      }
+      const chRms = Math.sqrt(sumSquares / windowSize);
+      if (chRms > maxRms) maxRms = chRms;
     }
-    const rms = Math.sqrt(sumSquares / windowSize);
-    const db = rms > 1e-5 ? 20 * Math.log10(rms) : -96;
+    const db = maxRms > 3.16e-5 ? 20 * Math.log10(maxRms) : -91;
     rmsDbValues.push(db);
   }
 
@@ -312,20 +322,26 @@ export function analyzeTrackAudioNoiseFloor(
   const effectiveNoiseWindows = nonNullWindows.length > 50 ? nonNullWindows : rmsDbValues;
   const noiseFloorDb = effectiveNoiseWindows[Math.floor(effectiveNoiseWindows.length * 0.15)];
   const isShortFile = audioBuffer.duration < 45;
-  const noiseUpperPct = isShortFile ? 0.45 : 0.80;
+  const noiseUpperPct = isShortFile ? 0.45 : 0.78;
   const noiseUpperDb = effectiveNoiseWindows[Math.floor(effectiveNoiseWindows.length * noiseUpperPct)];
 
   // Top 0.5% energy windows represent true vocal peaks (immune to 95%+ silence/room-tone in 24-min dubbing tracks)
   const topPeakIdx = Math.min(rmsDbValues.length - 1, Math.max(0, Math.floor(rmsDbValues.length * 0.995)));
   const topVoicePeakDb = rmsDbValues[topPeakIdx];
 
-  // Active speech windows: strictly above upper room-noise fluctuations AND within 24 dB of true vocal peak
-  const minSpeechCandDb = Math.max(-58, noiseUpperDb + 5.0, noiseFloorDb + 7.5, topVoicePeakDb - 24.0);
+  // Active speech windows: adaptively scaled to the track's own vocal peak and noise floor (NO -58 dB hard clamp!)
+  // This ensures quieter unnormalized tracks (e.g. speech at -55 dB to -68 dB, noise at -91 dB) are measured accurately.
+  const minSpeechCandDb = Math.max(
+    -82,
+    noiseUpperDb + 4.2,
+    noiseFloorDb + 6.5,
+    topVoicePeakDb - 28.0
+  );
   const activeSpeechWindows = rmsDbValues.filter(v => v >= minSpeechCandDb);
 
   const speechFloorDb = activeSpeechWindows.length > 0
-    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.30)]
-    : Math.max(noiseUpperDb + 6.0, topVoicePeakDb - 14.0);
+    ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.22)]
+    : Math.max(noiseUpperDb + 5.0, topVoicePeakDb - 18.0);
   const speechPeakDb = activeSpeechWindows.length > 0
     ? activeSpeechWindows[Math.floor(activeSpeechWindows.length * 0.90)]
     : Math.max(speechFloorDb + 4.0, topVoicePeakDb);
@@ -334,12 +350,61 @@ export function analyzeTrackAudioNoiseFloor(
   if (manualThresholdDb !== undefined && manualThresholdDb !== null && !isNaN(manualThresholdDb)) {
     calculatedThresholdDb = manualThresholdDb;
   } else {
-    // Ensure threshold is ALWAYS safely above room-noise upper tail (noiseUpperDb + 4.5 dB and noiseFloorDb + 7.0 dB)
-    // so sparse fix tracks with 99% room tone never generate false speech intervals out of background noise
-    const safeNoiseMarginDb = Math.max(noiseUpperDb + 4.5, noiseFloorDb + 7.0);
-    const voiceEntryDb = Math.min(speechFloorDb - 2.5, speechPeakDb - 17.0);
+    // Ensure threshold is safely above room-noise upper tail while scaling 1:1 with the track's actual recording level
+    const safeNoiseMarginDb = Math.max(noiseUpperDb + 4.0, noiseFloorDb + 6.2);
+    const voiceEntryDb = Math.min(speechFloorDb - 4.5, speechPeakDb - 21.0);
     calculatedThresholdDb = Math.max(safeNoiseMarginDb, voiceEntryDb);
-    calculatedThresholdDb = Math.max(-56, Math.min(-26, calculatedThresholdDb));
+
+    // If assigned subtitle windows are known on a full-length track, calibrate against the quietest recorded subtitle windows
+    // so quiet phrases, whispers, or unnormalized syllables are never eaten
+    if (subLines && subLines.length > 0 && !isShortFile) {
+      const subPhraseEnergyDbs: number[] = [];
+      for (const sub of subLines) {
+        const wStart = Math.max(0, sub.startSec - 1.2);
+        const wEnd = Math.min(audioBuffer.duration, sub.endSec + 1.5);
+        const sSample = Math.floor(wStart * sampleRate);
+        const eSample = Math.min(totalSamples, Math.floor(wEnd * sampleRate));
+        if (eSample <= sSample + windowSize) continue;
+
+        const winDbs: number[] = [];
+        for (let pos = sSample; pos + windowSize <= eSample; pos += windowSize) {
+          let maxRms = 0;
+          for (let c = 0; c < numChannels; c++) {
+            const ch = channels[c];
+            let sumSq = 0;
+            for (let j = 0; j < windowSize; j++) {
+              const s = ch[pos + j];
+              sumSq += s * s;
+            }
+            const r = Math.sqrt(sumSq / windowSize);
+            if (r > maxRms) maxRms = r;
+          }
+          const db = maxRms > 3.16e-5 ? 20 * Math.log10(maxRms) : -91;
+          if (db >= noiseFloorDb + 5.5 && db >= noiseUpperDb + 3.5) {
+            winDbs.push(db);
+          }
+        }
+        // Require at least 5 active 20ms windows (100ms) in the subtitle window to count as a recorded phrase
+        if (winDbs.length >= 5) {
+          winDbs.sort((a, b) => a - b);
+          const p65 = winDbs[Math.floor(winDbs.length * 0.65)];
+          subPhraseEnergyDbs.push(p65);
+        }
+      }
+
+      if (subPhraseEnergyDbs.length > 0) {
+        subPhraseEnergyDbs.sort((a, b) => a - b);
+        const quietestSubPhraseDb = subPhraseEnergyDbs[Math.floor(subPhraseEnergyDbs.length * 0.05)];
+        const subGuidedThresholdDb = Math.max(
+          noiseUpperDb + 3.6,
+          noiseFloorDb + 5.8,
+          quietestSubPhraseDb - 5.0
+        );
+        calculatedThresholdDb = Math.min(calculatedThresholdDb, subGuidedThresholdDb);
+      }
+    }
+
+    calculatedThresholdDb = Math.max(-82, Math.min(-26, calculatedThresholdDb));
   }
 
   const thresholdAmp = Math.pow(10, calculatedThresholdDb / 20);
@@ -360,7 +425,8 @@ export function analyzeTrackAudioNoiseFloor(
 /**
  * Speech interval detection algorithm on decoded AudioBuffer.
  * Identifies speech phrases and silences with noise calibration, intra-word pause smoothing,
- * and adaptive lead-in / lead-out padding so quiet consonants and breath tails are NEVER cut.
+ * adaptive lead-in / lead-out padding, and local subtitle-window quiet phrase recovery
+ * so quiet consonants, whispers, and unnormalized phrases are NEVER cut.
  */
 function detectSpeechIntervals(
   audioBuffer: AudioBuffer,
@@ -371,6 +437,7 @@ function detectSpeechIntervals(
     minSpeechDurationSec?: number;
     mergeCloseGapsSec?: number;
     manualThresholdDb?: number;
+    subLines?: Array<{ startSec: number; endSec: number }>;
     onCalibration?: (calib: NoiseCalibration) => void;
   } = {}
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
@@ -381,32 +448,82 @@ function detectSpeechIntervals(
     minSpeechDurationSec = 0.20,
     mergeCloseGapsSec = 0.35,
     manualThresholdDb,
+    subLines,
     onCalibration
   } = options;
 
-  const calib = analyzeTrackAudioNoiseFloor(audioBuffer, manualThresholdDb);
+  const calib = analyzeTrackAudioNoiseFloor(audioBuffer, manualThresholdDb, subLines);
   if (onCalibration) onCalibration(calib);
 
-  const channelData = audioBuffer.getChannelData(0);
+  const numChannels = Math.max(1, audioBuffer.numberOfChannels || 1);
+  const channels: Float32Array[] = [];
+  for (let c = 0; c < numChannels; c++) {
+    channels.push(audioBuffer.getChannelData(c));
+  }
   const sampleRate = audioBuffer.sampleRate;
-  const totalSamples = channelData.length;
+  const totalSamples = channels[0].length;
   const duration = audioBuffer.duration;
   const thresholdAmp = calib.thresholdAmp;
 
   const chunkSize = Math.max(128, Math.floor(sampleRate * 0.02)); // 20ms chunks
   const totalChunks = Math.floor(totalSamples / chunkSize);
+  const chunkRmsValues = new Float32Array(totalChunks);
   const isSpeechChunk = new Uint8Array(totalChunks);
 
   for (let i = 0; i < totalChunks; i++) {
-    let sumSquares = 0;
     const offset = i * chunkSize;
-    for (let j = 0; j < chunkSize; j++) {
-      const s = channelData[offset + j];
-      sumSquares += s * s;
+    let maxRms = 0;
+    for (let c = 0; c < numChannels; c++) {
+      const ch = channels[c];
+      let sumSquares = 0;
+      for (let j = 0; j < chunkSize; j++) {
+        const s = ch[offset + j];
+        sumSquares += s * s;
+      }
+      const chRms = Math.sqrt(sumSquares / chunkSize);
+      if (chRms > maxRms) maxRms = chRms;
     }
-    const rms = Math.sqrt(sumSquares / chunkSize);
-    if (rms >= thresholdAmp) {
+    chunkRmsValues[i] = maxRms;
+    if (maxRms >= thresholdAmp) {
       isSpeechChunk[i] = 1;
+    }
+  }
+
+  // Subtitle-Window Quiet Phrase Recovery:
+  // On full-length tracks (>= 45s) when subtitle windows are known, check if any subtitle window
+  // has no detected speech chunks at the global threshold, and if there is clear vocal energy above the noise floor
+  // inside [sub.startSec - 1.0, sub.endSec + 1.2], activate those chunks with a local adaptive threshold.
+  if (subLines && subLines.length > 0 && duration >= 45 && manualThresholdDb === undefined) {
+    const minLocalNoiseAmp = Math.pow(10, Math.max(-84, calib.noiseFloorDb + 5.5) / 20);
+    for (const sub of subLines) {
+      const wStartSec = Math.max(0, sub.startSec - 1.0);
+      const wEndSec = Math.min(duration, sub.endSec + 1.2);
+      const startChunk = Math.max(0, Math.floor((wStartSec * sampleRate) / chunkSize));
+      const endChunk = Math.min(totalChunks - 1, Math.floor((wEndSec * sampleRate) / chunkSize));
+      if (endChunk <= startChunk + 4) continue;
+
+      let activeCount = 0;
+      let localMaxRms = 0;
+      for (let cIdx = startChunk; cIdx <= endChunk; cIdx++) {
+        if (isSpeechChunk[cIdx] === 1) activeCount++;
+        if (chunkRmsValues[cIdx] > localMaxRms) localMaxRms = chunkRmsValues[cIdx];
+      }
+
+      // If fewer than 4 chunks (80ms) were detected in this subtitle window, check if a quieter phrase exists here
+      if (activeCount < 4 && localMaxRms >= minLocalNoiseAmp * 1.35) {
+        const localThreshAmp = Math.max(minLocalNoiseAmp, localMaxRms * 0.28);
+        let candidateCount = 0;
+        for (let cIdx = startChunk; cIdx <= endChunk; cIdx++) {
+          if (chunkRmsValues[cIdx] >= localThreshAmp) candidateCount++;
+        }
+        if (candidateCount >= 5) {
+          for (let cIdx = startChunk; cIdx <= endChunk; cIdx++) {
+            if (chunkRmsValues[cIdx] >= localThreshAmp) {
+              isSpeechChunk[cIdx] = 1;
+            }
+          }
+        }
+      }
     }
   }
 
@@ -585,8 +702,12 @@ function scanBufferWindowForSpeech(
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
   if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') return [];
   const calib = analyzeTrackAudioNoiseFloor(audioBuffer);
-  // Lower threshold by 4 dB to catch softer phrases that initial VAD may have missed
-  const sensitiveDb = Math.max(-65, Math.min(-34, calib.calculatedThresholdDb - 4.0));
+  // Lower threshold by 4.5 dB (down to -84 dB on clean unnormalized tracks) to catch softer phrases that initial VAD may have missed
+  const sensitiveDb = Math.max(
+    -84,
+    calib.noiseFloorDb + 5.0,
+    Math.min(-32, calib.calculatedThresholdDb - 4.5)
+  );
   const thresholdAmp = Math.pow(10, sensitiveDb / 20);
 
   const channelData = audioBuffer.getChannelData(0);
@@ -1991,6 +2112,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           const snip = (tr as any).patchSnippet;
           fetchedTracks.push({
             id: `${tr.id}_fix`,
+            targetMainTrackId: tr.id,
             projectId: tr.projectId,
             episodeId: tr.episodeId,
             participant: `${tr.participant} (Фикс)`,
@@ -2000,7 +2122,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             filePath: snip.path,
             role: 'fix',
             status: 'fixes_needed',
-            files: [{ id: snip.id || `${tr.id}_fix_file`, path: snip.path, createdAt: '', type: 'FIXES' }],
+            files: [{ id: snip.id || `${tr.id}_fix_file`, path: snip.path, createdAt: '', type: 'FIXES', isFix: true, targetTrackId: tr.id }],
             selectedFileId: snip.id || `${tr.id}_fix_file`,
             comments: tr.comments || []
           } as any);
@@ -2107,10 +2229,11 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       // 3B. Keep both Main Track and Fix Track visible on initial load so the user can inspect both
       // and run «Удалить тишину» ➔ «Вшить фиксы» (which classifies Scenario 1 Full Replacement vs Scenario 2 Targeted Fix).
       for (const fixTr of fetchedTracks.filter(t => isFixTrack(t))) {
-        const mainTr = fetchedTracks.find(t => !isFixTrack(t) && (t.id === fixTr.id.replace(/_fix$/, '') || normalizeName(t.dubberName) === normalizeName(fixTr.dubberName)));
+        const mainTr = fetchedTracks.find(t => !isFixTrack(t) && (t.id === (fixTr as any).targetMainTrackId || t.id === fixTr.id.replace(/_fix$/, '') || normalizeName(t.dubberName) === normalizeName(fixTr.dubberName)));
         if (!mainTr) continue;
         const fixBuf = audioBuffersRef.current[fixTr.id];
         const mainBuf = audioBuffersRef.current[mainTr.id];
+
         if (fixBuf && mainBuf) {
           const fixIvs = detectSpeechIntervals(fixBuf);
           const mainIvs = detectSpeechIntervals(mainBuf);
@@ -2434,8 +2557,6 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       }, 400);
     }
   };
-
-
   // PIPELINE STEP 3: "Удалить тишину" — Real VAD Silence Cutting with Noise Floor Auto-Calibration on ALL tracks
   const handleCutSilence = async () => {
     if (tracks.length === 0) {
@@ -2468,67 +2589,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         );
         await new Promise(r => setTimeout(r, 0));
 
-        // Check if pre-calculated sidecar analysis passport exists (.analysis.json)
-        let passport: any = null;
-        if (track.filePath) {
-          try {
-            passport = await ipcSafe.invoke('audio-get-track-analysis', { audioPath: track.filePath });
-          } catch (e) {}
-        }
-
-        if (passport && Array.isArray(passport.phrases) && passport.phrases.length > 0) {
-          if (passport.energyProfile) {
-            const ep = passport.energyProfile;
-            const calib: NoiseCalibration = {
-              noiseFloorDb: ep.noiseFloorDb ?? -52,
-              speechFloorDb: ep.speechRmsDb ?? -24,
-              speechPeakDb: ep.peakDb ?? -3,
-              calculatedThresholdDb: ep.suggestedGateThresholdDb ?? -44,
-              thresholdAmp: Math.pow(10, (ep.suggestedGateThresholdDb ?? -44) / 20),
-              dynamicRangeDb: Number(((ep.peakDb ?? -3) - (ep.noiseFloorDb ?? -52)).toFixed(1)),
-              snrDb: Number(((ep.speechRmsDb ?? -24) - (ep.noiseFloorDb ?? -52)).toFixed(1))
-            };
-            newCalibrations[track.id] = calib;
-            addLog(`⚡ Мгновенно загружен паспорт дорожки «${dubberName}» (кэш sidecar): Шум: ${calib.noiseFloorDb} dB, Речь: ${calib.speechFloorDb} dB, Порог: ${calib.calculatedThresholdDb} dB`, 'info');
-          }
-
-          addLog(`⚡ Паспорт «${dubberName}»: ${passport.phrases.length} готовых речевых фраз подтянуто без повторного сканирования!`, 'info');
-
-          updatedClips[track.id] = passport.phrases.map((phrase: any, idx: number) => {
-            let matchingSub: SubtitleLine | undefined = undefined;
-            let bestDiff = Infinity;
-            for (const s of trSubs) {
-              const d = Math.abs(s.startSec - phrase.startSec);
-              if (d < bestDiff && d <= 2.2) {
-                bestDiff = d;
-                matchingSub = s;
-              }
-            }
-
-            totalClips++;
-            return {
-              id: phrase.id || `clip_${track.id}_${idx}`,
-              trackId: track.id,
-              dubberName,
-              characterName,
-              clipStartSec: phrase.startSec,
-              durationSec: phrase.durationSec,
-              sourceStartSec: phrase.startSec,
-              sourceEndSec: phrase.endSec,
-              rawSourceStartSec: phrase.startSec,
-              rawSourceEndSec: phrase.endSec,
-              sourceAudioPath: track.filePath,
-              text: phrase.text || matchingSub?.text || `${characterName}: Фраза #${idx + 1}`,
-              volumePercent: 100,
-              isFix: phrase.isFix ?? isFixTrack(track),
-              hasCollision: false,
-              offsetSec: 0
-            };
-          });
-          continue;
-        }
-
-        // If audio buffer not yet decoded in memory, decode it right now
+        // Ensure audio buffer is decoded in memory so live adaptive per-track + subtitle-guided calibration runs
         if (!audioBuf && track.filePath) {
           try {
             const pUrl = await getPlayableAudioUrl(track.filePath);
@@ -2547,6 +2608,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         }
 
         if (audioBuf) {
+          const subLinesForVad = !isFixTrack(track)
+            ? trSubs
+            : (tracks.find(t => !isFixTrack(t) && normalizeName(t.dubberName) === normalizeName(track.dubberName))
+                ? (trackSubLinesMap[tracks.find(t => !isFixTrack(t) && normalizeName(t.dubberName) === normalizeName(track.dubberName))!.id] || trSubs)
+                : trSubs);
+
           const intervals = detectSpeechIntervals(audioBuf, {
             minSilenceDurationSec: timingSettings.minSilenceDurationSec,
             leadInPaddingSec: timingSettings.leadInPaddingSec,
@@ -2554,9 +2621,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             minSpeechDurationSec: timingSettings.minSpeechDurationSec,
             mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
             manualThresholdDb: timingSettings.autoAnalyzeNoiseFloor ? undefined : timingSettings.silenceThresholdDb,
+            subLines: subLinesForVad,
             onCalibration: (calib) => {
               newCalibrations[track.id] = calib;
-              addLog(`📊 Авто-калибровка «${dubberName}»: Шум: ${calib.noiseFloorDb} dB, Речь: ${calib.speechFloorDb} dB, Порог: ${calib.calculatedThresholdDb} dB (Запас: ${Math.round(timingSettings.leadInPaddingSec * 1000)}/${Math.round(timingSettings.leadOutPaddingSec * 1000)} мс)`, 'info');
+              const normGain = normalizationMetrics[track.id]?.gainDb;
+              const normInfo = normGain !== undefined ? `, Усиление норм.: ${normGain >= 0 ? '+' : ''}${normGain} dB` : '';
+              addLog(`📊 Авто-калибровка «${dubberName}»: Шум: ${calib.noiseFloorDb} dB, Речь: ${calib.speechFloorDb} dB, Порог: ${calib.calculatedThresholdDb} dB${normInfo} (Запас: ${Math.round(timingSettings.leadInPaddingSec * 1000)}/${Math.round(timingSettings.leadOutPaddingSec * 1000)} мс)`, 'info');
             }
           });
 
@@ -2785,16 +2855,20 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
           const fixDuration = fixBuf ? fixBuf.duration : (fixClips[fixClips.length - 1]?.clipStartSec || 0);
 
-          let bestMainTrackForFull = mainTracks[0];
-          let bestDurDiff = Infinity;
-          for (const mt of mainTracks) {
-            const buf = audioBuffersRef.current[mt.id];
-            const mtClips = updatedClips[mt.id] || [];
-            const dur = buf ? buf.duration : (mtClips[mtClips.length - 1]?.clipStartSec || 0);
-            const diff = Math.abs(dur - fixDuration);
-            if (diff < bestDurDiff) {
-              bestDurDiff = diff;
-              bestMainTrackForFull = mt;
+          let bestMainTrackForFull =
+            mainTracks.find(mt => mt.id === (fixTrack as any).targetMainTrackId || mt.id === fixTrack.id.replace(/_fix$/, '')) ||
+            mainTracks[0];
+          if (!mainTracks.some(mt => mt.id === (fixTrack as any).targetMainTrackId || mt.id === fixTrack.id.replace(/_fix$/, ''))) {
+            let bestDurDiff = Infinity;
+            for (const mt of mainTracks) {
+              const buf = audioBuffersRef.current[mt.id];
+              const mtClips = updatedClips[mt.id] || [];
+              const dur = buf ? buf.duration : (mtClips[mtClips.length - 1]?.clipStartSec || 0);
+              const diff = Math.abs(dur - fixDuration);
+              if (diff < bestDurDiff) {
+                bestDurDiff = diff;
+                bestMainTrackForFull = mt;
+              }
             }
           }
 

@@ -1412,6 +1412,8 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         id: Math.random().toString(36).substr(2, 9),
         episodeId: currentEpisode.id,
         type,
+        isFix: type === 'FIXES',
+        targetTrackId: trackId,
         path: res.path,
         uploadedById: baseDubberId,
         assignmentId: assignment.id,

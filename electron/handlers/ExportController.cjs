@@ -357,16 +357,21 @@ function registerExportHandlers(getData, mainWindow) {
       // 1. Дорожка + фикс -> фикс встраивается в дорожку (1 итоговая дорожка).
       // 2. Две дорожки без фиксов -> жестко две дорожки в тайминг и сведение.
       // 3. Две дорожки + фиксы (3 суммарно) -> фиксы встраиваются в ту дорожку, где эта фраза, и дальше идут 2 дорожки.
-      const isFixTr = (t) => t.id.includes('_fix_') || (t.participant || '').toLowerCase().includes('фикс') || (t.filePath || '').toLowerCase().includes('fix');
+      const isFixTr = (t) =>
+        t.role === 'fix' ||
+        t.isFix === true ||
+        t.id.endsWith('_fix') ||
+        t.id.includes('_fix_') ||
+        (t.participant || '').toLowerCase().includes('фикс');
       const mainTrs = actorTrs.filter(t => !isFixTr(t));
       const fixTrs = actorTrs.filter(t => isFixTr(t));
       const effectiveMainTrs = mainTrs.length > 0 ? mainTrs : actorTrs;
       const isMultiTrack = effectiveMainTrs.length > 1;
 
-      // Классификация фиксов по типу:
-      // 1. Цельный фикс (плюс-минус как оригинал по размеру/весу, >= 70% или разница <= 3 МБ):
+      // Сортировка фиксов ТОЛЬКО при экспорте:
+      // 1. Цельный фикс (перезапись всей дорожки, >= 75% размера оригинала):
       //    полностью заменяет черновую дорожку, вшивание отдельных фраз НЕ ТРЕБУЕТСЯ!
-      // 2. Фрагментарные фиксы (отдельные фразы, гораздо легче оригинала):
+      // 2. Фрагментарные фиксы (отдельные фразы, легче оригинала):
       //    вшиваются в соответствующую дорожку оригинала.
       const snippetFixClips = [];
       const fullReplacementFixes = new Map();
@@ -375,8 +380,8 @@ function registerExportHandlers(getData, mainWindow) {
         let fSize = 0;
         try { if (fTr.filePath && require('fs').existsSync(fTr.filePath)) fSize = require('fs').statSync(fTr.filePath).size; } catch (e) {}
 
-        let bestMainTr = effectiveMainTrs[0];
-        if (effectiveMainTrs.length > 1) {
+        let bestMainTr = effectiveMainTrs.find(mt => mt.id === fTr.targetMainTrackId || mt.id === fTr.id.replace(/_fix$/, '')) || effectiveMainTrs[0];
+        if (!bestMainTr && effectiveMainTrs.length > 1) {
           const fName = (fTr.filePath || fTr.participant || '').toLowerCase();
           const matched = effectiveMainTrs.find((mt, idx) => {
             const trNum = idx + 1;
@@ -389,7 +394,7 @@ function registerExportHandlers(getData, mainWindow) {
         try { if (bestMainTr?.filePath && require('fs').existsSync(bestMainTr.filePath)) mSize = require('fs').statSync(bestMainTr.filePath).size; } catch (e) {}
 
         const ratio = (mSize > 0 && fSize > 0) ? (fSize / mSize) : 0;
-        const isFullReplacement = mSize > 0 && fSize > 0 && (fSize >= mSize * 0.95);
+        const isFullReplacement = mSize > 0 && fSize > 0 && (fSize >= mSize * 0.75);
 
         if (isFullReplacement && bestMainTr) {
           fullReplacementFixes.set(bestMainTr.id, fTr);
@@ -397,7 +402,7 @@ function registerExportHandlers(getData, mainWindow) {
         } else {
           const fClips = (clipsMap[fTr.id] || []).filter(c => !c.isDeleted);
           for (const c of fClips) {
-            snippetFixClips.push({ ...c, trackFilePath: fTr.filePath });
+            snippetFixClips.push({ ...c, trackFilePath: fTr.filePath, targetMainTrackId: bestMainTr?.id });
           }
         }
       }

@@ -207,22 +207,32 @@ class AudioAnalysisService {
 
     if (onProgress) onProgress({ status: 'measuring_volume', progress: 20 });
 
-    // 2. Громкость и энергитический профиль
+    // 2. Громкость и энергетический профиль (адаптированный под реальную громкость и нормализацию дорожки)
     const volumeStats = await measureVolumeStats(audioPath);
-    
+    const rawSpeechRms = typeof volumeStats.speechRmsDb === 'number' ? volumeStats.speechRmsDb : -30;
+    const rawPeak = typeof volumeStats.peakDb === 'number' ? volumeStats.peakDb : -3;
+
+    // Вычисляем адаптивный порог детекции тишины относительно реального уровня речи дорожки,
+    // чтобы тихие ненормализованные дорожки (например, речь -55..-60 dB при шуме -91 dB) не съедались порогом -42/-55 dB
+    const adaptiveVadNoiseDb = options.noiseDb !== undefined
+      ? options.noiseDb
+      : Math.min(-38, Math.max(-76, Math.round(Math.min(rawSpeechRms - 7, rawPeak - 24))));
+
     // VAD & Silences
     if (onProgress) onProgress({ status: 'detecting_speech', progress: 35 });
     const vadResult = await detectSpeechIntervals(audioPath, {
-      noiseDb: options.noiseDb || -42,
+      noiseDb: adaptiveVadNoiseDb,
       minSilenceDuration: options.minSilenceDuration || 0.25
     });
 
     const silences = vadResult.silences || [];
     const noiseFloorDb = await measureNoiseFloor(audioPath, silences);
 
-    // Автоматический рекомендованный порог гейта
-    const rawGate = Math.round(noiseFloorDb + 8);
-    const suggestedGateThresholdDb = Math.min(-28, Math.max(-55, rawGate));
+    // Автоматический рекомендованный порог гейта с учётом реальной громкости речи и шумовой полки (без жёсткого отсечения на -55 dB)
+    const safeAboveNoise = Math.round(noiseFloorDb + 7);
+    const safeBelowSpeech = Math.round(Math.min(rawSpeechRms - 5, rawPeak - 22));
+    const rawGate = Math.max(safeAboveNoise, safeBelowSpeech);
+    const suggestedGateThresholdDb = Math.min(-28, Math.max(-78, rawGate));
 
     const energyProfile = {
       noiseFloorDb,
@@ -322,7 +332,7 @@ class AudioAnalysisService {
     };
 
     const analysisData = {
-      version: '1.0.0',
+      version: '2.0.0',
       audioPath,
       updatedAt: new Date().toISOString(),
       audioMeta,
@@ -344,7 +354,7 @@ class AudioAnalysisService {
   }
 
   /**
-   * Чтение/создание паспорта .analysis.json с мгновенной проверкой кэша по mtime
+   * Чтение/создание паспорта .analysis.json с мгновенной проверкой кэша по mtime и версии алгоритма
    */
   static async getOrRunAnalysis(audioPath, force = false, options = {}, onProgress = null) {
     if (!audioPath || !fs.existsSync(audioPath)) {
@@ -366,7 +376,7 @@ class AudioAnalysisService {
       try {
         const raw = await fsPromises.readFile(jsonPath, 'utf-8');
         const data = JSON.parse(raw);
-        if (data && data.audioMeta && typeof data.audioMeta.mtimeMs === 'number') {
+        if (data && data.version === '2.0.0' && data.audioMeta && typeof data.audioMeta.mtimeMs === 'number') {
           // Если дата изменения совпадает с точностью до 100мс
           if (Math.abs(data.audioMeta.mtimeMs - currentMtimeMs) < 100) {
             log.info(`[AudioAnalysisService] Cache HIT for ${audioPath}. Instant read from ${jsonPath}`);
