@@ -1242,7 +1242,23 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   const [exportProgress, setExportProgress] = useState<number>(0);
   const [isLogDrawerOpen, setIsLogDrawerOpen] = useState<boolean>(false);
   const [operationLogs, setOperationLogs] = useState<Array<{ time: string; msg: string; level: 'info' | 'success' | 'warn' | 'error' }>>([]);
+  const [rawSubtitles, setRawSubtitles] = useState<SubtitleLine[]>([]);
   const [trackSubLinesMap, setTrackSubLinesMap] = useState<Record<string, SubtitleLine[]>>({});
+  const subtitles = useMemo<SubtitleLine[]>(() => {
+    if (rawSubtitles.length > 0) return rawSubtitles;
+    const seen = new Set<string>();
+    const merged: SubtitleLine[] = [];
+    for (const list of Object.values(trackSubLinesMap)) {
+      for (const s of list) {
+        const key = String(s.id ?? `${s.startSec}_${s.text}`);
+        if (!seen.has(key)) {
+          seen.add(key);
+          merged.push(s);
+        }
+      }
+    }
+    return merged.sort((a, b) => a.startSec - b.startSec);
+  }, [rawSubtitles, trackSubLinesMap]);
 
   // Unified Adaptive Active Process State (surfaces all background & active tasks under header)
   const [activeProcess, setActiveProcess] = useState<{
@@ -2155,6 +2171,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           addLog(`✓ Успешно распарсено ${parsedLines.length} строк субтитров.`, 'success');
         }
       }
+      setRawSubtitles(parsedLines);
 
       // 1B. Load Original Video & Extract Original Audio Waveform Peaks
       if (currentEpisode.rawPath) {
