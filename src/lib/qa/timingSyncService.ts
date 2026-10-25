@@ -351,8 +351,15 @@ export function applyTimingPassportToClips(
   }
 
   const updated: Record<string, any[]> = {};
+  const allTrackIds = Object.keys(clipsByTrack);
 
-  for (const trackId of Object.keys(clipsByTrack)) {
+  // Check if tracks have already been sliced into individual phrase clips
+  const isSliced = allTrackIds.some(tId => {
+    const trClips = clipsByTrack[tId] || [];
+    return trClips.length > 1 || (trClips.length === 1 && !String(trClips[0].id).endsWith('_full') && trClips[0].durationSec < 90);
+  });
+
+  for (const trackId of allTrackIds) {
     const clips = clipsByTrack[trackId] || [];
     updated[trackId] = clips.map(clip => {
       const clipStart = clip.clipStartSec + (clip.offsetSec || 0);
@@ -365,29 +372,63 @@ export function applyTimingPassportToClips(
           (col.dubber1Name && dubberNorm && col.dubber1Name.toLowerCase().trim() === dubberNorm) ||
           (col.dubber2Name && dubberNorm && col.dubber2Name.toLowerCase().trim() === dubberNorm);
         if (!trkMatch) return false;
-        return !(clipEnd <= col.startSec + 0.05 || clipStart >= col.endSec - 0.05);
+        return !(clipEnd <= col.startSec + 0.03 || clipStart >= col.endSec - 0.03);
       });
 
       // Check timing issue match
       const matchingIssue = passport.timingIssues.find(iss => {
         const trkMatch = iss.trackId === trackId ||
-          (iss.dubberName && dubberNorm && iss.dubberName.toLowerCase().trim() === dubberNorm);
+          (iss.dubberName && dubberNorm && iss.dubberName.toLowerCase().trim() === dubberNorm) ||
+          (iss.overlappingDubber && dubberNorm && iss.overlappingDubber.toLowerCase().trim() === dubberNorm);
         if (!trkMatch) return false;
         const issStart = iss.timeSec ?? (iss as any).startSec ?? 0;
         const issEnd = issStart + (iss.durationSec || 1.0);
-        return !(clipEnd <= issStart + 0.05 || clipStart >= issEnd - 0.05);
+        return !(clipEnd <= issStart + 0.03 || clipStart >= issEnd - 0.03);
       });
 
       let hasCollision = Boolean(matchingCol) || (matchingIssue?.type === 'overlap');
-      let timingIssue: 'overlap' | 'desync' | 'orphan' | 'missing' | undefined = clip.timingIssue;
+      let timingIssue: 'overlap' | 'desync' | 'orphan' | 'missing' | null | undefined = clip.timingIssue;
       let timingIssueText = clip.timingIssueText;
+      let overlappingClipId = clip.overlappingClipId;
 
-      if (matchingIssue) {
+      if (hasCollision && isSliced && clip.durationSec < 90) {
+        // Find actual overlapping partner clip on the timeline right now
+        let partnerClip: any = null;
+        for (const otherTrkId of allTrackIds) {
+          for (const other of (clipsByTrack[otherTrkId] || [])) {
+            if (other.id === clip.id || other.isPhysics || other.durationSec >= 90) continue;
+            const oStart = other.clipStartSec + (other.offsetSec || 0);
+            const oEnd = oStart + other.durationSec;
+            const ov = Math.min(clipEnd, oEnd) - Math.max(clipStart, oStart);
+            if (ov > 0.015) {
+              partnerClip = other;
+              break;
+            }
+          }
+          if (partnerClip) break;
+        }
+
+        if (partnerClip) {
+          overlappingClipId = partnerClip.id;
+          timingIssue = 'overlap';
+          timingIssueText = matchingIssue?.description ||
+            (matchingCol
+              ? `Наезд: «${matchingCol.dubber1Name}» и «${matchingCol.dubber2Name}» (${matchingCol.overlapDurationSec}с)`
+              : `Наезд с «${partnerClip.dubberName}»`);
+        } else {
+          // If tracks are sliced and no clip actually overlaps this clip anymore, the collision is already resolved
+          hasCollision = false;
+          if (timingIssue === 'overlap') {
+            timingIssue = null;
+            timingIssueText = undefined;
+          }
+        }
+      } else if (matchingIssue) {
         if (matchingIssue.type === 'overlap') {
           hasCollision = true;
+          timingIssue = 'overlap';
           timingIssueText = matchingIssue.description;
         } else if (matchingIssue.type === 'desync') {
-          // Only mark as start-time desync if subStartSec is provided and start delta is within surgical corridor (0.30s..1.50s)
           if (typeof matchingIssue.subStartSec === 'number') {
             const startDelta = Math.abs(clipStart - matchingIssue.subStartSec);
             if (startDelta >= 0.30 && startDelta <= 1.50) {
@@ -400,14 +441,17 @@ export function applyTimingPassportToClips(
           timingIssueText = matchingIssue.description;
         }
       } else if (matchingCol) {
+        hasCollision = true;
+        timingIssue = 'overlap';
         timingIssueText = `Наезд: «${matchingCol.dubber1Name}» и «${matchingCol.dubber2Name}» (${matchingCol.overlapDurationSec}с)`;
       }
 
       return {
         ...clip,
-        hasCollision: hasCollision || clip.hasCollision,
-        timingIssue: timingIssue || clip.timingIssue,
-        timingIssueText: timingIssueText || clip.timingIssueText
+        hasCollision,
+        overlappingClipId,
+        timingIssue: timingIssue ?? null,
+        timingIssueText
       };
     });
   }

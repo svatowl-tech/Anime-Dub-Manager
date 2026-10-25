@@ -1118,6 +1118,8 @@ export interface AudioClip {
   targetSubEndSec?: number;
   timeDiffSec?: number;       // Difference in seconds from subtitle start (positive = late, negative = early)
   overlappingClipId?: string;
+  isSplitContinuation?: boolean; // 2nd/3rd part of a phrase split by a dramatic pause inside the same subtitle (locked in place)
+  overlapResolvedLock?: boolean; // Locked after surgical overlap separation so audit loop never pulls it back into collision
 }
 
 export interface IntentionalOverlapTrackEntry {
@@ -1527,6 +1529,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   const [finalVerificationReport, setFinalVerificationReport] = useState<{
     totalSubs: number;
     voicedSubs: number;
+    voicedByOtherDubberCount?: number;
     recoveredFromFixCount: number;
     recoveredFromOrigCount: number;
     realignedCount: number;
@@ -2608,32 +2611,268 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       setIsLoading(true);
       updateProcess('Синхронизация с QA', 'Загрузка паспорта QA проверки...', 40, 1, 2);
       const savedProject = await loadTimingProjectForEpisode(currentEpisode, tracks);
-      updateProcess('Синхронизация с QA', 'Применение меток замечаний к клипам таймлайна...', 85, 2, 2);
+      updateProcess('Синхронизация с QA', 'Применение меток замечаний и сверка с текущим таймлайном...', 85, 2, 2);
       if (savedProject && (
         (savedProject.collisions && savedProject.collisions.length > 0) ||
         (savedProject.timingIssues && savedProject.timingIssues.length > 0) ||
         (savedProject.missingSubtitles && savedProject.missingSubtitles.length > 0)
       )) {
         savedPassportRef.current = savedProject;
-        setCollisions(savedProject.collisions || []);
-        setTimingIssues(savedProject.timingIssues || []);
-        setMissingSubtitles(savedProject.missingSubtitles || []);
-        setIsTimingAnalyzed(true);
-        setIsIssuesDrawerOpen((savedProject.timingIssues?.length || 0) > 0);
 
-        setAudioClips(prev => applyTimingPassportToClips(prev, savedProject));
+        const markedClips = applyTimingPassportToClips(audioClips, savedProject);
+        const allTrackIds = Object.keys(markedClips);
+        const isSliced = allTrackIds.some(tId => {
+          const list = markedClips[tId] || [];
+          return list.length > 1 || (list.length === 1 && !String(list[0].id).endsWith('_full') && list[0].durationSec < 90);
+        });
+
+        // Cross-link QA issues to actual sliced clips on the timeline and filter out already-resolved items
+        const enrichedIssues: TimingIssue[] = [];
+        const activeCollisions: VoiceCollisionMarker[] = [];
+        const seenOverlapPairs = new Set<string>();
+
+        for (const rawIssue of (savedProject.timingIssues || [])) {
+          if (rawIssue.type === 'overlap') {
+            if (!isSliced) {
+              enrichedIssues.push({ ...rawIssue });
+              continue;
+            }
+            // Find the two clips that overlap near rawIssue.timeSec
+            const issStart = rawIssue.timeSec ?? 0;
+            const issEnd = issStart + (rawIssue.durationSec || 1.2);
+            let foundEarly: AudioClip | null = null;
+            let foundLate: AudioClip | null = null;
+
+            for (let i = 0; i < allTrackIds.length; i++) {
+              for (const c1 of (markedClips[allTrackIds[i]] || [])) {
+                if (c1.isPhysics || c1.durationSec >= 90) continue;
+                const s1 = c1.clipStartSec + (c1.offsetSec || 0);
+                const e1 = s1 + c1.durationSec;
+                if (e1 < issStart - 0.8 || s1 > issEnd + 0.8) continue;
+
+                for (let j = i; j < allTrackIds.length; j++) {
+                  for (const c2 of (markedClips[allTrackIds[j]] || [])) {
+                    if (c1.id === c2.id || c2.isPhysics || c2.durationSec >= 90) continue;
+                    const s2 = c2.clipStartSec + (c2.offsetSec || 0);
+                    const e2 = s2 + c2.durationSec;
+                    const ov = Math.min(e1, e2) - Math.max(s1, s2);
+                    if (ov > 0.015) {
+                      const [early, late] = s1 <= s2 ? [c1, c2] : [c2, c1];
+                      foundEarly = early;
+                      foundLate = late;
+                      break;
+                    }
+                  }
+                  if (foundEarly && foundLate) break;
+                }
+                if (foundEarly && foundLate) break;
+              }
+              if (foundEarly && foundLate) break;
+            }
+
+            if (foundEarly && foundLate) {
+              const pairKey = [foundEarly.id, foundLate.id].sort().join('__');
+              if (!seenOverlapPairs.has(pairKey)) {
+                seenOverlapPairs.add(pairKey);
+                const earlyEnd = foundEarly.clipStartSec + (foundEarly.offsetSec || 0) + foundEarly.durationSec;
+                const lateStart = foundLate.clipStartSec + (foundLate.offsetSec || 0);
+                const ovDur = Number(Math.max(0.02, earlyEnd - lateStart).toFixed(2));
+
+                foundEarly.hasCollision = true;
+                foundLate.hasCollision = true;
+                foundEarly.timingIssue = 'overlap';
+                foundLate.timingIssue = 'overlap';
+                foundEarly.overlappingClipId = foundLate.id;
+                foundLate.overlappingClipId = foundEarly.id;
+
+                enrichedIssues.push({
+                  ...rawIssue,
+                  trackId: foundLate.trackId,
+                  dubberName: foundLate.dubberName,
+                  characterName: foundLate.characterName,
+                  clipId: foundLate.id,
+                  overlappingClipId: foundEarly.id,
+                  overlappingDubber: foundEarly.dubberName,
+                  timeSec: lateStart,
+                  durationSec: ovDur,
+                  overlapDurationSec: ovDur
+                });
+
+                activeCollisions.push({
+                  id: `col_sync_${foundEarly.id}_${foundLate.id}`,
+                  track1Id: foundEarly.trackId,
+                  track2Id: foundLate.trackId,
+                  dubber1Name: foundEarly.dubberName,
+                  dubber2Name: foundLate.dubberName,
+                  character1Name: foundEarly.characterName,
+                  character2Name: foundLate.characterName,
+                  startSec: lateStart,
+                  endSec: earlyEnd,
+                  overlapDurationSec: ovDur
+                });
+              }
+            }
+          } else if (rawIssue.type === 'missing') {
+            if (!isSliced) {
+              enrichedIssues.push({ ...rawIssue });
+              continue;
+            }
+            const mStart = rawIssue.timeSec ?? 0;
+            const mEnd = mStart + (rawIssue.durationSec || 1.2);
+            const mDur = Math.max(0.25, mEnd - mStart);
+            // Check if ANY dubber track (this dubber OR another dubber) has a speech clip covering [mStart, mEnd]
+            const isVoicedByAnyDubber = allTrackIds.some(tId => {
+              const trObj = tracks.find(t => t.id === tId);
+              if (trObj && isFixTrack(trObj)) return false;
+              return (markedClips[tId] || []).some(c => {
+                if (c.isPhysics || c.durationSec >= 90) return false;
+                const cs = c.clipStartSec + (c.offsetSec || 0);
+                const ce = cs + c.durationSec;
+                const ov = Math.min(ce, mEnd + 0.25) - Math.max(cs, mStart - 0.25);
+                return ov >= Math.min(0.28, mDur * 0.35);
+              });
+            });
+            if (!isVoicedByAnyDubber) {
+              enrichedIssues.push({ ...rawIssue });
+            }
+          } else {
+            enrichedIssues.push({ ...rawIssue });
+          }
+        }
+
+        // Also scan sliced timeline for any live intra-track or inter-track overlaps not yet in enrichedIssues
+        if (isSliced) {
+          for (let i = 0; i < allTrackIds.length; i++) {
+            const t1 = tracks.find(t => t.id === allTrackIds[i]);
+            if (t1 && isFixTrack(t1)) continue;
+            const clips1 = markedClips[allTrackIds[i]] || [];
+
+            for (let idx1 = 0; idx1 < clips1.length; idx1++) {
+              const c1 = clips1[idx1];
+              if (c1.isPhysics || c1.durationSec >= 90) continue;
+              const s1 = c1.clipStartSec + (c1.offsetSec || 0);
+              const e1 = s1 + c1.durationSec;
+
+              for (let j = i; j < allTrackIds.length; j++) {
+                const t2 = tracks.find(t => t.id === allTrackIds[j]);
+                if (t2 && isFixTrack(t2)) continue;
+                const clips2 = markedClips[allTrackIds[j]] || [];
+
+                for (let idx2 = (i === j ? idx1 + 1 : 0); idx2 < clips2.length; idx2++) {
+                  const c2 = clips2[idx2];
+                  if (c1.id === c2.id || c2.isPhysics || c2.durationSec >= 90) continue;
+                  if (c1.isUnisonPhrase && c2.isUnisonPhrase) continue;
+                  const s2 = c2.clipStartSec + (c2.offsetSec || 0);
+                  const e2 = s2 + c2.durationSec;
+                  const ov = Math.min(e1, e2) - Math.max(s1, s2);
+
+                  if (ov > 0.03) {
+                    const [early, late] = s1 <= s2 ? [c1, c2] : [c2, c1];
+                    const pairKey = [early.id, late.id].sort().join('__');
+                    if (seenOverlapPairs.has(pairKey)) continue;
+
+                    // If on different tracks, check if it's a long simultaneous multi-character scene (>= 0.45s subtitle overlap) and not flagged as collision
+                    if (i !== j && !c1.hasCollision && !c2.hasCollision) {
+                      const sub1 = (trackSubLinesMap[early.trackId] || []).find(s => String(s.id) === early.matchedSubId);
+                      const sub2 = (trackSubLinesMap[late.trackId] || []).find(s => String(s.id) === late.matchedSubId);
+                      if (sub1 && sub2) {
+                        const subOv = Math.min(sub1.endSec, sub2.endSec) - Math.max(sub1.startSec, sub2.startSec);
+                        if (subOv >= 0.45) continue;
+                      }
+                    }
+
+                    seenOverlapPairs.add(pairKey);
+                    const earlyEnd = early.clipStartSec + (early.offsetSec || 0) + early.durationSec;
+                    const lateStart = late.clipStartSec + (late.offsetSec || 0);
+                    const ovDur = Number(Math.max(0.02, earlyEnd - lateStart).toFixed(2));
+
+                    early.hasCollision = true;
+                    late.hasCollision = true;
+                    early.timingIssue = 'overlap';
+                    late.timingIssue = 'overlap';
+                    early.overlappingClipId = late.id;
+                    late.overlappingClipId = early.id;
+
+                    enrichedIssues.push({
+                      id: `issue_live_ov_${early.id}_${late.id}`,
+                      type: 'overlap',
+                      trackId: late.trackId,
+                      dubberName: late.dubberName,
+                      characterName: late.characterName,
+                      clipId: late.id,
+                      overlappingClipId: early.id,
+                      overlappingDubber: early.dubberName,
+                      timeSec: lateStart,
+                      durationSec: ovDur,
+                      overlapDurationSec: ovDur,
+                      description: i === j
+                        ? `Наезд внутри дорожки «${late.dubberName}» (${ovDur}с): «${early.text.slice(0, 18)}» 💥 «${late.text.slice(0, 18)}»`
+                        : `Наезд голосов: «${early.dubberName}» перекрывает «${late.dubberName}» (${ovDur}с) [${formatSeconds(lateStart)}]`
+                    });
+
+                    activeCollisions.push({
+                      id: `col_live_${early.id}_${late.id}`,
+                      track1Id: early.trackId,
+                      track2Id: late.trackId,
+                      dubber1Name: early.dubberName,
+                      dubber2Name: late.dubberName,
+                      character1Name: early.characterName,
+                      character2Name: late.characterName,
+                      startSec: lateStart,
+                      endSec: earlyEnd,
+                      overlapDurationSec: ovDur
+                    });
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        const filteredMissingMarkers = (savedProject.missingSubtitles || []).filter(m => {
+          if (!isSliced) return true;
+          const mDur = Math.max(0.25, m.endSec - m.startSec);
+          return !allTrackIds.some(tId => {
+            const trObj = tracks.find(t => t.id === tId);
+            if (trObj && isFixTrack(trObj)) return false;
+            return (markedClips[tId] || []).some(c => {
+              if (c.isPhysics || c.durationSec >= 90) return false;
+              const cs = c.clipStartSec + (c.offsetSec || 0);
+              const ce = cs + c.durationSec;
+              const ov = Math.min(ce, m.endSec + 0.25) - Math.max(cs, m.startSec - 0.25);
+              return ov >= Math.min(0.28, mDur * 0.35);
+            });
+          });
+        });
+
+        const finalCollisions = isSliced ? activeCollisions : (savedProject.collisions || []);
+        const finalSummary = {
+          ...savedProject.summary,
+          totalGaps: enrichedIssues.length,
+          overlapsCount: enrichedIssues.filter(i => i.type === 'overlap' && !i.overlappingDubber).length,
+          collisionsCount: finalCollisions.length,
+          desyncCount: enrichedIssues.filter(i => i.type === 'desync').length,
+          missingCount: filteredMissingMarkers.length
+        };
+
+        setAudioClips(markedClips);
+        setCollisions(finalCollisions);
+        setTimingIssues(enrichedIssues);
+        setMissingSubtitles(filteredMissingMarkers);
+        setIsTimingAnalyzed(true);
+        setIsIssuesDrawerOpen(enrichedIssues.length > 0);
 
         setQaPassportLoaded({
           loaded: true,
-          summary: savedProject.summary,
+          summary: finalSummary,
           savedAt: savedProject.savedAt
         });
 
         addLog(
-          `✓ Синхронизация с QA завершена: загружено замечаний — ${savedProject.summary.totalGaps} (наездов — ${savedProject.summary.overlapsCount}, коллизий — ${savedProject.summary.collisionsCount}, рассинхронов — ${savedProject.summary.desyncCount}).`,
+          `✓ Синхронизация с QA завершена: актуальных замечаний — ${finalSummary.totalGaps} (наездов/коллизий — ${enrichedIssues.filter(i => i.type === 'overlap').length}, рассинхронов — ${finalSummary.desyncCount}, пропусков — ${finalSummary.missingCount}).`,
           'success'
         );
-        toast.success(`Синхронизировано с QA! Загружено замечаний: ${savedProject.summary.totalGaps}`);
+        toast.success(`Синхронизировано с QA! Актуальных замечаний: ${finalSummary.totalGaps}`);
       } else {
         toast.info('В QA проверке пока нет сохраненных замечаний или проверка еще не запускалась.');
       }
@@ -3462,8 +3701,11 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
       // Pass 2: Subtitle-Anchored Monotonic Matching with:
       // 1) Multi-subtitle single audio clip support (1 clip -> K consecutive subtitles)
-      // 2) Adapted/rephrased line protection (Whisper NEVER disqualifies a clip in an unvoiced subtitle window)
-      // 3) "Физика" (sighs, gasps, grunts, laughs outside subtitles) detection & protection
+      // 2) Split-phrase continuation protection (K clips -> 1 subtitle when a phrase has an internal pause, so the 2nd part is NEVER pulled to a skipped next subtitle)
+      // 3) Cross-dubber voicing check (if a subtitle is skipped by this dubber but voiced by another dubber, it is NOT missing)
+      // 4) "Физика" (sighs, gasps, grunts, laughs outside subtitles) detection & protection
+      let crossDubberCoveredCount = 0;
+
       for (const track of tracks) {
         const dubberName = track.participant || track.dubberName || 'Даббер';
         const characterName = track.character || track.characterName || 'Персонаж';
@@ -3475,6 +3717,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
         const assignedSubIndices = new Set<number>();
         const clipMatchedSubIdx = new Array<number>(clips.length).fill(-1);
+        const clipIsSplitContinuation = new Array<boolean>(clips.length).fill(false);
         const clipCoveredSubIndices: number[][] = Array.from({ length: clips.length }, () => []);
         const clipMatchedByWhisper = new Array<boolean>(clips.length).fill(false);
         const clipWhisperScore = new Array<number>(clips.length).fill(0);
@@ -3496,7 +3739,6 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           return targetStartSec >= prevEnd - 0.25 && (targetStartSec + Math.min(clip.durationSec, 1.2)) <= nextStart + 0.25;
         };
 
-        // Helper: check monotonic order compatibility (clip cIdx can only match sIdx if no earlier clip matched > sIdx and no later clip matched < sIdx)
         const isMonotonicCompatible = (cIdx: number, sIdx: number): boolean => {
           for (let i = 0; i < cIdx; i++) {
             if (clipMatchedSubIdx[i] !== -1 && clipMatchedSubIdx[i] >= sIdx) return false;
@@ -3512,7 +3754,6 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           const clip = clips[cIdx];
           const cStart = clip.clipStartSec + (clip.offsetSec || 0);
           const primarySub = trSubs[primarySIdx];
-          // Estimate where clip ends when placed on primarySub.startSec
           const effectiveEnd = Math.max(cStart + clip.durationSec, primarySub.startSec + clip.durationSec);
           const nextClipStart = cIdx + 1 < clips.length
             ? (clips[cIdx + 1].clipStartSec + (clips[cIdx + 1].offsetSec || 0))
@@ -3531,7 +3772,6 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             const interSubGap = nxtSub.startSec - prevSub.endSec;
             if (interSubGap > 1.35) break;
 
-            // Check if the next clip on the track is actually intended for nxtSub
             if (Math.abs(nextClipStart - nxtSub.startSec) <= 0.85) break;
 
             const nxtSubDur = Math.max(0.25, nxtSub.endSec - nxtSub.startSec);
@@ -3547,7 +3787,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           }
         };
 
-        // Sub-Pass 2A: Lock well-placed dialogue clips first (diff <= 2.2s)
+        // Sub-Pass 2A: Lock primary dialogue clips within a tight physiological window [-0.70s, +1.35s] of subtitle start
         const candidatePairs: Array<{ cIdx: number; sIdx: number; score: number }> = [];
         for (let cIdx = 0; cIdx < clips.length; cIdx++) {
           const clip = clips[cIdx];
@@ -3560,13 +3800,22 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           );
           for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
             const sub = trSubs[sIdx];
-            const diff = Math.abs(cStart - sub.startSec);
-            if (diff <= 2.2 && isWithinTrackCorridor(cIdx, sub.startSec)) {
+            const signedDiff = cStart - sub.startSec;
+            const absDiff = Math.abs(signedDiff);
+
+            // Prevent a clip that sits inside the previous subtitle from being matched as an early start of `sub`
+            if (sIdx > 0) {
+              const prevSub = trSubs[sIdx - 1];
+              if (cStart >= prevSub.startSec - 0.15 && cStart <= prevSub.endSec + 0.25 && sub.startSec - cStart > 0.55) {
+                continue;
+              }
+            }
+
+            if (signedDiff >= -0.70 && signedDiff <= 1.35 && isWithinTrackCorridor(cIdx, sub.startSec)) {
               const subDur = Math.max(0.25, sub.endSec - sub.startSec);
               const durRatio = Math.min(clip.durationSec, subDur) / Math.max(clip.durationSec, subDur);
-              // Penalize ultra-short (< 0.24s) non-verbal breath bursts when a multi-word subtitle (> 0.9s) is being matched
               const shortBreathPenalty = (clip.durationSec < 0.24 && speechStats.activeWindows < 8 && subDur > 0.9) ? 1.4 : 0;
-              const score = diff - durRatio * 0.35 + shortBreathPenalty;
+              const score = absDiff - durRatio * 0.35 + shortBreathPenalty;
               candidatePairs.push({ cIdx, sIdx, score });
             }
           }
@@ -3580,25 +3829,71 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           expandMultiSubCoverage(pair.cIdx, pair.sIdx);
         }
 
-        // Sub-Pass 2B: Subtitle-Anchored Corridor Matching for any remaining unassigned subtitles
-        // CRITICAL RULE: Where an unvoiced subtitle exists in the corridor, a speech clip in that window IS the dialogue phrase,
-        // even if the dubber adapted/rephrased the text for lip-sync or Whisper failed to transcribe it!
+        // Sub-Pass 2A.2: Absorb Split-Phrase Continuation Clips (2nd/3rd part of a phrase divided by an internal pause)
+        // Crucial protection: if a phrase for subtitle `sub` was split into 2 clips, the 2nd clip belongs to `sub`
+        // and MUST NEVER be mistaken for an unvoiced next subtitle `nextSub`!
+        for (let cIdx = 0; cIdx < clips.length; cIdx++) {
+          const sIdx = clipMatchedSubIdx[cIdx];
+          if (sIdx === -1 || clipIsSplitContinuation[cIdx]) continue;
+          const covered = clipCoveredSubIndices[cIdx];
+          const lastCoveredSIdx = covered.length > 0 ? covered[covered.length - 1] : sIdx;
+          const sub = trSubs[lastCoveredSIdx];
+          const nextSub = lastCoveredSIdx + 1 < trSubs.length ? trSubs[lastCoveredSIdx + 1] : null;
+
+          let scanIdx = cIdx + 1;
+          while (scanIdx < clips.length && clipMatchedSubIdx[scanIdx] === -1) {
+            const prevPart = clips[scanIdx - 1];
+            const prevPartEnd = prevPart.clipStartSec + (prevPart.offsetSec || 0) + prevPart.durationSec;
+            const partClip = clips[scanIdx];
+            if (partClip.isPhysics) break;
+            const partStart = partClip.clipStartSec + (partClip.offsetSec || 0);
+            const partEnd = partStart + partClip.durationSec;
+            const pauseGap = partStart - prevPartEnd;
+
+            const fitsInsideCurrentSub =
+              pauseGap >= -0.05 &&
+              pauseGap <= 1.25 &&
+              (partStart <= sub.endSec + 0.35 || partEnd <= sub.endSec + 0.65);
+
+            const clearlyBeforeNextSub = !nextSub || (
+              nextSub.startSec - partStart >= 0.55 &&
+              (partStart <= sub.endSec + 0.25 || Math.abs(partStart - sub.endSec) < Math.abs(partStart - nextSub.startSec))
+            );
+
+            if (fitsInsideCurrentSub && clearlyBeforeNextSub) {
+              clipMatchedSubIdx[scanIdx] = lastCoveredSIdx;
+              clipIsSplitContinuation[scanIdx] = true;
+              clipCoveredSubIndices[scanIdx] = [lastCoveredSIdx];
+              scanIdx++;
+            } else {
+              break;
+            }
+          }
+        }
+
+        // Sub-Pass 2B: Subtitle-Anchored Corridor Matching for remaining unassigned subtitles
+        // Restricted to [-0.75s, +1.45s] so a skipped subtitle NEVER pulls an earlier phrase forward across the timeline!
         for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
           if (assignedSubIndices.has(sIdx)) continue;
           const sub = trSubs[sIdx];
+          const prevSub = sIdx > 0 ? trSubs[sIdx - 1] : null;
 
           let bestCIdx = -1;
           let bestCandidateScore = -Infinity;
 
           for (let cIdx = 0; cIdx < clips.length; cIdx++) {
-            if (clipMatchedSubIdx[cIdx] !== -1) continue;
+            if (clipMatchedSubIdx[cIdx] !== -1 || clipIsSplitContinuation[cIdx]) continue;
             const clip = clips[cIdx];
             if (clip.isPhysics) continue;
             if (!isMonotonicCompatible(cIdx, sIdx)) continue;
 
             const cStart = clip.clipStartSec + (clip.offsetSec || 0);
-            const timeDist = Math.abs(cStart - sub.startSec);
-            if (timeDist > 4.2 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
+            const signedDiff = cStart - sub.startSec;
+            const timeDist = Math.abs(signedDiff);
+
+            // Never pull a clip that starts > 0.75s before `sub.startSec` or sits inside `prevSub`
+            if (signedDiff < -0.75 || signedDiff > 1.45 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
+            if (prevSub && cStart <= prevSub.endSec + 0.25 && sub.startSec - cStart > 0.55) continue;
 
             const subDur = Math.max(0.25, sub.endSec - sub.startSec);
             const durFit = Math.min(clip.durationSec, subDur) / Math.max(clip.durationSec, subDur);
@@ -3608,13 +3903,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               clip.sourceEndSec
             );
 
-            // Whisper is used strictly as a positive bonus — never as a rejection filter!
             const recWords = normalizeSpeechText(clip.recognizedText || '');
             const hasAnyWhisperWords = recWords.length >= 2;
             const textSim = clip.recognizedText ? calculateTextSimilarity(clip.recognizedText, sub.text) : 0;
 
             const candidateScore =
-              (4.5 - timeDist) * 2.0 +
+              (2.5 - timeDist) * 2.0 +
               durFit * 2.5 +
               Math.min(2.0, speechStats.activeSpeechSec) +
               (hasAnyWhisperWords ? 2.0 : 0) +
@@ -3631,15 +3925,11 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             assignedSubIndices.add(sIdx);
             if (clips[bestCIdx].recognizedText) {
               const sim = calculateTextSimilarity(clips[bestCIdx].recognizedText!, sub.text);
-              clipMatchedByWhisper[bestCIdx] = timeDistGreater(clips[bestCIdx], sub.startSec, 2.2);
+              clipMatchedByWhisper[bestCIdx] = Math.abs((clips[bestCIdx].clipStartSec + (clips[bestCIdx].offsetSec || 0)) - sub.startSec) > 1.2;
               clipWhisperScore[bestCIdx] = Math.max(60, Math.round(sim * 100));
             }
             expandMultiSubCoverage(bestCIdx, sIdx);
           }
-        }
-
-        function timeDistGreater(c: AudioClip, targetSec: number, thresh: number): boolean {
-          return Math.abs((c.clipStartSec + (c.offsetSec || 0)) - targetSec) > thresh;
         }
 
         const mappedClips: AudioClip[] = [];
@@ -3649,6 +3939,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           const cStart = clip.clipStartSec + (clip.offsetSec || 0);
           const bestSubIdx = clipMatchedSubIdx[cIdx];
           const bestSub = bestSubIdx !== -1 ? trSubs[bestSubIdx] : null;
+          const isContinuation = clipIsSplitContinuation[cIdx];
           const matchedByWhisper = clipMatchedByWhisper[cIdx];
 
           const prevClipEnd = cIdx > 0
@@ -3659,79 +3950,94 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             : Infinity;
 
           if (bestSub && bestSubIdx !== -1) {
-            const coveredIdxs = clipCoveredSubIndices[cIdx].length > 0 ? clipCoveredSubIndices[cIdx] : [bestSubIdx];
-            const coveredSubs = coveredIdxs.map(idx => trSubs[idx]).filter(Boolean);
-            const firstSub = coveredSubs[0] || bestSub;
-            const lastSub = coveredSubs[coveredSubs.length - 1] || bestSub;
-
-            const maxShift = 2.2;
-            let surgicalTarget = Math.max(cStart - maxShift, Math.min(cStart + maxShift, firstSub.startSec));
-            surgicalTarget = Math.max(prevClipEnd, Math.min(surgicalTarget, Math.max(prevClipEnd, nextClipStart - clip.durationSec)));
-            surgicalTarget = Number(Math.max(0, surgicalTarget).toFixed(3));
-
-            const rawTimeDiff = cStart - firstSub.startSec;
-            const absRawDiff = Math.abs(rawTimeDiff);
-            const effectiveShift = Math.abs(surgicalTarget - cStart);
-
-            clip.isPhysics = false;
-            clip.text = coveredSubs.length > 1
-              ? coveredSubs.map(s => s.text).join(' / ')
-              : firstSub.text;
-            clip.matchedSubId = String(firstSub.id ?? bestSubIdx);
-            clip.coveredSubIds = coveredSubs.map((s, idx) => String(s.id ?? coveredIdxs[idx]));
-            clip.targetSubStartSec = surgicalTarget;
-            clip.targetSubEndSec = lastSub.endSec;
-            clip.timeDiffSec = Number(rawTimeDiff.toFixed(2));
-            if (matchedByWhisper) {
-              clip.whisperMatchedScore = clipWhisperScore[cIdx];
-            }
-
-            if (matchedByWhisper && effectiveShift >= 0.25) {
-              clip.timingIssue = 'orphan';
-              clip.timingIssueText = `Подтяжка к субтитру: «${(clip.recognizedText || clip.text).slice(0, 20)}» ➔ [${formatSeconds(surgicalTarget)}]`;
-
-              newIssues.push({
-                id: `issue_orphan_matched_${clip.id}`,
-                type: 'orphan',
-                trackId: track.id,
-                dubberName,
-                characterName,
-                clipId: clip.id,
-                timeSec: cStart,
-                durationSec: clip.durationSec,
-                subText: clip.text,
-                subStartSec: surgicalTarget,
-                subEndSec: lastSub.endSec,
-                whisperText: clip.recognizedText,
-                whisperMatchScore: clipWhisperScore[cIdx],
-                description: `Привязка реплики «${(clip.recognizedText || clip.text).slice(0, 35)}» ➔ [${formatSeconds(surgicalTarget)}]`
-              });
-            } else if (absRawDiff >= 0.28 && absRawDiff <= 2.4 && effectiveShift >= 0.10) {
-              clip.timingIssue = 'desync';
-              clip.timingIssueText = rawTimeDiff > 0 
-                ? `Опаздывает на +${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})` 
-                : `Спешит на -${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})`;
-
-              newIssues.push({
-                id: `issue_desync_${clip.id}`,
-                type: 'desync',
-                trackId: track.id,
-                dubberName,
-                characterName,
-                clipId: clip.id,
-                timeSec: cStart,
-                durationSec: clip.durationSec,
-                subText: clip.text,
-                subStartSec: surgicalTarget,
-                subEndSec: lastSub.endSec,
-                timeDiffSec: Number(rawTimeDiff.toFixed(2)),
-                description: rawTimeDiff > 0
-                  ? `Фраза #${cIdx + 1} опаздывает на +${absRawDiff.toFixed(2)}с: «${clip.text.slice(0, 35)}»`
-                  : `Фраза #${cIdx + 1} спешит на -${absRawDiff.toFixed(2)}с: «${clip.text.slice(0, 35)}»`
-              });
-            } else {
+            if (isContinuation) {
+              // 2nd/3rd part of a split phrase: lock in place on its recorded timestamp!
+              clip.isPhysics = false;
+              clip.isSplitContinuation = true;
+              clip.text = `${bestSub.text} (ч. 2)`;
+              clip.matchedSubId = String(bestSub.id ?? bestSubIdx);
+              clip.coveredSubIds = [String(bestSub.id ?? bestSubIdx)];
+              clip.targetSubStartSec = Number(cStart.toFixed(3));
+              clip.targetSubEndSec = bestSub.endSec;
+              clip.timeDiffSec = 0;
               clip.timingIssue = null;
               clip.timingIssueText = undefined;
+            } else {
+              const coveredIdxs = clipCoveredSubIndices[cIdx].length > 0 ? clipCoveredSubIndices[cIdx] : [bestSubIdx];
+              const coveredSubs = coveredIdxs.map(idx => trSubs[idx]).filter(Boolean);
+              const firstSub = coveredSubs[0] || bestSub;
+              const lastSub = coveredSubs[coveredSubs.length - 1] || bestSub;
+
+              const maxShift = 1.6;
+              let surgicalTarget = Math.max(cStart - maxShift, Math.min(cStart + maxShift, firstSub.startSec));
+              surgicalTarget = Math.max(prevClipEnd, Math.min(surgicalTarget, Math.max(prevClipEnd, nextClipStart - clip.durationSec)));
+              surgicalTarget = Number(Math.max(0, surgicalTarget).toFixed(3));
+
+              const rawTimeDiff = cStart - firstSub.startSec;
+              const absRawDiff = Math.abs(rawTimeDiff);
+              const effectiveShift = Math.abs(surgicalTarget - cStart);
+
+              clip.isPhysics = false;
+              clip.isSplitContinuation = false;
+              clip.text = coveredSubs.length > 1
+                ? coveredSubs.map(s => s.text).join(' / ')
+                : firstSub.text;
+              clip.matchedSubId = String(firstSub.id ?? bestSubIdx);
+              clip.coveredSubIds = coveredSubs.map((s, idx) => String(s.id ?? coveredIdxs[idx]));
+              clip.targetSubStartSec = surgicalTarget;
+              clip.targetSubEndSec = lastSub.endSec;
+              clip.timeDiffSec = Number(rawTimeDiff.toFixed(2));
+              if (matchedByWhisper) {
+                clip.whisperMatchedScore = clipWhisperScore[cIdx];
+              }
+
+              if (matchedByWhisper && effectiveShift >= 0.25) {
+                clip.timingIssue = 'orphan';
+                clip.timingIssueText = `Подтяжка к субтитру: «${(clip.recognizedText || clip.text).slice(0, 20)}» ➔ [${formatSeconds(surgicalTarget)}]`;
+
+                newIssues.push({
+                  id: `issue_orphan_matched_${clip.id}`,
+                  type: 'orphan',
+                  trackId: track.id,
+                  dubberName,
+                  characterName,
+                  clipId: clip.id,
+                  timeSec: cStart,
+                  durationSec: clip.durationSec,
+                  subText: clip.text,
+                  subStartSec: surgicalTarget,
+                  subEndSec: lastSub.endSec,
+                  whisperText: clip.recognizedText,
+                  whisperMatchScore: clipWhisperScore[cIdx],
+                  description: `Привязка реплики «${(clip.recognizedText || clip.text).slice(0, 35)}» ➔ [${formatSeconds(surgicalTarget)}]`
+                });
+              } else if (absRawDiff >= 0.30 && absRawDiff <= 1.8 && effectiveShift >= 0.10) {
+                clip.timingIssue = 'desync';
+                clip.timingIssueText = rawTimeDiff > 0 
+                  ? `Опаздывает на +${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})` 
+                  : `Спешит на -${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})`;
+
+                newIssues.push({
+                  id: `issue_desync_${clip.id}`,
+                  type: 'desync',
+                  trackId: track.id,
+                  dubberName,
+                  characterName,
+                  clipId: clip.id,
+                  timeSec: cStart,
+                  durationSec: clip.durationSec,
+                  subText: clip.text,
+                  subStartSec: surgicalTarget,
+                  subEndSec: lastSub.endSec,
+                  timeDiffSec: Number(rawTimeDiff.toFixed(2)),
+                  description: rawTimeDiff > 0
+                    ? `Фраза #${cIdx + 1} опаздывает на +${absRawDiff.toFixed(2)}с: «${clip.text.slice(0, 35)}»`
+                    : `Фраза #${cIdx + 1} спешит на -${absRawDiff.toFixed(2)}с: «${clip.text.slice(0, 35)}»`
+                });
+              } else {
+                clip.timingIssue = null;
+                clip.timingIssueText = undefined;
+              }
             }
           } else {
             // Sub-Pass 2C: Unmatched clip where there is NO unvoiced subtitle in the corridor -> Protected "Физика" (sigh, gasp, grunt, laugh)
@@ -3750,20 +4056,37 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           mappedClips.push(clip);
         }
 
-        // 3. Problem: Missing Subtitle Lines (taking into account multi-subtitle single clips via assignedSubIndices & coveredSubIds)
+        // 3. Problem: Missing Subtitle Lines (checking both this dubber AND cross-dubber voicing across all other tracks!)
         for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
           if (!assignedSubIndices.has(sIdx)) {
             const sub = trSubs[sIdx];
             const subIdStr = String(sub.id ?? sIdx);
+            const subDur = Math.max(0.25, sub.endSec - sub.startSec);
             const hasAudioCover = mappedClips.some(c => {
               if (c.coveredSubIds?.includes(subIdStr) || c.matchedSubId === subIdStr) return true;
               if (c.isPhysics) return false;
               const cStart = c.clipStartSec + (c.offsetSec || 0);
               const cEnd = cStart + c.durationSec;
-              return (cStart <= sub.endSec + 0.8 && cEnd >= sub.startSec - 0.8);
+              const ov = Math.min(cEnd, sub.endSec + 0.25) - Math.max(cStart, sub.startSec - 0.25);
+              return ov >= Math.min(0.28, subDur * 0.35);
             });
 
-            if (!hasAudioCover) {
+            // Cross-dubber check: if another dubber voiced this subtitle window, it is NOT a missing phrase!
+            const voicedByOtherDubber = !hasAudioCover && tracks.some(otherTr => {
+              if (otherTr.id === track.id || isFixTrack(otherTr)) return false;
+              const otherList = updatedClips[otherTr.id] || currentClips[otherTr.id] || [];
+              return otherList.some(oc => {
+                if (oc.isPhysics || oc.durationSec >= 90) return false;
+                const oStart = oc.clipStartSec + (oc.offsetSec || 0);
+                const oEnd = oStart + oc.durationSec;
+                const ov = Math.min(oEnd, sub.endSec + 0.25) - Math.max(oStart, sub.startSec - 0.25);
+                return ov >= Math.min(0.28, subDur * 0.35);
+              });
+            });
+
+            if (voicedByOtherDubber) {
+              crossDubberCoveredCount++;
+            } else if (!hasAudioCover) {
               newIssues.push({
                 id: `issue_missing_${track.id}_${sub.id || sIdx}`,
                 type: 'missing',
@@ -3809,7 +4132,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
           const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
 
-          if (c1End > c2Start + 0.04) {
+          if (c1End > c2Start + 0.03) {
             const overlapDur = c1End - c2Start;
             c1.timingIssue = 'overlap';
             c2.timingIssue = 'overlap';
@@ -3837,7 +4160,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
       // 3B. Inter-track analysis between different dubbers:
       // - Unison / Mass phrases: align by vocal onset peak (detectSpeechOnsetOffsetSec)
-      // - Simultaneous overlapping subtitles: stamp overlapGroupId & Main (0 dB) / Secondary (-10 dB) role
+      // - Simultaneous overlapping subtitles (>= 0.45s): stamp overlapGroupId & Main (0 dB) / Secondary (-10 dB) role
+      // - Sequential tail overlaps (< 0.45s sub overlap): flag as collision ('overlap') so "Исправить" separates them cleanly
       const trackIds = Object.keys(updatedClips);
       const detectedIntentionalOverlapsMap = new Map<string, IntentionalOverlapMoment>();
       const existingPriorityById: Record<string, string | null> = {};
@@ -3946,7 +4270,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               const overlapEnd = Math.min(c1End, c2End);
               const overlapDur = overlapEnd - overlapStart;
 
-              if (overlapDur > 0.08) {
+              if (overlapDur > 0.04) {
                 const sub1 = findSubForClip(trackIds[i], c1);
                 const sub2 = findSubForClip(trackIds[j], c2);
 
@@ -3976,11 +4300,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                   continue;
                 }
 
+                // Only classify as intentional simultaneous scene if the subtitles themselves overlap by >= 0.45s
                 let isSpecifiedInSubtitles = false;
                 if (sub1 && sub2) {
                   const subOverlapStart = Math.max(sub1.startSec, sub2.startSec);
                   const subOverlapEnd = Math.min(sub1.endSec, sub2.endSec);
-                  if (subOverlapEnd > subOverlapStart + 0.05) {
+                  if (subOverlapEnd - subOverlapStart >= 0.45) {
                     isSpecifiedInSubtitles = true;
                   }
                 }
@@ -4072,6 +4397,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                   c1.isSelfOverlap = true;
                   c2.isSelfOverlap = true;
                 } else {
+                  const [earlyClip, lateClip] = c1Start <= c2Start ? [c1, c2] : [c2, c1];
                   c1.hasCollision = true;
                   c2.hasCollision = true;
                   c1.overlappingClipId = c2.id;
@@ -4080,31 +4406,31 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                   if (!c2.timingIssue) c2.timingIssue = 'overlap';
 
                   newCollisions.push({
-                    id: `col_${c1.id}_${c2.id}`,
-                    track1Id: trackIds[i],
-                    track2Id: trackIds[j],
-                    dubber1Name: c1.dubberName,
-                    dubber2Name: c2.dubberName,
-                    character1Name: c1.characterName,
-                    character2Name: c2.characterName,
+                    id: `col_${earlyClip.id}_${lateClip.id}`,
+                    track1Id: earlyClip.trackId,
+                    track2Id: lateClip.trackId,
+                    dubber1Name: earlyClip.dubberName,
+                    dubber2Name: lateClip.dubberName,
+                    character1Name: earlyClip.characterName,
+                    character2Name: lateClip.characterName,
                     startSec: overlapStart,
                     endSec: overlapEnd,
                     overlapDurationSec: Number(overlapDur.toFixed(2))
                   });
 
                   newIssues.push({
-                    id: `issue_overlap_inter_${c1.id}_${c2.id}`,
+                    id: `issue_overlap_inter_${earlyClip.id}_${lateClip.id}`,
                     type: 'overlap',
-                    trackId: trackIds[j],
-                    dubberName: c2.dubberName,
-                    characterName: c2.characterName,
-                    clipId: c2.id,
+                    trackId: lateClip.trackId,
+                    dubberName: lateClip.dubberName,
+                    characterName: lateClip.characterName,
+                    clipId: lateClip.id,
                     timeSec: overlapStart,
                     durationSec: overlapDur,
                     overlapDurationSec: Number(overlapDur.toFixed(2)),
-                    overlappingClipId: c1.id,
-                    overlappingDubber: c1.dubberName,
-                    description: `Наезд голосов (не в субтитрах): «${c1.dubberName}» и «${c2.dubberName}» (${overlapDur.toFixed(2)}с) [${formatSeconds(overlapStart)}]`
+                    overlappingClipId: earlyClip.id,
+                    overlappingDubber: earlyClip.dubberName,
+                    description: `Наезд голосов: «${earlyClip.dubberName}» и «${lateClip.dubberName}» (${overlapDur.toFixed(2)}с) [${formatSeconds(overlapStart)}]`
                   });
                 }
               }
@@ -4129,6 +4455,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
       if (totalPhysicsDetected > 0) {
         addLog(`⚡ Защита физики: распознано и защищено от сдвига/удаления ${totalPhysicsDetected} звуков физики (вздохи/охи/смех вне субтитров).`, 'info');
+      }
+      if (crossDubberCoveredCount > 0) {
+        addLog(`🤝 Перекрёстная озвучка: ${crossDubberCoveredCount} сабов озвучены другими дабберами серии — исключены из пропусков.`, 'success');
       }
       if (totalMultiSubClips > 0) {
         addLog(`🔗 Слитные реплики: обнаружено ${totalMultiSubClips} соседних субтитров, озвученных дабберами на одном дыхании в одном клипе.`, 'info');
@@ -4226,7 +4555,6 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     rawClips: AudioClip[],
     trSubs: SubtitleLine[]
   ): AudioClip[] => {
-    const dubberName = track.participant || track.dubberName || 'Даббер';
     const characterName = track.character || track.characterName || 'Персонаж';
     const trackBuf = audioBuffersRef.current[track.id];
 
@@ -4246,6 +4574,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
     const assignedSubIndices = new Set<number>();
     const clipMatchedSubIdx = new Array<number>(clips.length).fill(-1);
+    const clipIsSplitContinuation = new Array<boolean>(clips.length).fill(false);
     const clipCoveredSubIndices: number[][] = Array.from({ length: clips.length }, () => []);
 
     const isWithinTrackCorridor = (cIdx: number, targetStartSec: number): boolean => {
@@ -4303,7 +4632,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       }
     };
 
-    // Pass A: Match clips within 2.2s of subtitle starts
+    // Pass A.1: Tight asymmetric primary matching ([-0.70s, +1.35s] from subtitle start)
+    // Prevents a subsequent skipped subtitle from stealing the 2nd part of an earlier split phrase!
     const candidatePairs: Array<{ cIdx: number; sIdx: number; score: number }> = [];
     for (let cIdx = 0; cIdx < clips.length; cIdx++) {
       const clip = clips[cIdx];
@@ -4315,8 +4645,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       );
       for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
         const sub = trSubs[sIdx];
-        const diff = Math.abs(cStart - sub.startSec);
-        if (diff <= 2.2 && isWithinTrackCorridor(cIdx, sub.startSec)) {
+        const signedDiff = cStart - sub.startSec;
+        const diff = Math.abs(signedDiff);
+        if (signedDiff >= -0.70 && signedDiff <= 1.35 && isWithinTrackCorridor(cIdx, sub.startSec)) {
           const subDur = Math.max(0.25, sub.endSec - sub.startSec);
           const durRatio = Math.min(clip.durationSec, subDur) / Math.max(clip.durationSec, subDur);
           const shortBreathPenalty = (clip.durationSec < 0.22 && speechStats.activeWindows < 7 && subDur > 0.85) ? 1.5 : 0;
@@ -4334,7 +4665,43 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       expandMultiSubCoverage(pair.cIdx, pair.sIdx);
     }
 
-    // Pass B: Match remaining unassigned subtitles to available clips in corridor (<= 3.8s)
+    // Pass A.2: Absorb split-phrase continuations (2nd/3rd parts of a phrase split by an internal pause)
+    // If clip[cIdx] is unmatched and sits inside or right after the previous clip's subtitle window,
+    // lock it as a continuation of that previous subtitle so a skipped next subtitle NEVER pulls it forward!
+    for (let cIdx = 1; cIdx < clips.length; cIdx++) {
+      if (clipMatchedSubIdx[cIdx] !== -1) continue;
+      const prevSubIdx = clipMatchedSubIdx[cIdx - 1];
+      if (prevSubIdx === -1) continue;
+
+      const prevClip = clips[cIdx - 1];
+      const curClip = clips[cIdx];
+      const prevEnd = prevClip.clipStartSec + (prevClip.offsetSec || 0) + prevClip.durationSec;
+      const curStart = curClip.clipStartSec + (curClip.offsetSec || 0);
+      const gapFromPrevClip = curStart - prevEnd;
+
+      const coveredByPrev = clipCoveredSubIndices[cIdx - 1].length > 0
+        ? clipCoveredSubIndices[cIdx - 1]
+        : [prevSubIdx];
+      const lastCoveredSubIdx = coveredByPrev[coveredByPrev.length - 1];
+      const prevSub = trSubs[lastCoveredSubIdx] || trSubs[prevSubIdx];
+      const nextUnassignedSub = lastCoveredSubIdx + 1 < trSubs.length ? trSubs[lastCoveredSubIdx + 1] : null;
+
+      const isInsideOrNearPrevSub =
+        curStart <= prevSub.endSec + 0.55 ||
+        (gapFromPrevClip <= 0.65 && (prevClip.durationSec + gapFromPrevClip + curClip.durationSec) <= (prevSub.endSec - prevSub.startSec) + 1.15);
+      const isCloserToNextSub =
+        nextUnassignedSub !== null &&
+        Math.abs(curStart - nextUnassignedSub.startSec) <= 0.55 &&
+        curStart >= prevSub.endSec - 0.10;
+
+      if (gapFromPrevClip >= -0.05 && gapFromPrevClip <= 0.95 && isInsideOrNearPrevSub && !isCloserToNextSub) {
+        clipMatchedSubIdx[cIdx] = prevSubIdx;
+        clipIsSplitContinuation[cIdx] = true;
+        clipCoveredSubIndices[cIdx] = [...coveredByPrev];
+      }
+    }
+
+    // Pass B: Match remaining unassigned subtitles to genuinely nearby clips (<= 1.45s, never grabbing earlier split parts)
     for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
       if (assignedSubIndices.has(sIdx)) continue;
       const sub = trSubs[sIdx];
@@ -4346,12 +4713,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         if (!isMonotonicCompatible(cIdx, sIdx)) continue;
         const clip = clips[cIdx];
         const cStart = clip.clipStartSec + (clip.offsetSec || 0);
-        const timeDist = Math.abs(cStart - sub.startSec);
-        if (timeDist > 3.8 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
+        const signedDiff = cStart - sub.startSec;
+        const timeDist = Math.abs(signedDiff);
+        if (signedDiff < -0.80 || signedDiff > 1.55 || timeDist > 1.45 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
 
         const subDur = Math.max(0.25, sub.endSec - sub.startSec);
         const durFit = Math.min(clip.durationSec, subDur) / Math.max(clip.durationSec, subDur);
-        const score = (4.0 - timeDist) * 2.0 + durFit * 2.5;
+        const score = (2.0 - timeDist) * 2.0 + durFit * 2.5;
         if (score > bestScore) {
           bestScore = score;
           bestCIdx = cIdx;
@@ -4368,7 +4736,10 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     // Apply matched metadata or Physics protection
     for (let cIdx = 0; cIdx < clips.length; cIdx++) {
       const clip = clips[cIdx];
+      const cStart = clip.clipStartSec + (clip.offsetSec || 0);
       const bestSubIdx = clipMatchedSubIdx[cIdx];
+      const isSplitPart = clipIsSplitContinuation[cIdx] || Boolean(clip.isSplitContinuation);
+
       if (bestSubIdx !== -1) {
         const coveredIdxs = clipCoveredSubIndices[cIdx].length > 0 ? clipCoveredSubIndices[cIdx] : [bestSubIdx];
         const coveredSubs = coveredIdxs.map(idx => trSubs[idx]).filter(Boolean);
@@ -4377,16 +4748,23 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         const onset = Math.min(0.10, clip.speechOnsetOffsetSec || 0);
 
         clip.isPhysics = false;
-        clip.text = coveredSubs.length > 1
+        clip.isSplitContinuation = isSplitPart;
+        clip.text = isSplitPart
+          ? `${firstSub.text} (ч. 2)`
+          : coveredSubs.length > 1
           ? coveredSubs.map(s => s.text).join(' / ')
           : firstSub.text;
         clip.matchedSubId = String(firstSub.id ?? bestSubIdx);
         clip.coveredSubIds = coveredSubs.map((s, idx) => String(s.id ?? coveredIdxs[idx]));
-        clip.targetSubStartSec = Number(Math.max(0, firstSub.startSec - onset).toFixed(3));
+        // Split-phrase continuations and overlap-resolved clips stay locked on their current timecode!
+        clip.targetSubStartSec = (isSplitPart || clip.overlapResolvedLock)
+          ? Number(cStart.toFixed(3))
+          : Number(Math.max(0, firstSub.startSec - onset).toFixed(3));
         clip.targetSubEndSec = lastSub.endSec;
       } else {
         // Non-dialogue character sound ("физика": sigh, gasp, grunt, laugh outside subtitles)
         clip.isPhysics = true;
+        clip.isSplitContinuation = false;
         clip.timingIssue = null;
         clip.timingIssueText = undefined;
         clip.targetSubStartSec = undefined;
@@ -4406,9 +4784,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   // Verifies 100% of subtitles across all dubbers:
   // - Locks each clip to at most ONE primary subtitle (coveredSubIds[0]) so multi-subtitle
   //   clips NEVER oscillate back and forth between two subtitles.
-  // - Never moves clips that are already in sync (within ±0.30s of subtitle start).
-  // - Prevents duplicate recovery by checking source-interval overlap against all clips on the timeline.
-  // - Never runs a blind domino cascade that pushes properly timed clips onto empty spaces.
+  // - Protects split-phrase continuations (`isSplitContinuation`) and resolved overlaps (`overlapResolvedLock`).
+  // - Recognizes subtitles voiced by another dubber (`voicedByOtherDubber`) as valid voiced lines (not missing).
+  // - Never moves clips that are already in sync (within ±0.30s of subtitle start) or into inter-track collisions.
   // ---------------------------------------------------------------------------
   const runIterativeSelfHealingAudit = useCallback((
     clipsInput: Record<string, AudioClip[]>
@@ -4420,6 +4798,46 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     for (const [trId, list] of Object.entries(clipsInput)) {
       workingClips[trId] = list.map(c => ({ ...c }));
     }
+
+    // Helper: check if another dubber's track already voices a subtitle window `[sub.startSec, sub.endSec]`
+    const findOtherDubberCoveringSubtitle = (currentTrackId: string, sub: SubtitleLine): { dubberName: string; clip: AudioClip } | null => {
+      const subDur = Math.max(0.25, sub.endSec - sub.startSec);
+      for (const otherTrack of tracks) {
+        if (otherTrack.id === currentTrackId) continue;
+        const otherClips = workingClips[otherTrack.id] || [];
+        for (const oc of otherClips) {
+          if (oc.isPhysics) continue;
+          const os = oc.clipStartSec + (oc.offsetSec || 0);
+          const oe = os + oc.durationSec;
+          const ov = Math.min(oe, sub.endSec + 0.20) - Math.max(os, sub.startSec - 0.20);
+          if (ov >= Math.min(0.28, subDur * 0.35)) {
+            return {
+              dubberName: otherTrack.participant || otherTrack.dubberName || 'Другой даббер',
+              clip: oc
+            };
+          }
+        }
+      }
+      return null;
+    };
+
+    // Helper: find the latest end time of a preceding dialogue turn on any other track so moving a clip earlier never creates an inter-track overlap
+    const getPrevInterTrackTurnEnd = (currentTrackId: string, curStart: number, targetStart: number): number => {
+      let maxPrevEnd = 0;
+      for (const [otherTrId, otherClips] of Object.entries(workingClips)) {
+        if (otherTrId === currentTrackId) continue;
+        for (const oc of otherClips) {
+          if (oc.isPhysics) continue;
+          const os = oc.clipStartSec + (oc.offsetSec || 0);
+          const oe = os + oc.durationSec;
+          // If the other speaker's clip started before our current clip and ends near/after targetStart
+          if (os < curStart - 0.08 && oe > targetStart - 0.04 && oe <= curStart + 0.35) {
+            maxPrevEnd = Math.max(maxPrevEnd, oe + 0.04);
+          }
+        }
+      }
+      return maxPrevEnd;
+    };
 
     const MAX_ITERATIONS = 4;
     let recoveredFromFixCount = 0;
@@ -4441,14 +4859,16 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
         // Re-bind clips monotonically at the start of each pass so matchedSubId & coveredSubIds are 100% accurate
         let trClips = bindTrackClipsToSubtitlesMonotonically(track, workingClips[track.id] || [], trSubs);
-        const lockedClipIds = new Set<string>();
+        // Lock all split-phrase continuation clips right away so they are never grabbed by any subsequent subtitle
+        const lockedClipIds = new Set<string>(
+          trClips.filter(c => c.isSplitContinuation || c.overlapResolvedLock).map(c => c.id)
+        );
 
         for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
           const sub = trSubs[sIdx];
           const subIdStr = String(sub.id ?? sIdx);
 
           // 1. Check if `sub` is a SECONDARY subtitle (index >= 1) of a continuous multi-subtitle clip.
-          // If so, the clip is anchored to its first subtitle (coveredSubIds[0]) and MUST NOT be pulled to `sub.startSec`!
           const multiSubOwner = trClips.find(
             c => !c.isPhysics && c.coveredSubIds && c.coveredSubIds.length > 1 && c.coveredSubIds.includes(subIdStr) && c.coveredSubIds[0] !== subIdStr
           );
@@ -4457,13 +4877,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             continue;
           }
 
-          // 2. Find the primary clip assigned to `sub` (never grabbing a clip already locked to an earlier subtitle!)
+          // 2. Find the primary clip assigned to `sub` (never grabbing a split-phrase continuation or a clip locked to an earlier subtitle!)
           let coveringClipIdx = trClips.findIndex(
-            c => !c.isPhysics && !lockedClipIds.has(c.id) && (c.matchedSubId === subIdStr || c.coveredSubIds?.[0] === subIdStr)
+            c => !c.isPhysics && !c.isSplitContinuation && !lockedClipIds.has(c.id) && (c.matchedSubId === subIdStr || c.coveredSubIds?.[0] === subIdStr)
           );
           if (coveringClipIdx === -1) {
             coveringClipIdx = trClips.findIndex(c => {
-              if (c.isPhysics || lockedClipIds.has(c.id)) return false;
+              if (c.isPhysics || c.isSplitContinuation || lockedClipIds.has(c.id)) return false;
               if (c.matchedSubId && c.matchedSubId !== subIdStr) return false;
               const cs = c.clipStartSec + (c.offsetSec || 0);
               const ce = cs + c.durationSec;
@@ -4475,6 +4895,10 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             const covClip = trClips[coveringClipIdx];
             lockedClipIds.add(covClip.id);
 
+            if (covClip.isSplitContinuation || covClip.overlapResolvedLock || covClip.isUnisonPhrase) {
+              continue;
+            }
+
             const covStart = covClip.clipStartSec + (covClip.offsetSec || 0);
             const onset = Math.min(0.10, covClip.speechOnsetOffsetSec || 0);
             const voiceStart = covStart + onset;
@@ -4484,15 +4908,20 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               Math.abs(covStart - sub.startSec) > 0.32 &&
               Math.abs(voiceStart - sub.startSec) > 0.30;
 
-            if (!covClip.isUnisonPhrase && isDisplaced) {
-              const prevLim = coveringClipIdx > 0
+            if (isDisplaced) {
+              const prevIntraLim = coveringClipIdx > 0
                 ? (trClips[coveringClipIdx - 1].clipStartSec + (trClips[coveringClipIdx - 1].offsetSec || 0) + trClips[coveringClipIdx - 1].durationSec + 0.03)
                 : 0;
+              const idealStart = Math.max(0, sub.startSec - onset);
+              const prevInterLim = idealStart < covStart
+                ? getPrevInterTrackTurnEnd(track.id, covStart, idealStart)
+                : 0;
+              const prevLim = Math.max(prevIntraLim, prevInterLim);
+
               const nextLim = coveringClipIdx + 1 < trClips.length
                 ? (trClips[coveringClipIdx + 1].clipStartSec + (trClips[coveringClipIdx + 1].offsetSec || 0) - covClip.durationSec - 0.03)
                 : Infinity;
 
-              const idealStart = Math.max(0, sub.startSec - onset);
               const clampedTarget = Math.max(covStart - 2.0, Math.min(covStart + 2.0, idealStart));
               const healedStart = Number(
                 Math.max(0, Math.max(prevLim, Math.min(clampedTarget, Math.max(prevLim, nextLim)))).toFixed(3)
@@ -4516,7 +4945,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             continue;
           }
 
-          // 3. Check if any clip already covers [sub.startSec, sub.endSec] acoustically on the timeline
+          // 3. Check if any clip on this track already covers [sub.startSec, sub.endSec] acoustically on the timeline
           const alreadyCoveredAcoustically = trClips.some(c => {
             if (c.isPhysics) return false;
             const cs = c.clipStartSec + (c.offsetSec || 0);
@@ -4526,7 +4955,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           });
           if (alreadyCoveredAcoustically) continue;
 
-          // Subtitle `sub` is genuinely UNVOICED on the timeline!
+          // Subtitle `sub` is UNVOICED on this dubber's timeline — check local corridor first
           const prevSubEnd = sIdx > 0 ? trSubs[sIdx - 1].endSec : 0;
           const nextSubStart = sIdx + 1 < trSubs.length ? trSubs[sIdx + 1].startSec : Infinity;
 
@@ -4557,14 +4986,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           }
 
           // Step B: Search Priority 1 — Fix Track Buffers, then Priority 2 — Original Track Buffer
-          // Strictly inside the local corridor [localWinStart, localWinEnd] and rejecting any source audio already on the timeline!
           const localWinStart = Math.max(0, Math.max(prevSubEnd - 0.10, sub.startSec - 1.3));
           const localWinEnd = Math.min(nextSubStart + 0.10, sub.endSec + 1.3);
           if (localWinEnd <= localWinStart + 0.18) continue;
 
           const isSourceIntervalAlreadyUsed = (ivStart: number, ivEnd: number): boolean => {
             return trClips.some(existing => {
-              // Check overlap in source buffer time AND timeline time so an existing phrase is NEVER duplicated
               const srcOverlap = Math.min(existing.sourceEndSec, ivEnd) - Math.max(existing.sourceStartSec, ivStart);
               const tlStart = existing.clipStartSec + (existing.offsetSec || 0);
               const tlEnd = tlStart + existing.durationSec;
@@ -4698,7 +5125,6 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
           const overlap = c1End - c2Start;
           if (overlap > 0 && overlap <= 0.16 && c1.durationSec - overlap >= 0.20) {
-            // Trim only the silent lead-out padding tail of c1 so c2 stays on its exact timecode
             c1.durationSec = Number((c1.durationSec - overlap - 0.01).toFixed(3));
             c1.sourceEndSec = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
           }
@@ -4712,9 +5138,10 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       }
     }
 
-    // Final Verification Tally across 100% of subtitles of all dubbers
+    // Final Verification Tally across 100% of subtitles of all dubbers (with Cross-Dubber Voicing Check)
     let totalSubs = 0;
     let voicedSubs = 0;
+    let voicedByOtherDubberCount = 0;
     let physicsProtectedCount = 0;
     const unvoicedSubs: MissingSubtitleMarker[] = [];
 
@@ -4730,7 +5157,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         totalSubs++;
         const sub = trSubs[sIdx];
         const subIdStr = String(sub.id ?? sIdx);
-        const isCovered = trClips.some(c => {
+        const isCoveredOnOwnTrack = trClips.some(c => {
           if (c.isPhysics) return false;
           if (c.matchedSubId === subIdStr || c.coveredSubIds?.includes(subIdStr)) return true;
           const cs = c.clipStartSec + (c.offsetSec || 0);
@@ -4738,19 +5165,30 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           return cs <= sub.endSec + 0.55 && ce >= sub.startSec - 0.55;
         });
 
-        if (isCovered) {
+        if (isCoveredOnOwnTrack) {
           voicedSubs++;
         } else {
-          unvoicedSubs.push({
-            id: `missing_${track.id}_${subIdStr}`,
-            subId: subIdStr,
-            trackId: track.id,
-            dubberName,
-            characterName,
-            startSec: sub.startSec,
-            endSec: sub.endSec,
-            text: sub.text
-          });
+          // Cross-dubber check: if another dubber voiced this subtitle window, it's NOT a missing phrase!
+          const otherCoverage = findOtherDubberCoveringSubtitle(track.id, sub);
+          if (otherCoverage) {
+            voicedSubs++;
+            voicedByOtherDubberCount++;
+            addLog(
+              `🤝 [Проверка дабберов] Реплика «${sub.text.slice(0, 28)}» (${formatSeconds(sub.startSec)}, роль: ${characterName}) отсутствует у «${dubberName}», но озвучена даббером «${otherCoverage.dubberName}» — пропуск снят.`,
+              'info'
+            );
+          } else {
+            unvoicedSubs.push({
+              id: `missing_${track.id}_${subIdStr}`,
+              subId: subIdStr,
+              trackId: track.id,
+              dubberName,
+              characterName,
+              startSec: sub.startSec,
+              endSec: sub.endSec,
+              text: sub.text
+            });
+          }
         }
       }
     }
@@ -4760,6 +5198,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       report: {
         totalSubs,
         voicedSubs,
+        voicedByOtherDubberCount,
         recoveredFromFixCount,
         recoveredFromOrigCount,
         realignedCount,
@@ -4772,6 +5211,133 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   }, [tracks, trackSubLinesMap, timingSettings.leadInPaddingSec, timingSettings.leadOutPaddingSec, bindTrackClipsToSubtitlesMonotonically, addLog]);
 
   // ---------------------------------------------------------------------------
+  // SURGICAL OVERLAP & COLLISION RESOLVER (INTRA-TRACK & INTER-TRACK)
+  // Separates colliding phrases cleanly without cascading across the timeline,
+  // and stamps `overlapResolvedLock = true` so subsequent passes never undo the fix.
+  // ---------------------------------------------------------------------------
+  const separateOverlappingClipPair = useCallback((
+    earlyClip: AudioClip,
+    lateClip: AudioClip,
+    earlyTrackClips: AudioClip[],
+    lateTrackClips: AudioClip[]
+  ): boolean => {
+    const earlyStart = earlyClip.clipStartSec + (earlyClip.offsetSec || 0);
+    const earlyEnd = earlyStart + earlyClip.durationSec;
+    const lateStart = lateClip.clipStartSec + (lateClip.offsetSec || 0);
+    const overlap = earlyEnd - lateStart;
+
+    if (overlap <= 0.01) {
+      earlyClip.hasCollision = false;
+      lateClip.hasCollision = false;
+      if (earlyClip.timingIssue === 'overlap') {
+        earlyClip.timingIssue = null;
+        earlyClip.timingIssueText = undefined;
+      }
+      if (lateClip.timingIssue === 'overlap') {
+        lateClip.timingIssue = null;
+        lateClip.timingIssueText = undefined;
+      }
+      return false;
+    }
+
+    const needed = overlap + 0.035;
+    let remaining = needed;
+
+    // 1. If micro-overlap (<= 0.14s) and earlyClip has enough duration, trim silent tail of earlyClip first
+    if (overlap <= 0.14 && earlyClip.durationSec - overlap >= 0.28) {
+      const trim = Math.min(remaining, Math.min(0.10, earlyClip.durationSec - 0.25));
+      if (trim > 0.01) {
+        earlyClip.durationSec = Number((earlyClip.durationSec - trim).toFixed(3));
+        earlyClip.sourceEndSec = Number((earlyClip.sourceStartSec + earlyClip.durationSec).toFixed(3));
+        remaining -= trim;
+      }
+    }
+
+    // 2. Check how much earlyClip can safely move earlier on its own track
+    const earlySorted = [...earlyTrackClips].sort(
+      (a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0))
+    );
+    const earlyIdx = earlySorted.findIndex(c => c.id === earlyClip.id);
+    const earlyPrevEnd = earlyIdx > 0
+      ? (earlySorted[earlyIdx - 1].clipStartSec + (earlySorted[earlyIdx - 1].offsetSec || 0) + earlySorted[earlyIdx - 1].durationSec + 0.03)
+      : 0;
+    const earlyMinAllowed = typeof earlyClip.targetSubStartSec === 'number'
+      ? Math.max(earlyPrevEnd, Math.min(earlyStart, earlyClip.targetSubStartSec - 0.18))
+      : Math.max(earlyPrevEnd, earlyStart - 0.35);
+    const maxPullEarlyBack = Math.max(0, earlyStart - earlyMinAllowed);
+
+    // 3. Check how much lateClip can safely move later on its own track (without hitting the next clip on lateTrack)
+    const lateSorted = [...lateTrackClips].sort(
+      (a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0))
+    );
+    const lateIdx = lateSorted.findIndex(c => c.id === lateClip.id);
+    const lateNextStart = lateIdx !== -1 && lateIdx + 1 < lateSorted.length
+      ? (lateSorted[lateIdx + 1].clipStartSec + (lateSorted[lateIdx + 1].offsetSec || 0) - 0.03)
+      : Infinity;
+    const maxPushLateForward = Math.max(0, lateNextStart - (lateStart + lateClip.durationSec));
+
+    if (remaining > 0.005 && maxPullEarlyBack > 0.01) {
+      const pull = Math.min(remaining, maxPullEarlyBack);
+      earlyClip.clipStartSec = Number(Math.max(0, earlyStart - pull).toFixed(3));
+      earlyClip.offsetSec = 0;
+      remaining -= pull;
+    }
+
+    if (remaining > 0.005) {
+      const push = maxPushLateForward >= remaining
+        ? remaining
+        : Math.max(remaining, Math.min(remaining, maxPushLateForward));
+      lateClip.clipStartSec = Number((lateStart + push).toFixed(3));
+      lateClip.offsetSec = 0;
+      remaining -= push;
+
+      // If pushing lateClip slightly touched the next clip on lateClip's same track, nudge that neighbor within local slack
+      if (lateIdx !== -1 && lateIdx + 1 < lateSorted.length) {
+        const nxt = lateSorted[lateIdx + 1];
+        const newLateEnd = lateClip.clipStartSec + lateClip.durationSec;
+        const nxtStart = nxt.clipStartSec + (nxt.offsetSec || 0);
+        if (newLateEnd + 0.02 > nxtStart) {
+          const afterNxtStart = lateIdx + 2 < lateSorted.length
+            ? (lateSorted[lateIdx + 2].clipStartSec + (lateSorted[lateIdx + 2].offsetSec || 0) - 0.02)
+            : Infinity;
+          const neededNudge = (newLateEnd + 0.025) - nxtStart;
+          if (nxtStart + neededNudge + nxt.durationSec <= afterNxtStart) {
+            nxt.clipStartSec = Number((nxtStart + neededNudge).toFixed(3));
+            nxt.offsetSec = 0;
+            nxt.overlapResolvedLock = true;
+          }
+        }
+      }
+    }
+
+    const finalEarlyStart = earlyClip.clipStartSec + (earlyClip.offsetSec || 0);
+    const finalLateStart = lateClip.clipStartSec + (lateClip.offsetSec || 0);
+
+    earlyClip.targetSubStartSec = finalEarlyStart;
+    lateClip.targetSubStartSec = finalLateStart;
+    earlyClip.overlapResolvedLock = true;
+    lateClip.overlapResolvedLock = true;
+    earlyClip.hasCollision = false;
+    lateClip.hasCollision = false;
+    earlyClip.overlappingClipId = undefined;
+    lateClip.overlappingClipId = undefined;
+    if (earlyClip.timingIssue === 'overlap') {
+      earlyClip.timingIssue = null;
+      earlyClip.timingIssueText = undefined;
+    }
+    if (lateClip.timingIssue === 'overlap') {
+      lateClip.timingIssue = null;
+      lateClip.timingIssueText = undefined;
+    }
+
+    addLog(
+      `↔️ Наезд раздвинут: «${earlyClip.dubberName}» (${formatSeconds(finalEarlyStart)}–${formatSeconds(finalEarlyStart + earlyClip.durationSec)}) и «${lateClip.dubberName}» (➔ ${formatSeconds(finalLateStart)})`,
+      'success'
+    );
+    return true;
+  }, [addLog]);
+
+  // ---------------------------------------------------------------------------
   // ЭТАП 2: ТОЧЕЧНЫЙ ХИРУРГИЧЕСКИЙ АВТОТАЙМИНГ + ИТЕРАЦИОННЫЙ САМОВОССТАНАВЛИВАЮЩИЙСЯ АУДИТ
   // ---------------------------------------------------------------------------
   const handleApplyTargetedAutoTiming = async (typeFilter: 'all' | 'overlap' | 'desync' | 'orphan' = 'all') => {
@@ -4779,7 +5345,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     try {
       setIsLoading(true);
       updateProcess('2. Точечный автотайминг', 'Монотонная привязка фраз к субтитрам и защита физики...', 25, 1, 3);
-      addLog(`Запуск Этапа 2: хирургический автотайминг + самовосстанавливающаяся проверка всех сабов (фильтр: ${typeFilter})...`, 'info');
+      addLog(`Запуск Этапа 2: хирургический автотайминг (режим: ${typeFilter})...`, 'info');
       await new Promise(r => setTimeout(r, 0));
 
       const updatedClips: Record<string, AudioClip[]> = {};
@@ -4792,6 +5358,138 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       let fixedOverlapCount = 0;
       let fixedOrphanCount = 0;
 
+      // Helper to resolve ALL intra-track and inter-track overlaps currently on the timeline or in timingIssues
+      const resolveAllOverlapsInMap = (clipsMap: Record<string, AudioClip[]>): number => {
+        let resolved = 0;
+        const findClipEntryById = (id?: string): { clip: AudioClip; trackId: string } | null => {
+          if (!id) return null;
+          for (const [tId, list] of Object.entries(clipsMap)) {
+            const found = list.find(c => c.id === id);
+            if (found) return { clip: found, trackId: tId };
+          }
+          return null;
+        };
+
+        // Pass 1: Resolve all explicit overlap issues from `timingIssues` (including QA passport inter-track collisions)
+        for (const issue of timingIssues) {
+          if (issue.type !== 'overlap') continue;
+          let entryA = findClipEntryById(issue.clipId);
+          let entryB = findClipEntryById(issue.overlappingClipId || entryA?.clip.overlappingClipId);
+
+          if (!entryA || !entryB) {
+            // Find any two clips overlapping near `issue.timeSec`
+            const nearClips: Array<{ clip: AudioClip; trackId: string }> = [];
+            for (const [tId, list] of Object.entries(clipsMap)) {
+              for (const c of list) {
+                if (c.isPhysics) continue;
+                const cs = c.clipStartSec + (c.offsetSec || 0);
+                const ce = cs + c.durationSec;
+                if (cs <= issue.timeSec + 1.2 && ce >= issue.timeSec - 1.2) {
+                  nearClips.push({ clip: c, trackId: tId });
+                }
+              }
+            }
+            for (let i = 0; i < nearClips.length; i++) {
+              for (let j = i + 1; j < nearClips.length; j++) {
+                const a = nearClips[i];
+                const b = nearClips[j];
+                const as = a.clip.clipStartSec + (a.clip.offsetSec || 0);
+                const ae = as + a.clip.durationSec;
+                const bs = b.clip.clipStartSec + (b.clip.offsetSec || 0);
+                const be = bs + b.clip.durationSec;
+                if (Math.min(ae, be) - Math.max(as, bs) > 0.015) {
+                  entryA = as <= bs ? a : b;
+                  entryB = as <= bs ? b : a;
+                  break;
+                }
+              }
+              if (entryA && entryB) break;
+            }
+          }
+
+          if (entryA && entryB && entryA.clip.id !== entryB.clip.id) {
+            const aStart = entryA.clip.clipStartSec + (entryA.clip.offsetSec || 0);
+            const bStart = entryB.clip.clipStartSec + (entryB.clip.offsetSec || 0);
+            const early = aStart <= bStart ? entryA : entryB;
+            const late = aStart <= bStart ? entryB : entryA;
+            if (separateOverlappingClipPair(early.clip, late.clip, clipsMap[early.trackId] || [], clipsMap[late.trackId] || [])) {
+              resolved++;
+            }
+          }
+        }
+
+        // Pass 2: Resolve any remaining intra-track overlaps on every track
+        for (const trackId of Object.keys(clipsMap)) {
+          const clips = clipsMap[trackId] || [];
+          clips.sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
+          for (let i = 0; i < clips.length - 1; i++) {
+            const c1 = clips[i];
+            const c2 = clips[i + 1];
+            const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
+            const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
+            if (c1End - c2Start > 0.015) {
+              if (separateOverlappingClipPair(c1, c2, clips, clips)) {
+                resolved++;
+              }
+            }
+          }
+        }
+
+        // Pass 3: Resolve any remaining flagged inter-track collisions (hasCollision or timingIssue === 'overlap')
+        const allDialogue: Array<{ clip: AudioClip; trackId: string }> = [];
+        for (const [tId, list] of Object.entries(clipsMap)) {
+          for (const c of list) {
+            if (!c.isPhysics && !c.isUnisonPhrase) {
+              allDialogue.push({ clip: c, trackId: tId });
+            }
+          }
+        }
+        allDialogue.sort(
+          (a, b) => (a.clip.clipStartSec + (a.clip.offsetSec || 0)) - (b.clip.clipStartSec + (b.clip.offsetSec || 0))
+        );
+        for (let i = 0; i < allDialogue.length; i++) {
+          for (let j = i + 1; j < allDialogue.length; j++) {
+            const a = allDialogue[i];
+            const b = allDialogue[j];
+            if (a.trackId === b.trackId) continue;
+            const aStart = a.clip.clipStartSec + (a.clip.offsetSec || 0);
+            const aEnd = aStart + a.clip.durationSec;
+            const bStart = b.clip.clipStartSec + (b.clip.offsetSec || 0);
+            if (bStart >= aEnd - 0.015) break;
+
+            const isFlaggedPair =
+              a.clip.hasCollision ||
+              b.clip.hasCollision ||
+              a.clip.timingIssue === 'overlap' ||
+              b.clip.timingIssue === 'overlap' ||
+              a.clip.overlappingClipId === b.clip.id ||
+              b.clip.overlappingClipId === a.clip.id;
+            const subOverlap = (typeof a.clip.targetSubEndSec === 'number' && typeof b.clip.targetSubStartSec === 'number')
+              ? (a.clip.targetSubEndSec - b.clip.targetSubStartSec)
+              : 0;
+
+            if (isFlaggedPair || subOverlap < 0.45) {
+              if (separateOverlappingClipPair(a.clip, b.clip, clipsMap[a.trackId] || [], clipsMap[b.trackId] || [])) {
+                resolved++;
+              }
+            }
+          }
+        }
+
+        return resolved;
+      };
+
+      // Mode "overlap": ONLY separate overlaps, never running desync shifts or audit!
+      if (typeFilter === 'overlap') {
+        updateProcess('2. Точечный автотайминг', 'Хирургическое разведение наездов...', 75, 2, 2);
+        fixedOverlapCount = resolveAllOverlapsInMap(updatedClips);
+        setAudioClips(updatedClips);
+        setTimingIssues(prev => prev.filter(i => i.type !== 'overlap'));
+        setCollisions([]);
+        toast.success(`Раздвинуто наездов: ${fixedOverlapCount}`);
+        return;
+      }
+
       // 1 & 2. Хирургическое выравнивание только реально сдвинутых (> 0.30с) фраз строго внутри локального коридора
       for (const trackId of Object.keys(updatedClips)) {
         const clips = [...(updatedClips[trackId] || [])].sort(
@@ -4800,7 +5498,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
         for (let idx = 0; idx < clips.length; idx++) {
           const clip = clips[idx];
-          if (clip.isPhysics || clip.isUnisonPhrase) continue;
+          if (clip.isPhysics || clip.isUnisonPhrase || clip.isSplitContinuation || clip.overlapResolvedLock) continue;
 
           const shouldFixDesync = (typeFilter === 'all' || typeFilter === 'desync');
           const shouldFixOrphan = clip.timingIssue === 'orphan' && (typeFilter === 'all' || typeFilter === 'orphan');
@@ -4819,9 +5517,25 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               continue;
             }
 
-            const prevEnd = idx > 0
+            const prevIntraEnd = idx > 0
               ? (clips[idx - 1].clipStartSec + (clips[idx - 1].offsetSec || 0) + clips[idx - 1].durationSec + 0.03)
               : 0;
+            // Also respect preceding speaker's phrase end on other tracks when pulling earlier
+            let prevInterEnd = 0;
+            if (clip.targetSubStartSec < curStart) {
+              for (const [otherTrId, otherClips] of Object.entries(updatedClips)) {
+                if (otherTrId === trackId) continue;
+                for (const oc of otherClips) {
+                  if (oc.isPhysics) continue;
+                  const os = oc.clipStartSec + (oc.offsetSec || 0);
+                  const oe = os + oc.durationSec;
+                  if (os < curStart - 0.08 && oe > clip.targetSubStartSec - 0.04 && oe <= curStart + 0.35) {
+                    prevInterEnd = Math.max(prevInterEnd, oe + 0.04);
+                  }
+                }
+              }
+            }
+            const prevEnd = Math.max(prevIntraEnd, prevInterEnd);
             const nextStart = idx + 1 < clips.length
               ? (clips[idx + 1].clipStartSec + (clips[idx + 1].offsetSec || 0) - 0.03)
               : Infinity;
@@ -4854,58 +5568,25 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         updatedClips[trackId] = clips;
       }
 
-      updateProcess('2. Точечный автотайминг', 'Хирургическое разведение локальных наездов...', 60, 2, 3);
-      await new Promise(r => setTimeout(r, 0));
-
-      // 3. Хирургическое разведение наездов (Overlap) без каскадного сдвига последующих фраз
-      if (typeFilter === 'all' || typeFilter === 'overlap') {
-        for (const trackId of Object.keys(updatedClips)) {
-          const clips = [...(updatedClips[trackId] || [])];
-          clips.sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
-
-          for (let i = 0; i < clips.length - 1; i++) {
-            const c1 = clips[i];
-            const c2 = clips[i + 1];
-            const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
-            const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
-            const overlap = c1End - c2Start;
-
-            if (overlap > 0.01) {
-              if (overlap <= 0.16 && c1.durationSec - overlap >= 0.22) {
-                c1.durationSec = Number((c1.durationSec - overlap - 0.01).toFixed(3));
-                c1.sourceEndSec = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
-              } else if (typeof c1.targetSubStartSec === 'number' && c1.clipStartSec > c1.targetSubStartSec) {
-                const prevLimit = i > 0 ? ((clips[i - 1].clipStartSec + (clips[i - 1].offsetSec || 0)) + clips[i - 1].durationSec + 0.03) : 0;
-                const canMoveBack = Math.min(overlap + 0.02, Math.max(0, c1.clipStartSec - Math.max(c1.targetSubStartSec, prevLimit)));
-                if (canMoveBack > 0.01) {
-                  c1.clipStartSec = Number((c1.clipStartSec - canMoveBack).toFixed(3));
-                  c1.offsetSec = 0;
-                }
-              }
-              c1.hasCollision = false;
-              c2.hasCollision = false;
-              c1.timingIssue = null;
-              c2.timingIssue = null;
-              c1.timingIssueText = undefined;
-              c2.timingIssueText = undefined;
-              fixedOverlapCount++;
-            }
-          }
-          updatedClips[trackId] = clips;
-        }
-      }
-
-      // 4. ИТЕРАЦИОННАЯ ФИНАЛЬНАЯ ПРОВЕРКА И САМОВОССТАНОВЛЕНИЕ ВСЕХ САБОВ ВСЕХ ДАББЕРОВ
+      // 3. ИТЕРАЦИОННАЯ ФИНАЛЬНАЯ ПРОВЕРКА И САМОВОССТАНОВЛЕНИЕ ВСЕХ САБОВ ВСЕХ ДАББЕРОВ
       updateProcess(
         '3. Финальный аудит и самовосстановление',
         'Проверка 100% субтитров всех дабберов и поиск пропавших реплик (Фиксы ➔ Оригинал)...',
-        88,
-        3,
+        72,
+        2,
         3
       );
       await new Promise(r => setTimeout(r, 0));
 
       const { healedClips, report } = runIterativeSelfHealingAudit(updatedClips);
+
+      // 4. Хирургическое разведение наездов (ПОСЛЕ аудита, чтобы ни один раздвинутый наезд не вернулся назад!)
+      if (typeFilter === 'all') {
+        updateProcess('3. Разведение наездов', 'Финальное хирургическое разведение локальных и междорожечных наездов...', 92, 3, 3);
+        await new Promise(r => setTimeout(r, 0));
+        fixedOverlapCount += resolveAllOverlapsInMap(healedClips);
+      }
+
       setAudioClips(healedClips);
       setFinalVerificationReport(report);
       setMissingSubtitles(report.unvoicedSubs);
@@ -4933,19 +5614,19 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
       if (report.passed) {
         addLog(
-          `✅ ФИНАЛЬНАЯ ПРОВЕРКА ПРОЙДЕНА (итераций: ${report.iterationsRun}): 100% субтитров всех дабберов (${report.voicedSubs}/${report.totalSubs}) озвучены и стоят на своих местах! Восстановлено из фиксов: ${report.recoveredFromFixCount}, из оригинала: ${report.recoveredFromOrigCount}, довыровнено: ${report.realignedCount}, защищено физики: ${report.physicsProtectedCount}.`,
+          `✅ ФИНАЛЬНАЯ ПРОВЕРКА ПРОЙДЕНА (итераций: ${report.iterationsRun}): 100% субтитров всех дабберов (${report.voicedSubs}/${report.totalSubs}${report.voicedByOtherDubberCount ? `, из них озвучено другими дабберами: ${report.voicedByOtherDubberCount}` : ''}) озвучены и стоят на своих местах! Раздвинуто наездов: ${fixedOverlapCount}, восстановлено из фиксов: ${report.recoveredFromFixCount}, из оригинала: ${report.recoveredFromOrigCount}, довыровнено: ${report.realignedCount}.`,
           'success'
         );
         toast.success(
-          `Финальная проверка пройдена! Все ${report.voicedSubs}/${report.totalSubs} сабов на местах (восстановлено: ${report.recoveredFromFixCount + report.recoveredFromOrigCount}, исправлено: ${totalFixed}).`
+          `Финальная проверка пройдена! Все ${report.voicedSubs}/${report.totalSubs} сабов на местах (наездов раздвинуто: ${fixedOverlapCount}, исправлено: ${totalFixed}).`
         );
       } else {
         addLog(
-          `⚠️ Финальный аудит завершён за ${report.iterationsRun} итераций: озвучено ${report.voicedSubs}/${report.totalSubs} сабов (восстановлено из фиксов: ${report.recoveredFromFixCount}, из оригинала: ${report.recoveredFromOrigCount}). Не найдено звука ни в фиксе, ни в оригинале для ${report.unvoicedSubs.length} сабов.`,
+          `⚠️ Финальный аудит завершён за ${report.iterationsRun} итераций: озвучено ${report.voicedSubs}/${report.totalSubs} сабов${report.voicedByOtherDubberCount ? ` (в т.ч. другими дабберами: ${report.voicedByOtherDubberCount})` : ''}, раздвинуто наездов: ${fixedOverlapCount}. Не найдено звука для ${report.unvoicedSubs.length} сабов.`,
           'warn'
         );
         toast.warning(
-          `Автотайминг и самовосстановление завершены! Озвучено ${report.voicedSubs}/${report.totalSubs} сабов (восстановлено: ${report.recoveredFromFixCount + report.recoveredFromOrigCount}). Не озвучено в исходниках: ${report.unvoicedSubs.length}.`,
+          `Автотайминг завершён! Озвучено ${report.voicedSubs}/${report.totalSubs} сабов, раздвинуто наездов: ${fixedOverlapCount}. Пропусков в исходниках: ${report.unvoicedSubs.length}.`,
           { duration: 6000 }
         );
       }
@@ -4982,73 +5663,104 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     toast.success('Фраза точечно пододвинута к субтитру!');
   };
 
-  // Quick surgical fixer for an overlap collision (intra-track or inter-track)
-  const handleResolveSingleOverlap = (trackId: string, clipId: string) => {
+  // Quick surgical fixer for an overlap collision (intra-track or inter-track, by clipId or timeSec)
+  const handleResolveSingleOverlap = (trackId: string, clipId?: string, issueTimeSec?: number, explicitOverlappingClipId?: string) => {
+    let wasResolved = false;
     setAudioClips(prev => {
-      const updated = { ...prev };
-      let targetClip: AudioClip | null = null;
-      let targetTrackId = trackId;
-
-      for (const [tId, clips] of Object.entries(updated)) {
-        const found = clips.find(c => c.id === clipId);
-        if (found) {
-          targetClip = found;
-          targetTrackId = tId;
-          break;
-        }
-      }
-      if (!targetClip) return prev;
-
-      let collidingClip: AudioClip | null = null;
-      if (targetClip.overlappingClipId) {
-        for (const clips of Object.values(updated)) {
-          const found = clips.find(c => c.id === targetClip!.overlappingClipId);
-          if (found) {
-            collidingClip = found;
-            break;
-          }
-        }
+      const updated: Record<string, AudioClip[]> = {};
+      for (const [tId, list] of Object.entries(prev)) {
+        updated[tId] = list.map(c => ({ ...c }));
       }
 
-      if (collidingClip) {
-        const colEnd = (collidingClip.clipStartSec + (collidingClip.offsetSec || 0)) + collidingClip.durationSec;
-        const curStart = targetClip.clipStartSec + (targetClip.offsetSec || 0);
-        if (colEnd > curStart) {
-          const shift = (colEnd - curStart) + 0.04;
-          targetClip.clipStartSec = Number((targetClip.clipStartSec + shift).toFixed(3));
-          targetClip.offsetSec = 0;
-          targetClip.hasCollision = false;
-          collidingClip.hasCollision = false;
-          targetClip.timingIssue = null;
-          collidingClip.timingIssue = null;
-          addLog(`↔️ Раздвинут наезд: «${targetClip.text}» сдвинута на +${shift.toFixed(2)}с`, 'success');
+      const findById = (id?: string): { clip: AudioClip; trackId: string } | null => {
+        if (!id) return null;
+        for (const [tId, list] of Object.entries(updated)) {
+          const found = list.find(c => c.id === id);
+          if (found) return { clip: found, trackId: tId };
         }
-      } else {
-        const trClips = [...(updated[targetTrackId] || [])];
-        trClips.sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
-        const idx = trClips.findIndex(c => c.id === clipId);
-        if (idx > 0) {
-          const prevClip = trClips[idx - 1];
-          const prevEnd = (prevClip.clipStartSec + (prevClip.offsetSec || 0)) + prevClip.durationSec;
-          const curStart = targetClip.clipStartSec + (targetClip.offsetSec || 0);
-          if (prevEnd > curStart) {
-            const shift = (prevEnd - curStart) + 0.04;
-            targetClip.clipStartSec = Number((targetClip.clipStartSec + shift).toFixed(3));
-            targetClip.offsetSec = 0;
-            targetClip.hasCollision = false;
-            prevClip.hasCollision = false;
-            targetClip.timingIssue = null;
-            prevClip.timingIssue = null;
-            addLog(`↔️ Раздвинут наезд внутри дорожки: «${targetClip.text}» сдвинута на +${shift.toFixed(2)}с`, 'success');
+        return null;
+      };
+
+      let entryA = findById(clipId);
+      let entryB = findById(explicitOverlappingClipId || entryA?.clip.overlappingClipId);
+
+      // If entryA exists but entryB is not linked by ID, search for any clip overlapping entryA (same track or other tracks)
+      if (entryA && !entryB) {
+        const aStart = entryA.clip.clipStartSec + (entryA.clip.offsetSec || 0);
+        const aEnd = aStart + entryA.clip.durationSec;
+        for (const [tId, list] of Object.entries(updated)) {
+          for (const c of list) {
+            if (c.id === entryA.clip.id || c.isPhysics) continue;
+            const cs = c.clipStartSec + (c.offsetSec || 0);
+            const ce = cs + c.durationSec;
+            if (Math.min(aEnd, ce) - Math.max(aStart, cs) > 0.01) {
+              entryB = { clip: c, trackId: tId };
+              break;
+            }
+          }
+          if (entryB) break;
+        }
+      }
+
+      // Fallback: search by issueTimeSec across all tracks if clip IDs were from QA passport before slicing
+      if ((!entryA || !entryB) && typeof issueTimeSec === 'number') {
+        const near: Array<{ clip: AudioClip; trackId: string }> = [];
+        for (const [tId, list] of Object.entries(updated)) {
+          for (const c of list) {
+            if (c.isPhysics) continue;
+            const cs = c.clipStartSec + (c.offsetSec || 0);
+            const ce = cs + c.durationSec;
+            if (cs <= issueTimeSec + 1.25 && ce >= issueTimeSec - 1.25) {
+              near.push({ clip: c, trackId: tId });
+            }
           }
         }
-        updated[targetTrackId] = trClips;
+        for (let i = 0; i < near.length; i++) {
+          for (let j = i + 1; j < near.length; j++) {
+            const a = near[i];
+            const b = near[j];
+            const as = a.clip.clipStartSec + (a.clip.offsetSec || 0);
+            const ae = as + a.clip.durationSec;
+            const bs = b.clip.clipStartSec + (b.clip.offsetSec || 0);
+            const be = bs + b.clip.durationSec;
+            if (Math.min(ae, be) - Math.max(as, bs) > 0.01) {
+              entryA = as <= bs ? a : b;
+              entryB = as <= bs ? b : a;
+              break;
+            }
+          }
+          if (entryA && entryB) break;
+        }
+      }
+
+      if (entryA && entryB && entryA.clip.id !== entryB.clip.id) {
+        const aStart = entryA.clip.clipStartSec + (entryA.clip.offsetSec || 0);
+        const bStart = entryB.clip.clipStartSec + (entryB.clip.offsetSec || 0);
+        const early = aStart <= bStart ? entryA : entryB;
+        const late = aStart <= bStart ? entryB : entryA;
+        wasResolved = separateOverlappingClipPair(
+          early.clip,
+          late.clip,
+          updated[early.trackId] || [],
+          updated[late.trackId] || []
+        );
       }
 
       return updated;
     });
-    setTimingIssues(prev => prev.filter(i => i.clipId !== clipId));
-    toast.success('Наезд точечно раздвинут!');
+
+    setTimingIssues(prev =>
+      prev.filter(i => {
+        if (clipId && (i.clipId === clipId || i.overlappingClipId === clipId)) return false;
+        if (typeof issueTimeSec === 'number' && i.type === 'overlap' && Math.abs(i.timeSec - issueTimeSec) <= 0.35) return false;
+        return true;
+      })
+    );
+    if (wasResolved) {
+      toast.success('Наезд точечно раздвинут!');
+    } else {
+      toast.info('Фразы на этом участке уже разведены.');
+    }
   };
 
   // Quick clipboard helper for missing phrases
@@ -5753,13 +6465,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
           <button
             onClick={() => handleApplyTargetedAutoTiming('all')}
-            disabled={isLoading || tracks.length === 0 || timingIssues.filter(i => i.type !== 'missing').length === 0}
+            disabled={isLoading || tracks.length === 0}
             className={`h-8 px-2.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 border transition shrink-0 ${
-              timingIssues.filter(i => i.type !== 'missing').length > 0
+              tracks.length > 0
                 ? 'bg-indigo-600 hover:bg-indigo-500 text-white border-indigo-500 shadow-sm'
                 : 'bg-neutral-800/60 text-neutral-500 border-neutral-800 cursor-not-allowed'
             }`}
-            title="5. Точечный автотайминг: раздвигает только наезды и выравнивает рассинхроны под субтитры"
+            title="5. Точечный автотайминг: раздвигает наезды, выравнивает рассинхроны и проверяет все сабы"
           >
             {isLoading && statusMessage.includes('Этап 2') ? (
               <Loader2 className="w-3.5 h-3.5 text-amber-300 animate-spin shrink-0" />
@@ -6079,10 +6791,14 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                       </button>
                     )}
 
-                    {issue.type === 'overlap' && issue.clipId && (
+                    {issue.type === 'overlap' && (
                       <button
-                        onClick={(e) => { e.stopPropagation(); handleResolveSingleOverlap(issue.trackId, issue.clipId!); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleResolveSingleOverlap(issue.trackId, issue.clipId, issue.timeSec, issue.overlappingClipId);
+                        }}
                         className="px-2 py-0.5 bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold rounded flex items-center gap-1 shadow"
+                        title="Точечно раздвинуть пересекающиеся фразы"
                       >
                         <MoveHorizontal className="w-2.5 h-2.5" />
                         <span>Раздвинуть</span>
@@ -6148,6 +6864,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             {(finalVerificationReport.recoveredFromFixCount > 0 || finalVerificationReport.recoveredFromOrigCount > 0) && (
               <span className="px-2 py-0.5 rounded bg-emerald-900/60 border border-emerald-700/60 text-[10px] font-mono text-emerald-200">
                 🚑 Восстановлено: {finalVerificationReport.recoveredFromFixCount} из фикса / {finalVerificationReport.recoveredFromOrigCount} из оригинала
+              </span>
+            )}
+
+            {Boolean(finalVerificationReport.voicedByOtherDubberCount && finalVerificationReport.voicedByOtherDubberCount > 0) && (
+              <span className="px-2 py-0.5 rounded bg-sky-900/60 border border-sky-700/60 text-[10px] font-mono text-sky-200">
+                🤝 Озвучено другими дабберами: {finalVerificationReport.voicedByOtherDubberCount}
               </span>
             )}
 
@@ -7034,9 +7756,12 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                                     🎯 К субтитру
                                   </button>
                                 )}
-                                {clip.hasCollision && (
+                                {(clip.hasCollision || clip.timingIssue === 'overlap') && (
                                   <button
-                                    onClick={(e) => { e.stopPropagation(); handleResolveSingleOverlap(track.id, clip.id); }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleResolveSingleOverlap(track.id, clip.id, clip.clipStartSec + (clip.offsetSec || 0), clip.overlappingClipId);
+                                    }}
                                     className="px-1.5 py-0.5 bg-red-600 hover:bg-red-500 text-white rounded font-bold transition shadow mr-0.5"
                                     title="Раздвинуть наезд"
                                   >
