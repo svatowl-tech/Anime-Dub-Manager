@@ -321,11 +321,11 @@ export function detectSpeechIntervals(
   } = {}
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
   const {
-    minSilenceDurationSec = 0.30,
-    leadInPaddingSec = 0.15,
-    leadOutPaddingSec = 0.22,
-    minSpeechDurationSec = 0.20,
-    mergeCloseGapsSec = 0.35,
+    minSilenceDurationSec = 0.26,
+    leadInPaddingSec = 0.18,
+    leadOutPaddingSec = 0.26,
+    minSpeechDurationSec = 0.15,
+    mergeCloseGapsSec = 0.25,
     manualThresholdDb,
     onCalibration
   } = options;
@@ -425,6 +425,68 @@ export function detectSpeechIntervals(
   return finalIntervals;
 }
 
+/**
+ * Rule: IF A PHRASE DOES NOT EXCEED THE BOUNDARIES OF THE SUBTITLE
+ * OR EXCEEDS IT WITH A TAIL BY NO MORE THAN 30% OF THE SUBTITLE DURATION,
+ * THEN TIMING OF THE PHRASE IS NOT REQUIRED.
+ *
+ * @param clipStartSec Audio phrase start time on timeline
+ * @param clipDurationSec Audio phrase duration in seconds
+ * @param subStartSec Subtitle start time
+ * @param subEndSec Subtitle end time
+ */
+export function isPhraseTimingNotRequired(
+  clipStartSec: number,
+  clipDurationSec: number,
+  subStartSec: number,
+  subEndSec: number
+): { notRequired: boolean; reason?: string; tailExcessSec?: number; tailExcessPct?: number } {
+  if (
+    typeof clipStartSec !== 'number' ||
+    typeof clipDurationSec !== 'number' ||
+    typeof subStartSec !== 'number' ||
+    typeof subEndSec !== 'number'
+  ) {
+    return { notRequired: false };
+  }
+  const subDur = Math.max(0.1, subEndSec - subStartSec);
+  const clipEndSec = clipStartSec + clipDurationSec;
+
+  // Has phrase started noticeably before subtitle start? (allow a small acoustic margin 0.08s for consonant lead-in)
+  const startsPrematurely = clipStartSec < subStartSec - 0.08;
+  if (startsPrematurely) {
+    return { notRequired: false };
+  }
+
+  // Case 1: Phrase does not exceed boundaries of the subtitle (with small 0.05s rounding margin)
+  if (clipEndSec <= subEndSec + 0.05) {
+    return {
+      notRequired: true,
+      reason: 'В пределах субтитра (тайминг не требуется)'
+    };
+  }
+
+  // Case 2: Phrase exceeds with a tail, but by no more than 30% of the subtitle duration
+  const tailExcessSec = clipEndSec - subEndSec;
+  const maxAllowedTail = subDur * 0.30 + 0.05;
+  const tailExcessPct = (tailExcessSec / subDur) * 100;
+
+  if (tailExcessSec <= maxAllowedTail) {
+    return {
+      notRequired: true,
+      reason: `Хвост фразы заходит на ${tailExcessSec.toFixed(2)}с (${Math.round(tailExcessPct)}% ≤ 30% саба — тайминг не требуется)`,
+      tailExcessSec: Number(tailExcessSec.toFixed(2)),
+      tailExcessPct: Math.round(tailExcessPct)
+    };
+  }
+
+  return {
+    notRequired: false,
+    tailExcessSec: Number(tailExcessSec.toFixed(2)),
+    tailExcessPct: Math.round(tailExcessPct)
+  };
+}
+
 export interface AudioClip {
   id: string;
   trackId: string;
@@ -438,6 +500,7 @@ export interface AudioClip {
   recognizedText?: string;  // What Whisper recognized in this audio phrase
   whisperMatchedScore?: number; // Match confidence percentage (0-100)
   volumePercent: number;    // Gain % (0 - 200%)
+  volumeGainDb?: number;    // Gain dB offset (0 dB for main voice, -10 dB for secondary voice in overlaps)
   isFix?: boolean;          // Flag for spliced fix takes
   hasCollision?: boolean;   // Collision with another actor
   offsetSec: number;        // Manual mouse drag offset
@@ -445,6 +508,11 @@ export interface AudioClip {
   rawSourceEndSec?: number;   // Detected end before any manual trim/expansion
   isSelfOverlap?: boolean;    // Intentional parallel layer between 2 tracks of same dubber
   isIntentionalOverlap?: boolean; // Intentional overlap specified in original subtitles
+  overlapGroupId?: string;  // Group ID for intentional overlap
+  overlapRole?: 'main' | 'secondary' | null; // Main (0 dB) vs Secondary (-10 dB)
+  overlapRoleDisabled?: boolean; // User explicitly disabled intentional overlap role on this phrase
+  timingNotRequired?: boolean; // Phrase within sub or tail <= 30% of sub duration
+  timingNotRequiredReason?: string;
   sourceAudioTrackId?: string; // Track ID of audio buffer if spliced from fix track
   sourceAudioPath?: string;    // Direct file path on disk for export / mixing
   // Two-Stage Auto-Timing Problem Tracking

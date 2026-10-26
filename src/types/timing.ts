@@ -28,6 +28,12 @@ export interface AudioClip {
   targetSubEndSec?: number;
   timeDiffSec?: number;
   overlappingClipId?: string;
+  volumeGainDb?: number;
+  overlapRole?: 'main' | 'secondary' | null;
+  overlapRoleDisabled?: boolean;
+  overlapGroupId?: string;
+  timingNotRequired?: boolean;
+  timingNotRequiredReason?: string;
   // Pause compensation metadata
   pauseModifications?: {
     originalPauseDuration: number;

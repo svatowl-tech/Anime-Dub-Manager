@@ -13,7 +13,9 @@ import {
   isFixTrack,
   formatSeconds,
   getPlayableAudioUrl,
-  detectSpeechIntervals
+  detectSpeechIntervals,
+  isPhraseTimingNotRequired,
+  normalizeName
 } from "./timingAudioUtils";
 
 export function useTimingAutoAlign(params: {
@@ -302,7 +304,17 @@ export function useTimingAutoAlign(params: {
               clip.whisperMatchedScore = clipWhisperScore[cIdx];
             }
 
-            if (matchedByWhisper && effectiveShift >= 0.25) {
+            // User Rule: If phrase does not exceed sub or tail <= 30% of sub duration, timing is NOT required!
+            const timingExempt = isPhraseTimingNotRequired(cStart, clip.durationSec, bestSub.startSec, bestSub.endSec);
+
+            if (timingExempt.notRequired) {
+              clip.timingNotRequired = true;
+              clip.timingNotRequiredReason = timingExempt.reason;
+              clip.timingIssue = null;
+              clip.timingIssueText = undefined;
+              clip.targetSubStartSec = cStart;
+            } else if (matchedByWhisper && effectiveShift >= 0.25) {
+              clip.timingNotRequired = false;
               clip.timingIssue = 'orphan';
               clip.timingIssueText = `Whisper локальная подтяжка: «${clip.recognizedText?.slice(0, 20)}» ➔ [${formatSeconds(surgicalTarget)}]`;
 
@@ -323,6 +335,7 @@ export function useTimingAutoAlign(params: {
                 description: `Хирургическая привязка Whisper «${clip.recognizedText}» ➔ «${bestSub.text.slice(0, 35)}» [${formatSeconds(surgicalTarget)}]`
               });
             } else if (absRawDiff >= 0.32 && absRawDiff <= 1.8 && effectiveShift >= 0.12) {
+              clip.timingNotRequired = false;
               clip.timingIssue = 'desync';
               clip.timingIssueText = rawTimeDiff > 0 
                 ? `Опаздывает на +${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})` 

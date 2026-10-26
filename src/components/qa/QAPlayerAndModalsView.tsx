@@ -16,6 +16,7 @@ import {
   Sparkles,
   Save,
   SkipForward,
+  SkipBack,
   Scissors,
   VolumeX,
   Sliders
@@ -53,6 +54,11 @@ export interface QAPlayerAndModalsViewProps {
   isPlaying: boolean;
   togglePlay: () => void;
   seekToNext: () => void;
+  seekToPrev: () => void;
+  isManualDubberOverride: boolean;
+  setIsManualDubberOverride: React.Dispatch<React.SetStateAction<boolean>>;
+  manualDubberId: string;
+  setManualDubberId: React.Dispatch<React.SetStateAction<string>>;
   handleStop: () => void;
   handlePause: () => void;
   isAutoNormalize: boolean;
@@ -148,6 +154,11 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
   isPlaying,
   togglePlay,
   seekToNext,
+  seekToPrev,
+  isManualDubberOverride,
+  setIsManualDubberOverride,
+  manualDubberId,
+  setManualDubberId,
   handleStop,
   handlePause,
   isAutoNormalize,
@@ -210,6 +221,228 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
   confirmState,
   setConfirmState
 }) => {
+  const currentSubIndex = React.useMemo(() => {
+    if (!subLines || subLines.length === 0) return -1;
+    let idx = -1;
+    for (let i = subLines.length - 1; i >= 0; i--) {
+      if (currentTime >= subLines[i].startSec - 0.05) {
+        idx = i;
+        break;
+      }
+    }
+    return idx;
+  }, [subLines, currentTime]);
+
+  const availableDubbers = React.useMemo(() => {
+    const list: Array<{ id: string; name: string; roles: string; trackId?: string }> = [];
+    const seen = new Set<string>();
+
+    (currentEpisode?.assignments || []).forEach(a => {
+      const dId = a.substituteId || a.dubberId;
+      if (!dId) return;
+      const nick = a.substitute?.nickname || a.dubber?.nickname || a.characterName || 'Даббер';
+      if (!seen.has(dId)) {
+        seen.add(dId);
+        const dubberRoles = (currentEpisode?.assignments || [])
+          .filter(other => (other.substituteId || other.dubberId) === dId)
+          .map(other => other.characterName)
+          .filter(Boolean);
+
+        const matchingTrack = tracks.find(t => t.id === dId || t.id.startsWith(dId + '__'));
+        list.push({
+          id: dId,
+          name: nick,
+          roles: dubberRoles.join(', '),
+          trackId: matchingTrack?.id || dId
+        });
+      }
+    });
+
+    tracks.forEach(t => {
+      if (t.id === 'original') return;
+      const baseId = t.id.split('__')[0];
+      if (!seen.has(baseId)) {
+        seen.add(baseId);
+        list.push({
+          id: baseId,
+          name: t.participant,
+          roles: t.character,
+          trackId: t.id
+        });
+      }
+    });
+
+    return list;
+  }, [currentEpisode?.assignments, tracks]);
+
+  React.useEffect(() => {
+    if (!manualDubberId && availableDubbers.length > 0) {
+      setManualDubberId(availableDubbers[0].id);
+    }
+  }, [availableDubbers, manualDubberId, setManualDubberId]);
+
+  const renderFixIssueBar = () => {
+    return (
+      <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-3.5 space-y-3 shrink-0">
+        {/* Top bar: Subtitle speaker, Subtitle Navigation & Manual Dubber checkbox */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Speaker badge */}
+            <div className={`text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${
+              currentCharacter 
+                ? 'bg-blue-950/40 border-blue-600/50 text-blue-300' 
+                : 'bg-neutral-800 border-neutral-700 text-neutral-400'
+            }`}>
+              <User className="w-3.5 h-3.5" />
+              <span>{currentCharacter ? (currentDubberNickname ? `${currentDubberNickname} (${currentCharacter})` : currentCharacter) : 'Вне сабов'}</span>
+            </div>
+
+            {/* Quick Subtitle Navigation */}
+            <div className="flex items-center gap-1 bg-neutral-950 p-0.5 rounded-lg border border-neutral-800 shadow-inner">
+              <button
+                type="button"
+                onClick={seekToPrev}
+                disabled={subLines.length === 0}
+                className="px-2.5 py-1 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 hover:text-white text-xs font-semibold flex items-center gap-1 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Перейти к предыдущему субтитру (Shift+A / Alt+Left)"
+              >
+                <SkipBack className="w-3.5 h-3.5 text-blue-400" />
+                <span>Пред. саб</span>
+              </button>
+
+              <span className="text-[11px] font-mono text-neutral-400 px-2 select-none">
+                {currentSubIndex >= 0 ? `${currentSubIndex + 1}` : '–'} / {subLines.length}
+              </span>
+
+              <button
+                type="button"
+                onClick={seekToNext}
+                disabled={subLines.length === 0}
+                className="px-2.5 py-1 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 hover:text-white text-xs font-semibold flex items-center gap-1 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Перейти к следующему субтитру (Shift+D / Alt+Right)"
+              >
+                <span>След. саб</span>
+                <SkipForward className="w-3.5 h-3.5 text-blue-400" />
+              </button>
+            </div>
+
+            {/* Reassign role if subtitle is active */}
+            {currentCharacter && currentEpisode && (
+              <div className="flex items-center gap-1.5 text-xs text-neutral-400">
+                <span className="text-[10px]">Роль:</span>
+                <select 
+                  className="bg-neutral-800 border border-neutral-700 text-white text-[10px] rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                  value={currentCharacter}
+                  onChange={(e) => handleReassignCharacter(e.target.value)}
+                >
+                  <option value={currentCharacter}>{currentCharacter}</option>
+                  {currentEpisode.assignments?.map(a => a.characterName)
+                    .filter(name => name !== currentCharacter)
+                    .filter((v, i, a) => a.indexOf(v) === i)
+                    .map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))
+                  }
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* Option: Checkbox for manual dubber selection */}
+          <div className="flex items-center gap-2 bg-neutral-950/80 px-2.5 py-1 rounded-lg border border-neutral-800">
+            <label className="flex items-center gap-1.5 text-xs text-neutral-300 cursor-pointer select-none font-medium">
+              <input
+                type="checkbox"
+                checked={isManualDubberOverride}
+                onChange={(e) => {
+                  setIsManualDubberOverride(e.target.checked);
+                  if (e.target.checked && !manualDubberId && availableDubbers.length > 0) {
+                    setManualDubberId(availableDubbers[0].id);
+                  }
+                }}
+                className="rounded border-neutral-700 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+              />
+              <span>Указать дабера:</span>
+            </label>
+
+            {isManualDubberOverride ? (
+              <select
+                value={manualDubberId}
+                onChange={(e) => setManualDubberId(e.target.value)}
+                className="bg-neutral-850 border border-blue-500/60 text-blue-200 text-xs font-semibold rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-[200px]"
+              >
+                {availableDubbers.map(d => (
+                  <option key={d.id} value={d.id}>
+                    {d.name} {d.roles ? `(${d.roles})` : ''}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className="text-[11px] text-neutral-500 italic">
+                (авто: {currentDubberNickname || selectedTrack?.participant || 'по фразе'})
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Subtitle text snippet line (if present) */}
+        {currentSubtitleText && (
+          <div className="text-xs text-amber-200/90 bg-neutral-950/60 px-3 py-1.5 rounded-lg border border-neutral-800/80 flex items-center justify-between gap-2">
+            <span className="italic truncate">"{currentSubtitleText}"</span>
+            <button
+              type="button"
+              onClick={() => setNewComment(prev => prev ? `${prev} [${currentSubtitleText}]` : `[${currentSubtitleText}] `)}
+              className="text-[10px] text-blue-400 hover:text-blue-300 font-medium shrink-0 underline ml-2"
+              title="Вставить текст текущего субтитра в поле правки"
+            >
+              Вставить текст
+            </button>
+          </div>
+        )}
+
+        {/* Input & Send Action */}
+        <div className="flex gap-2">
+          <div className="relative flex-1">
+            <input 
+              type="text" 
+              value={newComment}
+              onChange={(e) => {
+                setNewComment(e.target.value);
+                if (isPlaying && e.target.value.length > 0) {
+                  handlePause(); // Auto-pause when typing
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleAddComment();
+                if (e.key === ' ') {
+                  e.stopPropagation(); // Prevent space from toggling play when typing
+                }
+              }}
+              placeholder={
+                isManualDubberOverride
+                  ? `Выписать фикс дабберу «${availableDubbers.find(d => d.id === manualDubberId)?.name || 'Выбранному'}» на ${new Date(currentTime * 1000).toISOString().substr(14, 5)}...`
+                  : "Добавить замечание / фикс на этой секунде (Enter)..."
+              }
+              className="w-full bg-neutral-850 border border-neutral-700 text-white rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 placeholder:text-neutral-500"
+            />
+            <div className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-neutral-500 pointer-events-none">
+              [F — быстрый фикс]
+            </div>
+          </div>
+          <button 
+            type="button"
+            onClick={() => handleAddComment()}
+            disabled={!newComment.trim()}
+            className="px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 text-white rounded-lg transition-colors font-bold text-sm shrink-0 flex items-center gap-1.5 shadow-md shadow-blue-600/20"
+          >
+            <MessageSquare className="w-4 h-4" />
+            <span>Выписать фикс</span>
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <>
       {/* Main Content - Player & Comments */}
@@ -246,7 +479,14 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
                     className="w-full accent-blue-500"
                   />
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
+                    <div className="flex items-center gap-3">
+                      <button 
+                        onClick={seekToPrev} 
+                        className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all"
+                        title="К предыдущей реплике (Стрелка влево / Shift+A)"
+                      >
+                        <SkipBack className="w-5 h-5" />
+                      </button>
                       <button 
                         onClick={togglePlay} 
                         className="p-2 bg-blue-600 hover:bg-blue-500 rounded-full text-white transition-all"
@@ -257,7 +497,7 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
                       <button 
                         onClick={seekToNext} 
                         className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all"
-                        title="К следующей реплике (Стрелка вправо)"
+                        title="К следующей реплике (Стрелка вправо / Shift+D)"
                       >
                         <SkipForward className="w-5 h-5" />
                       </button>
@@ -353,72 +593,8 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
                 })}
               </div>
 
-              <div className="mt-6 pt-6 border-t border-neutral-800 shrink-0">
-                <div className="flex items-center justify-between">
-                  <div className="flex flex-col gap-2">
-                    <div className="flex items-center justify-between">
-                      <div className={`text-sm font-bold uppercase tracking-widest flex items-center gap-2 ${currentCharacter ? 'text-blue-400' : 'text-neutral-500'}`}>
-                        <User className="w-4 h-4" />
-                        {currentCharacter ? (
-                          <span>
-                            {currentDubberNickname ? `${currentDubberNickname} (${currentCharacter})` : currentCharacter}
-                          </span>
-                        ) : 'Никто не говорит'}
-                      </div>
-                      
-                      {currentCharacter && currentEpisode && (
-                        <div className="flex items-center gap-2">
-                          <span className="text-[10px] text-neutral-500">Переназначить:</span>
-                          <select 
-                            className="bg-neutral-800 border border-neutral-700 text-white text-[10px] rounded px-2 py-1 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                            value={currentCharacter}
-                            onChange={(e) => handleReassignCharacter(e.target.value)}
-                          >
-                            <option value={currentCharacter}>{currentCharacter}</option>
-                            {currentEpisode.assignments?.map(a => a.characterName)
-                              .filter(name => name !== currentCharacter)
-                              .filter((v, i, a) => a.indexOf(v) === i) // Unique
-                              .map(name => (
-                                <option key={name} value={name}>{name}</option>
-                              ))
-                            }
-                          </select>
-                        </div>
-                      )}
-                    </div>
-                    {currentSubtitleText && (
-                      <div className="text-xs text-neutral-400 italic line-clamp-1">
-                        "{currentSubtitleText}"
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    <input 
-                      type="text" 
-                      value={newComment}
-                      onChange={(e) => {
-                        setNewComment(e.target.value);
-                        if (isPlaying && e.target.value.length > 0) {
-                          handlePause(); // Auto-pause when typing
-                        }
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleAddComment();
-                        if (e.key === ' ') {
-                          e.stopPropagation(); // Prevent space from toggling play when typing
-                        }
-                      }}
-                      placeholder="Добавить комментарий на этой секунде..."
-                      className="bg-neutral-800 border border-neutral-700 text-white rounded-lg px-4 py-2 w-80 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                    />
-                    <button 
-                      onClick={() => handleAddComment()}
-                      className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition-colors font-bold"
-                    >
-                      Отправить
-                    </button>
-                  </div>
-                </div>
+              <div className="mt-4 pt-4 border-t border-neutral-800 shrink-0">
+                {renderFixIssueBar()}
               </div>
             </div>
           </div>
@@ -466,6 +642,13 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
                             <X className="w-5 h-5" />
                           </button>
                           <button 
+                            onClick={seekToPrev} 
+                            className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all"
+                            title="К предыдущей реплике (Стрелка влево / Shift+A)"
+                          >
+                            <SkipBack className="w-5 h-5" />
+                          </button>
+                          <button 
                             onClick={togglePlay} 
                             className="p-3 bg-blue-600 hover:bg-blue-500 rounded-full text-white transition-all transform hover:scale-110"
                             title={isPlaying ? "Пауза" : "Играть"}
@@ -475,7 +658,7 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
                           <button 
                             onClick={seekToNext} 
                             className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all"
-                            title="К следующей реплике (Стрелка вправо)"
+                            title="К следующей реплике (Стрелка вправо / Shift+D)"
                           >
                             <SkipForward className="w-5 h-5" />
                           </button>
@@ -649,6 +832,8 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {renderFixIssueBar()}
                 </div>
               </div>
 
@@ -700,22 +885,126 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
 
       {/* Comment Modal */}
       {commentModal?.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50">
-          <div className="bg-neutral-900 p-6 rounded-lg border border-neutral-700 w-96">
-            <h3 className="text-white font-bold mb-4">Добавить правку</h3>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-neutral-900 p-6 rounded-xl border border-neutral-700 w-full max-w-md space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="text-white font-bold text-base flex items-center gap-2">
+                <MessageSquare className="w-4 h-4 text-blue-400" />
+                <span>Добавить правку на {new Date(currentTime * 1000).toISOString().substr(14, 5)}</span>
+              </h3>
+              <button 
+                onClick={() => setCommentModal(null)} 
+                className="text-neutral-500 hover:text-white p-1"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Subtitle navigation row inside modal */}
+            <div className="flex items-center justify-between gap-2 bg-neutral-950 p-2 rounded-lg border border-neutral-800 text-xs">
+              <span className="text-neutral-400 font-medium">Субтитр {currentSubIndex >= 0 ? `${currentSubIndex + 1}` : '–'} / {subLines.length}</span>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={seekToPrev}
+                  disabled={subLines.length === 0}
+                  className="px-2 py-0.5 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 text-xs flex items-center gap-1 disabled:opacity-40"
+                  title="К предыдущему субтитру"
+                >
+                  <SkipBack className="w-3 h-3 text-blue-400" />
+                  <span>Пред</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={seekToNext}
+                  disabled={subLines.length === 0}
+                  className="px-2 py-0.5 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 text-xs flex items-center gap-1 disabled:opacity-40"
+                  title="К следующему субтитру"
+                >
+                  <span>След</span>
+                  <SkipForward className="w-3 h-3 text-blue-400" />
+                </button>
+              </div>
+            </div>
+
+            {/* Manual dubber selection inside modal */}
+            <div className="flex items-center gap-2 bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
+              <label className="flex items-center gap-1.5 text-xs text-neutral-300 cursor-pointer select-none font-medium">
+                <input
+                  type="checkbox"
+                  checked={isManualDubberOverride}
+                  onChange={(e) => {
+                    setIsManualDubberOverride(e.target.checked);
+                    if (e.target.checked && !manualDubberId && availableDubbers.length > 0) {
+                      setManualDubberId(availableDubbers[0].id);
+                    }
+                  }}
+                  className="rounded border-neutral-700 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5 accent-blue-600 cursor-pointer"
+                />
+                <span>Указать дабера:</span>
+              </label>
+              {isManualDubberOverride ? (
+                <select
+                  value={manualDubberId}
+                  onChange={(e) => setManualDubberId(e.target.value)}
+                  className="flex-1 bg-neutral-850 border border-blue-500/60 text-blue-200 text-xs font-semibold rounded px-2 py-1 focus:outline-none"
+                >
+                  {availableDubbers.map(d => (
+                    <option key={d.id} value={d.id}>
+                      {d.name} {d.roles ? `(${d.roles})` : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className="text-[11px] text-neutral-500 italic">
+                  (авто: {currentDubberNickname || selectedTrack?.participant || 'по фразе'})
+                </span>
+              )}
+            </div>
+
+            {currentSubtitleText && (
+              <div className="text-xs text-amber-200/90 bg-neutral-950/60 px-2.5 py-1.5 rounded border border-neutral-800/80 italic line-clamp-2">
+                "{currentSubtitleText}"
+              </div>
+            )}
+
             <input 
               type="text" 
               value={newComment}
               onChange={(e) => setNewComment(e.target.value)}
-              className="bg-neutral-800 border border-neutral-700 text-white rounded-lg px-4 py-2 w-full mb-4"
-              placeholder="Введите комментарий..."
+              className="bg-neutral-800 border border-neutral-700 text-white rounded-lg px-4 py-2 w-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+              placeholder={
+                isManualDubberOverride
+                  ? `Текст замечания для ${availableDubbers.find(d => d.id === manualDubberId)?.name || 'даббера'}...`
+                  : "Текст замечания / фикса..."
+              }
+              autoFocus
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  handleAddComment();
+                  setCommentModal(null);
+                }
+              }}
             />
-            <div className="flex justify-end gap-2">
-              <button onClick={() => setCommentModal(null)} className="text-neutral-400">Отмена</button>
-              <button onClick={() => {
-                handleAddComment();
-                setCommentModal(null);
-              }} className="bg-blue-600 text-white px-4 py-2 rounded">Сохранить</button>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-neutral-800">
+              <button 
+                onClick={() => setCommentModal(null)} 
+                className="px-4 py-1.5 rounded-lg text-xs text-neutral-400 hover:text-white bg-neutral-800 hover:bg-neutral-700 transition"
+              >
+                Отмена
+              </button>
+              <button 
+                onClick={() => {
+                  handleAddComment();
+                  setCommentModal(null);
+                }} 
+                disabled={!newComment.trim()}
+                className="px-5 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white transition flex items-center gap-1.5 shadow-md shadow-blue-600/20"
+              >
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>Выписать фикс</span>
+              </button>
             </div>
           </div>
         </div>

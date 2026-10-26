@@ -43,6 +43,7 @@ import { getSharedAudioContext } from '../lib/qa/sharedAudioContext';
 import { analyzeAudioBufferForPreview, analyzeAudioForPreview, NormalizationMetrics } from '../lib/qa/audioNormalizer';
 import { ExportModal } from './ExportModal';
 import { TimingSettingsModal, TimingSettings, DEFAULT_TIMING_SETTINGS } from './TimingSettingsModal';
+import { isPhraseTimingNotRequired } from './timing/timingAudioUtils';
 import { normalizeSpeechText } from '../lib/qa/whisperTextChecker';
 import { globalAudioAICleanupEngine } from '../services/AudioAICleanupEngine';
 import { prepareQATracksForTiming } from '../lib/qaTimingHelper';
@@ -409,10 +410,10 @@ function detectSpeechIntervals(
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
   const {
     minSilenceDurationSec = 0.24,
-    leadInPaddingSec = 0.08,
-    leadOutPaddingSec = 0.12,
-    minSpeechDurationSec = 0.16,
-    mergeCloseGapsSec = 0.18,
+    leadInPaddingSec = 0.18,
+    leadOutPaddingSec = 0.26,
+    minSpeechDurationSec = 0.14,
+    mergeCloseGapsSec = 0.22,
     manualThresholdDb,
     subLines,
     onCalibration
@@ -431,12 +432,12 @@ function detectSpeechIntervals(
   const duration = audioBuffer.duration;
   const triggerThresholdAmp = calib.thresholdAmp;
 
-  // Tight word-edge threshold (5 dB below trigger, never below -56 dB) to capture consonant attacks/releases
-  // without bridging across inter-phrase pauses or room tone.
+  // Sensitive word-edge threshold to capture delicate consonant attacks and breath endings
+  // so quiet speech ends are never cut flush ("заподлицо").
   const edgeThresholdDb = Math.max(
-    -56,
-    calib.noiseFloorDb + 8.0,
-    calib.calculatedThresholdDb - 5.0
+    -60,
+    calib.noiseFloorDb + 4.5,
+    calib.calculatedThresholdDb - 7.0
   );
   const edgeThresholdAmp = Math.pow(10, edgeThresholdDb / 20);
 
@@ -524,11 +525,11 @@ function detectSpeechIntervals(
     }
   }
 
-  // Pass 2: Tight Local Word-Edge Expansion (up to 100ms backwards and 140ms forwards)
-  const maxBackwardExpandChunks = 5; // 100ms
-  const maxForwardExpandChunks = 7;  // 140ms
+  // Pass 2: Natural Word-Edge Expansion (up to 200ms backwards and 280ms forwards)
+  const maxBackwardExpandChunks = 10; // 200ms
+  const maxForwardExpandChunks = 14;  // 280ms
   const isAboveEdge = (idx: number) =>
-    chunkRmsValues[idx] >= edgeThresholdAmp || chunkPeakValues[idx] >= edgeThresholdAmp * 2.0;
+    chunkRmsValues[idx] >= edgeThresholdAmp || chunkPeakValues[idx] >= edgeThresholdAmp * 1.8;
 
   let segIdx = 0;
   while (segIdx < totalChunks) {
@@ -548,7 +549,7 @@ function detectSpeechIntervals(
           backSilentRun = 0;
         } else {
           backSilentRun++;
-          if (backSilentRun > 1) break;
+          if (backSilentRun > 2) break;
         }
       }
       for (let k = newStart; k < segStart; k++) {
@@ -564,7 +565,7 @@ function detectSpeechIntervals(
           fwdSilentRun = 0;
         } else {
           fwdSilentRun++;
-          if (fwdSilentRun > 1) break;
+          if (fwdSilentRun > 2) break;
         }
       }
       for (let k = segEnd + 1; k <= newEnd; k++) {
@@ -577,10 +578,11 @@ function detectSpeechIntervals(
     }
   }
 
-  // Clamp padding to surgical values (60-100ms lead-in, 90-150ms lead-out) so clip start matches actual speech onset
-  const effectiveLeadInSec = Math.min(0.10, Math.max(0.05, leadInPaddingSec));
-  const effectiveLeadOutSec = Math.min(0.15, Math.max(0.08, leadOutPaddingSec));
-  const effectiveMinSilenceSec = Math.min(0.26, Math.max(0.16, minSilenceDurationSec));
+  // Generous lead-in and lead-out margins (default 180ms lead-in, 260ms lead-out)
+  // so phrase attacks and quiet breath/whisper endings are NEVER cut flush ("заподлицо")!
+  const effectiveLeadInSec = Math.min(0.40, Math.max(0.12, leadInPaddingSec || 0.18));
+  const effectiveLeadOutSec = Math.min(0.50, Math.max(0.18, leadOutPaddingSec || 0.26));
+  const effectiveMinSilenceSec = Math.min(0.35, Math.max(0.16, minSilenceDurationSec));
 
   const rawIntervals: Array<{ startSec: number; endSec: number; durationSec: number }> = [];
   let inSpeech = false;
@@ -1120,6 +1122,9 @@ export interface AudioClip {
   overlappingClipId?: string;
   isSplitContinuation?: boolean; // 2nd/3rd part of a phrase split by a dramatic pause inside the same subtitle (locked in place)
   overlapResolvedLock?: boolean; // Locked after surgical overlap separation so audit loop never pulls it back into collision
+  overlapRoleDisabled?: boolean; // Explicitly disabled intentional overlap mode by user
+  timingNotRequired?: boolean;   // Phrase within subtitle bounds or tail <= 30% of sub duration
+  timingNotRequiredReason?: string;
 }
 
 export interface IntentionalOverlapTrackEntry {
@@ -4420,7 +4425,17 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                 clip.whisperMatchedScore = clipWhisperScore[cIdx];
               }
 
-              if (matchedByWhisper && effectiveShift >= 0.25) {
+              // User Rule: If phrase does not exceed subtitle boundaries or tail <= 30% of sub duration, timing is NOT required!
+              const timingExempt = isPhraseTimingNotRequired(cStart, clip.durationSec, firstSub.startSec, lastSub.endSec);
+
+              if (timingExempt.notRequired) {
+                clip.timingNotRequired = true;
+                clip.timingNotRequiredReason = timingExempt.reason;
+                clip.timingIssue = null;
+                clip.timingIssueText = undefined;
+                clip.targetSubStartSec = cStart;
+              } else if (matchedByWhisper && effectiveShift >= 0.25) {
+                clip.timingNotRequired = false;
                 clip.timingIssue = 'orphan';
                 clip.timingIssueText = `Подтяжка к субтитру: «${(clip.recognizedText || clip.text).slice(0, 20)}» ➔ [${formatSeconds(surgicalTarget)}]`;
 
@@ -4441,6 +4456,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                   description: `Привязка реплики «${(clip.recognizedText || clip.text).slice(0, 35)}» ➔ [${formatSeconds(surgicalTarget)}]`
                 });
               } else if (absRawDiff >= 0.30 && absRawDiff <= 1.8 && effectiveShift >= 0.10) {
+                clip.timingNotRequired = false;
                 clip.timingIssue = 'desync';
                 clip.timingIssueText = rawTimeDiff > 0 
                   ? `Опаздывает на +${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})` 
@@ -4975,6 +4991,132 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     toast.success(`Главный голос: ${mainDubberName} (0 дБ) • Второй голос: -10 дБ`);
   }, [addLog]);
 
+  // Activate Main/Secondary mode on a phrase (and pair it with any overlapping phrase on other tracks)
+  const handleActivateClipOverlapMode = useCallback((trackId: string, clipId: string, targetRole: 'main' | 'secondary' = 'main') => {
+    setAudioClips(prev => {
+      const next: Record<string, AudioClip[]> = {};
+      for (const [tId, trClips] of Object.entries(prev)) {
+        next[tId] = trClips.map(c => ({ ...c }));
+      }
+
+      const thisClip = next[trackId]?.find(c => c.id === clipId);
+      if (!thisClip) return prev;
+
+      const cStart = thisClip.clipStartSec + (thisClip.offsetSec || 0);
+      const cEnd = cStart + thisClip.durationSec;
+      const groupId = thisClip.overlapGroupId || `ov_grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+      thisClip.overlapGroupId = groupId;
+      thisClip.isIntentionalOverlap = true;
+      thisClip.overlapRole = targetRole;
+      thisClip.overlapRoleDisabled = false;
+      thisClip.volumeGainDb = targetRole === 'main' ? 0 : -10;
+      thisClip.hasCollision = false;
+      if (thisClip.timingIssue === 'overlap') {
+        thisClip.timingIssue = null;
+        thisClip.timingIssueText = undefined;
+      }
+
+      let pairedDubber = '';
+      for (const [otherTrackId, otherClips] of Object.entries(next)) {
+        if (otherTrackId === trackId) continue;
+        for (const oc of otherClips) {
+          if (oc.isPhysics) continue;
+          const os = oc.clipStartSec + (oc.offsetSec || 0);
+          const oe = os + oc.durationSec;
+          const overlap = Math.min(cEnd, oe) - Math.max(cStart, os);
+          if (overlap > 0.04) {
+            oc.overlapGroupId = groupId;
+            oc.isIntentionalOverlap = true;
+            oc.overlapRole = targetRole === 'main' ? 'secondary' : 'main';
+            oc.overlapRoleDisabled = false;
+            oc.volumeGainDb = oc.overlapRole === 'main' ? 0 : -10;
+            oc.hasCollision = false;
+            if (oc.timingIssue === 'overlap') {
+              oc.timingIssue = null;
+              oc.timingIssueText = undefined;
+            }
+            pairedDubber = oc.dubberName;
+          }
+        }
+      }
+
+      addLog(`✨ Активирован режим одновременной речи: «${thisClip.dubberName}» (${targetRole === 'main' ? '★ Главный 0 дБ' : '🔉 Второй -10 дБ'})${pairedDubber ? ` в паре с «${pairedDubber}»` : ''}.`, 'info');
+      toast.success(`Режим одновременной речи: ${thisClip.dubberName} (${targetRole === 'main' ? '★ Главный 0 дБ' : '🔉 Второй -10 дБ'})`);
+
+      return next;
+    });
+  }, [addLog]);
+
+  // Remove Main/Secondary mode from a phrase (restore 0 dB)
+  const handleRemoveClipOverlapMode = useCallback((trackId: string, clipId: string) => {
+    setAudioClips(prev => {
+      const next: Record<string, AudioClip[]> = {};
+      for (const [tId, trClips] of Object.entries(prev)) {
+        next[tId] = trClips.map(c => ({ ...c }));
+      }
+
+      const thisClip = next[trackId]?.find(c => c.id === clipId);
+      if (!thisClip) return prev;
+
+      thisClip.overlapRole = null;
+      thisClip.overlapRoleDisabled = true;
+      thisClip.volumeGainDb = 0;
+      thisClip.isIntentionalOverlap = false;
+      thisClip.overlapGroupId = undefined;
+
+      addLog(`🚫 Режим Главный/Второй снят с фразы «${thisClip.text.slice(0, 30)}» (${thisClip.dubberName}), громкость возвращена на 0 дБ.`, 'info');
+      toast.info(`Режим Главный/Второй отключен (0 дБ)`);
+
+      return next;
+    });
+  }, [addLog]);
+
+  // Toggle Main (0 dB) <-> Secondary (-10 dB) role, or activate if not active
+  const handleToggleClipOverlapRole = useCallback((trackId: string, clipId: string) => {
+    setAudioClips(prev => {
+      const next: Record<string, AudioClip[]> = {};
+      for (const [tId, trClips] of Object.entries(prev)) {
+        next[tId] = trClips.map(c => ({ ...c }));
+      }
+
+      const thisClip = next[trackId]?.find(c => c.id === clipId);
+      if (!thisClip) return prev;
+
+      if (!thisClip.overlapRole) {
+        const groupId = thisClip.overlapGroupId || `ov_grp_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        thisClip.overlapGroupId = groupId;
+        thisClip.isIntentionalOverlap = true;
+        thisClip.overlapRole = 'main';
+        thisClip.overlapRoleDisabled = false;
+        thisClip.volumeGainDb = 0;
+        thisClip.hasCollision = false;
+        toast.success(`Фраза «${thisClip.dubberName}» сделана Главной (0 дБ)`);
+      } else if (thisClip.overlapRole === 'main') {
+        thisClip.overlapRole = 'secondary';
+        thisClip.volumeGainDb = -10;
+        toast.info(`Фраза «${thisClip.dubberName}» сделана Второй (-10 дБ)`);
+      } else {
+        thisClip.overlapRole = 'main';
+        thisClip.volumeGainDb = 0;
+        toast.success(`Фраза «${thisClip.dubberName}» сделана Главной (0 дБ)`);
+      }
+
+      if (thisClip.overlapGroupId) {
+        for (const [tId, trClips] of Object.entries(next)) {
+          for (const oc of trClips) {
+            if (oc.id !== thisClip.id && oc.overlapGroupId === thisClip.overlapGroupId) {
+              oc.overlapRole = thisClip.overlapRole === 'main' ? 'secondary' : 'main';
+              oc.volumeGainDb = oc.overlapRole === 'main' ? 0 : -10;
+            }
+          }
+        }
+      }
+
+      return next;
+    });
+  }, []);
+
   // Manual toggle between "⚡ Физика" (protected non-subtitle sound) and "💬 Фраза" (dialogue phrase)
   const handleToggleClipPhysics = useCallback((trackId: string, clipId: string) => {
     setAudioClips(prev => {
@@ -5361,12 +5503,22 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             const covClip = trClips[coveringClipIdx];
             lockedClipIds.add(covClip.id);
 
-            if (covClip.isSplitContinuation || covClip.overlapResolvedLock || covClip.isUnisonPhrase) {
+            if (covClip.isSplitContinuation || covClip.overlapResolvedLock || covClip.isUnisonPhrase || covClip.overlapRole) {
               continue;
             }
 
             const covStart = covClip.clipStartSec + (covClip.offsetSec || 0);
             const origStart = covClip.rawSourceStartSec ?? covClip.sourceStartSec ?? covStart;
+
+            // User Rule: If phrase does not exceed sub or tail <= 30% of sub duration, timing is NOT required!
+            const exemptCheck = isPhraseTimingNotRequired(covStart, covClip.durationSec, sub.startSec, sub.endSec);
+            if (exemptCheck.notRequired) {
+              covClip.timingNotRequired = true;
+              covClip.timingNotRequiredReason = exemptCheck.reason;
+              covClip.targetSubStartSec = covStart;
+              continue; // Phrase is exempt from timing, leave in place!
+            }
+
             const signedDiff = covStart - sub.startSec;
 
             // Only align if the phrase is genuinely displaced (starts > 0.35s BEFORE sub.startSec or > 0.55s AFTER sub.startSec)
@@ -5387,8 +5539,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                 ? (trClips[coveringClipIdx + 1].clipStartSec + (trClips[coveringClipIdx + 1].offsetSec || 0) - covClip.durationSec - 0.03)
                 : Infinity;
 
-              // Never move a clip more than 0.65s from its recorded position
-              const clampedTarget = Math.max(origStart - 0.65, Math.min(origStart + 0.65, idealStart));
+              // Never move a clip more than 0.40s from its recorded position
+              const clampedTarget = Math.max(origStart - 0.40, Math.min(origStart + 0.40, idealStart));
               const healedStart = Number(
                 Math.max(0, Math.max(prevLim, Math.min(clampedTarget, Math.max(prevLim, nextLim)))).toFixed(3)
               );
@@ -5745,29 +5897,37 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
     // PROTECTION FOR SIMULTANEOUS SPEECH (when two subtitles/characters are supposed to sound together):
     if (earlyClip.trackId !== lateClip.trackId) {
-      if (earlyClip.isIntentionalOverlap || lateClip.isIntentionalOverlap || earlyClip.isUnisonPhrase || lateClip.isUnisonPhrase) {
-        clearCollisionFlags();
-        return false;
-      }
-      // 1. Contained clip (e.g. 12:28.33 inside 12:24.90-12:32.32, or 19:59-20:04 inside 19:57.78-20:06.68)
-      //    or simultaneous start, or large overlap (> 0.48s)
       if (
-        lateStart - earlyStart <= 0.10 ||
-        lateEnd <= earlyEnd + 0.18 ||
-        overlap > 0.48 ||
-        overlap > minClipDur * 0.42
+        earlyClip.isIntentionalOverlap ||
+        lateClip.isIntentionalOverlap ||
+        earlyClip.overlapRole ||
+        lateClip.overlapRole ||
+        earlyClip.isUnisonPhrase ||
+        lateClip.isUnisonPhrase ||
+        (earlyClip.timingNotRequired && lateClip.timingNotRequired)
       ) {
         clearCollisionFlags();
         return false;
       }
-      // 2. The two clips' matched subtitles overlap in .ass (or subLate starts > 0.45s before earlyClip ends)
+      // 1. Contained clip (e.g. short line spoken inside another character's longer line)
+      //    or simultaneous start, or significant overlap (> 0.40s)
+      if (
+        lateStart - earlyStart <= 0.12 ||
+        lateEnd <= earlyEnd + 0.15 ||
+        overlap > 0.40 ||
+        overlap > minClipDur * 0.38
+      ) {
+        clearCollisionFlags();
+        return false;
+      }
+      // 2. The two clips' matched subtitles overlap in .ass (or subLate starts before earlyClip ends)
       if (subEarly && subLate) {
         if (subEarly.id !== undefined && subLate.id !== undefined && String(subEarly.id) === String(subLate.id)) {
           clearCollisionFlags();
           return false;
         }
         const subOv = Math.min(subEarly.endSec, subLate.endSec) - Math.max(subEarly.startSec, subLate.startSec);
-        if (subOv > -0.02 || earlyEnd - subLate.startSec > 0.45) {
+        if (subOv > -0.05 || earlyEnd - subLate.startSec > 0.35) {
           clearCollisionFlags();
           return false;
         }
@@ -5781,15 +5941,15 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         for (let b = a + 1; b < activeGlobalSubs.length; b++) {
           const gOv = Math.min(activeGlobalSubs[a].endSec, activeGlobalSubs[b].endSec) -
             Math.max(activeGlobalSubs[a].startSec, activeGlobalSubs[b].startSec);
-          if (gOv >= 0.05) {
+          if (gOv >= 0.04) {
             clearCollisionFlags();
             return false;
           }
         }
       }
     } else {
-      // Same track: never separate if overlap > 0.55s
-      if (overlap > 0.55) {
+      // Same track: never separate if overlap > 0.50s
+      if (overlap > 0.50) {
         clearCollisionFlags();
         return false;
       }
@@ -6065,13 +6225,35 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
         for (let idx = 0; idx < clips.length; idx++) {
           const clip = clips[idx];
-          if (clip.isPhysics || clip.isUnisonPhrase || clip.isSplitContinuation || clip.overlapResolvedLock) continue;
+          if (clip.isPhysics || clip.isUnisonPhrase || clip.isSplitContinuation || clip.overlapResolvedLock || clip.overlapRole || clip.timingNotRequired) continue;
+
+          const curStart = clip.clipStartSec + (clip.offsetSec || 0);
+          const trSubs = trackSubLinesMap[trackId] || [];
+          const matchedSub = clip.matchedSubId
+            ? (trSubs.find(s => String(s.id) === String(clip.matchedSubId)) || subtitles.find(s => String(s.id) === String(clip.matchedSubId)))
+            : undefined;
+          const subStart = matchedSub ? matchedSub.startSec : clip.targetSubStartSec;
+          const subEnd = matchedSub ? matchedSub.endSec : (clip.targetSubEndSec ?? (typeof subStart === 'number' ? subStart + clip.durationSec : undefined));
+
+          // User Rule: If phrase is inside sub or tail <= 30% of sub duration, timing is NOT required!
+          if (typeof subStart === 'number' && typeof subEnd === 'number') {
+            const exemptCheck = isPhraseTimingNotRequired(curStart, clip.durationSec, subStart, subEnd);
+            if (exemptCheck.notRequired) {
+              clips[idx] = {
+                ...clip,
+                timingNotRequired: true,
+                timingNotRequiredReason: exemptCheck.reason,
+                timingIssue: null,
+                timingIssueText: undefined
+              };
+              continue;
+            }
+          }
 
           const shouldFixDesync = (typeFilter === 'all' || typeFilter === 'desync');
           const shouldFixOrphan = clip.timingIssue === 'orphan' && (typeFilter === 'all' || typeFilter === 'orphan');
 
           if ((shouldFixDesync || shouldFixOrphan) && typeof clip.targetSubStartSec === 'number') {
-            const curStart = clip.clipStartSec + (clip.offsetSec || 0);
             const origStart = clip.rawSourceStartSec ?? clip.sourceStartSec ?? curStart;
             const signedDiff = curStart - clip.targetSubStartSec;
             const rawDiff = Math.abs(signedDiff);
@@ -6110,8 +6292,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
               ? (clips[idx + 1].clipStartSec + (clips[idx + 1].offsetSec || 0) - 0.03)
               : Infinity;
 
-            // Cap maximum automatic shift to 0.65s from original recorded position
-            let safeStart = Math.max(origStart - 0.65, Math.min(origStart + 0.65, clip.targetSubStartSec));
+            // Cap maximum automatic shift to 0.35s from original recorded position
+            let safeStart = Math.max(origStart - 0.35, Math.min(origStart + 0.35, clip.targetSubStartSec));
             safeStart = Math.max(prevEnd, Math.min(safeStart, Math.max(prevEnd, nextStart - clip.durationSec)));
             safeStart = Number(Math.max(0, safeStart).toFixed(3));
 
@@ -8227,6 +8409,14 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                                     🎙 УНИСОН
                                   </span>
                                 )}
+                                {clip.timingNotRequired && !clip.timingIssue && !clip.hasCollision && (
+                                  <span
+                                    className="bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 px-1 rounded text-[8px] font-bold shrink-0"
+                                    title={clip.timingNotRequiredReason || 'Фраза в пределах саба (хвост ≤30%) — тайминг не требуется'}
+                                  >
+                                    ✓ В САБЕ (≤30%)
+                                  </span>
+                                )}
                                 {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">НАЕЗД</span>}
                                 {clip.timingIssue === 'desync' && (
                                   <span className="bg-amber-500 text-neutral-950 px-1 rounded text-[8px] font-black shrink-0" title={clip.timingIssueText}>
@@ -8250,26 +8440,38 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                                 </span>
                               </div>
                               <div className="flex items-center gap-1 shrink-0">
-                                {/* Direct Main Voice Selector on Simultaneous Overlapping Clips */}
-                                {clip.isIntentionalOverlap && clip.overlapGroupId && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleSetOverlapMainClip(clip.overlapGroupId!, clip.id, clip.dubberName);
-                                    }}
-                                    className={`px-1.5 py-0.2 rounded text-[8px] font-black transition border ${
-                                      clip.overlapRole === 'main'
-                                        ? 'bg-emerald-500 text-neutral-950 border-emerald-300 shadow-sm'
-                                        : 'bg-neutral-900/90 hover:bg-emerald-950 text-amber-300 border-amber-500/50'
-                                    }`}
-                                    title={
-                                      clip.overlapRole === 'main'
-                                        ? 'Главный голос (0 дБ) в пересечении сабов. Остальные участники этого пересечения автоматически приглушены на -10 дБ.'
-                                        : 'Сделать этот голос главным (0 дБ) в пересечении, а остальные приглушить на -10 дБ'
-                                    }
-                                  >
-                                    {clip.overlapRole === 'main' ? '★ Главный (0дБ)' : '🔉 Второй (-10дБ)'}
-                                  </button>
+                                {/* Direct Main Voice Selector and Mode Removal on Overlapping Clips */}
+                                {clip.overlapRole && (
+                                  <div className="flex items-center gap-0.5">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleToggleClipOverlapRole(track.id, clip.id);
+                                      }}
+                                      className={`px-1.5 py-0.2 rounded text-[8px] font-black transition border ${
+                                        clip.overlapRole === 'main'
+                                          ? 'bg-emerald-500 text-neutral-950 border-emerald-300 shadow-sm'
+                                          : 'bg-neutral-900/90 hover:bg-emerald-950 text-amber-300 border-amber-500/50'
+                                      }`}
+                                      title={
+                                        clip.overlapRole === 'main'
+                                          ? '★ Главный голос (0 дБ) в одновременной речи. Кликните для переключения на Второй (-10 дБ).'
+                                          : '🔉 Второй голос (-10 дБ) в одновременной речи. Кликните для переключения на Главный (0 дБ).'
+                                      }
+                                    >
+                                      {clip.overlapRole === 'main' ? '★ Главный (0дБ)' : '🔉 Второй (-10дБ)'}
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleRemoveClipOverlapMode(track.id, clip.id);
+                                      }}
+                                      className="px-1 py-0.2 rounded text-[8px] font-bold bg-neutral-800 hover:bg-red-950 text-neutral-400 hover:text-red-300 border border-neutral-700 transition"
+                                      title="Убрать режим Главный/Второй (снять приглушение -10 дБ, вернуть обычный режим фразы)"
+                                    >
+                                      ✕
+                                    </button>
+                                  </div>
                                 )}
                                 <span className="text-[8px] font-bold text-amber-300">
                                   {clip.volumePercent || 100}%
@@ -8309,21 +8511,56 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                             {/* Clip Bottom Action Tools (Split, Expand & Nudge, Surgical Fixes) */}
                             <div className="px-1 py-0.5 bg-black/50 flex items-center justify-between opacity-0 hover:opacity-100 transition text-[8px] z-20">
                               <div className="flex items-center gap-0.5">
-                                {clip.isIntentionalOverlap && clip.overlapGroupId && (
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleSetOverlapMainClip(clip.overlapGroupId!, clip.id, clip.dubberName);
-                                    }}
-                                    className={`px-1.5 py-0.5 rounded font-bold transition shadow mr-0.5 ${
-                                      clip.overlapRole === 'main'
-                                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                                        : 'bg-amber-700 hover:bg-amber-600 text-white'
-                                    }`}
-                                    title="Переключить главный голос (0 дБ) / второстепенный голос (-10 дБ) при одновременных сабах"
-                                  >
-                                    {clip.overlapRole === 'main' ? '★ Главный 0дБ' : '🔉 Сделать главным'}
-                                  </button>
+                                {clip.overlapRole ? (
+                                  <div className="flex items-center gap-0.5 mr-0.5">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleToggleClipOverlapRole(track.id, clip.id);
+                                      }}
+                                      className={`px-1.5 py-0.5 rounded font-bold transition shadow ${
+                                        clip.overlapRole === 'main'
+                                          ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                                          : 'bg-amber-700 hover:bg-amber-600 text-white'
+                                      }`}
+                                      title="Переключить роль: Главный (0 дБ) <-> Второй (-10 дБ)"
+                                    >
+                                      {clip.overlapRole === 'main' ? '★ Главный 0дБ' : '🔉 Сделать главным'}
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleRemoveClipOverlapMode(track.id, clip.id);
+                                      }}
+                                      className="px-1 py-0.5 rounded bg-neutral-800 hover:bg-red-900 text-neutral-300 hover:text-white font-bold transition border border-neutral-700"
+                                      title="Убрать режим Главный/Второй с этой фразы (сбросить приглушение на 0 дБ)"
+                                    >
+                                      🚫 Снять
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-0.5 mr-0.5">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleActivateClipOverlapMode(track.id, clip.id, 'main');
+                                      }}
+                                      className="px-1.5 py-0.5 rounded font-bold transition shadow bg-neutral-850 hover:bg-emerald-900 text-emerald-300 border border-emerald-700/60"
+                                      title="Активировать режим одновременной речи: сделать эту фразу Главной (0 дБ)"
+                                    >
+                                      ★ Главный
+                                    </button>
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleActivateClipOverlapMode(track.id, clip.id, 'secondary');
+                                      }}
+                                      className="px-1.5 py-0.5 rounded font-bold transition shadow bg-neutral-850 hover:bg-amber-950 text-amber-300 border border-amber-700/60"
+                                      title="Активировать режим одновременной речи: сделать эту фразу Второй (-10 дБ)"
+                                    >
+                                      🔉 Второй
+                                    </button>
+                                  </div>
                                 )}
                                 <button
                                   onClick={(e) => {

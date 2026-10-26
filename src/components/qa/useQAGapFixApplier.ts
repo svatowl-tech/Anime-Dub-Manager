@@ -598,7 +598,14 @@ export function useQAGapFixApplier({
         }
         return g;
       });
-      handleSaveDetectedGaps(updatedGapsState);
+      setDetectedGaps(updatedGapsState);
+      if (currentEpisode?.id) {
+        try {
+          localStorage.setItem(`qa_detected_gaps_${currentEpisode.id}`, JSON.stringify(updatedGapsState));
+        } catch (e) {
+          console.warn('Failed to save QA gaps to localStorage:', e);
+        }
+      }
 
       const reassignCount = selectedGaps.filter(g => g.isSubtitleError || g.resolutionAction === 'reassign_character').length;
       if (reassignCount > 0) {

@@ -3,11 +3,13 @@ import React, { createContext, useContext, useRef, useCallback, useMemo } from '
 interface PlayerControls {
   togglePlayPause: () => void;
   seekToNext?: () => void;
+  seekToPrev?: () => void;
 }
 
 interface VideoContextType {
   togglePlayPause: () => void;
   seekToNext: () => void;
+  seekToPrev: () => void;
   registerPlayer: (controls: PlayerControls) => void;
   unregisterPlayer: () => void;
 }
@@ -45,12 +47,23 @@ export const VideoProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, []);
 
+  const seekToPrev = useCallback(() => {
+    if (controlsRef.current?.seekToPrev) {
+      try {
+        controlsRef.current.seekToPrev();
+      } catch (error) {
+        console.error('VideoContext: Error in seekToPrev', error);
+      }
+    }
+  }, []);
+
   const contextValue = useMemo(() => ({
     togglePlayPause,
     seekToNext,
+    seekToPrev,
     registerPlayer,
     unregisterPlayer
-  }), [togglePlayPause, seekToNext, registerPlayer, unregisterPlayer]);
+  }), [togglePlayPause, seekToNext, seekToPrev, registerPlayer, unregisterPlayer]);
 
   return (
     <VideoContext.Provider value={contextValue}>

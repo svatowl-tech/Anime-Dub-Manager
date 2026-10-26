@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { Play, Pause, CheckCircle, XCircle, AlertCircle, MessageSquare, Volume2, Check, X, Activity, User, Clock, FileAudio, Send, Video, Trash2, Mic, Sparkles, Save, SkipForward, Scissors, Zap, VolumeX, Volume1, Sliders, Info } from 'lucide-react';
+import { Play, Pause, CheckCircle, XCircle, AlertCircle, MessageSquare, Volume2, Check, X, Activity, User, Clock, FileAudio, Send, Video, Trash2, Mic, Sparkles, Save, SkipForward, SkipBack, Scissors, Zap, VolumeX, Volume1, Sliders, Info } from 'lucide-react';
 import { toast } from 'sonner';
 import { safeCopyToClipboard } from '../lib/clipboard';
 import { ipcSafe } from '../lib/ipcSafe';
@@ -84,6 +84,9 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     scanWhisperText: false,
     whisperModel: 'small'
   });
+
+  const [isManualDubberOverride, setIsManualDubberOverride] = useState(false);
+  const [manualDubberId, setManualDubberId] = useState<string>('');
 
   const gapsByTrack = useMemo(() => {
     const map: Record<string, number> = {};
@@ -889,17 +892,53 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
     }
   }, [subLines, currentTime]);
 
+  const seekToPrev = useCallback(() => {
+    if (subLines.length === 0) return;
+
+    // subLines is sorted by startSec
+    let prevSub: SubtitleLine | null = null;
+    for (let i = subLines.length - 1; i >= 0; i--) {
+      if (subLines[i].startSec < currentTime - 0.25) {
+        prevSub = subLines[i];
+        break;
+      }
+    }
+
+    if (!prevSub && subLines.length > 0 && currentTime > subLines[0].startSec + 0.1) {
+      prevSub = subLines[0];
+    }
+
+    if (prevSub) {
+      const prevTime = Math.max(0, prevSub.startSec);
+      if (wavesurferRef.current) {
+        wavesurferRef.current.setTime(prevTime);
+      }
+      if (videoRef.current) {
+        videoRef.current.currentTime = prevTime;
+      }
+      setCurrentTime(prevTime);
+    }
+  }, [subLines, currentTime]);
+
   useEffect(() => {
-    registerPlayer({ togglePlayPause: togglePlay, seekToNext });
+    registerPlayer({ togglePlayPause: togglePlay, seekToNext, seekToPrev });
     return () => unregisterPlayer();
-  }, [registerPlayer, unregisterPlayer, togglePlay, seekToNext]);
+  }, [registerPlayer, unregisterPlayer, togglePlay, seekToNext, seekToPrev]);
 
-  const handleAddComment = useCallback(async (textOverride?: string) => {
-    const commentText = textOverride || newComment;
-    if (!commentText.trim() || !currentEpisode) return;
+  const handleAddComment = useCallback(async (textOverride?: string, customTargetDubberId?: string) => {
+    const commentText = (textOverride !== undefined ? textOverride : newComment).trim();
+    if (!commentText || !currentEpisode) return;
 
-    // Use selected track if available, otherwise try to auto-detect
-    let targetTrackId = selectedTrackId === 'all' ? null : selectedTrackId;
+    // Use explicit dubber if provided or if manual override checkbox is on
+    const effectiveDubberId = customTargetDubberId || (isManualDubberOverride && manualDubberId ? manualDubberId : null);
+
+    let targetTrackId = effectiveDubberId;
+
+    if (!targetTrackId) {
+      // Use selected track if available, otherwise try to auto-detect
+      targetTrackId = selectedTrackId === 'all' ? null : selectedTrackId;
+    }
+    
     const baseDubberId = targetTrackId ? targetTrackId.split('__')[0] : null;
     
     // If we have a detected character, we can use it to find the specific assignment
@@ -924,7 +963,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       if (tracks.length > 0) {
         targetTrackId = tracks[0].id;
       } else {
-        toast.error("Не удалось определить дабера для фикса. Выберите дорожку вручную.");
+        toast.error("Не удалось определить дабера для фикса. Включите галочку «Указать дабера» и выберите нужного.");
         return;
       }
     }
@@ -937,30 +976,35 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       subId: currentSubId || undefined
     };
 
+    const resolvedDubberId = targetTrackId.split('__')[0];
+
     // Update local state immediately for responsiveness
-    const updatedTracks = tracks.map(t => 
-      t.id === targetTrackId ? { 
-        ...t, 
-        comments: [...t.comments, comment],
-        status: 'fixes_needed' as const
-      } : t
-    );
+    const updatedTracks = tracks.map(t => {
+      const tBase = t.id.split('__')[0];
+      if (t.id === targetTrackId || tBase === resolvedDubberId) {
+        return { 
+          ...t, 
+          comments: [...t.comments, comment],
+          status: 'fixes_needed' as const
+        };
+      }
+      return t;
+    });
     
     setTracks(updatedTracks);
     if (!textOverride) setNewComment('');
 
     // Save to DB
     try {
-      // Determine which assignment to attach the comment to
-      // If the dubber has multiple roles, we try to match the current character,
-      // otherwise we use the first assignment of that dubber.
-      const resolvedDubberId = targetTrackId.split('__')[0];
       const targetDubberAssignments = currentEpisode.assignments?.filter(a => (a.substituteId || a.dubberId) === resolvedDubberId) || [];
       const bestAssignmentMatch = targetDubberAssignments.find(
         a => currentCharacter && a.characterName.toLowerCase() === currentCharacter.toLowerCase()
       ) || targetDubberAssignments[0];
 
-      if (!bestAssignmentMatch) return;
+      if (!bestAssignmentMatch) {
+        toast.warn('Правка сохранена в дорожку (роль дабера в назначениях не найдена)');
+        return;
+      }
 
       const updatedAssignments = currentEpisode.assignments?.map(a => {
         if (a.id === bestAssignmentMatch.id) {
@@ -983,11 +1027,14 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         assignments: updatedAssignments,
         status: currentEpisode.status === 'FINISHED' ? 'FINISHED' : 'FIXES'
       });
+      const dubberNick = bestAssignmentMatch.substitute?.nickname || bestAssignmentMatch.dubber?.nickname || bestAssignmentMatch.characterName;
+      toast.success(`Правка успешно выписана дабберу «${dubberNick}»!`);
       onRefresh();
     } catch (error) {
       console.error('Save comment error:', error);
+      toast.error('Ошибка сохранения правки в БД');
     }
-  }, [newComment, currentEpisode, selectedTrackId, tracks, currentCharacter, currentTime, currentSubId, onRefresh]);
+  }, [newComment, currentEpisode, selectedTrackId, tracks, currentCharacter, currentTime, currentSubId, isManualDubberOverride, manualDubberId, onRefresh]);
 
   const detectSilence = async () => {
     if (!wavesurferRef.current || !regionsRef.current) return;
@@ -1067,11 +1114,21 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         e.preventDefault();
         togglePlay();
       }
+
+      if ((e.code === 'ArrowRight' && (e.altKey || e.ctrlKey || e.shiftKey)) || ((e.code === 'KeyD' || e.code === 'KeyN') && (e.altKey || e.shiftKey))) {
+        e.preventDefault();
+        seekToNext();
+      }
+
+      if ((e.code === 'ArrowLeft' && (e.altKey || e.ctrlKey || e.shiftKey)) || ((e.code === 'KeyA' || e.code === 'KeyP') && (e.altKey || e.shiftKey))) {
+        e.preventDefault();
+        seekToPrev();
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [currentTime, currentSubtitleText, currentSubId, togglePlay, handleAddComment]);
+  }, [currentTime, currentSubtitleText, currentSubId, togglePlay, handleAddComment, seekToNext, seekToPrev]);
 
   // Sync wavesurfer with video when scrubbing
   useEffect(() => {
@@ -1609,6 +1666,11 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         isPlaying={isPlaying}
         togglePlay={togglePlay}
         seekToNext={seekToNext}
+        seekToPrev={seekToPrev}
+        isManualDubberOverride={isManualDubberOverride}
+        setIsManualDubberOverride={setIsManualDubberOverride}
+        manualDubberId={manualDubberId}
+        setManualDubberId={setManualDubberId}
         handleStop={handleStop}
         handlePause={handlePause}
         isAutoNormalize={isAutoNormalize}

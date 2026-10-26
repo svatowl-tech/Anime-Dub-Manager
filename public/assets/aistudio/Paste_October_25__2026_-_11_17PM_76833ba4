@@ -1,0 +1,1780 @@
+================================================================================
+          ANIME DUB MANAGER — ПОЛНЫЙ ДИАГНОСТИЧЕСКИЙ ЛОГ ПРОЦЕССОВ
+================================================================================
+Время генерации:  2026-10-25T20:17:28.215Z
+Платформа:        Electron Desktop
+Браузер / Агент:  Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) anime-dub-manager/1.2.0 Chrome/146.0.7680.188 Electron/41.2.1 Safari/537.36
+Память JS Heap:   3586 MB / 3586 MB (Лимит: 3586 MB)
+Всего событий:    191 | Ошибок: 1 | Предупреждений: 8
+Активные процессы: Нет зависших процессов.
+================================================================================
+                     ХРОНОЛОГИЧЕСКИЙ ТАЙМЛАЙН СОБЫТИЙ:
+================================================================================
+[19:23:45.031] [INFO   ] [SYSTEM  ] 🚀 Инициализация React интерфейса Anime Dub Manager завершена.
+[19:23:45.136] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[19:23:45.138] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[19:23:45.139] [PROCESS] [IPC     ] ▶ Запуск: «get-config»
+[19:23:45.139] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[19:23:45.139] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-progress
+[19:23:45.139] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[19:23:45.140] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[19:23:45.140] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: episode-updated
+[19:23:45.141] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[19:23:45.141] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-progress
+[19:23:45.141] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[19:23:45.141] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: torrent-download-started
+[19:23:45.142] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: download-progress
+[19:23:45.142] [PROCESS] [IPC     ] ▶ Запуск: «get-projects»
+[19:23:45.163] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [25ms]
+    Детали: [Array: 34 items]
+[19:23:45.163] [PROCESS] [IPC     ] ✓ Завершен: «get-config» [24ms]
+    Детали: [Object: 18 keys]
+[19:23:45.184] [PROCESS] [IPC     ] ▶ Запуск: «cloud-pull» (расчетное время ~60с)
+[19:23:45.860] [PROCESS] [IPC     ] ✓ Завершен: «get-projects» [718ms]
+    Детали: [Array: 35 items]
+[19:23:45.938] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[19:23:45.939] [PROCESS] [IPC     ] ▶ Запуск: «check-services-status»
+[19:23:45.939] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1775947272968"
+    }
+[19:23:45.939] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1779549719402"
+    }
+[19:23:45.940] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1780163767550"
+    }
+[19:23:45.963] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [25ms]
+    Детали: [Array: 34 items]
+[19:23:48.466] [PROCESS] [IPC     ] ✓ Завершен: «check-services-status» [2527ms]
+    Детали: [Object: 5 keys]
+[19:23:50.909] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [4970ms]
+    Детали: [Object: 2 keys]
+[19:23:50.931] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [4992ms]
+    Детали: [Object: 2 keys]
+[19:23:50.987] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [5048ms]
+    Детали: [Object: 2 keys]
+[19:23:50.987] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790961893492"
+    }
+[19:23:50.988] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790968370440"
+    }
+[19:23:50.988] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "proj_1792619749064_272"
+    }
+[19:23:51.243] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [256ms]
+    Детали: [Object: 2 keys]
+[19:23:51.260] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [272ms]
+    Детали: [Object: 2 keys]
+[19:23:51.519] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [531ms]
+    Детали: [Object: 2 keys]
+[19:23:51.519] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1792685074896"
+    }
+[19:23:51.951] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [432ms]
+    Детали: [Object: 2 keys]
+[19:24:26.754] [INFO   ] [PROJECT ] Выбор проекта: "1780163767550"
+[19:24:26.765] [PROCESS] [IPC     ] ▶ Запуск: «get-project»
+    Детали: 1780163767550
+[19:24:26.766] [PROCESS] [IPC     ] ▶ Запуск: «get-next-episode-date»
+    Детали: {
+      "title": "Kaijuu 8-gou 2nd Season"
+    }
+[19:24:26.766] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1780163767550"
+    }
+[19:24:26.846] [PROCESS] [IPC     ] ✓ Завершен: «get-project» [81ms]
+    Детали: [Object: 30 keys]
+[19:24:26.847] [PROCESS] [IPC     ] ▶ Запуск: «get-anime-details»
+    Детали: {
+      "id": 59177,
+      "source": "shikimori"
+    }
+[19:24:28.976] [PROCESS] [IPC     ] ✓ Завершен: «get-next-episode-date» [2211ms]
+    Детали: Вышел полностью
+[19:24:29.013] [PROCESS] [IPC     ] ✓ Завершен: «get-anime-details» [2166ms]
+    Детали: [Object: 2 keys]
+[19:24:29.014] [PROCESS] [IPC     ] ▶ Запуск: «get-anime-characters»
+    Детали: {
+      "id": 59177,
+      "source": "shikimori"
+    }
+[19:24:29.234] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [2468ms]
+    Детали: [Object: 2 keys]
+[19:24:29.310] [PROCESS] [IPC     ] ✓ Завершен: «get-anime-characters» [296ms]
+    Детали: [Object: 2 keys]
+[19:24:32.785] [INFO   ] [NAV     ] Переключение вкладки: "dashboard" ➔ "qa"
+[19:24:32.805] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[19:24:32.807] [PROCESS] [IPC     ] ▶ Запуск: «get-raw-subtitles»
+    Детали: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+[19:24:32.833] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [28ms]
+    Детали: [Array: 34 items]
+[19:24:32.951] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.1055546779714962_1791492020836.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.952] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.620849139601179_1791572097983.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.952] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.294880424740143_1792192825905.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.952] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.6049283030100298_1791586792324.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.953] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.11251077652272234_1791492006375.FLAC",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.953] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.33022698056765254_1791666092800.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.953] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.6117587279652487_1792358235486.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.954] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.26426891427743304_1791666099303.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[19:24:32.960] [PROCESS] [IPC     ] ✓ Завершен: «get-raw-subtitles» [153ms]
+    Детали: [Object: 2 keys]
+[19:24:33.044] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [92ms]
+    Детали: [Object: 6 keys]
+[19:24:33.047] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [95ms]
+    Детали: [Object: 6 keys]
+[19:24:33.048] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [95ms]
+    Детали: [Object: 6 keys]
+[19:24:33.048] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [95ms]
+    Детали: [Object: 6 keys]
+[19:24:33.048] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [97ms]
+    Детали: [Object: 6 keys]
+[19:24:33.053] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [100ms]
+    Детали: [Object: 6 keys]
+[19:24:33.070] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [116ms]
+    Детали: [Object: 6 keys]
+[19:24:33.093] [PROCESS] [IPC     ] ✓ Завершен: «audio-get-track-analysis» [141ms]
+    Детали: [Object: 6 keys]
+[19:24:33.186] [INFO   ] [IPC     ] ⏳ [ПРОЦЕСС ВЫПОЛНЯЕТСЯ] «cloud-pull» (p#8-cloud-pull) выполняется уже 48002ms (тяжелая фоновая задача, ожидание в пределах нормы ~60с)...
+    Детали: {
+      "scope": "IPC",
+      "name": "cloud-pull",
+      "elapsedMs": 48002
+    }
+[19:24:36.509] [INFO   ] [NAV     ] Переключение вкладки: "qa" ➔ "timing"
+[19:24:36.522] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[19:24:36.523] [PROCESS] [IPC     ] ▶ Запуск: «get-raw-subtitles»
+    Детали: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+[19:24:36.551] [PROCESS] [IPC     ] ✓ Завершен: «get-raw-subtitles» [28ms]
+    Детали: [Object: 2 keys]
+[19:24:36.552] [PROCESS] [IPC     ] ▶ Запуск: «extract-audio-peaks»
+    Детали: {
+      "videoPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+      "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+      "pointsPerSecond": 5
+    }
+[19:24:37.960] [PROCESS] [IPC     ] ✓ Завершен: «extract-audio-peaks» [1407ms]
+    Детали: [Array: 7100 items]
+[19:24:37.960] [PROCESS] [IPC     ] ▶ Запуск: «timing-load-state»
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[19:24:37.985] [PROCESS] [IPC     ] ✓ Завершен: «timing-load-state» [25ms]
+    Детали: [Object: 5 keys]
+[19:24:37.986] [PROCESS] [IPC     ] ▶ Запуск: «mixing-get-status»
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[19:24:39.511] [PROCESS] [IPC     ] ✓ Завершен: «mixing-get-status» [1525ms]
+    Детали: [Object: 6 keys]
+[19:26:15.300] [WARN   ] [HANG    ] ⚠️ [ПРЕВЫШЕН ЛИМИТ ВРЕМЕНИ] Длительная операция «cloud-pull» (p#8-cloud-pull) выполняется уже 150117ms (превышение расчетных ~60с). Проверьте системные ресурсы.
+    Детали: {
+      "scope": "IPC",
+      "name": "cloud-pull",
+      "elapsedMs": 150117
+    }
+[19:53:13.080] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «cloud-pull» успешно выполнен за 1767896ms (система отработала штатно) [1767896ms]
+    Детали: [Array: 5 items]
+[19:53:13.086] [PROCESS] [IPC     ] ▶ Запуск: «get-projects»
+[19:53:13.286] [PROCESS] [IPC     ] ✓ Завершен: «get-projects» [200ms]
+    Детали: [Array: 35 items]
+[21:40:55.811] [PROCESS] [IPC     ] ▶ Запуск: «timing-whisper-transcribe-clips» (расчетное время ~60с)
+    Детали: {
+      "audioFilePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.294880424740143_1792192825905.flac",
+      "clips": [
+        {
+          "id": "clip_6__stunningstan_28",
+          "startSec": 708.62,
+          "endSec": 709.02,
+          "hint": "Фраза 29"
+        },
+        {
+          "id": "clip_6__stunningstan_29",
+          "startSec": 714.52,
+          "endSec": 714.96,
+          "hint": "Фраза 30"
+        },
+        {
+          "id": "clip_6__stunningstan_33",
+          "startSec": 753.38,
+          "endSec": 754.44,
+          "hint": "Фраза 34"
+        },
+        {
+          "id": "clip_6__stunningstan_34",
+          "startSec": 756.58,
+          "endSec": 757.08,
+          "hint": "Фраза 35"
+        }
+      ],
+      "model": "tiny",
+      "language": "ru"
+    }
+[21:41:11.748] [PROCESS] [IPC     ] ✓ Завершен: «timing-whisper-transcribe-clips» [15937ms]
+    Детали: [Object: 1 keys]
+[22:59:18.975] [PROCESS] [IPC     ] ▶ Запуск: «mixing-get-status»
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[22:59:19.048] [PROCESS] [IPC     ] ✓ Завершен: «mixing-get-status» [73ms]
+    Детали: [Object: 6 keys]
+[22:59:19.049] [PROCESS] [IPC     ] ▶ Запуск: «mixing-save-timing-metadata»
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      },
+      "timingMetadata": {
+        "version": "1.0",
+        "updatedAt": "2026-10-25T19:59:19.048Z",
+        "episodeNumber": 8,
+        "defaultVolumePercent": 100,
+        "intentionalOverlaps": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "rolesVolumeMap": {
+          "Аой Кагураги, Ихару Фурухаси": 100,
+          "Kori": 100,
+          "Дзюго Огата": 100,
+          "Tenmag": 100,
+          "Кафка Хибино, Оператор": 100,
+          "Stunning Stan": 100,
+          "Кикору Синомия, Токо": 100,
+          "Defa": 100,
+          "Мина Асиро, Хикари Синомия": 100,
+          "Miss Di": 100,
+          "Рэно Итикава, Харуити Идзумо": 100,
+          "7pies": 100,
+          "Сосиро Хосина": 100,
+          "Stenai": 100,
+          "Оператор (Ж)": 100,
+          "Bonique": 100
+        },
+        "phrases": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (306 more items)"
+        ]
+      }
+    }
+[22:59:19.079] [PROCESS] [IPC     ] ✓ Завершен: «mixing-save-timing-metadata» [31ms]
+    Детали: [Object: 3 keys]
+[22:59:19.080] [PROCESS] [IPC     ] ▶ Запуск: «audio-save-timing-analysis»
+    Детали: {
+      "episodeDir": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\Сведения",
+      "data": {
+        "version": "1.0",
+        "updatedAt": "2026-10-25T19:59:19.048Z",
+        "episodeNumber": 8,
+        "defaultVolumePercent": 100,
+        "intentionalOverlaps": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "rolesVolumeMap": {
+          "Аой Кагураги, Ихару Фурухаси": 100,
+          "Kori": 100,
+          "Дзюго Огата": 100,
+          "Tenmag": 100,
+          "Кафка Хибино, Оператор": 100,
+          "Stunning Stan": 100,
+          "Кикору Синомия, Токо": 100,
+          "Defa": 100,
+          "Мина Асиро, Хикари Синомия": 100,
+          "Miss Di": 100,
+          "Рэно Итикава, Харуити Идзумо": 100,
+          "7pies": 100,
+          "Сосиро Хосина": 100,
+          "Stenai": 100,
+          "Оператор (Ж)": 100,
+          "Bonique": 100
+        },
+        "phrases": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (306 more items)"
+        ]
+      }
+    }
+[22:59:19.100] [PROCESS] [IPC     ] ✓ Завершен: «audio-save-timing-analysis» [20ms]
+    Детали: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Сведения\Тайминг\timing_project.analysis.json
+[22:59:19.100] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: mixing-progress
+[22:59:19.100] [PROCESS] [IPC     ] ▶ Запуск: «timing-export-to-mixing» (расчетное время ~120с)
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      },
+      "targetDir": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\Сведения",
+      "tracks": [
+        {
+          "id": "12__kori",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "Kori",
+          "character": "Аой Кагураги, Ихару Фурухаси",
+          "dubberName": "Kori",
+          "characterName": "Аой Кагураги, Ихару Фурухаси",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.1055546779714962_1791492020836.flac",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "xi9a3vmx0",
+          "fileSize": 4952176,
+          "comments": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "9__tenmag",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "Tenmag",
+          "character": "Дзюго Огата",
+          "dubberName": "Tenmag",
+          "characterName": "Дзюго Огата",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\Fixes\\fix_0.620849139601179_1792598212454.flac",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "bccwa284l",
+          "fileSize": 5359125,
+          "comments": "[Object / Max Depth Exceeded]",
+          "patchSnippet": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "6__stunningstan",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "Stunning Stan",
+          "character": "Кафка Хибино, Оператор",
+          "dubberName": "Stunning Stan",
+          "characterName": "Кафка Хибино, Оператор",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.294880424740143_1792192825905.flac",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "age5507an",
+          "fileSize": 7393230,
+          "comments": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1__defa",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "Defa",
+          "character": "Кикору Синомия, Токо",
+          "dubberName": "Defa",
+          "characterName": "Кикору Синомия, Токо",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.6049283030100298_1791586792324.flac",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "fejvkop5r",
+          "fileSize": 4027651,
+          "comments": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "13__missdi",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "Miss Di",
+          "character": "Мина Асиро, Хикари Синомия",
+          "dubberName": "Miss Di",
+          "characterName": "Мина Асиро, Хикари Синомия",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.11251077652272234_1791492006375.FLAC",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "rxrsmejrt",
+          "fileSize": 2013559,
+          "comments": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1775080765990__7pies",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "7pies",
+          "character": "Рэно Итикава, Харуити Идзумо",
+          "dubberName": "7pies",
+          "characterName": "Рэно Итикава, Харуити Идзумо",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.33022698056765254_1791666092800.flac",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "3pzabgwt3",
+          "fileSize": 1490074,
+          "comments": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "15__stenai",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "Stenai",
+          "character": "Сосиро Хосина",
+          "dubberName": "Stenai",
+          "characterName": "Сосиро Хосина",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.6117587279652487_1792358235486.flac",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "wtknum7qq",
+          "fileSize": 18814751,
+          "comments": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1775075809942__bonique",
+          "projectId": "1780163767550",
+          "episodeId": "1780267529341",
+          "participant": "Bonique",
+          "character": "Оператор (Ж)",
+          "dubberName": "Bonique",
+          "characterName": "Оператор (Ж)",
+          "filePath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\QAFixes\\dub_0.26426891427743304_1791666099303.flac",
+          "role": "dubber",
+          "status": "recorded",
+          "files": "[Object / Max Depth Exceeded]",
+          "selectedFileId": "23dcfjwak",
+          "fileSize": 669705,
+          "comments": "[Object / Max Depth Exceeded]"
+        }
+      ],
+      "audioClips": {
+        "12__kori": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (4 more items)"
+        ],
+        "9__tenmag": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (36 more items)"
+        ],
+        "6__stunningstan": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (77 more items)"
+        ],
+        "1__defa": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "13__missdi": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "1775080765990__7pies": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "15__stenai": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (83 more items)"
+        ],
+        "1775075809942__bonique": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ]
+      },
+      "volumes": {},
+      "timingMetadata": {
+        "version": "1.0",
+        "updatedAt": "2026-10-25T19:59:19.048Z",
+        "episodeNumber": 8,
+        "defaultVolumePercent": 100,
+        "intentionalOverlaps": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "rolesVolumeMap": {
+          "Аой Кагураги, Ихару Фурухаси": 100,
+          "Kori": 100,
+          "Дзюго Огата": 100,
+          "Tenmag": 100,
+          "Кафка Хибино, Оператор": 100,
+          "Stunning Stan": 100,
+          "Кикору Синомия, Токо": 100,
+          "Defa": 100,
+          "Мина Асиро, Хикари Синомия": 100,
+          "Miss Di": 100,
+          "Рэно Итикава, Харуити Идзумо": 100,
+          "7pies": 100,
+          "Сосиро Хосина": 100,
+          "Stenai": 100,
+          "Оператор (Ж)": 100,
+          "Bonique": 100
+        },
+        "phrases": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (306 more items)"
+        ]
+      }
+    }
+[23:00:55.105] [INFO   ] [IPC     ] ⏳ [ПРОЦЕСС ВЫПОЛНЯЕТСЯ] «timing-export-to-mixing» (p#228-timing-export-to-mixing) выполняется уже 96004ms (тяжелая фоновая задача, ожидание в пределах нормы ~120с)...
+    Детали: {
+      "scope": "IPC",
+      "name": "timing-export-to-mixing",
+      "elapsedMs": 96004,
+      "meta": {
+        "episode": {
+          "id": "1780267529341",
+          "projectId": "1780163767550",
+          "number": 8,
+          "status": "QA",
+          "deadline": "2026-10-11T19:43:25.480Z",
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-31T22:45:29.341Z",
+          "updatedAt": "2026-10-21T15:56:52.606Z",
+          "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+          "isHardsub": false,
+          "title": "Destiny",
+          "airingDate": "06.09.2025",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "project": "[Object / Max Depth Exceeded]"
+        },
+        "targetDir": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\Сведения",
+        "tracks": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "audioClips": {
+          "12__kori": "[Object / Max Depth Exceeded]",
+          "9__tenmag": "[Object / Max Depth Exceeded]",
+          "6__stunningstan": "[Object / Max Depth Exceeded]",
+          "1__defa": "[Object / Max Depth Exceeded]",
+          "13__missdi": "[Object / Max Depth Exceeded]",
+          "1775080765990__7pies": "[Object / Max Depth Exceeded]",
+          "15__stenai": "[Object / Max Depth Exceeded]",
+          "1775075809942__bonique": "[Object / Max Depth Exceeded]"
+        },
+        "volumes": {},
+        "timingMetadata": {
+          "version": "1.0",
+          "updatedAt": "2026-10-25T19:59:19.048Z",
+          "episodeNumber": 8,
+          "defaultVolumePercent": 100,
+          "intentionalOverlaps": "[Object / Max Depth Exceeded]",
+          "rolesVolumeMap": "[Object / Max Depth Exceeded]",
+          "phrases": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[23:01:47.199] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «timing-export-to-mixing» успешно выполнен за 148099ms (система отработала штатно) [148099ms]
+    Детали: [Object: 3 keys]
+[23:01:47.200] [INFO   ] [NAV     ] Переключение вкладки: "timing" ➔ "mixing"
+[23:01:47.292] [PROCESS] [IPC     ] ▶ Запуск: «mixing-get-status»
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[23:01:47.297] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: mixing-progress
+[23:01:47.297] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: mixing-log
+[23:01:47.297] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[23:01:47.700] [PROCESS] [IPC     ] ✓ Завершен: «mixing-get-status» [408ms]
+    Детали: [Object: 6 keys]
+[23:06:27.667] [PROCESS] [IPC     ] ▶ Запуск: «mixing-get-status»
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[23:06:27.710] [PROCESS] [IPC     ] ✓ Завершен: «mixing-get-status» [43ms]
+    Детали: [Object: 6 keys]
+[23:06:31.336] [PROCESS] [IPC     ] ▶ Запуск: «mixing-get-status»
+    Детали: {
+      "episode": {
+        "id": "1780267529341",
+        "projectId": "1780163767550",
+        "number": 8,
+        "status": "QA",
+        "deadline": "2026-10-11T19:43:25.480Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-05-31T22:45:29.341Z",
+        "updatedAt": "2026-10-21T15:56:52.606Z",
+        "subPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\subtitles.ass",
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4",
+        "isHardsub": false,
+        "title": "Destiny",
+        "airingDate": "06.09.2025",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "project": {
+          "id": "1780163767550",
+          "title": "Кайдзю номер восемь 2",
+          "originalTitle": "Kaijuu 8-gou 2nd Season",
+          "releaseType": "VOICEOVER",
+          "emoji": "👾",
+          "isOngoing": false,
+          "synopsis": "После масштабной операции Силы обороны столкнулись с новыми трудностями. У [character=187463]Кафки Хибино[/character] тоже прибавилось проблем, хотя основные цели не изменились. Он по-прежнему жаждет избавить мир от кайдзю, и ему по-прежнему нужно доказать свою полезность товарищам и командованию. А сделать это всё сложнее, ведь кайдзю, кажется, становятся всё сильнее.\nСмогут ли грядущие испытания стать катализатором положительных перемен? Удастся ли теперь Кафке сблизиться с подругой детства [character=187500]Миной Асиро[/character]? Сумеют ли Силы обороны справиться с растущей угрозой кайдзю... [длина 771 симв.]",
+          "posterUrl": "https://smotret-anime.com/posters/36878.41115268784.jpg",
+          "typeAndSeason": "TV",
+          "totalEpisodes": 11,
+          "globalMapping": "[{\"characterName\":\"Кафка Хибино\",\"dubberId\":\"6\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187463.jpg?1718140927\",\"isMain\":false,\"original_name\":\"Kafka Hibino\"},{\"characterName\":\"Сосиро Хосина\",\"dubberId\":\"15\",\"photoUrl\":\"https://shikimori.io/system/characters/original/187499.jpg?1718140956\",\"isMain\":false,\"original_name\":\"Soushirou Hoshina\"},{\"characterName\":\"Гэн Наруми\",\"dubberId\":\"9\",\"photoUrl\":\"https://shikimori.io/system/characters/original/198940.jpg?1708849417\",\"isMain\":false,\"original_name\":\"Gen Narumi\"},{\"characterName\":\"Кикору Синомия\",\"dubberId\":\"1\",\"photoUrl\":\"http... [длина 16559 симв.]",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 8,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-05-30T17:56:07.550Z",
+          "updatedAt": "2026-10-21T21:56:00.088Z",
+          "assignedDubbers": "[Object / Max Depth Exceeded]",
+          "soundEngineerId": "9",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "characterAliases": "{}",
+          "anime365Id": 36878,
+          "coverSettings": "{\"fontFamily\":\"Russo One\",\"titleSize\":92,\"episodeSize\":96,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#ffffff\",\"fontBold\":true,\"fontItalic\":false,\"textTransform\":\"uppercase\",\"cutTopXPercent\":9,\"cutBottomXPercent\":54,\"cutColor\":\"#000000\",\"cutOpacity\":0.9,\"dividerStyle\":\"barbed-wire\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#000000\",\"strokeWidth\":2,\"shadowColor\":\"#000000\",\"shadowBlur\":15,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":25,\"logoY\":75,\"logoWidth\":600,\"logoRotation\":0,\"textX\":80,\"textY\":756,\"lineSpacing\":1.25,\"savedCustomTitle\":\"Кайдзю №8\\n2 сезон\"}",
+          "year": 2025,
+          "nextEpisodeDate": "Не определена",
+          "links": "{\"tg\":\"https://t.me/voise_okane/72\",\"vk\":\"https://vk.ru/wall-216521493_2753\",\"anime365\":\"https://smotret-anime.com/catalog/kaijuu-8-gou-2nd-season-36878\",\"shikimori\":\"https://shikimori.io/animes/59177\",\"kodik\":\"https://kodikonline.com/serial/68222/aN1DLR59858f83\",\"mal\":\"https://myanimelist.net/anime/59177\",\"anilist\":\"https://anilist.co/anime/178754\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=18722\",\"quickUploadLinks\":[{\"name\":\"TG Загрузка\",\"url\":\"https://t.me/akaneproject\"},{\"name\":\"Kodik Конвертер\",\"url\":\"https://converter.kodikres.com/\"},{\"name\":\"VK Кабинет\",\"url\":\"https... [длина 968 симв.]",
+          "airedEpisodes": 11,
+          "tgPostTemplate": "{title}\n{emoji} {episodeNumber}/{totalEpisodes} {emoji} \n \n━━━━━━ ◦ ❖ ◦ ━━━━━━\nРоли озвучили:\n \n{dubberLinks}\n \nТайминг и работа со звуком: \n{seTg}\n\n━━━━━━ ◦ ❖ ◦ ━━━━━━\n\n⏪[{prevEpisodeNumber}]({prevLinkTg}) | 📝 [Каталог всех релизов](https://t.me/+EWFlmF96FGJmYWNi) |  {nextEpisodeNumber} (Скоро)⏩\n\n#{projectSlug}",
+          "vkPostTemplate": "{title} \n{emoji} {episodeNumber}/{totalEpisodes} {emoji}\n \n| Роли озвучили: {dubberInfo}\n \n| Тайминг и работа со звуком: {seVk}\n \n➪ Аниме 365: : {linkAnime365}\n➪ Телеграмм:: {linkTg}\n➪ Kodik: : {linkKodik}",
+          "nameStresses": "{\"Кафка Хибино\":\"кАфка хибИно\",\"Сосиро Хосина\":\"сосИро хОсина\",\"Гэн Наруми\":\"гЭн нарУми\",\"Кикору Синомия\":\"кикОру синОмия\",\"Мина Асиро\":\"мИна асИро\",\"Ихару Фурухаси\":\"ихАру фурухАси\",\"Эйдзи Хасэгава\":\"Эйдзи хасэгАва\",\"Соитиро Хосина\":\"соитИро хОсина\",\"Рэно Итикава\":\"рЭно итикАва\",\"Исао Синомия\":\"исАо синОмия\",\"Акира Курусу\":\"акИра курУсу\",\"Кинаси\":\"кинАси\",\"Миякэ\":\"миЯкэ\",\"Синономэ\":\"синОномэ\",\"Татибана\":\"татИбана\",\"Дзюдзо Ногидзака\":\"жзЮдзо ногидзАка\",\"Кэйдзи Итами\":\"кэйдзИ итАми\",\"Табути\":\"табУти\",\"Итинокура\":\"итинОкура\",\"Хакуа Игараси\":\"хакУа игарАси\",\"Дзюра Игараси\":\"дзЮра игарАси\",\"Рё Ика... [длина 853 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[23:06:31.376] [PROCESS] [IPC     ] ✓ Завершен: «mixing-get-status» [40ms]
+    Детали: [Object: 6 keys]
+[23:06:40.250] [INFO   ] [NAV     ] Переключение вкладки: "mixing" ➔ "subtitles"
+[23:06:40.260] [PROCESS] [IPC     ] ▶ Запуск: «get-raw-subtitles»
+    Детали: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+[23:06:40.260] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[23:06:40.261] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[23:06:40.288] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [28ms]
+    Детали: [Array: 34 items]
+[23:06:40.312] [PROCESS] [IPC     ] ✓ Завершен: «get-raw-subtitles» [52ms]
+    Детали: [Object: 2 keys]
+[23:06:43.725] [INFO   ] [NAV     ] Переключение вкладки: "subtitles" ➔ "cover"
+[23:06:44.537] [INFO   ] [NAV     ] Переключение вкладки: "cover" ➔ "dashboard"
+[23:06:44.546] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[23:06:44.547] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[23:06:44.547] [PROCESS] [IPC     ] ▶ Запуск: «get-config»
+[23:06:44.547] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[23:06:44.548] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-progress
+[23:06:44.548] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[23:06:44.548] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[23:06:44.548] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: episode-updated
+[23:06:44.548] [PROCESS] [IPC     ] ▶ Запуск: «get-next-episode-date»
+    Детали: {
+      "title": "Kaijuu 8-gou 2nd Season"
+    }
+[23:06:44.548] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1780163767550"
+    }
+[23:06:44.591] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [44ms]
+    Детали: [Array: 34 items]
+[23:06:44.592] [PROCESS] [IPC     ] ✓ Завершен: «get-config» [44ms]
+    Детали: [Object: 18 keys]
+[23:06:44.980] [PROCESS] [IPC     ] ✓ Завершен: «get-next-episode-date» [432ms]
+    Детали: Вышел полностью
+[23:06:45.526] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [978ms]
+    Детали: [Object: 2 keys]
+[23:06:46.057] [INFO   ] [PROJECT ] Выбор проекта: "none"
+[23:06:46.066] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[23:06:46.066] [PROCESS] [IPC     ] ▶ Запуск: «check-services-status»
+[23:06:46.066] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1775947272968"
+    }
+[23:06:46.066] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1779549719402"
+    }
+[23:06:46.067] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1780163767550"
+    }
+[23:06:46.095] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [29ms]
+    Детали: [Array: 34 items]
+[23:06:46.354] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [287ms]
+    Детали: [Object: 2 keys]
+[23:06:46.354] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [288ms]
+    Детали: [Object: 2 keys]
+[23:06:46.390] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [323ms]
+    Детали: [Object: 2 keys]
+[23:06:46.390] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790961893492"
+    }
+[23:06:46.390] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790968370440"
+    }
+[23:06:46.391] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "proj_1792619749064_272"
+    }
+[23:06:46.574] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [184ms]
+    Детали: [Object: 2 keys]
+[23:06:46.636] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [246ms]
+    Детали: [Object: 2 keys]
+[23:06:47.881] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [1491ms]
+    Детали: [Object: 2 keys]
+[23:06:47.882] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1792685074896"
+    }
+[23:06:48.070] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [189ms]
+    Детали: [Object: 2 keys]
+[23:06:48.570] [PROCESS] [IPC     ] ✓ Завершен: «check-services-status» [2504ms]
+    Детали: [Object: 5 keys]
+[23:07:02.321] [INFO   ] [PROJECT ] Выбор проекта: "1790968370440"
+[23:07:02.327] [PROCESS] [IPC     ] ▶ Запуск: «get-project»
+    Детали: 1790968370440
+[23:07:02.330] [PROCESS] [IPC     ] ▶ Запуск: «get-next-episode-date»
+    Детали: {
+      "title": "Cyberpunk: Edgerunners 2"
+    }
+[23:07:02.330] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790968370440"
+    }
+[23:07:02.369] [PROCESS] [IPC     ] ✓ Завершен: «get-project» [42ms]
+    Детали: [Object: 27 keys]
+[23:07:02.369] [PROCESS] [IPC     ] ▶ Запуск: «get-anime-details»
+    Детали: {
+      "id": 61990,
+      "source": "shikimori"
+    }
+[23:07:02.596] [PROCESS] [IPC     ] ✓ Завершен: «get-anime-details» [227ms]
+    Детали: [Object: 2 keys]
+[23:07:02.596] [PROCESS] [IPC     ] ▶ Запуск: «get-anime-characters»
+    Детали: {
+      "id": 61990,
+      "source": "shikimori"
+    }
+[23:07:02.644] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [314ms]
+    Детали: [Object: 2 keys]
+[23:07:02.808] [PROCESS] [IPC     ] ✓ Завершен: «get-anime-characters» [212ms]
+    Детали: [Object: 2 keys]
+[23:07:02.814] [PROCESS] [IPC     ] ▶ Запуск: «save-project»
+    Детали: {
+      "id": "1790968370440",
+      "title": "Киберпанк: Бегущие по краю 2",
+      "originalTitle": "Cyberpunk: Edgerunners 2",
+      "releaseType": "RECAST",
+      "emoji": "🤖",
+      "isOngoing": true,
+      "synopsis": "Найт-Сити по-прежнему горит неоновыми огнями, ослепляя тех, кто пришёл сюда за властью, и маня тех, кто готов поставить на кон всё ради славы или свободы. Корпорация «Арасака» продолжает укреплять своё влияние, банды борются за территории, а наёмники выполняют опасные заказы в надежде заработать. В этом городе технологии способны сделать человека сильнее, быстрее и опаснее, но ни один имплант не защищает от потери самого себя. Чем больше имплантов получает человек, тем выше риск киберпсихоза, когда чрезмерная нагрузка на психику может привести к потере рассудка.\n[character=299242]Уик Кингсли[/... [длина 1297 симв.]",
+      "posterUrl": "https://smotret-anime.app/posters/39861.15600270184.jpg",
+      "typeAndSeason": "ONA",
+      "totalEpisodes": 10,
+      "globalMapping": "[{\"characterName\":\"Роман Каракс\",\"dubberId\":\"1775075809942\",\"photoUrl\":\"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogA... [длина 1689959 симв.]",
+      "links": "{\"tg\":\"\",\"vk\":\"\",\"anime365\":\"https://smotret-anime.app/catalog/cyberpunk-edgerunners-2-39861\",\"shikimori\":\"https://shikimori.io/animes/61990\",\"kodik\":\"\",\"mal\":\"https://myanimelist.net/anime/61990\",\"anilist\":\"https://anilist.co/anime/195539\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=19445\"}",
+      "status": "ACTIVE",
+      "lastActiveEpisode": 2,
+      "assignedDubberIds": [
+        "1792270632467",
+        "1783720265920",
+        "1775075809942",
+        "15",
+        "12",
+        "9",
+        "1775080765990",
+        "1787161986020",
+        "4",
+        "6",
+        "Роман Каракс",
+        "Ди",
+        "Талия Янг",
+        "Уик Кингсли"
+      ],
+      "createdAt": "2026-10-02T19:12:50.440Z",
+      "updatedAt": "2026-10-24T20:22:13.033Z",
+      "anime365Id": 39861,
+      "year": 2026,
+      "nextEpisodeDate": "Не определена",
+      "airedEpisodes": 0,
+      "soundEngineerId": "17",
+      "characterAliases": "{\"Роман\":\"Роман Каракс\",\"Талия Ян\":\"Талия Янг\",\"Талия\":\"Талия Янг\",\"\\\"Мешуга\":\"Мешуга\",\"\\\"Дэвид\":\"Ди\",\"\\\"Уик\":\"Уик Кингсли\",\"\\\"Мигель\":\"Мигель\",\"Мешуга (по связи)\":\"Мешуга\",\"\\\"Роман\":\"Роман Каракс\",\"Дэвид\":\"Ди\",\"Уик (по связи)\":\"Уик Кингсли\",\"Мэсюга\":\"Мешуга\",\"Мигель (по связи)\":\"Мигель\",\"Jessie\":\"Джесси\",\"Уик\":\"Уик Кингсли\",\"Avida Yang\":\"Авида\",\"Авида Ян\":\"Авида\",\"Кирил\":\"Кирилл\"}",
+      "nameStresses": "{\"Роман Каракс\":\"рОман\",\"Талия Янг\":\"тАлия\",\"Эмили\":\"Эмили\",\"Кирил\":\"кирИл\",\"Мигель\":\"мигЕль\",\"Ричард\":\"рИчард\",\"Мешуга\":\"мЕшуга\",\"Авида\":\"Авида\",\"Хелио\":\"хЕлио\",\"Кирилл\":\"кирИлл\",\"Олек\":\"Олек\",\"Каприкорн\":\"кАприкорн\",\"Кёко\":\"кЁко\"}"
+    }
+[23:07:02.876] [PROCESS] [IPC     ] ✓ Завершен: «get-next-episode-date» [546ms]
+    Детали: Вышел полностью
+[23:07:02.969] [PROCESS] [IPC     ] ✓ Завершен: «save-project» [155ms]
+    Детали: [Array: 35 items]
+[23:07:02.970] [PROCESS] [IPC     ] ▶ Запуск: «get-projects»
+[23:07:04.119] [PROCESS] [IPC     ] ✓ Завершен: «get-projects» [1150ms]
+    Детали: [Array: 35 items]
+[23:07:07.561] [INFO   ] [NAV     ] Переключение вкладки: "dashboard" ➔ "qa"
+[23:07:07.564] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[23:07:07.565] [PROCESS] [IPC     ] ▶ Запуск: «get-raw-subtitles»
+    Детали: I:\YandexDisk\Озвучка\Киберпанк_ Бегущие по краю 2\Episode_2\subtitles.ass
+[23:07:07.575] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [12ms]
+    Детали: [Array: 34 items]
+[23:07:07.587] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_ep_1790968370440_2_1792524874665-Авида-1792614224085_1792825769079.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[23:07:07.587] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_ep_1790968370440_2_1792524874665-Врач-1792614224085_1792775727114.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[23:07:07.588] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_ep_1790968370440_2_1792524874665-Кирилл-1792614224085_1792780901897.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[23:07:07.588] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.5124193700366446_1792873348798.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[23:07:07.588] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.5951649040998418_1792775735015.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[23:07:07.588] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.22188745980141855_1792873357445.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[23:07:07.588] [PROCESS] [IPC     ] ▶ Запуск: «audio-get-track-analysis»
+    Детали: {
+      "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.5257304806260475_1792825789334.flac",
+      "options": {
+        "skipWhisper": true
+      }
+    }
+[23:07:07.705] [PROCESS] [IPC     ] ✓ Завершен: «get-raw-subtitles» [141ms]
+    Детали: [Object: 2 keys]
+[23:07:13.587] [WARN   ] [HANG    ] ⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «audio-get-track-analysis» (p#266-audio-get-track-analysis) выполняется уже 6001ms без ответа...
+    Детали: {
+      "scope": "IPC",
+      "name": "audio-get-track-analysis",
+      "elapsedMs": 6001,
+      "meta": {
+        "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_ep_1790968370440_2_1792524874665-Авида-1792614224085_1792825769079.flac",
+        "options": {
+          "skipWhisper": true
+        }
+      }
+    }
+[23:07:13.590] [WARN   ] [HANG    ] ⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «audio-get-track-analysis» (p#267-audio-get-track-analysis) выполняется уже 6003ms без ответа...
+    Детали: {
+      "scope": "IPC",
+      "name": "audio-get-track-analysis",
+      "elapsedMs": 6003,
+      "meta": {
+        "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_ep_1790968370440_2_1792524874665-Врач-1792614224085_1792775727114.flac",
+        "options": {
+          "skipWhisper": true
+        }
+      }
+    }
+[23:07:13.590] [WARN   ] [HANG    ] ⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «audio-get-track-analysis» (p#268-audio-get-track-analysis) выполняется уже 6003ms без ответа...
+    Детали: {
+      "scope": "IPC",
+      "name": "audio-get-track-analysis",
+      "elapsedMs": 6003,
+      "meta": {
+        "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_ep_1790968370440_2_1792524874665-Кирилл-1792614224085_1792780901897.flac",
+        "options": {
+          "skipWhisper": true
+        }
+      }
+    }
+[23:07:13.591] [WARN   ] [HANG    ] ⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «audio-get-track-analysis» (p#269-audio-get-track-analysis) выполняется уже 6003ms без ответа...
+    Детали: {
+      "scope": "IPC",
+      "name": "audio-get-track-analysis",
+      "elapsedMs": 6003,
+      "meta": {
+        "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.5124193700366446_1792873348798.flac",
+        "options": {
+          "skipWhisper": true
+        }
+      }
+    }
+[23:07:13.591] [WARN   ] [HANG    ] ⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «audio-get-track-analysis» (p#270-audio-get-track-analysis) выполняется уже 6003ms без ответа...
+    Детали: {
+      "scope": "IPC",
+      "name": "audio-get-track-analysis",
+      "elapsedMs": 6003,
+      "meta": {
+        "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.5951649040998418_1792775735015.flac",
+        "options": {
+          "skipWhisper": true
+        }
+      }
+    }
+[23:07:13.593] [WARN   ] [HANG    ] ⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «audio-get-track-analysis» (p#271-audio-get-track-analysis) выполняется уже 6005ms без ответа...
+    Детали: {
+      "scope": "IPC",
+      "name": "audio-get-track-analysis",
+      "elapsedMs": 6005,
+      "meta": {
+        "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.22188745980141855_1792873357445.flac",
+        "options": {
+          "skipWhisper": true
+        }
+      }
+    }
+[23:07:13.593] [WARN   ] [HANG    ] ⏳ [ВНИМАНИЕ / ЗАДЕРЖКА] Процесс «audio-get-track-analysis» (p#272-audio-get-track-analysis) выполняется уже 6005ms без ответа...
+    Детали: {
+      "scope": "IPC",
+      "name": "audio-get-track-analysis",
+      "elapsedMs": 6005,
+      "meta": {
+        "audioPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\QAFixes\\dub_0.5257304806260475_1792825789334.flac",
+        "options": {
+          "skipWhisper": true
+        }
+      }
+    }
+[23:07:14.118] [PROCESS] [IPC     ] ▶ Запуск: «get-whisper-system-status»
+    Детали: {
+      "model": "small"
+    }
+[23:07:14.134] [PROCESS] [IPC     ] ✓ Завершен: «get-whisper-system-status» [17ms]
+    Детали: [Object: 9 keys]
+[23:07:14.904] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «audio-get-track-analysis» успешно выполнен за 7317ms (система отработала штатно) [7317ms]
+    Детали: [Object: 6 keys]
+[23:07:15.908] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «audio-get-track-analysis» успешно выполнен за 8320ms (система отработала штатно) [8320ms]
+    Детали: [Object: 6 keys]
+[23:07:16.410] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «audio-get-track-analysis» успешно выполнен за 8822ms (система отработала штатно) [8822ms]
+    Детали: [Object: 6 keys]
+[23:07:16.423] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «audio-get-track-analysis» успешно выполнен за 8835ms (система отработала штатно) [8835ms]
+    Детали: [Object: 6 keys]
+[23:07:16.523] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «audio-get-track-analysis» успешно выполнен за 8935ms (система отработала штатно) [8935ms]
+    Детали: [Object: 6 keys]
+[23:07:16.685] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «audio-get-track-analysis» успешно выполнен за 9097ms (система отработала штатно) [9097ms]
+    Детали: [Object: 6 keys]
+[23:07:17.097] [PROCESS] [IPC     ] ✓ [ВОССТАНОВЛЕНО / ЗАВЕРШЕНО] «audio-get-track-analysis» успешно выполнен за 9510ms (система отработала штатно) [9510ms]
+    Детали: [Object: 6 keys]
+[23:08:20.664] [ERROR  ] [CRASH   ] 🚨 Фатальный сбой рендеринга React: Video is not defined
+    Детали: {
+      "errorName": "ReferenceError",
+      "errorMessage": "Video is not defined",
+      "errorStack": "ReferenceError: Video is not defined\n    at hx (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-BW1zz1iN.js:321:230772)\n    at _E (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/vendor-BfGwDkVc.js:48:51513)\n    at YE (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/vendor-BfGwDkVc.js:48:76443)\n    at z1 (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/vendor-BfGwDkVc.js:48:87826)\n    at Sw (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dis... [длина 1243 симв.]",
+      "componentStack": "\n    at hx (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-BW1zz1iN.js:321:228745)\n    at div (<anonymous>)\n    at div (<anonymous>)\n    at div (<anonymous>)\n    at div (<anonymous>)\n    at div (<anonymous>)\n    at bx (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-BW1zz1iN.js:322:3330)\n    at gx (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-BW1zz1iN.js:322:52872)\n    at div (<anonymous>)\n    at jx (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/asset... [длина 1066 симв.]"
+    }
+================================================================================
+                      КОНЕЦ ДИАГНОСТИЧЕСКОГО ОТЧЕТА
+================================================================================

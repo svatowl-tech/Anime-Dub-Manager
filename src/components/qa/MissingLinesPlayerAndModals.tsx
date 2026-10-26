@@ -27,7 +27,9 @@ import {
   Save,
   FileCheck,
   Edit3,
-  Gauge
+  Gauge,
+  RotateCcw,
+  Info
 } from "lucide-react";
 import { toast } from "sonner";
 import { safeCopyToClipboard } from "../../lib/clipboard";

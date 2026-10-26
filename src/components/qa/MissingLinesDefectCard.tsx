@@ -26,7 +26,8 @@ import {
   Repeat,
   Activity,
   Flame,
-  UserPlus
+  UserPlus,
+  Video
 } from "lucide-react";
 import {
   MissingLineDetection,

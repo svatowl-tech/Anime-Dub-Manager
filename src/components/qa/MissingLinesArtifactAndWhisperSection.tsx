@@ -39,6 +39,13 @@ export interface MissingLinesArtifactAndWhisperProps {
   updateGaps: (updater: (prev: MissingLineDetection[]) => MissingLineDetection[]) => void;
 }
 
+const formatTimecode = (sec: number) => {
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  const ms = Math.floor((sec % 1) * 10);
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms}`;
+};
+
 export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifactAndWhisperProps> = ({
   gap,
   category,
@@ -159,9 +166,7 @@ export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifac
 
                               <button
                                 onClick={() => {
-                                  const nextLoop = !isLoopingSnippet;
-                                  setIsLoopingSnippet(nextLoop);
-                                  handlePlaySnippet(gap, 'primary', nextLoop);
+                                  handlePlaySnippet(gap, 'primary', !isLoopingSnippet);
                                 }}
                                 className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1 border ${
                                   isLoopingSnippet && isPlayingPrimary
@@ -207,7 +212,7 @@ export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifac
                                 type="button"
                                 onClick={() => {
                                   handleResolutionChange(gap.id, 'request_dubber_fix');
-                                  setGaps(prev => prev.map(g => g.id === gap.id ? { 
+                                  updateGaps(prev => prev.map(g => g.id === gap.id ? { 
                                     ...g, 
                                     selected: true,
                                     comment: g.comment || (
@@ -236,7 +241,7 @@ export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifac
                                 type="button"
                                 onClick={() => {
                                   handleResolutionChange(gap.id, 'note_sound_engineer');
-                                  setGaps(prev => prev.map(g => g.id === gap.id ? { 
+                                  updateGaps(prev => prev.map(g => g.id === gap.id ? { 
                                     ...g, 
                                     selected: true,
                                     comment: g.comment || (
@@ -265,7 +270,7 @@ export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifac
                                 type="button"
                                 onClick={() => {
                                   handleResolutionChange(gap.id, 'ignore');
-                                  setGaps(prev => prev.map(g => g.id === gap.id ? { ...g, selected: false } : g));
+                                  updateGaps(prev => prev.map(g => g.id === gap.id ? { ...g, selected: false } : g));
                                 }}
                                 className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 border ${
                                   gap.resolutionAction === 'ignore'
@@ -465,7 +470,7 @@ export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifac
                                 type="button"
                                 onClick={() => {
                                   handleResolutionChange(gap.id, 'legitimate_fix');
-                                  setGaps(prev => prev.map(g => g.id === gap.id ? {
+                                  updateGaps(prev => prev.map(g => g.id === gap.id ? {
                                     ...g,
                                     selected: true,
                                     resolutionAction: 'legitimate_fix',
@@ -487,7 +492,7 @@ export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifac
                                 type="button"
                                 onClick={() => {
                                   handleResolutionChange(gap.id, 'actor_better_than_sub');
-                                  setGaps(prev => prev.map(g => g.id === gap.id ? {
+                                  updateGaps(prev => prev.map(g => g.id === gap.id ? {
                                     ...g,
                                     selected: true,
                                     resolutionAction: 'actor_better_than_sub',
@@ -509,7 +514,7 @@ export const MissingLinesArtifactAndWhisperSection: React.FC<MissingLinesArtifac
                                 type="button"
                                 onClick={() => {
                                   handleResolutionChange(gap.id, 'ignore');
-                                  setGaps(prev => prev.map(g => g.id === gap.id ? {
+                                  updateGaps(prev => prev.map(g => g.id === gap.id ? {
                                     ...g,
                                     selected: false,
                                     resolutionAction: 'ignore'
