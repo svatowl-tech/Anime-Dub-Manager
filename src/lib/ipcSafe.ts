@@ -26,6 +26,7 @@ const HEAVY_CHANNELS: Record<string, number> = {
   
   // Media / Video / Transcoding
   'timing-export-to-mixing': 120000,
+  'mixing-export-to-sound-engineer': 180000,
   'transcode-video': 180000,
   'render-final-video': 240000,
   'export-mix-audio': 120000,

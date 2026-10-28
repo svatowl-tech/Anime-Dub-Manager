@@ -224,6 +224,127 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [extAudioPaths, setExtAudioPaths] = useState<string[]>([]);
   const [isSubmittingExternal, setIsSubmittingExternal] = useState<boolean>(false);
 
+  // Export to Sound Engineer (from processed Mixing module -> FLAC + Hardsub Video + Subtitles)
+  const [isExportSeModalOpen, setIsExportSeModalOpen] = useState<boolean>(false);
+  const [exportSeTargetDir, setExportSeTargetDir] = useState<string>('');
+  const [exportSeSourceStepId, setExportSeSourceStepId] = useState<string>('latest');
+  const [exportSeSkipConversion, setExportSeSkipConversion] = useState<boolean>(false);
+  const [exportSeIncludeSubtitles, setExportSeIncludeSubtitles] = useState<boolean>(true);
+  const [exportSeAdditionalProcessing, setExportSeAdditionalProcessing] = useState<boolean>(false);
+  const [isExportingSe, setIsExportingSe] = useState<boolean>(false);
+  const [exportSeProgress, setExportSeProgress] = useState<number>(0);
+  const [exportSeStatusMsg, setExportSeStatusMsg] = useState<string>('');
+
+  // Compute available processed modules with audio outputs for Sound Engineer export
+  const processedAudioSteps = useMemo(() => {
+    if (!manifest?.pipeline) return [];
+    const audioExt = /\.(wav|flac|mp3|ogg|m4a|aac)$/i;
+    return manifest.pipeline.filter((step) => {
+      if (step.enabled === false) return false;
+      if (step.moduleId === 'video_mux' || step.moduleId === 'stem_separation') return false;
+      const validFiles = (step.outputFiles || []).filter((f) => audioExt.test(f.name || f.path));
+      return validFiles.length > 0;
+    });
+  }, [manifest]);
+
+  const latestProcessedAudioStep = useMemo(() => {
+    if (processedAudioSteps.length === 0) return null;
+    return processedAudioSteps[processedAudioSteps.length - 1];
+  }, [processedAudioSteps]);
+
+  const resolvedExportSeStep = useMemo(() => {
+    if (exportSeSourceStepId === 'source') return null;
+    if (exportSeSourceStepId === 'latest') return latestProcessedAudioStep;
+    return processedAudioSteps.find((s) => s.id === exportSeSourceStepId) || latestProcessedAudioStep;
+  }, [exportSeSourceStepId, latestProcessedAudioStep, processedAudioSteps]);
+
+  const resolvedExportSeTracks = useMemo(() => {
+    const audioExt = /\.(wav|flac|mp3|ogg|m4a|aac)$/i;
+    if (resolvedExportSeStep && resolvedExportSeStep.outputFiles?.length) {
+      return resolvedExportSeStep.outputFiles.filter((f) => audioExt.test(f.name || f.path));
+    }
+    return manifest?.sourceFiles?.dubberTracks || [];
+  }, [resolvedExportSeStep, manifest]);
+
+  const handleOpenExportSeModal = async () => {
+    setExportSeSourceStepId('latest');
+    setIsExportSeModalOpen(true);
+    if (!exportSeTargetDir && currentEpisode) {
+      try {
+        const res = await ipcSafe.invoke('export-get-default-dir', {
+          episode: currentEpisode,
+          role: 'SOUND_ENGINEER'
+        });
+        if (res?.defaultDir) {
+          setExportSeTargetDir(res.defaultDir);
+        }
+      } catch (err) {
+        // fallback handled on backend
+      }
+    }
+  };
+
+  const handleSelectExportSeDir = async () => {
+    try {
+      const dir = await ipcSafe.invoke('select-directory');
+      if (dir) {
+        setExportSeTargetDir(dir);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка выбора папки: ${e.message}`);
+    }
+  };
+
+  const handleExportToSoundEngineer = async () => {
+    if (!currentEpisode) {
+      toast.error('Сначала выберите серию для экспорта звукорежиссеру');
+      return;
+    }
+    try {
+      setIsExportingSe(true);
+      setExportSeProgress(2);
+      setExportSeStatusMsg('Подготовка к экспорту дорожек в FLAC...');
+
+      const unsub = ipcSafe.on('mixing-progress', (data: any) => {
+        if (data && (!data.stepId || data.stepId === 'export_se')) {
+          if (typeof data.percent === 'number') {
+            setExportSeProgress(data.percent);
+          }
+          if (data.message) {
+            setExportSeStatusMsg(data.message);
+          }
+        }
+      });
+
+      const res = await ipcSafe.invoke('mixing-export-to-sound-engineer', {
+        episode: currentEpisode,
+        workingDir: workingDir || undefined,
+        targetDir: exportSeTargetDir || undefined,
+        sourceStepId: exportSeSourceStepId || 'latest',
+        skipConversion: exportSeSkipConversion,
+        includeSubtitles: exportSeIncludeSubtitles,
+        additionalProcessing: exportSeAdditionalProcessing
+      });
+
+      if (typeof unsub === 'function') unsub();
+      setIsExportingSe(false);
+      setExportSeProgress(100);
+
+      if (res?.success) {
+        if (res.targetDir) {
+          setExportSeTargetDir(res.targetDir);
+        }
+        toast.success(
+          `Экспорт звукорежиссеру завершен! Выгружено ${res.exportedTracksCount || 0} FLAC-дорожек из «${res.sourceStepTitle || 'модуля'}»`
+        );
+        setIsExportSeModalOpen(false);
+      }
+    } catch (e: any) {
+      setIsExportingSe(false);
+      toast.error(`Ошибка экспорта звукорежиссеру: ${e.message}`);
+    }
+  };
+
   // Acoustic Original Profile & Voice Matcher State
   const [isAcousticMatchModalOpen, setIsAcousticMatchModalOpen] = useState<boolean>(false);
   const [origVocalsPath, setOrigVocalsPath] = useState<string>('');
@@ -2398,6 +2519,15 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
           >
             <Download className="w-4 h-4" />
             <span>Импорт звукорежиссера</span>
+          </button>
+
+          <button
+            onClick={handleOpenExportSeModal}
+            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition shadow-sm"
+            title="Экспортировать обработанные дорожки из последнего модуля в FLAC + видео с вшитыми субтитрами + общие субтитры для звукорежиссера"
+          >
+            <FolderOutput className="w-4 h-4" />
+            <span>Экспорт звукорежиссеру</span>
           </button>
 
           <button
@@ -5884,6 +6014,229 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                   </span>
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SOUND ENGINEER EXPORT MODAL (FROM PROCESSED MIXING MODULE -> FLAC + HARDSUB VIDEO + SUBS) */}
+      {isExportSeModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl w-full max-w-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+            <div className="px-6 py-4 border-b border-neutral-800 flex items-center justify-between bg-neutral-950">
+              <div className="flex items-center gap-2.5">
+                <FolderOutput className="w-5 h-5 text-indigo-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-white">Экспорт звукорежиссеру (из обработанного модуля Сведения)</h3>
+                  <p className="text-[11px] text-neutral-400">
+                    Выгрузка обработанных дорожек с конвертацией WAV → FLAC + видео со вшитыми субтитрами + общие субтитры
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => !isExportingSe && setIsExportSeModalOpen(false)}
+                disabled={isExportingSe}
+                className="text-neutral-500 hover:text-neutral-300 text-sm px-2 py-1 disabled:opacity-50"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 overflow-y-auto">
+              <div className="bg-indigo-950/30 border border-indigo-500/30 rounded-xl p-3.5 text-xs text-indigo-200 leading-relaxed">
+                Этот экспорт берет аудиодорожки из <strong>последнего обработанного модуля</strong> конвейера сведения (например, после нейросетей шумоподавления, дереверберации, автотайминга или нормализации), автоматически конвертирует их из рабочего формата <strong>WAV в сжатый без потерь FLAC (48 кГц)</strong> и складывает в папку для звукорежиссера вместе с видео со вшитыми субтитрами и файлом общих субтитров.
+              </div>
+
+              {/* 1. Source module selector */}
+              <div>
+                <label className="text-xs text-neutral-300 font-semibold block mb-1.5">
+                  1. Откуда брать аудиодорожки для конвертации в FLAC:
+                </label>
+                <select
+                  value={exportSeSourceStepId}
+                  onChange={(e) => setExportSeSourceStepId(e.target.value)}
+                  disabled={isExportingSe}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-neutral-200 focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="latest">
+                    {latestProcessedAudioStep
+                      ? `Автоматически: последний обработанный модуль — «${latestProcessedAudioStep.title}» (${latestProcessedAudioStep.outputFiles?.length || 0} треков)`
+                      : 'Автоматически: последний обработанный модуль (пока нет обработанных модулей — возьмутся исходные дорожки)'}
+                  </option>
+                  {processedAudioSteps.map((step) => (
+                    <option key={step.id} value={step.id}>
+                      Модуль [{step.prefix}]: {step.title} ({step.outputFiles?.length || 0} обработанных WAV-дорожек)
+                    </option>
+                  ))}
+                  <option value="source">
+                    Исходные дорожки даберов (00_raw_dubbers — без обработки модулями) ({manifest?.sourceFiles?.dubberTracks?.length || 0} треков)
+                  </option>
+                </select>
+
+                {/* Preview of tracks to be converted WAV -> FLAC */}
+                <div className="mt-2 bg-neutral-950/80 border border-neutral-800/80 rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-medium text-neutral-400">
+                      Источник:{' '}
+                      <strong className="text-indigo-300">
+                        {resolvedExportSeStep ? resolvedExportSeStep.title : 'Исходные дорожки даберов'}
+                      </strong>
+                    </span>
+                    <span className="text-[11px] text-emerald-400 font-mono">
+                      К выгрузке в .flac: {resolvedExportSeTracks.length} шт.
+                    </span>
+                  </div>
+                  {resolvedExportSeTracks.length > 0 ? (
+                    <div className="max-h-28 overflow-y-auto space-y-1 pr-1">
+                      {resolvedExportSeTracks.map((tr, idx) => (
+                        <div
+                          key={`${tr.path}_${idx}`}
+                          className="flex items-center justify-between text-[11px] bg-neutral-900/80 px-2.5 py-1 rounded border border-neutral-800/60"
+                        >
+                          <span className="text-neutral-300 truncate font-mono">{tr.name}</span>
+                          <span className="text-indigo-400 font-mono shrink-0 ml-2">WAV → FLAC</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-[11px] text-amber-400">
+                      Дорожки не найдены. Сначала выполните импорт звукорежиссера или внешних файлов.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* 2. Target folder selector */}
+              <div>
+                <label className="text-xs text-neutral-300 font-semibold block mb-1.5">
+                  2. Папка назначения для экспорта звукорежиссеру:
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={exportSeTargetDir}
+                    onChange={(e) => setExportSeTargetDir(e.target.value)}
+                    disabled={isExportingSe}
+                    placeholder="По умолчанию: <Название серии> для звукорежиссёра"
+                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-neutral-200 focus:outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    onClick={handleSelectExportSeDir}
+                    disabled={isExportingSe}
+                    className="px-3.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-xl text-xs font-medium transition shrink-0"
+                  >
+                    Обзор...
+                  </button>
+                </div>
+                <p className="text-[10px] text-neutral-500 mt-1">
+                  Туда будут сохранены: сконвертированные дорожки <code>.flac</code>, видео со вшитыми субтитрами <code>_[с субтитрами].mp4</code> и общие субтитры <code>_[субтитры_общие].ass</code>.
+                </p>
+              </div>
+
+              {/* 3. Video & Subtitles options */}
+              <div className="space-y-2 pt-1">
+                <label className="flex items-center gap-3 p-2.5 bg-neutral-950/60 border border-neutral-800/80 rounded-xl cursor-pointer hover:border-neutral-700">
+                  <input
+                    type="checkbox"
+                    checked={exportSeIncludeSubtitles}
+                    onChange={(e) => setExportSeIncludeSubtitles(e.target.checked)}
+                    disabled={isExportingSe}
+                    className="rounded border-neutral-700 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <div className="text-xs font-medium text-neutral-200">
+                      Сложить туда же общие субтитры с разметкой ролей даберов
+                    </div>
+                    <div className="text-[11px] text-neutral-500">
+                      Формирует файл <code>_[субтитры_общие].ass/.srt</code> со всеми репликами и привязанными актерами
+                    </div>
+                  </div>
+                </label>
+
+                <label className="flex items-center gap-3 p-2.5 bg-neutral-950/60 border border-neutral-800/80 rounded-xl cursor-pointer hover:border-neutral-700">
+                  <input
+                    type="checkbox"
+                    checked={!exportSeSkipConversion}
+                    onChange={(e) => setExportSeSkipConversion(!e.target.checked)}
+                    disabled={isExportingSe}
+                    className="rounded border-neutral-700 text-indigo-600 focus:ring-indigo-500"
+                  />
+                  <div>
+                    <div className="text-xs font-medium text-neutral-200">
+                      Вшить общие субтитры в видео (хардсаб MP4 для звукорежиссера)
+                    </div>
+                    <div className="text-[11px] text-neutral-500">
+                      Если отключено — видео будет скопировано в папку без перекодирования как оригинал
+                    </div>
+                  </div>
+                </label>
+
+                {!exportSeSkipConversion && (
+                  <label className="flex items-center gap-3 p-2.5 bg-neutral-950/60 border border-neutral-800/80 rounded-xl cursor-pointer hover:border-neutral-700">
+                    <input
+                      type="checkbox"
+                      checked={exportSeAdditionalProcessing}
+                      onChange={(e) => setExportSeAdditionalProcessing(e.target.checked)}
+                      disabled={isExportingSe}
+                      className="rounded border-neutral-700 text-indigo-600 focus:ring-indigo-500"
+                    />
+                    <div>
+                      <div className="text-xs font-medium text-neutral-200">
+                        Ускоренный профиль кодирования видео (720p для быстрой выгрузки)
+                      </div>
+                      <div className="text-[11px] text-neutral-500">
+                        Ускоряет рендер видео со вшитыми субтитрами для комфортной работы в DAW (Reaper / Audition)
+                      </div>
+                    </div>
+                  </label>
+                )}
+              </div>
+
+              {/* Progress indicator during export */}
+              {isExportingSe && (
+                <div className="bg-neutral-950 border border-indigo-500/40 rounded-xl p-3.5 space-y-2">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-indigo-300 flex items-center gap-2 font-medium">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                      {exportSeStatusMsg || 'Экспорт файлов звукорежиссеру...'}
+                    </span>
+                    <span className="text-indigo-400 font-mono font-bold">{Math.round(exportSeProgress)}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-neutral-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-indigo-500 transition-all duration-300"
+                      style={{ width: `${Math.max(3, Math.min(100, exportSeProgress))}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-6 py-4 border-t border-neutral-800 bg-neutral-950 flex justify-end gap-2.5">
+              <button
+                onClick={() => setIsExportSeModalOpen(false)}
+                disabled={isExportingSe}
+                className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-300 rounded-xl text-xs font-medium transition"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={handleExportToSoundEngineer}
+                disabled={isExportingSe || resolvedExportSeTracks.length === 0}
+                className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition shadow-lg shadow-indigo-900/20"
+              >
+                {isExportingSe ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Выгрузка в FLAC ({Math.round(exportSeProgress)}%)...</span>
+                  </>
+                ) : (
+                  <>
+                    <FolderOutput className="w-4 h-4" />
+                    <span>Выгрузить в FLAC звукорежиссеру</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

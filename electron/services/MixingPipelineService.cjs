@@ -3637,6 +3637,353 @@ class MixingPipelineService {
   }
 
   /**
+   * Export processed audio tracks from the Mixing pipeline (or selected step) into FLAC format
+   * for an external Sound Engineer, along with the burned-in subtitle video and general subtitle file.
+   */
+  async exportProcessedToSoundEngineer({
+    episode,
+    workingDir,
+    targetDir,
+    baseDir,
+    config,
+    projectsData,
+    participantsData,
+    sourceStepId = 'latest',
+    skipConversion = false,
+    includeSubtitles = true,
+    additionalProcessing = false,
+    onProgress,
+    onLog
+  }) {
+    const logFn = (msg, level = 'info', meta = null) => {
+      log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](`[Mixing-ExportSE] ${msg}`);
+      if (onLog) onLog(msg, level, meta);
+    };
+
+    const epDir = this.getEpisodeDir(episode, baseDir);
+    const epName = path.basename(epDir) || `Серия_${episode?.number || 1}`;
+    const exportDir = targetDir && String(targetDir).trim()
+      ? path.resolve(String(targetDir).trim())
+      : path.join(path.dirname(epDir), `${epName} для звукорежиссёра`);
+
+    logFn(`Подготовка экспорта звукорежиссёру в папку: ${exportDir}`);
+    await this.ensureDirectory(exportDir, logFn);
+
+    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
+    const manifest = statusData?.manifest;
+    if (!manifest) {
+      throw new Error('Манифест сведения не найден. Сначала импортируйте дорожки в модуль Сведения.');
+    }
+
+    const pipeline = Array.isArray(manifest.pipeline) ? manifest.pipeline : [];
+    const audioExtRegex = /\.(wav|flac|mp3|ogg|m4a|aac)$/i;
+
+    let selectedStep = null;
+    let sourceTracks = [];
+    let sourceStepTitle = 'Исходные дорожки даберов (00_raw_dubbers)';
+
+    if (sourceStepId && sourceStepId !== 'latest' && sourceStepId !== 'source') {
+      const found = pipeline.find((s) => s.id === sourceStepId);
+      if (found && Array.isArray(found.outputFiles) && found.outputFiles.length > 0) {
+        const validOutputs = found.outputFiles.filter(
+          (f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path)
+        );
+        if (validOutputs.length > 0) {
+          selectedStep = found;
+          sourceTracks = validOutputs;
+          sourceStepTitle = found.title || found.moduleId;
+        }
+      }
+    } else if (sourceStepId !== 'source') {
+      // Find the last processed module in the pipeline that produced audio tracks (excluding final video mux)
+      const latestVoiceStep = this._findLatestCompletedVoiceStep(manifest);
+      // Also check if there is any later completed step in pipeline (e.g. mixdown or voice chain) with audio outputFiles
+      let latestAudioStep = null;
+      for (let i = pipeline.length - 1; i >= 0; i--) {
+        const s = pipeline[i];
+        if (s.enabled === false) continue;
+        if (s.moduleId === 'video_mux' || s.moduleId === 'stem_separation') continue;
+        if (Array.isArray(s.outputFiles) && s.outputFiles.length > 0) {
+          const validOutputs = s.outputFiles.filter(
+            (f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path)
+          );
+          if (validOutputs.length > 0) {
+            latestAudioStep = { step: s, files: validOutputs };
+            break;
+          }
+        }
+      }
+
+      if (latestVoiceStep && Array.isArray(latestVoiceStep.outputFiles) && latestVoiceStep.outputFiles.length > 0) {
+        const validVoiceOutputs = latestVoiceStep.outputFiles.filter(
+          (f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path)
+        );
+        if (validVoiceOutputs.length > 0) {
+          selectedStep = latestVoiceStep;
+          sourceTracks = validVoiceOutputs;
+          sourceStepTitle = latestVoiceStep.title || latestVoiceStep.moduleId;
+        }
+      } else if (latestAudioStep) {
+        selectedStep = latestAudioStep.step;
+        sourceTracks = latestAudioStep.files;
+        sourceStepTitle = latestAudioStep.step.title || latestAudioStep.step.moduleId;
+      }
+    }
+
+    // Fallback to raw dubber tracks if no processed step was found or 'source' was requested
+    if (sourceTracks.length === 0) {
+      const dubberTracks = Array.isArray(manifest?.sourceFiles?.dubberTracks)
+        ? manifest.sourceFiles.dubberTracks.filter((f) => f?.path && fsSync.existsSync(f.path))
+        : [];
+      sourceTracks = dubberTracks;
+      selectedStep = null;
+      sourceStepTitle = 'Исходные дорожки даберов (без обработки модулями)';
+    }
+
+    if (sourceTracks.length === 0) {
+      throw new Error('Не найдено аудиодорожек для экспорта звукорежиссёру. Убедитесь, что дорожки импортированы в Сведение.');
+    }
+
+    logFn(`Источник дорожек для экспорта: «${sourceStepTitle}» (${sourceTracks.length} треков)`);
+
+    const videoSource = manifest?.sourceFiles?.video?.path || episode?.rawPath;
+    const subSource = manifest?.sourceFiles?.subtitles?.path || episode?.subPath;
+
+    const baseVideoName = videoSource
+      ? path.basename(videoSource, path.extname(videoSource))
+      : `Episode_${episode?.number || 1}`;
+
+    const exportedFiles = [];
+    const exportLogLines = [
+      `=== ОТЧЕТ ОБ ЭКСПОРТЕ ИЗ МОДУЛЯ СВЕДЕНИЯ ЗВУКОРЕЖИССЕРУ ===`,
+      `Дата: ${new Date().toLocaleString('ru-RU')}`,
+      `Серия: #${episode?.number || 1}`,
+      `Папка назначения: ${exportDir}`,
+      `Модуль-источник дорожек: ${sourceStepTitle}`,
+      `Количество дорожек: ${sourceTracks.length}`,
+      `Конвертация дорожек: WAV -> FLAC (48 кГц)`,
+      `------------------------------------------------------------`
+    ];
+
+    if (onProgress) {
+      onProgress({ percent: 5, message: `Подготовка экспорта (${sourceStepTitle})...` });
+    }
+
+    // 1. Export general subtitles with dubber roles
+    let exportedSubPath = null;
+    if (includeSubtitles !== false && subSource && fsSync.existsSync(subSource)) {
+      const subExt = path.extname(subSource) || '.ass';
+      exportedSubPath = path.join(exportDir, `${baseVideoName}_[субтитры_общие]${subExt}`);
+      logFn(`Экспорт общих субтитров: ${path.basename(exportedSubPath)}`);
+      if (onProgress) {
+        onProgress({ percent: 10, message: 'Формирование общих субтитров с ролями...' });
+      }
+      try {
+        const { exportFullAssWithRoles } = require('./subtitleService.cjs');
+        let characterAliases = {};
+        if (projectsData && Array.isArray(projectsData.projects)) {
+          const parentProj = projectsData.projects.find(
+            (p) => Array.isArray(p.episodes) && p.episodes.some((e) => e.id === episode?.id)
+          );
+          if (parentProj && parentProj.characterAliases) {
+            characterAliases = parentProj.characterAliases;
+          }
+        }
+        await exportFullAssWithRoles(
+          subSource,
+          exportedSubPath,
+          episode?.assignments || {},
+          participantsData || { participants: [] },
+          characterAliases
+        );
+      } catch (subErr) {
+        logFn(`Предупреждение при разметке ролей субтитров (${subErr.message}), копируем исходный файл субтитров.`, 'warn');
+        await fs.copyFile(subSource, exportedSubPath);
+      }
+      exportedFiles.push({ type: 'subtitles', name: path.basename(exportedSubPath), path: exportedSubPath });
+      exportLogLines.push(`[СУБТИТРЫ] ${path.basename(exportedSubPath)}`);
+    }
+
+    // 2. Convert & Export Audio Tracks from the processed module into FLAC
+    const usedFlacNames = new Set();
+    for (let i = 0; i < sourceTracks.length; i++) {
+      const track = sourceTracks[i];
+      const trackPctStart = 15 + Math.round((i / sourceTracks.length) * 50);
+      const rawName = track.name || path.basename(track.path);
+      const rawBase = path.basename(rawName, path.extname(rawName));
+
+      // Derive clean dubber nick or track label
+      let cleanNick = track.dubberNick || this._deriveDubberNickFromFilename(rawName, selectedStep?.prefix);
+      if (!cleanNick || cleanNick === rawBase) {
+        cleanNick = rawBase
+          .replace(/^(?:\d{2}_[a-zA-Z0-9]+_)+/i, '')
+          .replace(/^00_timed_/i, '')
+          .replace(/^00_raw_/i, '');
+      }
+
+      // Preserve main/secondary suffix if split tracks exist
+      let layerSuffix = '';
+      if (/_main$/i.test(rawBase) || /\[главные\]/i.test(rawBase)) {
+        layerSuffix = '_[главные]';
+        cleanNick = cleanNick.replace(/_main$/i, '').replace(/\[главные\]/gi, '').trim();
+      } else if (/_secondary$/i.test(rawBase) || /\[второстепенные\]/i.test(rawBase)) {
+        layerSuffix = '_[второстепенные]';
+        cleanNick = cleanNick.replace(/_secondary$/i, '').replace(/\[второстепенные\]/gi, '').trim();
+      }
+
+      const safeNick = String(cleanNick || `Track_${i + 1}`).replace(/[<>:"/\\|?*]/g, '_').trim();
+      let outFlacName = `${baseVideoName}_[${safeNick}]${layerSuffix}.flac`;
+      let dupCounter = 2;
+      while (usedFlacNames.has(outFlacName.toLowerCase())) {
+        outFlacName = `${baseVideoName}_[${safeNick}_${dupCounter}]${layerSuffix}.flac`;
+        dupCounter++;
+      }
+      usedFlacNames.add(outFlacName.toLowerCase());
+
+      const outFlacPath = path.join(exportDir, outFlacName);
+      logFn(`[${i + 1}/${sourceTracks.length}] Конвертация в FLAC: ${rawName} -> ${outFlacName}`);
+      if (onProgress) {
+        onProgress({
+          percent: trackPctStart,
+          message: `Конвертация в FLAC (${i + 1}/${sourceTracks.length}): ${outFlacName}`
+        });
+      }
+
+      try {
+        const cmd = ffmpeg(track.path)
+          .noVideo()
+          .audioCodec('flac')
+          .audioFrequency(48000)
+          .outputOptions(['-compression_level 5'])
+          .output(outFlacPath);
+
+        await this._execFfmpeg(cmd, {
+          logFn,
+          outPath: outFlacPath,
+          description: `FLAC экспорт ${outFlacName}`,
+          onProgress: (p) => {
+            if (onProgress && typeof p?.percent === 'number') {
+              const stepSpan = Math.max(1, Math.round(50 / sourceTracks.length));
+              const cur = Math.min(65, trackPctStart + Math.round((p.percent / 100) * stepSpan));
+              onProgress({
+                percent: cur,
+                message: `Конвертация в FLAC (${i + 1}/${sourceTracks.length}): ${outFlacName} (${Math.round(p.percent)}%)`
+              });
+            }
+          }
+        });
+      } catch (flacErr) {
+        logFn(`Предупреждение FFmpeg при конвертации ${rawName} в FLAC (${flacErr.message}), создаем резервную копию.`, 'warn');
+        await fs.copyFile(track.path, outFlacPath);
+      }
+
+      exportedFiles.push({
+        type: 'audio_flac',
+        name: outFlacName,
+        path: outFlacPath,
+        sourceName: rawName
+      });
+      exportLogLines.push(`[АУДИО FLAC] ${rawName}  -->  ${outFlacName}`);
+    }
+
+    // 3. Export Video (with burned-in general subtitles or direct copy)
+    if (videoSource && fsSync.existsSync(videoSource)) {
+      const vidExt = path.extname(videoSource) || '.mp4';
+      if (skipConversion) {
+        const outVideoCopy = path.join(exportDir, `${baseVideoName}[оригинал]${vidExt}`);
+        logFn(`Копирование оригинального видео без перекодирования: ${path.basename(outVideoCopy)}`);
+        if (onProgress) {
+          onProgress({ percent: 75, message: 'Копирование видеофайла...' });
+        }
+        await fs.copyFile(videoSource, outVideoCopy);
+        exportedFiles.push({ type: 'video', name: path.basename(outVideoCopy), path: outVideoCopy });
+        exportLogLines.push(`[ВИДЕО ОРИГИНАЛ] ${path.basename(outVideoCopy)}`);
+      } else {
+        const outHardsubVideo = path.join(exportDir, `${baseVideoName}_[с субтитрами].mp4`);
+        const subForBurn = exportedSubPath && fsSync.existsSync(exportedSubPath)
+          ? exportedSubPath
+          : (subSource && fsSync.existsSync(subSource) ? subSource : null);
+
+        const ffmpegService = require('./ffmpegService.cjs');
+        if (subForBurn) {
+          logFn(`Вшивание общих субтитров в видео (хардсаб): ${path.basename(outHardsubVideo)}`);
+          if (onProgress) {
+            onProgress({ percent: 70, message: 'Вшивание субтитров в видео для звукорежиссера...' });
+          }
+          try {
+            await ffmpegService.bakeSubtitles(
+              videoSource,
+              subForBurn,
+              outHardsubVideo,
+              (p) => {
+                if (onProgress) {
+                  const pct = typeof p === 'number' ? p : (p?.percent || 0);
+                  onProgress({
+                    percent: Math.min(98, 70 + Math.round((pct / 100) * 28)),
+                    message: `Вшивание субтитров в видео: ${Math.round(pct)}%`
+                  });
+                }
+              },
+              (cmdLine) => logFn(`FFmpeg Hardsub: ${cmdLine}`),
+              { additionalProcessing: !!additionalProcessing, config: config || {} }
+            );
+          } catch (vidErr) {
+            logFn(`Предупреждение при вшивании субтитров в видео (${vidErr.message}), копируем исходное видео.`, 'warn');
+            await fs.copyFile(videoSource, outHardsubVideo);
+          }
+        } else {
+          logFn(`Файл субтитров отсутствует, конвертация видео в MP4: ${path.basename(outHardsubVideo)}`);
+          if (onProgress) {
+            onProgress({ percent: 70, message: 'Конвертация видео в MP4...' });
+          }
+          try {
+            await ffmpegService.transcodeToMp4(
+              videoSource,
+              outHardsubVideo,
+              (p) => {
+                if (onProgress) {
+                  const pct = typeof p === 'number' ? p : (p?.percent || 0);
+                  onProgress({
+                    percent: Math.min(98, 70 + Math.round((pct / 100) * 28)),
+                    message: `Конвертация видео: ${Math.round(pct)}%`
+                  });
+                }
+              },
+              (cmdLine) => logFn(`FFmpeg Video: ${cmdLine}`),
+              { additionalProcessing: !!additionalProcessing, config: config || {} }
+            );
+          } catch (vidErr) {
+            logFn(`Предупреждение при конвертации видео (${vidErr.message}), копируем исходное видео.`, 'warn');
+            await fs.copyFile(videoSource, outHardsubVideo);
+          }
+        }
+        exportedFiles.push({ type: 'video', name: path.basename(outHardsubVideo), path: outHardsubVideo });
+        exportLogLines.push(`[ВИДЕО С СУБТИТРАМИ] ${path.basename(outHardsubVideo)}`);
+      }
+    }
+
+    // 4. Save export summary log
+    try {
+      const logFilePath = path.join(exportDir, 'ЭКСПОРТ_СВЕДЕНИЯ_ЛОГ.txt');
+      await fs.writeFile(logFilePath, exportLogLines.join('\r\n'), 'utf8');
+    } catch (e) {}
+
+    logFn(`Экспорт звукорежиссёру успешно завершен! Выгружено FLAC-дорожек: ${sourceTracks.length} в папку ${exportDir}`);
+    if (onProgress) {
+      onProgress({ percent: 100, message: 'Экспорт звукорежиссеру в FLAC успешно завершен!' });
+    }
+
+    return {
+      success: true,
+      targetDir: exportDir,
+      sourceStepId: selectedStep?.id || 'source',
+      sourceStepTitle,
+      exportedTracksCount: sourceTracks.length,
+      files: exportedFiles
+    };
+  }
+
+  /**
    * Safely replace an existing target file using retry and fallback strategies against Win32 / player file locks
    */
   async _safeReplaceFile(tempPath, targetPath, logFn = null) {

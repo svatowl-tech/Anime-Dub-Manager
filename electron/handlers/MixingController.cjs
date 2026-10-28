@@ -119,6 +119,49 @@ function registerMixingHandlers(getData, mainWindow) {
     });
   }));
 
+  ipcMain.handle('mixing-export-to-sound-engineer', wrapIpcHandler(async (event, params) => {
+    const {
+      episode,
+      workingDir,
+      targetDir,
+      sourceStepId,
+      skipConversion,
+      includeSubtitles,
+      additionalProcessing
+    } = params || {};
+
+    if (!episode) throw new Error('Не выбрана серия для экспорта звукорежиссеру');
+
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    const projectsData = await getData('projects.json');
+    const participantsData = await getData('participants.json');
+
+    const onProgress = (p) => {
+      sendProgress('mixing-progress', { stepId: 'export_se', ...p });
+    };
+
+    const onLog = createLogSender('export_se');
+
+    onLog(`Запуск экспорта обработанных дорожек звукорежиссеру для серии #${episode.number || 1}...`, 'info', { params });
+
+    return await MixingPipelineService.exportProcessedToSoundEngineer({
+      episode,
+      workingDir,
+      targetDir,
+      baseDir,
+      config,
+      projectsData,
+      participantsData,
+      sourceStepId: sourceStepId || 'latest',
+      skipConversion: !!skipConversion,
+      includeSubtitles: includeSubtitles !== false,
+      additionalProcessing: !!additionalProcessing,
+      onProgress,
+      onLog
+    });
+  }));
+
   ipcMain.handle('mixing-run-step', wrapIpcHandler(async (event, { episode, targetDir, stepId }) => {
     if (!episode || !stepId) throw new Error('Не указаны обязательные параметры (episode, stepId)');
     const config = await getData('config.json');
