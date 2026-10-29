@@ -56,6 +56,10 @@ export const parseCoverSettings = (
       logoY: s.logoY !== undefined ? Number(s.logoY) : DEFAULT_COVER_SETTINGS.logoY,
       logoWidth: s.logoWidth !== undefined ? Number(s.logoWidth) : DEFAULT_COVER_SETTINGS.logoWidth,
       logoRotation: s.logoRotation !== undefined ? Number(s.logoRotation) : DEFAULT_COVER_SETTINGS.logoRotation,
+      watermarkX: s.watermarkX !== undefined ? Number(s.watermarkX) : DEFAULT_COVER_SETTINGS.watermarkX,
+      watermarkY: s.watermarkY !== undefined ? Number(s.watermarkY) : DEFAULT_COVER_SETTINGS.watermarkY,
+      watermarkSize: s.watermarkSize !== undefined ? Number(s.watermarkSize) : DEFAULT_COVER_SETTINGS.watermarkSize,
+      watermarkOpacity: s.watermarkOpacity !== undefined ? Number(s.watermarkOpacity) : DEFAULT_COVER_SETTINGS.watermarkOpacity,
       textX: s.textX !== undefined ? Number(s.textX) : DEFAULT_COVER_SETTINGS.textX,
       textY: s.textY !== undefined ? Number(s.textY) : DEFAULT_COVER_SETTINGS.textY,
       lineSpacing: s.lineSpacing !== undefined ? Number(s.lineSpacing) : DEFAULT_COVER_SETTINGS.lineSpacing,
@@ -110,5 +114,36 @@ export const removeSavedWatermark = (): void => {
     localStorage.removeItem('anime_dub_watermark');
   } catch (err) {
     console.warn('Could not remove watermark from localStorage', err);
+  }
+};
+
+export interface SavedWatermarkTransform {
+  watermarkX: number;
+  watermarkY: number;
+  watermarkSize: number;
+  watermarkOpacity: number;
+}
+
+export const getSavedWatermarkTransform = (): SavedWatermarkTransform | null => {
+  try {
+    const raw = localStorage.getItem('anime_dub_watermark_transform');
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return {
+      watermarkX: parsed.watermarkX !== undefined ? Number(parsed.watermarkX) : DEFAULT_COVER_SETTINGS.watermarkX,
+      watermarkY: parsed.watermarkY !== undefined ? Number(parsed.watermarkY) : DEFAULT_COVER_SETTINGS.watermarkY,
+      watermarkSize: parsed.watermarkSize !== undefined ? Number(parsed.watermarkSize) : DEFAULT_COVER_SETTINGS.watermarkSize,
+      watermarkOpacity: parsed.watermarkOpacity !== undefined ? Number(parsed.watermarkOpacity) : DEFAULT_COVER_SETTINGS.watermarkOpacity,
+    };
+  } catch {
+    return null;
+  }
+};
+
+export const saveWatermarkTransform = (transform: SavedWatermarkTransform): void => {
+  try {
+    localStorage.setItem('anime_dub_watermark_transform', JSON.stringify(transform));
+  } catch (err) {
+    console.warn('Could not save watermark transform to localStorage', err);
   }
 };

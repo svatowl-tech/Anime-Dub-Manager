@@ -44,6 +44,10 @@ export interface CoverSettings {
   logoY: number;
   logoWidth: number;
   logoRotation: number;
+  watermarkX: number;
+  watermarkY: number;
+  watermarkSize: number;
+  watermarkOpacity: number;
   textX: number;
   textY: number;
   lineSpacing: number;
@@ -78,6 +82,10 @@ export const DEFAULT_COVER_SETTINGS: CoverSettings = {
   logoY: 75,
   logoWidth: 600,
   logoRotation: 0,
+  watermarkX: 97,
+  watermarkY: 6,
+  watermarkSize: 300,
+  watermarkOpacity: 100,
   textX: 80,
   textY: 756,
   lineSpacing: 1.25,

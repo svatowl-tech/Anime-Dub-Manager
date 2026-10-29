@@ -12,6 +12,8 @@ import {
   getSavedWatermark,
   saveWatermark,
   removeSavedWatermark,
+  getSavedWatermarkTransform,
+  saveWatermarkTransform,
 } from '../lib/cover/coverStorage';
 import { CoverTabImages } from './cover/CoverTabImages';
 import { CoverTabText } from './cover/CoverTabText';
@@ -82,6 +84,20 @@ export default function CoverGenerator({ currentEpisode, onRefresh }: CoverGener
   const [logoRotation, setLogoRotation] = useState(DEFAULT_COVER_SETTINGS.logoRotation);
   const [hideTitleWhenLogoPresent, setHideTitleWhenLogoPresent] = useState<boolean>(true);
 
+  // Studio Watermark Position & Size State
+  const [watermarkX, setWatermarkX] = useState<number>(
+    () => getSavedWatermarkTransform()?.watermarkX ?? DEFAULT_COVER_SETTINGS.watermarkX
+  );
+  const [watermarkY, setWatermarkY] = useState<number>(
+    () => getSavedWatermarkTransform()?.watermarkY ?? DEFAULT_COVER_SETTINGS.watermarkY
+  );
+  const [watermarkSize, setWatermarkSize] = useState<number>(
+    () => getSavedWatermarkTransform()?.watermarkSize ?? DEFAULT_COVER_SETTINGS.watermarkSize
+  );
+  const [watermarkOpacity, setWatermarkOpacity] = useState<number>(
+    () => getSavedWatermarkTransform()?.watermarkOpacity ?? DEFAULT_COVER_SETTINGS.watermarkOpacity
+  );
+
   // Video Frame Extraction
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -97,6 +113,16 @@ export default function CoverGenerator({ currentEpisode, onRefresh }: CoverGener
         .catch((err) => console.warn('Could not load saved watermark', err));
     }
   }, []);
+
+  // Persist watermark transform in localStorage whenever adjusted
+  useEffect(() => {
+    saveWatermarkTransform({
+      watermarkX,
+      watermarkY,
+      watermarkSize,
+      watermarkOpacity,
+    });
+  }, [watermarkX, watermarkY, watermarkSize, watermarkOpacity]);
 
   // Load Project Cover Settings on project/episode change
   useEffect(() => {
@@ -132,6 +158,13 @@ export default function CoverGenerator({ currentEpisode, onRefresh }: CoverGener
     setLogoY(settings.logoY);
     setLogoWidth(settings.logoWidth);
     setLogoRotation(settings.logoRotation);
+    if (currentEpisode.project?.coverSettings) {
+      const savedTransform = getSavedWatermarkTransform();
+      setWatermarkX(settings.watermarkX ?? savedTransform?.watermarkX ?? DEFAULT_COVER_SETTINGS.watermarkX);
+      setWatermarkY(settings.watermarkY ?? savedTransform?.watermarkY ?? DEFAULT_COVER_SETTINGS.watermarkY);
+      setWatermarkSize(settings.watermarkSize ?? savedTransform?.watermarkSize ?? DEFAULT_COVER_SETTINGS.watermarkSize);
+      setWatermarkOpacity(settings.watermarkOpacity ?? savedTransform?.watermarkOpacity ?? DEFAULT_COVER_SETTINGS.watermarkOpacity);
+    }
     setTextX(settings.textX);
     setTextY(settings.textY);
     setLineSpacing(settings.lineSpacing);
@@ -275,6 +308,10 @@ export default function CoverGenerator({ currentEpisode, onRefresh }: CoverGener
     logoY,
     logoWidth,
     logoRotation,
+    watermarkX,
+    watermarkY,
+    watermarkSize,
+    watermarkOpacity,
     textX,
     textY,
     lineSpacing,
@@ -327,6 +364,10 @@ export default function CoverGenerator({ currentEpisode, onRefresh }: CoverGener
     logoY,
     logoWidth,
     logoRotation,
+    watermarkX,
+    watermarkY,
+    watermarkSize,
+    watermarkOpacity,
     textX,
     textY,
     lineSpacing,
@@ -538,6 +579,14 @@ export default function CoverGenerator({ currentEpisode, onRefresh }: CoverGener
                 onWatermarkUpload={handleWatermarkUpload}
                 onRemoveWatermark={handleRemoveWatermark}
                 onVideoTimeChange={handleVideoTimeChange}
+                watermarkX={watermarkX}
+                setWatermarkX={setWatermarkX}
+                watermarkY={watermarkY}
+                setWatermarkY={setWatermarkY}
+                watermarkSize={watermarkSize}
+                setWatermarkSize={setWatermarkSize}
+                watermarkOpacity={watermarkOpacity}
+                setWatermarkOpacity={setWatermarkOpacity}
               />
             )}
 

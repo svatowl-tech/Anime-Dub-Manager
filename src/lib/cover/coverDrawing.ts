@@ -306,12 +306,21 @@ export const renderCoverToCanvas = ({
 
   // 8. Draw Studio Watermark
   if (watermarkImage) {
-    const maxW = 350;
-    const maxH = 250;
-    const scale = Math.min(maxW / watermarkImage.width, maxH / watermarkImage.height);
-    const w = watermarkImage.width * scale;
-    const h = watermarkImage.height * scale;
-    const p = 50;
-    ctx.drawImage(watermarkImage, canvas.width - w - p, p, w, h);
+    const targetWidth = settings.watermarkSize !== undefined ? settings.watermarkSize : 300;
+    const aspect = watermarkImage.width > 0 ? watermarkImage.height / watermarkImage.width : 1;
+    const w = Math.max(10, targetWidth);
+    const h = Math.max(10, w * aspect);
+
+    const posXPercent = settings.watermarkX !== undefined ? settings.watermarkX : 97;
+    const posYPercent = settings.watermarkY !== undefined ? settings.watermarkY : 6;
+    const opacityPercent = settings.watermarkOpacity !== undefined ? settings.watermarkOpacity : 100;
+
+    const x = (canvas.width - w) * (posXPercent / 100);
+    const y = (canvas.height - h) * (posYPercent / 100);
+
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, opacityPercent / 100));
+    ctx.drawImage(watermarkImage, x, y, w, h);
+    ctx.restore();
   }
 };
