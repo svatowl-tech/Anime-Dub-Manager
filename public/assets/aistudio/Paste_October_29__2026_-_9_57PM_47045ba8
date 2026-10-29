@@ -1,0 +1,687 @@
+================================================================================
+          ANIME DUB MANAGER — ПОЛНЫЙ ДИАГНОСТИЧЕСКИЙ ЛОГ ПРОЦЕССОВ
+================================================================================
+Время генерации:  2026-10-29T18:57:22.051Z
+Платформа:        Electron Desktop
+Браузер / Агент:  Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) anime-dub-manager/1.2.0 Chrome/146.0.7680.188 Electron/41.2.1 Safari/537.36
+Память JS Heap:   104 MB / 111 MB (Лимит: 3586 MB)
+Всего событий:    97 | Ошибок: 1 | Предупреждений: 1
+--------------------------------------------------------------------------------
+⚠️ АКТИВНЫЕ / НЕЗАВЕРШЕННЫЕ ПРОЦЕССЫ НА МОМЕНТ ОТЧЕТА (1):
+  • [IPC] «cloud-pull» (ID: p#8-cloud-pull) — выполняется уже 227328ms (старт: 21:53:34.723)
+================================================================================
+                     ХРОНОЛОГИЧЕСКИЙ ТАЙМЛАЙН СОБЫТИЙ:
+================================================================================
+[21:53:34.359] [INFO   ] [SYSTEM  ] 🚀 Инициализация React интерфейса Anime Dub Manager завершена.
+[21:53:34.451] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[21:53:34.452] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[21:53:34.452] [PROCESS] [IPC     ] ▶ Запуск: «get-config»
+[21:53:34.453] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[21:53:34.453] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-progress
+[21:53:34.453] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[21:53:34.453] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[21:53:34.453] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: episode-updated
+[21:53:34.454] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[21:53:34.454] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-progress
+[21:53:34.455] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[21:53:34.455] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: torrent-download-started
+[21:53:34.455] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: download-progress
+[21:53:34.455] [PROCESS] [IPC     ] ▶ Запуск: «get-projects»
+[21:53:34.554] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [102ms]
+    Детали: [Array: 34 items]
+[21:53:34.554] [PROCESS] [IPC     ] ✓ Завершен: «get-config» [102ms]
+    Детали: [Object: 18 keys]
+[21:53:34.722] [PROCESS] [IPC     ] ✓ Завершен: «get-projects» [267ms]
+    Детали: [Array: 35 items]
+[21:53:34.723] [PROCESS] [IPC     ] ▶ Запуск: «cloud-pull» (расчетное время ~60с)
+[21:53:34.735] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[21:53:34.735] [PROCESS] [IPC     ] ▶ Запуск: «check-services-status»
+[21:53:34.735] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1775947272968"
+    }
+[21:53:34.736] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1779549719402"
+    }
+[21:53:34.736] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1780163767550"
+    }
+[21:53:34.805] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [70ms]
+    Детали: [Array: 34 items]
+[21:53:35.411] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [675ms]
+    Детали: [Object: 2 keys]
+[21:53:35.438] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [702ms]
+    Детали: [Object: 2 keys]
+[21:53:35.474] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [739ms]
+    Детали: [Object: 2 keys]
+[21:53:35.474] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790961893492"
+    }
+[21:53:35.474] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790968370440"
+    }
+[21:53:35.475] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "proj_1792619749064_272"
+    }
+[21:53:35.604] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [130ms]
+    Детали: [Object: 2 keys]
+[21:53:35.635] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [161ms]
+    Детали: [Object: 2 keys]
+[21:53:35.673] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [199ms]
+    Детали: [Object: 2 keys]
+[21:53:35.674] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1792685074896"
+    }
+[21:53:35.792] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [118ms]
+    Детали: [Object: 2 keys]
+[21:53:37.308] [PROCESS] [IPC     ] ✓ Завершен: «check-services-status» [2573ms]
+    Детали: [Object: 5 keys]
+[21:53:37.770] [INFO   ] [PROJECT ] Выбор проекта: "1790968370440"
+[21:53:37.780] [PROCESS] [IPC     ] ▶ Запуск: «get-project»
+    Детали: 1790968370440
+[21:53:37.782] [PROCESS] [IPC     ] ▶ Запуск: «get-next-episode-date»
+    Детали: {
+      "title": "Cyberpunk: Edgerunners 2"
+    }
+[21:53:37.783] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790968370440"
+    }
+[21:53:37.862] [PROCESS] [IPC     ] ✓ Завершен: «get-project» [83ms]
+    Детали: [Object: 28 keys]
+[21:53:37.862] [PROCESS] [IPC     ] ▶ Запуск: «get-anime-details»
+    Детали: {
+      "id": 61990,
+      "source": "shikimori"
+    }
+[21:53:37.942] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [159ms]
+    Детали: [Object: 2 keys]
+[21:53:38.188] [PROCESS] [IPC     ] ✓ Завершен: «get-anime-details» [326ms]
+    Детали: [Object: 2 keys]
+[21:53:38.188] [PROCESS] [IPC     ] ▶ Запуск: «get-anime-characters»
+    Детали: {
+      "id": 61990,
+      "source": "shikimori"
+    }
+[21:53:38.250] [PROCESS] [IPC     ] ✓ Завершен: «get-next-episode-date» [468ms]
+    Детали: Вышел полностью
+[21:53:38.376] [PROCESS] [IPC     ] ✓ Завершен: «get-anime-characters» [187ms]
+    Детали: [Object: 2 keys]
+[21:53:39.998] [INFO   ] [NAV     ] Переключение вкладки: "dashboard" ➔ "cover"
+[21:54:21.434] [PROCESS] [IPC     ] ▶ Запуск: «save-project»
+    Детали: {
+      "id": "1790968370440",
+      "title": "Киберпанк: Бегущие по краю 2",
+      "originalTitle": "Cyberpunk: Edgerunners 2",
+      "releaseType": "RECAST",
+      "emoji": "🤖",
+      "isOngoing": true,
+      "synopsis": "Найт-Сити по-прежнему горит неоновыми огнями, ослепляя тех, кто пришёл сюда за властью, и маня тех, кто готов поставить на кон всё ради славы или свободы. Корпорация «Арасака» продолжает укреплять своё влияние, банды борются за территории, а наёмники выполняют опасные заказы в надежде заработать. В этом городе технологии способны сделать человека сильнее, быстрее и опаснее, но ни один имплант не защищает от потери самого себя. Чем больше имплантов получает человек, тем выше риск киберпсихоза, когда чрезмерная нагрузка на психику может привести к потере рассудка.\n[character=299242]Уик Кингсли[/... [длина 1297 симв.]",
+      "posterUrl": "https://smotret-anime.app/posters/39861.15600270184.jpg",
+      "typeAndSeason": "ONA",
+      "totalEpisodes": 10,
+      "globalMapping": "[{\"characterName\":\"Роман Каракс\",\"dubberId\":\"1775075809942\",\"photoUrl\":\"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogA... [длина 1690184 симв.]",
+      "links": "{\"tg\":\"\",\"vk\":\"\",\"anime365\":\"https://smotret-anime.app/catalog/cyberpunk-edgerunners-2-39861\",\"shikimori\":\"https://shikimori.io/animes/61990\",\"kodik\":\"\",\"mal\":\"https://myanimelist.net/anime/61990\",\"anilist\":\"https://anilist.co/anime/195539\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=19445\"}",
+      "status": "ACTIVE",
+      "lastActiveEpisode": 1,
+      "assignedDubberIds": [
+        "1792270632467",
+        "1783720265920",
+        "1775075809942",
+        "15",
+        "12",
+        "9",
+        "1775080765990",
+        "1787161986020",
+        "4",
+        "6",
+        "Роман Каракс",
+        "Ди",
+        "Талия Янг",
+        "Уик Кингсли"
+      ],
+      "createdAt": "2026-10-02T19:12:50.440Z",
+      "updatedAt": "2026-10-29T18:34:57.431Z",
+      "anime365Id": 39861,
+      "year": 2026,
+      "nextEpisodeDate": "Не определена",
+      "airedEpisodes": 0,
+      "soundEngineerId": "17",
+      "characterAliases": "{\"Роман\":\"Роман Каракс\",\"Талия Ян\":\"Талия Янг\",\"Талия\":\"Талия Янг\",\"\\\"Мешуга\":\"Мешуга\",\"\\\"Дэвид\":\"Ди\",\"\\\"Уик\":\"Уик Кингсли\",\"\\\"Мигель\":\"Мигель\",\"Мешуга (по связи)\":\"Мешуга\",\"\\\"Роман\":\"Роман Каракс\",\"Дэвид\":\"Ди\",\"Уик (по связи)\":\"Уик Кингсли\",\"Мэсюга\":\"Мешуга\",\"Мигель (по связи)\":\"Мигель\",\"Jessie\":\"Джесси\",\"Уик\":\"Уик Кингсли\",\"Avida Yang\":\"Авида\",\"Авида Ян\":\"Авида\",\"Кирил\":\"Кирилл\",\"Мальстрём 3\":\"(Ж) Мальстрём 3\"}",
+      "nameStresses": "{\"Роман Каракс\":\"рОман\",\"Талия Янг\":\"тАлия\",\"Эмили\":\"Эмили\",\"Кирил\":\"кирИл\",\"Мигель\":\"мигЕль\",\"Ричард\":\"рИчард\",\"Мешуга\":\"мЕшуга\",\"Авида\":\"Авида\",\"Хелио\":\"хЕлио\",\"Кирилл\":\"кирИлл\",\"Олек\":\"Олек\",\"Каприкорн\":\"кАприкорн\",\"Кёко\":\"кЁко\"}",
+      "coverSettings": "{\"fontFamily\":\"Impact\",\"titleSize\":140,\"episodeSize\":85,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#f1f701\",\"fontBold\":true,\"fontItalic\":true,\"textTransform\":\"none\",\"cutTopXPercent\":-20,\"cutBottomXPercent\":-20,\"cutColor\":\"#000000\",\"cutOpacity\":0.85,\"dividerStyle\":\"none\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#fa0143\",\"strokeWidth\":1,\"shadowColor\":\"#f1f801\",\"shadowBlur\":18,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":50,\"logoY\":76,\"logoWidth\":990,\"logoRotation\":0,\"watermarkX\":98,\"watermarkY\":4,\"watermarkSize\":180,\"watermarkOpacity\":100,\"textX\":812,\"textY\":1073,\"lineSpacing\":1.2... [длина 1315063 симв.]",
+      "episodes": [
+        {
+          "id": "1792515929050",
+          "projectId": "1790968370440",
+          "number": 1,
+          "title": "",
+          "status": "QA",
+          "deadline": "2026-10-22T17:00:00.000Z",
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-20T17:05:29.050Z",
+          "updatedAt": "2026-10-27T16:52:04.240Z",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\raw_video.mp4",
+          "isHardsub": false,
+          "subPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\subtitles.ass"
+        },
+        {
+          "id": "ep_1790968370440_2_1792524874665",
+          "projectId": "1790968370440",
+          "number": 2,
+          "status": "QA",
+          "deadline": "2026-10-25T17:00:00.000Z",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\raw_video.mp4",
+          "subPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\subtitles.ass",
+          "isHardsub": false,
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-20T19:34:34.665Z",
+          "updatedAt": "2026-10-28T17:56:42.745Z"
+        },
+        {
+          "id": "1792614756305",
+          "projectId": "1790968370440",
+          "number": 3,
+          "title": "",
+          "status": "RECORDING",
+          "deadline": "2026-10-24T17:00:00.000Z",
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-21T20:32:36.305Z",
+          "updatedAt": "2026-10-28T18:06:17.375Z",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_3\\raw_video.mp4",
+          "isHardsub": false,
+          "subPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_3\\subtitles.ass"
+        },
+        {
+          "id": "1792616522177",
+          "projectId": "1790968370440",
+          "number": 4,
+          "title": "",
+          "status": "UPLOAD",
+          "deadline": "2026-10-25T17:00:00.000Z",
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-21T21:02:02.177Z",
+          "updatedAt": "2026-10-21T21:12:59.453Z",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_4\\raw_video.mp4",
+          "isHardsub": false
+        }
+      ],
+      "soundEngineer": {
+        "id": "17",
+        "nickname": "Ikigai",
+        "telegram": "@IkigaiVoice",
+        "tgChannel": "https://t.me/IkiMoriVoice",
+        "vkLink": "https://vk.com/ikigaivoice",
+        "roles": [
+          "Дабер",
+          "Звукорежиссер"
+        ]
+      },
+      "assignedDubbers": [
+        {
+          "id": "1792270632467",
+          "nickname": "Never",
+          "telegram": "@neverqew",
+          "tgChannel": "https://t.me/neverqqe",
+          "vkLink": "https://vk.ru/neverqew",
+          "roles": "[Object / Max Depth Exceeded]",
+          "updatedAt": "2026-10-17T20:58:14.915Z",
+          "createdAt": "2026-10-17T20:58:14.915Z"
+        },
+        {
+          "id": "1783720265920",
+          "nickname": "гилти лорд",
+          "telegram": "@absolute_guilty",
+          "tgChannel": "https://t.me/guiltylordd",
+          "vkLink": "",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1775075809942",
+          "nickname": "Bonique",
+          "telegram": "@SNaumchuk",
+          "tgChannel": "",
+          "vkLink": "",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "15",
+          "nickname": "Stenai",
+          "telegram": "@Stenai",
+          "tgChannel": "https://vk.com/cursedsyphilis",
+          "vkLink": "https://vk.com/cursedsyphilis",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "12",
+          "nickname": "Kori",
+          "telegram": "@Renjie_Kori",
+          "tgChannel": "https://vk.com/korirotto",
+          "vkLink": "https://vk.com/korirotto",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "9",
+          "nickname": "Tenmag",
+          "telegram": "@Tenmag",
+          "tgChannel": "https://t.me/TenMagStream",
+          "vkLink": "https://vk.com/id3851489",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1775080765990",
+          "nickname": "7pies",
+          "telegram": "@sevenpies",
+          "tgChannel": "https://t.me/sevenpies7",
+          "vkLink": "http://vk.com/id368002031",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1787161986020",
+          "nickname": "vlorezhy",
+          "telegram": "@vlorezhy",
+          "tgChannel": "",
+          "vkLink": "",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "4",
+          "nickname": "Воробейка",
+          "telegram": "@anastasia_vorobeyka",
+          "tgChannel": "https://vk.com/club227967690",
+          "vkLink": "https://vk.com/club227967690",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "6",
+          "nickname": "Stunning Stan",
+          "telegram": "@stunningstan",
+          "tgChannel": "https://vk.com/core_yes",
+          "vkLink": "https://vk.com/core_yes",
+          "roles": "[Object / Max Depth Exceeded]"
+        }
+      ]
+    }
+[21:54:21.644] [PROCESS] [IPC     ] ✓ Завершен: «save-project» [210ms]
+    Детали: [Array: 35 items]
+[21:54:21.644] [PROCESS] [IPC     ] ▶ Запуск: «get-projects»
+[21:54:21.807] [PROCESS] [IPC     ] ✓ Завершен: «get-projects» [163ms]
+    Детали: [Array: 35 items]
+[21:54:22.724] [INFO   ] [IPC     ] ⏳ [ПРОЦЕСС ВЫПОЛНЯЕТСЯ] «cloud-pull» (p#8-cloud-pull) выполняется уже 48001ms (тяжелая фоновая задача, ожидание в пределах нормы ~60с)...
+    Детали: {
+      "scope": "IPC",
+      "name": "cloud-pull",
+      "elapsedMs": 48001
+    }
+[21:56:04.724] [WARN   ] [HANG    ] ⚠️ [ПРЕВЫШЕН ЛИМИТ ВРЕМЕНИ] Длительная операция «cloud-pull» (p#8-cloud-pull) выполняется уже 150001ms (превышение расчетных ~60с). Проверьте системные ресурсы.
+    Детали: {
+      "scope": "IPC",
+      "name": "cloud-pull",
+      "elapsedMs": 150001
+    }
+[21:56:47.277] [PROCESS] [IPC     ] ▶ Запуск: «save-project»
+    Детали: {
+      "id": "1790968370440",
+      "title": "Киберпанк: Бегущие по краю 2",
+      "originalTitle": "Cyberpunk: Edgerunners 2",
+      "releaseType": "RECAST",
+      "emoji": "🤖",
+      "isOngoing": true,
+      "synopsis": "Найт-Сити по-прежнему горит неоновыми огнями, ослепляя тех, кто пришёл сюда за властью, и маня тех, кто готов поставить на кон всё ради славы или свободы. Корпорация «Арасака» продолжает укреплять своё влияние, банды борются за территории, а наёмники выполняют опасные заказы в надежде заработать. В этом городе технологии способны сделать человека сильнее, быстрее и опаснее, но ни один имплант не защищает от потери самого себя. Чем больше имплантов получает человек, тем выше риск киберпсихоза, когда чрезмерная нагрузка на психику может привести к потере рассудка.\n[character=299242]Уик Кингсли[/... [длина 1297 симв.]",
+      "posterUrl": "https://smotret-anime.app/posters/39861.15600270184.jpg",
+      "typeAndSeason": "ONA",
+      "totalEpisodes": 10,
+      "globalMapping": "[{\"characterName\":\"Роман Каракс\",\"dubberId\":\"1775075809942\",\"photoUrl\":\"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogA... [длина 1690184 симв.]",
+      "links": "{\"tg\":\"\",\"vk\":\"\",\"anime365\":\"https://smotret-anime.app/catalog/cyberpunk-edgerunners-2-39861\",\"shikimori\":\"https://shikimori.io/animes/61990\",\"kodik\":\"\",\"mal\":\"https://myanimelist.net/anime/61990\",\"anilist\":\"https://anilist.co/anime/195539\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=19445\"}",
+      "status": "ACTIVE",
+      "lastActiveEpisode": 1,
+      "assignedDubberIds": [
+        "1792270632467",
+        "1783720265920",
+        "1775075809942",
+        "15",
+        "12",
+        "9",
+        "1775080765990",
+        "1787161986020",
+        "4",
+        "6",
+        "Роман Каракс",
+        "Ди",
+        "Талия Янг",
+        "Уик Кингсли"
+      ],
+      "createdAt": "2026-10-02T19:12:50.440Z",
+      "updatedAt": "2026-10-29T18:54:21.468Z",
+      "anime365Id": 39861,
+      "year": 2026,
+      "nextEpisodeDate": "Не определена",
+      "airedEpisodes": 0,
+      "soundEngineerId": "17",
+      "characterAliases": "{\"Роман\":\"Роман Каракс\",\"Талия Ян\":\"Талия Янг\",\"Талия\":\"Талия Янг\",\"\\\"Мешуга\":\"Мешуга\",\"\\\"Дэвид\":\"Ди\",\"\\\"Уик\":\"Уик Кингсли\",\"\\\"Мигель\":\"Мигель\",\"Мешуга (по связи)\":\"Мешуга\",\"\\\"Роман\":\"Роман Каракс\",\"Дэвид\":\"Ди\",\"Уик (по связи)\":\"Уик Кингсли\",\"Мэсюга\":\"Мешуга\",\"Мигель (по связи)\":\"Мигель\",\"Jessie\":\"Джесси\",\"Уик\":\"Уик Кингсли\",\"Avida Yang\":\"Авида\",\"Авида Ян\":\"Авида\",\"Кирил\":\"Кирилл\",\"Мальстрём 3\":\"(Ж) Мальстрём 3\"}",
+      "nameStresses": "{\"Роман Каракс\":\"рОман\",\"Талия Янг\":\"тАлия\",\"Эмили\":\"Эмили\",\"Кирил\":\"кирИл\",\"Мигель\":\"мигЕль\",\"Ричард\":\"рИчард\",\"Мешуга\":\"мЕшуга\",\"Авида\":\"Авида\",\"Хелио\":\"хЕлио\",\"Кирилл\":\"кирИлл\",\"Олек\":\"Олек\",\"Каприкорн\":\"кАприкорн\",\"Кёко\":\"кЁко\"}",
+      "coverSettings": "{\"fontFamily\":\"Impact\",\"titleSize\":140,\"episodeSize\":85,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#f1f701\",\"fontBold\":true,\"fontItalic\":true,\"textTransform\":\"none\",\"cutTopXPercent\":-20,\"cutBottomXPercent\":-20,\"cutColor\":\"#000000\",\"cutOpacity\":0.85,\"dividerStyle\":\"none\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#fa0143\",\"strokeWidth\":1,\"shadowColor\":\"#f1f801\",\"shadowBlur\":18,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":50,\"logoY\":76,\"logoWidth\":990,\"logoRotation\":0,\"watermarkX\":98,\"watermarkY\":4,\"watermarkSize\":180,\"watermarkOpacity\":100,\"textX\":812,\"textY\":1073,\"lineSpacing\":1.2... [длина 1315063 симв.]",
+      "episodes": [
+        {
+          "id": "1792515929050",
+          "projectId": "1790968370440",
+          "number": 1,
+          "title": "",
+          "status": "QA",
+          "deadline": "2026-10-22T17:00:00.000Z",
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-20T17:05:29.050Z",
+          "updatedAt": "2026-10-27T16:52:04.240Z",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\raw_video.mp4",
+          "isHardsub": false,
+          "subPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\subtitles.ass"
+        },
+        {
+          "id": "ep_1790968370440_2_1792524874665",
+          "projectId": "1790968370440",
+          "number": 2,
+          "status": "QA",
+          "deadline": "2026-10-25T17:00:00.000Z",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\raw_video.mp4",
+          "subPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_2\\subtitles.ass",
+          "isHardsub": false,
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-20T19:34:34.665Z",
+          "updatedAt": "2026-10-28T17:56:42.745Z"
+        },
+        {
+          "id": "1792614756305",
+          "projectId": "1790968370440",
+          "number": 3,
+          "title": "",
+          "status": "RECORDING",
+          "deadline": "2026-10-24T17:00:00.000Z",
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-21T20:32:36.305Z",
+          "updatedAt": "2026-10-28T18:06:17.375Z",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_3\\raw_video.mp4",
+          "isHardsub": false,
+          "subPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_3\\subtitles.ass"
+        },
+        {
+          "id": "1792616522177",
+          "projectId": "1790968370440",
+          "number": 4,
+          "title": "",
+          "status": "UPLOAD",
+          "deadline": "2026-10-25T17:00:00.000Z",
+          "assignments": "[Object / Max Depth Exceeded]",
+          "uploads": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-21T21:02:02.177Z",
+          "updatedAt": "2026-10-21T21:12:59.453Z",
+          "statusHistory": "[Object / Max Depth Exceeded]",
+          "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_4\\raw_video.mp4",
+          "isHardsub": false
+        }
+      ],
+      "soundEngineer": {
+        "id": "17",
+        "nickname": "Ikigai",
+        "telegram": "@IkigaiVoice",
+        "tgChannel": "https://t.me/IkiMoriVoice",
+        "vkLink": "https://vk.com/ikigaivoice",
+        "roles": [
+          "Дабер",
+          "Звукорежиссер",
+          "DUBBER",
+          "SOUND_ENGINEER"
+        ]
+      },
+      "assignedDubbers": [
+        {
+          "id": "1783720265920",
+          "nickname": "гилти лорд",
+          "telegram": "@absolute_guilty",
+          "tgChannel": "https://t.me/guiltylordd",
+          "vkLink": "",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1775075809942",
+          "nickname": "Bonique",
+          "telegram": "Bonique_21",
+          "tgChannel": "",
+          "vkLink": "",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "15",
+          "nickname": "Stenai",
+          "telegram": "@Stenai",
+          "tgChannel": "https://vk.com/cursedsyphilis",
+          "vkLink": "https://vk.com/cursedsyphilis",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "12",
+          "nickname": "Kori",
+          "telegram": "@Renjie_Kori",
+          "tgChannel": "https://vk.com/korirotto",
+          "vkLink": "https://vk.com/korirotto",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "9",
+          "nickname": "Tenmag",
+          "telegram": "@Tenmag",
+          "tgChannel": "https://t.me/TenMagStream",
+          "vkLink": "https://vk.com/id3851489",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "1775080765990",
+          "nickname": "7pies",
+          "telegram": "@sevenpies",
+          "tgChannel": "https://t.me/sevenpies7",
+          "vkLink": "http://vk.com/id368002031",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "4",
+          "nickname": "Воробейка",
+          "telegram": "@anastasia_vorobeyka",
+          "tgChannel": "https://t.me/vorobeyka23",
+          "vkLink": "https://vk.com/club227967690",
+          "roles": "[Object / Max Depth Exceeded]"
+        },
+        {
+          "id": "6",
+          "nickname": "Stunning Stan",
+          "telegram": "@stunningstan",
+          "tgChannel": "https://vk.com/core_yes",
+          "vkLink": "https://vk.com/core_yes",
+          "roles": "[Object / Max Depth Exceeded]"
+        }
+      ]
+    }
+[21:56:47.481] [PROCESS] [IPC     ] ✓ Завершен: «save-project» [204ms]
+    Детали: [Array: 35 items]
+[21:56:47.481] [PROCESS] [IPC     ] ▶ Запуск: «get-projects»
+[21:56:47.644] [PROCESS] [IPC     ] ✓ Завершен: «get-projects» [163ms]
+    Детали: [Array: 35 items]
+[21:56:48.747] [INFO   ] [NAV     ] Переключение вкладки: "cover" ➔ "subtitles"
+[21:56:48.757] [PROCESS] [IPC     ] ▶ Запуск: «get-raw-subtitles»
+    Детали: I:\YandexDisk\Озвучка\Киберпанк_ Бегущие по краю 2\Episode_1\subtitles.ass
+[21:56:48.757] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[21:56:48.762] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[21:56:48.790] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [33ms]
+    Детали: [Array: 28 items]
+[21:56:48.831] [PROCESS] [IPC     ] ✓ Завершен: «get-raw-subtitles» [74ms]
+    Детали: [Object: 2 keys]
+[21:56:50.184] [INFO   ] [NAV     ] Переключение вкладки: "subtitles" ➔ "dashboard"
+[21:56:50.199] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[21:56:50.203] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[21:56:50.203] [PROCESS] [IPC     ] ▶ Запуск: «get-config»
+[21:56:50.203] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[21:56:50.203] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-progress
+[21:56:50.203] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-queue-updated
+[21:56:50.204] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: task-completed
+[21:56:50.204] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: episode-updated
+[21:56:50.204] [PROCESS] [IPC     ] ▶ Запуск: «get-next-episode-date»
+    Детали: {
+      "title": "Cyberpunk: Edgerunners 2"
+    }
+[21:56:50.204] [PROCESS] [IPC     ] ▶ Запуск: «anime365-check-new-episodes»
+    Детали: {
+      "projectId": "1790968370440"
+    }
+[21:56:50.222] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [19ms]
+    Детали: [Array: 28 items]
+[21:56:50.222] [PROCESS] [IPC     ] ✓ Завершен: «get-config» [19ms]
+    Детали: [Object: 18 keys]
+[21:56:50.455] [PROCESS] [IPC     ] ✓ Завершен: «get-next-episode-date» [251ms]
+    Детали: Вышел полностью
+[21:56:50.526] [PROCESS] [IPC     ] ✓ Завершен: «anime365-check-new-episodes» [322ms]
+    Детали: [Object: 2 keys]
+[21:56:52.267] [INFO   ] [NAV     ] Переключение вкладки: "dashboard" ➔ "subtitles"
+[21:56:52.273] [PROCESS] [IPC     ] ▶ Запуск: «get-raw-subtitles»
+    Детали: I:\YandexDisk\Озвучка\Киберпанк_ Бегущие по краю 2\Episode_1\subtitles.ass
+[21:56:52.273] [PROCESS] [IPC     ] ▶ Запуск: «get-participants»
+[21:56:52.276] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[21:56:52.292] [PROCESS] [IPC     ] ✓ Завершен: «get-participants» [19ms]
+    Детали: [Array: 28 items]
+[21:56:52.296] [PROCESS] [IPC     ] ✓ Завершен: «get-raw-subtitles» [23ms]
+    Детали: [Object: 2 keys]
+[21:57:17.551] [INFO   ] [NAV     ] Переключение вкладки: "subtitles" ➔ "cover"
+[21:57:19.303] [INFO   ] [NAV     ] Переключение вкладки: "cover" ➔ "timing"
+[21:57:19.315] [DEBUG  ] [IPC     ] 👂 ipcSafe.on listener registered: ffmpeg-progress
+[21:57:19.316] [PROCESS] [IPC     ] ▶ Запуск: «get-raw-subtitles»
+    Детали: I:\YandexDisk\Озвучка\Киберпанк_ Бегущие по краю 2\Episode_1\subtitles.ass
+[21:57:19.344] [PROCESS] [IPC     ] ✓ Завершен: «get-raw-subtitles» [28ms]
+    Детали: [Object: 2 keys]
+[21:57:19.345] [PROCESS] [IPC     ] ▶ Запуск: «extract-audio-peaks»
+    Детали: {
+      "videoPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\raw_video.mp4",
+      "filePath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\raw_video.mp4",
+      "pointsPerSecond": 5
+    }
+[21:57:20.156] [INFO   ] [NAV     ] Переключение вкладки: "timing" ➔ "mixing"
+[21:57:20.181] [ERROR  ] [CRASH   ] 🚨 Фатальный сбой рендеринга React: useMemo is not defined
+    Детали: {
+      "errorName": "ReferenceError",
+      "errorMessage": "useMemo is not defined",
+      "errorStack": "ReferenceError: useMemo is not defined\n    at nm (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-CYycOXaw.js:333:14239)\n    at _E (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/vendor-C1I4Ju0N.js:48:51513)\n    at YE (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/vendor-C1I4Ju0N.js:48:76443)\n    at z1 (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/vendor-C1I4Ju0N.js:48:87826)\n    at Sw (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/di... [длина 1244 симв.]",
+      "componentStack": "\n    at nm (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-CYycOXaw.js:333:13162)\n    at main (<anonymous>)\n    at div (<anonymous>)\n    at _h (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-CYycOXaw.js:410:24366)\n    at Tx (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-CYycOXaw.js:321:126896)\n    at Ph (<anonymous>)\n    at Eh (file:///C:/Program%20Files/Anime%20Dub%20Manager/resources/app.asar/dist/assets/index-CYycOXaw.js:410:43034)"
+    }
+[21:57:21.770] [PROCESS] [IPC     ] ✓ Завершен: «extract-audio-peaks» [2424ms]
+    Детали: [Array: 8540 items]
+[21:57:21.770] [PROCESS] [IPC     ] ▶ Запуск: «timing-load-state»
+    Детали: {
+      "episode": {
+        "id": "1792515929050",
+        "projectId": "1790968370440",
+        "number": 1,
+        "title": "",
+        "status": "QA",
+        "deadline": "2026-10-22T17:00:00.000Z",
+        "assignments": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "... (10 more items)"
+        ],
+        "uploads": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "createdAt": "2026-10-20T17:05:29.050Z",
+        "updatedAt": "2026-10-27T16:52:04.240Z",
+        "statusHistory": [
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]",
+          "[Object / Max Depth Exceeded]"
+        ],
+        "rawPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\raw_video.mp4",
+        "isHardsub": false,
+        "subPath": "I:\\YandexDisk\\Озвучка\\Киберпанк_ Бегущие по краю 2\\Episode_1\\subtitles.ass",
+        "project": {
+          "id": "1790968370440",
+          "title": "Киберпанк: Бегущие по краю 2",
+          "originalTitle": "Cyberpunk: Edgerunners 2",
+          "releaseType": "RECAST",
+          "emoji": "🤖",
+          "isOngoing": true,
+          "synopsis": "Найт-Сити по-прежнему горит неоновыми огнями, ослепляя тех, кто пришёл сюда за властью, и маня тех, кто готов поставить на кон всё ради славы или свободы. Корпорация «Арасака» продолжает укреплять своё влияние, банды борются за территории, а наёмники выполняют опасные заказы в надежде заработать. В этом городе технологии способны сделать человека сильнее, быстрее и опаснее, но ни один имплант не защищает от потери самого себя. Чем больше имплантов получает человек, тем выше риск киберпсихоза, когда чрезмерная нагрузка на психику может привести к потере рассудка.\n[character=299242]Уик Кингсли[/... [длина 1297 симв.]",
+          "posterUrl": "https://smotret-anime.app/posters/39861.15600270184.jpg",
+          "typeAndSeason": "ONA",
+          "totalEpisodes": 10,
+          "globalMapping": "[{\"characterName\":\"Роман Каракс\",\"dubberId\":\"1775075809942\",\"photoUrl\":\"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogA... [длина 1690184 симв.]",
+          "links": "{\"tg\":\"\",\"vk\":\"\",\"anime365\":\"https://smotret-anime.app/catalog/cyberpunk-edgerunners-2-39861\",\"shikimori\":\"https://shikimori.io/animes/61990\",\"kodik\":\"\",\"mal\":\"https://myanimelist.net/anime/61990\",\"anilist\":\"https://anilist.co/anime/195539\",\"animedb\":\"https://anidb.net/perl-bin/animedb.pl?show=anime&aid=19445\"}",
+          "status": "ACTIVE",
+          "lastActiveEpisode": 1,
+          "assignedDubberIds": "[Object / Max Depth Exceeded]",
+          "createdAt": "2026-10-02T19:12:50.440Z",
+          "updatedAt": "2026-10-29T18:56:47.309Z",
+          "anime365Id": 39861,
+          "year": 2026,
+          "nextEpisodeDate": "Не определена",
+          "airedEpisodes": 0,
+          "soundEngineerId": "17",
+          "characterAliases": "{\"Роман\":\"Роман Каракс\",\"Талия Ян\":\"Талия Янг\",\"Талия\":\"Талия Янг\",\"\\\"Мешуга\":\"Мешуга\",\"\\\"Дэвид\":\"Ди\",\"\\\"Уик\":\"Уик Кингсли\",\"\\\"Мигель\":\"Мигель\",\"Мешуга (по связи)\":\"Мешуга\",\"\\\"Роман\":\"Роман Каракс\",\"Дэвид\":\"Ди\",\"Уик (по связи)\":\"Уик Кингсли\",\"Мэсюга\":\"Мешуга\",\"Мигель (по связи)\":\"Мигель\",\"Jessie\":\"Джесси\",\"Уик\":\"Уик Кингсли\",\"Avida Yang\":\"Авида\",\"Авида Ян\":\"Авида\",\"Кирил\":\"Кирилл\",\"Мальстрём 3\":\"(Ж) Мальстрём 3\"}",
+          "nameStresses": "{\"Роман Каракс\":\"рОман\",\"Талия Янг\":\"тАлия\",\"Эмили\":\"Эмили\",\"Кирил\":\"кирИл\",\"Мигель\":\"мигЕль\",\"Ричард\":\"рИчард\",\"Мешуга\":\"мЕшуга\",\"Авида\":\"Авида\",\"Хелио\":\"хЕлио\",\"Кирилл\":\"кирИлл\",\"Олек\":\"Олек\",\"Каприкорн\":\"кАприкорн\",\"Кёко\":\"кЁко\"}",
+          "coverSettings": "{\"fontFamily\":\"Impact\",\"titleSize\":140,\"episodeSize\":85,\"titleColor\":\"#ffffff\",\"episodeColor\":\"#f1f701\",\"fontBold\":true,\"fontItalic\":true,\"textTransform\":\"none\",\"cutTopXPercent\":-20,\"cutBottomXPercent\":-20,\"cutColor\":\"#000000\",\"cutOpacity\":0.85,\"dividerStyle\":\"none\",\"dividerColor\":\"#00e5ff\",\"strokeEnabled\":true,\"strokeColor\":\"#fa0143\",\"strokeWidth\":1,\"shadowColor\":\"#f1f801\",\"shadowBlur\":18,\"shadowOffsetX\":4,\"shadowOffsetY\":4,\"logoX\":50,\"logoY\":76,\"logoWidth\":990,\"logoRotation\":0,\"watermarkX\":98,\"watermarkY\":4,\"watermarkSize\":180,\"watermarkOpacity\":100,\"textX\":812,\"textY\":1073,\"lineSpacing\":1.2... [длина 1315063 симв.]",
+          "episodes": "[Object / Max Depth Exceeded]",
+          "soundEngineer": "[Object / Max Depth Exceeded]",
+          "assignedDubbers": "[Object / Max Depth Exceeded]"
+        }
+      }
+    }
+[21:57:21.835] [PROCESS] [IPC     ] ✓ Завершен: «timing-load-state» [65ms]
+    Детали: [Object: 5 keys]
+================================================================================
+                      КОНЕЦ ДИАГНОСТИЧЕСКОГО ОТЧЕТА
+================================================================================

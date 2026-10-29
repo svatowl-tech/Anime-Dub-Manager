@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { 
   Sliders, 
   Play, 
@@ -47,6 +47,7 @@ import {
   Zap,
   XCircle,
   FileDown,
+  FolderOutput,
   RotateCcw,
   Folder,
   Activity,
@@ -255,7 +256,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const resolvedExportSeStep = useMemo(() => {
     if (exportSeSourceStepId === 'source') return null;
     if (exportSeSourceStepId === 'latest') return latestProcessedAudioStep;
-    return processedAudioSteps.find((s) => s.id === exportSeSourceStepId) || latestProcessedAudioStep;
+    return processedAudioSteps.find((s) => s.stepId === exportSeSourceStepId) || latestProcessedAudioStep;
   }, [exportSeSourceStepId, latestProcessedAudioStep, processedAudioSteps]);
 
   const resolvedExportSeTracks = useMemo(() => {
@@ -6060,12 +6061,12 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                 >
                   <option value="latest">
                     {latestProcessedAudioStep
-                      ? `Автоматически: последний обработанный модуль — «${latestProcessedAudioStep.title}» (${latestProcessedAudioStep.outputFiles?.length || 0} треков)`
+                      ? `Автоматически: последний обработанный модуль — «${getModuleMeta(latestProcessedAudioStep.moduleId)?.title || latestProcessedAudioStep.moduleId}» (${latestProcessedAudioStep.outputFiles?.length || 0} треков)`
                       : 'Автоматически: последний обработанный модуль (пока нет обработанных модулей — возьмутся исходные дорожки)'}
                   </option>
                   {processedAudioSteps.map((step) => (
-                    <option key={step.id} value={step.id}>
-                      Модуль [{step.prefix}]: {step.title} ({step.outputFiles?.length || 0} обработанных WAV-дорожек)
+                    <option key={step.stepId} value={step.stepId}>
+                      Модуль [{step.prefix}]: {getModuleMeta(step.moduleId)?.title || step.moduleId} ({step.outputFiles?.length || 0} обработанных WAV-дорожек)
                     </option>
                   ))}
                   <option value="source">
@@ -6079,7 +6080,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                     <span className="text-[11px] font-medium text-neutral-400">
                       Источник:{' '}
                       <strong className="text-indigo-300">
-                        {resolvedExportSeStep ? resolvedExportSeStep.title : 'Исходные дорожки даберов'}
+                        {resolvedExportSeStep ? (getModuleMeta(resolvedExportSeStep.moduleId)?.title || resolvedExportSeStep.moduleId) : 'Исходные дорожки даберов'}
                       </strong>
                     </span>
                     <span className="text-[11px] text-emerald-400 font-mono">

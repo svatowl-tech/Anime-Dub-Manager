@@ -50,21 +50,26 @@ function registerSyncHandlers(getData, saveData, dataPath) {
     };
   }));
 
-  async function syncDir(yandexService, token, localDir, remoteDir, mode = 'push') {
+  const MEDIA_EXTENSIONS = new Set([
+    '.mp4', '.mkv', '.avi', '.mov', '.ts', '.webm',
+    '.m4a', '.wav', '.flac', '.mp3', '.ogg', '.aac', '.opus'
+  ]);
+
+  async function syncDir(yandexService, token, localDir, remoteDir, mode = 'push', deadlineTs = Date.now() + 45000) {
+    if (Date.now() > deadlineTs) return;
     await yandexService.ensureFolder(token, remoteDir);
     const items = await fs.readdir(localDir, { withFileTypes: true });
 
     for (const item of items) {
+      if (Date.now() > deadlineTs) break;
       const localPath = path.join(localDir, item.name);
       const remotePath = `${remoteDir}/${item.name}`;
 
       if (item.isDirectory()) {
-         await syncDir(yandexService, token, localPath, remotePath, mode);
+        await syncDir(yandexService, token, localPath, remotePath, mode, deadlineTs);
       } else if (item.isFile()) {
         const ext = path.extname(item.name).toLowerCase();
-        const isMediaFile = ['.mp4', '.mkv', '.avi', '.mov', '.ts', '.m4a', '.wav'].includes(ext);
-        
-        if (!isMediaFile) {
+        if (!MEDIA_EXTENSIONS.has(ext)) {
           try {
             if (mode === 'push') {
               await yandexService.uploadFile(token, localPath, remotePath);
@@ -104,7 +109,7 @@ function registerSyncHandlers(getData, saveData, dataPath) {
     // 2. Sync projects in baseDir
     if (config.baseDir) {
       try {
-        await syncDir(yandexService, config.yandexToken, config.baseDir, 'disk:/AnimeDubManagerProjects', 'push');
+        await syncDir(yandexService, config.yandexToken, config.baseDir, 'disk:/AnimeDubManagerProjects', 'push', Date.now() + 40000);
         results.push({ folder: 'projects', status: 'pushed' });
       } catch (e) {
         log.error('Failed to sync projects:', e);
@@ -124,6 +129,7 @@ function registerSyncHandlers(getData, saveData, dataPath) {
 
     const yandexService = await getYandexService();
     const results = [];
+    const pullDeadline = Date.now() + 45000;
 
     // 1. Pull JSONs
     const jsonFiles = ['participants.json', 'projects.json', 'episodes.json', 'config.json'];
@@ -219,18 +225,18 @@ function registerSyncHandlers(getData, saveData, dataPath) {
       }
     }
 
-    // 2. Pull Projects
-    // Note: Recursive pull is harder because we don't have a local list to compare with.
-    // We should probably list remote resources.
-    if (config.baseDir) {
+    // 2. Pull Projects (only non-media metadata/subtitles, skipping existing unchanged files and respecting time budget)
+    if (config.baseDir && Date.now() < pullDeadline) {
       try {
         await fs.mkdir(config.baseDir, { recursive: true });
         
         async function pullDirRecursive(remotePath, localPath) {
+          if (Date.now() > pullDeadline) return;
           const meta = await yandexService.getFileMeta(config.yandexToken, remotePath);
           if (!meta || !meta._embedded || !meta._embedded.items) return;
 
           for (const item of meta._embedded.items) {
+            if (Date.now() > pullDeadline) break;
             const itemRemotePath = item.path;
             const itemLocalPath = path.join(localPath, item.name);
 
@@ -239,12 +245,15 @@ function registerSyncHandlers(getData, saveData, dataPath) {
               await pullDirRecursive(itemRemotePath, itemLocalPath);
             } else {
               const ext = path.extname(item.name).toLowerCase();
-              const isMediaFile = ['.mp4', '.mkv', '.avi', '.mov', '.ts', '.m4a', '.wav'].includes(ext);
-              if (!isMediaFile) {
+              if (!MEDIA_EXTENSIONS.has(ext)) {
                 try {
+                  const localStat = await fs.stat(itemLocalPath).catch(() => null);
+                  if (localStat && typeof item.size === 'number' && localStat.size === item.size) {
+                    continue;
+                  }
                   await yandexService.downloadFile(config.yandexToken, itemRemotePath, itemLocalPath);
                 } catch(e) {
-                   log.error(`Failed to download ${item.name}:`, e.message);
+                  log.error(`Failed to download ${item.name}:`, e.message);
                 }
               }
             }

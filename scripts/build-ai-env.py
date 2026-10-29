@@ -8,6 +8,7 @@ and packages it into lightweight cross-platform zip archives for GitHub Releases
 import os
 import sys
 import re
+import struct
 import shutil
 import zipfile
 import platform
@@ -22,6 +23,78 @@ if hasattr(sys.stdout, 'reconfigure'):
         sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except Exception:
         pass
+
+
+def clear_linux_elf_execstack(target_dir):
+    """
+    Scans ELF shared libraries (.so / .so.*) inside target_dir on Linux and clears the
+    PF_X (0x1) executable stack bit from any PT_GNU_STACK (0x6474e551) program header.
+    Fixes 'cannot enable executable stack as shared object requires: Invalid argument'
+    on modern Linux kernels and glibc 2.41+ (e.g. onnxruntime_pybind11_state.so).
+    """
+    PT_GNU_STACK = 0x6474e551
+    PF_X = 0x1
+    patched_count = 0
+
+    for root, _, files in os.walk(target_dir):
+        for fname in files:
+            if not (fname.endswith(".so") or ".so." in fname):
+                continue
+            fpath = os.path.join(root, fname)
+            if os.path.islink(fpath):
+                continue
+            try:
+                with open(fpath, "r+b") as f:
+                    ident = f.read(64)
+                    if len(ident) < 52 or ident[:4] != b"\x7fELF":
+                        continue
+                    ei_class = ident[4]  # 1 = 32-bit, 2 = 64-bit
+                    ei_data = ident[5]   # 1 = little-endian, 2 = big-endian
+                    endian = "<" if ei_data == 1 else (">" if ei_data == 2 else None)
+                    if not endian:
+                        continue
+
+                    if ei_class == 2 and len(ident) >= 64:
+                        e_phoff = struct.unpack_from(f"{endian}Q", ident, 32)[0]
+                        e_phentsize = struct.unpack_from(f"{endian}H", ident, 54)[0]
+                        e_phnum = struct.unpack_from(f"{endian}H", ident, 56)[0]
+                        flags_rel_offset = 4
+                    elif ei_class == 1:
+                        e_phoff = struct.unpack_from(f"{endian}I", ident, 28)[0]
+                        e_phentsize = struct.unpack_from(f"{endian}H", ident, 42)[0]
+                        e_phnum = struct.unpack_from(f"{endian}H", ident, 44)[0]
+                        flags_rel_offset = 24
+                    else:
+                        continue
+
+                    if e_phoff == 0 or e_phnum == 0 or e_phentsize < 32:
+                        continue
+
+                    file_patched = False
+                    for i in range(e_phnum):
+                        ph_pos = e_phoff + i * e_phentsize
+                        f.seek(ph_pos)
+                        ph_type_bytes = f.read(4)
+                        if len(ph_type_bytes) < 4:
+                            break
+                        p_type = struct.unpack(f"{endian}I", ph_type_bytes)[0]
+                        if p_type == PT_GNU_STACK:
+                            f.seek(ph_pos + flags_rel_offset)
+                            flags_bytes = f.read(4)
+                            if len(flags_bytes) == 4:
+                                p_flags = struct.unpack(f"{endian}I", flags_bytes)[0]
+                                if p_flags & PF_X:
+                                    new_flags = p_flags & ~PF_X
+                                    f.seek(ph_pos + flags_rel_offset)
+                                    f.write(struct.pack(f"{endian}I", new_flags))
+                                    file_patched = True
+                    if file_patched:
+                        patched_count += 1
+                        print(f"  [ELF-PATCH] Cleared executable stack flag (PT_GNU_STACK) on: {fname}")
+            except Exception as elf_err:
+                print(f"  [WARN] Could not inspect/patch ELF header for {fname}: {elf_err}")
+
+    print(f"  [ELF-PATCH] Scanned Linux shared objects ({patched_count} files patched for non-executable stack).")
 
 
 def get_platform_tag():
@@ -309,8 +382,9 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     print("\n[STEP 4.1] Checking system dependencies for Aeneas (espeak / espeak-ng / ffmpeg)...")
     try:
         if is_linux:
-            run_cmd(["apt-get", "update"], check=False)
-            run_cmd(["apt-get", "install", "-y", "espeak", "espeak-ng", "ffmpeg", "libcew-dev"], check=False)
+            sudo_prefix = ["sudo", "-n"] if (hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo")) else []
+            run_cmd(sudo_prefix + ["apt-get", "update"], check=False)
+            run_cmd(sudo_prefix + ["apt-get", "install", "-y", "--no-install-recommends", "espeak", "espeak-ng", "ffmpeg"], check=False)
         elif is_mac:
             run_cmd(["brew", "install", "espeak", "ffmpeg"], check=False)
         elif is_win:
@@ -400,6 +474,12 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
                     print(f"  [PATCH] {df_utils_path} patched for DEEPFILTERNET_CACHE support.")
             except Exception as patch_e:
                 print(f"  [WARN] Failed to patch {df_utils_path}: {patch_e}")
+
+    # On Linux, strip executable stack flag (PT_GNU_STACK PF_X) from shared objects (e.g. onnxruntime)
+    # so glibc 2.41+ / Linux 6.11+ does not reject dlopen with 'cannot enable executable stack'
+    if is_linux:
+        print("\n[STEP 4.2] Sanitizing ELF PT_GNU_STACK flags on Linux shared libraries...")
+        clear_linux_elf_execstack(env_dir)
 
     # Verify PyTorch / TorchAudio / NumPy integrity inside venv
     print("\n[STEP 5] Verifying environment integrity and imports inside venv...")
@@ -758,6 +838,9 @@ except Exception as e:
 
     # 10. Prune bloat
     prune_unneeded_files(build_temp_dir, strip_cuda=(use_cpu_wheels and (is_win or is_linux)))
+
+    if is_linux:
+        clear_linux_elf_execstack(build_temp_dir)
 
     # 10.1 Post-pruning verification: Ensure PyTorch, CUDA module stub, DeepFilterNet and Demucs are fully intact!
     print("\n[STEP 8.5] Post-pruning integrity verification inside runtime...")

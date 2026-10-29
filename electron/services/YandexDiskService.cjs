@@ -48,6 +48,7 @@ class YandexDiskService {
       const response = await axios.get(this.baseUrl, {
         params: { path: remotePath },
         headers: { Authorization: `OAuth ${token}` },
+        timeout: 15000,
       });
       log.info(`YandexDisk: Successfully fetched meta for ${remotePath}`);
       return response.data;
@@ -92,6 +93,7 @@ class YandexDiskService {
         await axios.put(this.baseUrl, null, {
           params: { path: currentPath },
           headers: { Authorization: `OAuth ${token}` },
+          timeout: 15000,
         });
         log.info(`YandexDisk: Successfully created folder ${currentPath}`);
       } catch (error) {
@@ -112,6 +114,7 @@ class YandexDiskService {
       const { data } = await axios.get(`${this.baseUrl}/upload`, {
         params: { path: remotePath, overwrite: true },
         headers: { Authorization: `OAuth ${token}` },
+        timeout: 15000,
       });
 
       log.info(`YandexDisk: Upload URL received, starting upload of ${localPath}`);
@@ -124,7 +127,8 @@ class YandexDiskService {
           'Content-Length': stat.size
         },
         maxBodyLength: Infinity,
-        maxContentLength: Infinity
+        maxContentLength: Infinity,
+        timeout: 30000,
       });
 
       log.info(`YandexDisk: Successfully uploaded ${localPath} to ${remotePath}`);
@@ -141,10 +145,11 @@ class YandexDiskService {
       const { data } = await axios.get(`${this.baseUrl}/download`, {
         params: { path: remotePath },
         headers: { Authorization: `OAuth ${token}` },
+        timeout: 15000,
       });
 
       // 2. Download file
-      const response = await axios.get(data.href, { responseType: 'arraybuffer' });
+      const response = await axios.get(data.href, { responseType: 'arraybuffer', timeout: 30000 });
       await fs.writeFile(localPath, response.data);
 
       return true;

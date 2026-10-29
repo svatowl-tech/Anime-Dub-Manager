@@ -3682,8 +3682,14 @@ class MixingPipelineService {
     let sourceTracks = [];
     let sourceStepTitle = 'Исходные дорожки даберов (00_raw_dubbers)';
 
+    const resolveStepTitle = (s) => {
+      if (!s) return 'Модуль сведения';
+      const modDef = MODULE_DATABASE.find((m) => m.id === s.moduleId);
+      return modDef?.title || s.title || s.moduleId || s.stepId;
+    };
+
     if (sourceStepId && sourceStepId !== 'latest' && sourceStepId !== 'source') {
-      const found = pipeline.find((s) => s.id === sourceStepId);
+      const found = pipeline.find((s) => s.stepId === sourceStepId || s.id === sourceStepId);
       if (found && Array.isArray(found.outputFiles) && found.outputFiles.length > 0) {
         const validOutputs = found.outputFiles.filter(
           (f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path)
@@ -3691,7 +3697,7 @@ class MixingPipelineService {
         if (validOutputs.length > 0) {
           selectedStep = found;
           sourceTracks = validOutputs;
-          sourceStepTitle = found.title || found.moduleId;
+          sourceStepTitle = resolveStepTitle(found);
         }
       }
     } else if (sourceStepId !== 'source') {
@@ -3721,12 +3727,12 @@ class MixingPipelineService {
         if (validVoiceOutputs.length > 0) {
           selectedStep = latestVoiceStep;
           sourceTracks = validVoiceOutputs;
-          sourceStepTitle = latestVoiceStep.title || latestVoiceStep.moduleId;
+          sourceStepTitle = resolveStepTitle(latestVoiceStep);
         }
       } else if (latestAudioStep) {
         selectedStep = latestAudioStep.step;
         sourceTracks = latestAudioStep.files;
-        sourceStepTitle = latestAudioStep.step.title || latestAudioStep.step.moduleId;
+        sourceStepTitle = resolveStepTitle(latestAudioStep.step);
       }
     }
 

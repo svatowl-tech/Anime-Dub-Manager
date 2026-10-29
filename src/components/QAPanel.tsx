@@ -1002,7 +1002,7 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       ) || targetDubberAssignments[0];
 
       if (!bestAssignmentMatch) {
-        toast.warn('Правка сохранена в дорожку (роль дабера в назначениях не найдена)');
+        toast.warning('Правка сохранена в дорожку (роль дабера в назначениях не найдена)');
         return;
       }
 
