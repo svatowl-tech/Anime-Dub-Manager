@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare, Sliders, Clock, Terminal } from 'lucide-react';
+import { LayoutDashboard, Scissors, Settings, Mic2, Activity, PlaySquare, Database, Image as ImageIcon, BarChart2, X, Archive, Globe, Send, MessageSquare, Sliders, Clock, Terminal, Film } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import Dashboard from './components/Dashboard';
+import VideoEditorPanel from './components/VideoEditorPanel';
 import QAPanel from './components/QAPanel';
 import TimingPanel from './components/TimingPanel';
 import MixingPanel from './components/MixingPanel';
@@ -24,7 +25,7 @@ import { VideoProvider } from './contexts/VideoContext';
 import { useGlobalKeyboard } from './hooks/useGlobalKeyboard';
  
 function AppContent() {
-  type TabType = 'dashboard' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
+  type TabType = 'dashboard' | 'video-editor' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [savedAudioUrl, setSavedAudioUrl] = useState<string | null>(null);
   const [logEventCount, setLogEventCount] = useState<number>(0);
@@ -305,6 +306,20 @@ function AppContent() {
           </button>
 
           <button
+            id="step-video-editor"
+            onClick={() => handleNavigate('video-editor')}
+            title="Редактирование видео (FFmpeg без потери качества) с автоматическим пересчетом тайминга субтитров"
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
+              activeTab === 'video-editor' 
+                ? 'bg-emerald-600/10 text-emerald-400' 
+                : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+            }`}
+          >
+            <Film className="w-5 h-5" />
+            <span>Редактирование видео</span>
+          </button>
+
+          <button
             id="step-subtitles"
             onClick={() => handleNavigate('subtitles')}
             title="Инструменты для редактирования и синхронизации субтитров (ASS)"
@@ -316,19 +331,6 @@ function AppContent() {
           >
             <Scissors className="w-5 h-5" />
             <span>Утилиты (ASS)</span>
-          </button>
-
-          <button
-            onClick={() => handleNavigate('cover')}
-            title="Генерация обложек для серий"
-            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
-              activeTab === 'cover' 
-                ? 'bg-pink-600/10 text-pink-400' 
-                : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
-            }`}
-          >
-            <ImageIcon className="w-5 h-5" />
-            <span>Обложки серии</span>
           </button>
 
           <button
@@ -371,6 +373,19 @@ function AppContent() {
           >
             <Sliders className="w-5 h-5" />
             <span>Сведение видео</span>
+          </button>
+
+          <button
+            onClick={() => handleNavigate('cover')}
+            title="Генерация обложек для серий"
+            className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg font-medium transition-colors text-left ${
+              activeTab === 'cover' 
+                ? 'bg-pink-600/10 text-pink-400' 
+                : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+            }`}
+          >
+            <ImageIcon className="w-5 h-5" />
+            <span>Обложки серии</span>
           </button>
 
           <button
@@ -482,6 +497,19 @@ function AppContent() {
             onEpisodeSelect={handleEpisodeSelect}
             onRefresh={loadProjects}
           />
+        )}
+        {activeTab === 'video-editor' && (
+          <div className="p-4 sm:p-6">
+            {!activeEpisodeToPass ? (
+              <StandaloneMediaSelector title="Редактирование видео" onApply={setStandaloneEpisode} />
+            ) : (
+              <VideoEditorPanel
+                currentEpisode={activeEpisodeToPass}
+                onRefresh={loadProjects}
+                onOpenAssUtilities={() => handleNavigate('subtitles')}
+              />
+            )}
+          </div>
         )}
         {activeTab === 'telegram' && (
           <div className="p-3 sm:p-5 h-full flex flex-col overflow-hidden">

@@ -1858,6 +1858,14 @@ async function analyzeMkvSubtitleStreams(videoPath, streamIndices = []) {
   return results;
 }
 
+function clearSubtitleCache(filePath) {
+  if (filePath) {
+    subtitleCache.delete(filePath);
+  } else {
+    subtitleCache.clear();
+  }
+}
+
 module.exports = {
   getRawSubtitles,
   saveRawSubtitles,
@@ -1877,6 +1885,10 @@ module.exports = {
   removeHonorificsFromSubtitles,
   filterHonorificsFromAssTextCjs,
   evaluateCharacterDistribution,
-  analyzeMkvSubtitleStreams
+  analyzeMkvSubtitleStreams,
+  clearSubtitleCache,
+  readTextFileWithAutoEncoding,
+  parseDialogueLine
 };
+
 

@@ -25,6 +25,8 @@ const HEAVY_CHANNELS: Record<string, number> = {
   'ollama-chat': 45000,
   
   // Media / Video / Transcoding
+  'video-editor-render': 180000,
+  'video-editor-restore-original': 30000,
   'timing-export-to-mixing': 120000,
   'mixing-export-to-sound-engineer': 180000,
   'transcode-video': 180000,

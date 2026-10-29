@@ -218,7 +218,7 @@ async function startServer() {
   EpisodeHandlers.registerEpisodeHandlers(getData, saveData);
   ApiController.registerApiHandlers(getData, saveData);
   SyncController.registerSyncHandlers(getData, saveData, userDataPath);
-  MediaController.registerMediaHandlers(getData, getMainWindow, taskQueue);
+  MediaController.registerMediaHandlers(getData, getMainWindow, taskQueue, saveData);
   ExportController.registerExportHandlers(getData, getMainWindow);
   SystemController.registerSystemHandlers(getData, saveData, getMainWindow, taskQueue);
   SubtitleController.registerSubtitleHandlers(getData);

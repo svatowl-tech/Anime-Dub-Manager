@@ -695,7 +695,7 @@ app.whenReady().then(async () => {
     const getMainWindow = () => mainWindow;
     registerProjectHandlers(getData, saveData, getMainWindow);
     registerEpisodeHandlers(getData, saveData);
-    registerMediaHandlers(getData, getMainWindow, taskQueue);
+    registerMediaHandlers(getData, getMainWindow, taskQueue, saveData);
     registerExportHandlers(getData, getMainWindow, taskQueue);
     registerSubtitleHandlers(getData, saveData);
     registerSystemHandlers(getData, saveData, getMainWindow, taskQueue);

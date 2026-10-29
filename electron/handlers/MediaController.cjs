@@ -17,9 +17,11 @@ const {
 } = require('../services/ffmpegService.cjs');
 const { extractHardsub } = require('../services/ocrService.cjs');
 const { cleanAssFile, extractSignsAss } = require('../services/subtitleService.cjs');
+const VideoEditorService = require('../services/VideoEditorService.cjs');
 
-function registerMediaHandlers(getData, mainWindow, taskQueue) {
+function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow);
+
 
   ipcMain.handle('enqueue-ffmpeg-task', wrapIpcHandler(async (event, { type, payload, metadata }) => {
     log.info(`Enqueuing background task: ${type}`);
@@ -231,6 +233,82 @@ function registerMediaHandlers(getData, mainWindow, taskQueue) {
       if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-progress', percent);
     }, { language, preprocess, crop });
   }));
+
+  ipcMain.handle('video-editor-probe', wrapIpcHandler(async (event, filePath) => {
+    if (!filePath) throw new Error('Не указан путь к файлу');
+    return await VideoEditorService.probeMediaFile(filePath);
+  }));
+
+  ipcMain.handle('video-editor-preview-plan', wrapIpcHandler(async (event, { sourceDurationSec, subPath, operations }) => {
+    const plan = VideoEditorService.buildTimelinePlan(sourceDurationSec || 1, operations || {});
+    let subPreview = null;
+    if (subPath) {
+      subPreview = await VideoEditorService.recalculateSubtitles(subPath, null, plan, () => {}, true);
+    }
+    return {
+      plan,
+      subPreview
+    };
+  }));
+
+  ipcMain.handle('video-editor-render', wrapIpcHandler(async (event, payload) => {
+    const sendLog = (level, message) => {
+      log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](message);
+      const win = getWin();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('video-editor-log', {
+          level,
+          message,
+          timestamp: new Date().toISOString()
+        });
+      }
+    };
+
+    const onProgress = (percent) => {
+      const win = getWin();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('video-editor-progress', percent);
+        win.webContents.send('ffmpeg-progress', percent);
+      }
+    };
+
+    const result = await VideoEditorService.renderEditedVideo(
+      payload,
+      getData,
+      saveData,
+      onProgress,
+      sendLog
+    );
+
+    const win = getWin();
+    if (win && !win.isDestroyed() && result.updatedEpisode) {
+      win.webContents.send('episode-updated', result.updatedEpisode);
+    }
+
+    return result;
+  }));
+
+  ipcMain.handle('video-editor-restore-original', wrapIpcHandler(async (event, payload) => {
+    const sendLog = (level, message) => {
+      log.info(message);
+      const win = getWin();
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('video-editor-log', {
+          level,
+          message,
+          timestamp: new Date().toISOString()
+        });
+      }
+    };
+
+    const result = await VideoEditorService.restoreOriginalEpisodeMedia(payload, getData, saveData, sendLog);
+    const win = getWin();
+    if (win && !win.isDestroyed() && result.updatedEpisode) {
+      win.webContents.send('episode-updated', result.updatedEpisode);
+    }
+    return result;
+  }));
 }
 
 module.exports = { registerMediaHandlers };
+

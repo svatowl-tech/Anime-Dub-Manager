@@ -4,6 +4,7 @@ import { Episode } from "../../types";
 import { RawSubtitleLine, SubtitleUpdates } from "./types";
 import { SHORTCUT_KEYS } from "./utils";
 import { getCharacterColor } from "./characterColors";
+import { resolveLocalPath } from "../../lib/webFileSystem";
 
 interface SubtitleSidebarProps {
   currentEpisode: Episode | null;
@@ -67,6 +68,29 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
   onJumpToBookmark,
 }) => {
   const [currentPlaybackTime, setCurrentPlaybackTime] = useState<number>(0);
+  const [resolvedVideoSrc, setResolvedVideoSrc] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!currentEpisode?.rawPath) {
+      setResolvedVideoSrc('');
+      return;
+    }
+    resolveLocalPath(currentEpisode.rawPath)
+      .then((url) => {
+        if (!cancelled) {
+          setResolvedVideoSrc(url || currentEpisode.rawPath || '');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setResolvedVideoSrc(currentEpisode.rawPath || '');
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentEpisode?.rawPath, currentEpisode?.updatedAt]);
 
   // Sync playback time from video element
   useEffect(() => {
@@ -81,7 +105,7 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
     return () => {
       video.removeEventListener('timeupdate', handleTimeUpdate);
     };
-  }, [videoRef, currentEpisode?.rawPath]);
+  }, [videoRef, currentEpisode?.rawPath, resolvedVideoSrc]);
 
   // Find active line and active speaker based on current video time
   const currentActiveSpeaker = React.useMemo(() => {
@@ -128,7 +152,7 @@ export const SubtitleSidebar: React.FC<SubtitleSidebarProps> = ({
     <div className="w-[420px] flex flex-col shrink-0 bg-neutral-900 overflow-y-auto border-l border-neutral-800">
       {currentEpisode?.rawPath && (
         <div className="sticky top-0 z-20 border-b border-neutral-800 bg-neutral-950 p-3 shadow-lg space-y-2">
-          <video ref={videoRef} src={currentEpisode.rawPath} controls className="w-full rounded bg-black aspect-video object-contain" />
+          <video ref={videoRef} src={resolvedVideoSrc || currentEpisode.rawPath} controls className="w-full rounded bg-black aspect-video object-contain" />
           
           {/* Active Speaker Indicator under video */}
           <div className={`p-2.5 rounded-lg border transition-all ${

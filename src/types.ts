@@ -110,6 +110,8 @@ export interface Episode {
   fixesDeadline?: string;
   rawPath?: string;
   subPath?: string;
+  originalRawPath?: string;
+  originalSubPath?: string;
   isHardsub?: boolean;
   tgPostTemplate?: string;
   tgArticleTemplate?: string;
