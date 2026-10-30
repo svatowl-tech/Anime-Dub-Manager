@@ -3109,6 +3109,33 @@ class MixingPipelineService {
       manifest.sourceFiles.originalAudio = { name: path.basename(foundOrigAudio), path: foundOrigAudio, size: st.size, exists: true };
     }
 
+    // 2B. Поиск выделенных стемов оригинала (Vocals & M&E)
+    const origVocalsCandidates = [
+      path.join(rawDir, 'original_vocals.wav'),
+      path.join(workingDir, 'original_vocals.wav'),
+      path.join(epDir, 'Тайминг', 'stems', 'original_vocals.wav'),
+      path.join(rawDir, '00_original_vocals.wav'),
+      path.join(workingDir, '00_original_vocals.wav')
+    ];
+    let foundOrigVocals = origVocalsCandidates.find(p => p && fsSync.existsSync(p));
+    if (foundOrigVocals) {
+      const st = fsSync.statSync(foundOrigVocals);
+      manifest.sourceFiles.originalVocals = { name: path.basename(foundOrigVocals), path: foundOrigVocals, size: st.size, exists: true };
+    }
+
+    const origInstCandidates = [
+      path.join(rawDir, 'original_instrumental.wav'),
+      path.join(workingDir, 'original_instrumental.wav'),
+      path.join(epDir, 'Тайминг', 'stems', 'original_instrumental.wav'),
+      path.join(rawDir, '00_original_instrumental.wav'),
+      path.join(workingDir, '00_original_instrumental.wav')
+    ];
+    let foundOrigInst = origInstCandidates.find(p => p && fsSync.existsSync(p));
+    if (foundOrigInst) {
+      const st = fsSync.statSync(foundOrigInst);
+      manifest.sourceFiles.originalInstrumental = { name: path.basename(foundOrigInst), path: foundOrigInst, size: st.size, exists: true };
+    }
+
     const subFile = fileNames.find(f => /\.(ass|srt|vtt)$/i.test(f));
     if (subFile) {
       const sPath = path.join(workingDir, subFile);
@@ -3144,7 +3171,7 @@ class MixingPipelineService {
 
     const isStepOutputFile = (filename) => {
       const lower = filename.toLowerCase();
-      if (lower.includes('00_original_audio') || lower.includes('[сведено]') || lower.includes('video_mux')) return true;
+      if (lower.includes('00_original_audio') || lower.includes('original_vocals') || lower.includes('original_instrumental') || lower.includes('[сведено]') || lower.includes('video_mux')) return true;
       if (/^(0[1-9]|1[0-9])_(denoise|deepfilter|glue|compress|master|video_mux|eq|limiter|reverb|delay|mix)/i.test(filename)) return true;
       return pipelinePrefixes.some(pfx => pfx && filename.startsWith(pfx));
     };

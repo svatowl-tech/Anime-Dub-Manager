@@ -995,10 +995,40 @@ const OriginalPeaksWaveform: React.FC<{
   height: number;
   volume: number;
   isMuted: boolean;
-}> = ({ peaks, width, height, volume, isMuted }) => {
+  waveScale?: number;
+  autoNormalize?: boolean;
+  theme?: 'sky' | 'amber' | 'emerald';
+}> = ({ peaks, width, height, volume, isMuted, waveScale = 1.8, autoNormalize = true, theme = 'sky' }) => {
   const tileWidth = 4096;
   const numTiles = Math.max(1, Math.ceil(width / tileWidth));
   const tiles = useMemo(() => Array.from({ length: numTiles }, (_, i) => i), [numTiles]);
+
+  // Compute global peak distribution once so quiet original tracks are normalized
+  // and spoken phrases visually stand out from background room noise / silence.
+  const peakStats = useMemo(() => {
+    if (!peaks || peaks.length === 0) {
+      return { normGain: 1, noiseFloor: 0.005, speechThreshold: 0.02 };
+    }
+    const sampleStep = Math.max(1, Math.floor(peaks.length / 4000));
+    const nonZero: number[] = [];
+    for (let i = 0; i < peaks.length; i += sampleStep) {
+      const v = Math.abs(peaks[i] || 0);
+      if (v > 0.0003) nonZero.push(v);
+    }
+    if (nonZero.length === 0) {
+      return { normGain: 1, noiseFloor: 0.005, speechThreshold: 0.02 };
+    }
+    nonZero.sort((a, b) => a - b);
+    const p15 = nonZero[Math.floor(nonZero.length * 0.15)] || 0.002;
+    const p50 = nonZero[Math.floor(nonZero.length * 0.50)] || 0.02;
+    const p96 = nonZero[Math.min(nonZero.length - 1, Math.floor(nonZero.length * 0.96))] || 0.1;
+
+    // Normalize 96th percentile to 0.92 full scale so quiet anime tracks (-24..-14 dBFS) fill the lane
+    const normGain = Math.min(25, Math.max(1.0, 0.92 / Math.max(0.015, p96)));
+    const noiseFloor = Math.min(0.04, p15 * 1.15);
+    const speechThreshold = Math.max(noiseFloor * 1.8, Math.min(p50 * 0.85, p96 * 0.22));
+    return { normGain, noiseFloor, speechThreshold };
+  }, [peaks]);
 
   return (
     <div className="relative flex h-full pointer-events-none" style={{ width: `${width}px` }}>
@@ -1015,6 +1045,10 @@ const OriginalPeaksWaveform: React.FC<{
             height={height}
             volume={volume}
             isMuted={isMuted}
+            waveScale={waveScale}
+            autoNormalize={autoNormalize}
+            peakStats={peakStats}
+            theme={theme}
           />
         );
       })}
@@ -1030,7 +1064,11 @@ const OriginalPeaksTile: React.FC<{
   height: number;
   volume: number;
   isMuted: boolean;
-}> = ({ peaks, totalWidth, startX, tileWidth, height, volume, isMuted }) => {
+  waveScale: number;
+  autoNormalize: boolean;
+  peakStats: { normGain: number; noiseFloor: number; speechThreshold: number };
+  theme?: 'sky' | 'amber' | 'emerald';
+}> = ({ peaks, totalWidth, startX, tileWidth, height, isMuted, waveScale, autoNormalize, peakStats, theme = 'sky' }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
@@ -1042,23 +1080,42 @@ const OriginalPeaksTile: React.FC<{
     ctx.clearRect(0, 0, tileWidth, height);
     const centerY = height / 2;
 
+    // Subtle center axis line
+    const axisColor = isMuted 
+      ? 'rgba(115, 115, 115, 0.2)' 
+      : theme === 'amber'
+      ? 'rgba(245, 158, 11, 0.18)'
+      : 'rgba(56, 189, 248, 0.18)';
+    ctx.strokeStyle = axisColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, centerY);
+    ctx.lineTo(tileWidth, centerY);
+    ctx.stroke();
+
     if (!peaks || peaks.length === 0) {
-      ctx.strokeStyle = isMuted ? 'rgba(115,115,115,0.25)' : 'rgba(245,158,11,0.3)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, centerY);
-      ctx.lineTo(tileWidth, centerY);
-      ctx.stroke();
       return;
     }
 
     const barWidth = 2;
-    const barGap = 1.5;
+    const barGap = 1.2;
     const step = barWidth + barGap;
     const numBars = Math.floor(tileWidth / step);
-    const volScale = isMuted ? 0.25 : Math.max(0.2, Math.min(1.8, volume * 1.6));
+    const maxRadius = Math.max(4, centerY - 2);
+    const effectiveScale = Math.max(0.25, Math.min(12, waveScale || 1.8));
+    const baseNorm = autoNormalize ? peakStats.normGain : 2.0;
 
-    ctx.fillStyle = isMuted ? 'rgba(115, 115, 115, 0.35)' : 'rgba(245, 158, 11, 0.55)';
+    let silenceColor = isMuted ? 'rgba(115, 115, 115, 0.22)' : 'rgba(56, 189, 248, 0.22)';
+    let lowSoundColor = isMuted ? 'rgba(148, 163, 184, 0.42)' : 'rgba(56, 189, 248, 0.55)';
+    let phraseOuterColor = isMuted ? 'rgba(148, 163, 184, 0.65)' : 'rgba(245, 158, 11, 0.88)';
+    let phraseCoreColor = isMuted ? 'rgba(203, 213, 225, 0.75)' : 'rgba(253, 224, 71, 0.95)';
+
+    if (theme === 'amber') {
+      silenceColor = isMuted ? 'rgba(115, 115, 115, 0.22)' : 'rgba(245, 158, 11, 0.22)';
+      lowSoundColor = isMuted ? 'rgba(148, 163, 184, 0.42)' : 'rgba(245, 158, 11, 0.55)';
+      phraseOuterColor = isMuted ? 'rgba(148, 163, 184, 0.65)' : 'rgba(217, 119, 6, 0.88)';
+      phraseCoreColor = isMuted ? 'rgba(203, 213, 225, 0.75)' : 'rgba(251, 191, 36, 0.95)';
+    }
 
     for (let i = 0; i < numBars; i++) {
       const globalX = startX + i * step;
@@ -1068,15 +1125,44 @@ const OriginalPeaksTile: React.FC<{
       const idxEnd = Math.min(peaks.length, Math.max(idxStart + 1, Math.ceil(ratioEnd * peaks.length)));
 
       let maxPeak = 0;
+      let sumPeak = 0;
+      let count = 0;
       for (let p = idxStart; p < idxEnd; p++) {
         const val = Math.abs(peaks[p] || 0);
         if (val > maxPeak) maxPeak = val;
+        sumPeak += val;
+        count++;
+      }
+      const avgPeak = count > 0 ? sumPeak / count : maxPeak;
+
+      // Keep true silence flat (1px) so gaps between phrases are unmistakable
+      if (maxPeak <= peakStats.noiseFloor) {
+        ctx.fillStyle = silenceColor;
+        ctx.fillRect(i * step, centerY - 0.5, barWidth, 1);
+        continue;
       }
 
-      const barH = Math.max(1.5, Math.min(centerY - 2, maxPeak * (centerY - 3) * volScale));
+      // Normalize and apply gentle non-linear curve (gamma 0.72) when autoNormalize is active
+      // so quiet spoken dialogue syllables are clearly visible without clipping loud peaks
+      const normPeak = maxPeak * baseNorm;
+      const shapedPeak = autoNormalize
+        ? Math.pow(Math.min(1.35, normPeak), 0.72) * effectiveScale * 0.62
+        : normPeak * effectiveScale * 0.55;
+
+      const barH = Math.max(2.0, Math.min(maxRadius, shapedPeak * maxRadius));
+      const isSpeechPhrase = maxPeak >= peakStats.speechThreshold;
+
+      ctx.fillStyle = isSpeechPhrase ? phraseOuterColor : lowSoundColor;
       ctx.fillRect(i * step, centerY - barH, barWidth, barH * 2);
+
+      // Draw bright RMS inner core on speech phrases for crisp syllable definition
+      if (isSpeechPhrase && barH >= 4) {
+        const coreH = Math.max(1.5, Math.min(barH * 0.65, (avgPeak / Math.max(0.001, maxPeak)) * barH * 0.8));
+        ctx.fillStyle = phraseCoreColor;
+        ctx.fillRect(i * step, centerY - coreH, barWidth, coreH * 2);
+      }
     }
-  }, [peaks, totalWidth, startX, tileWidth, height, volume, isMuted]);
+  }, [peaks, totalWidth, startX, tileWidth, height, isMuted, waveScale, autoNormalize, peakStats]);
 
   return <canvas ref={canvasRef} width={tileWidth} height={height} className="shrink-0 h-full" />;
 };
@@ -1304,6 +1390,66 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [originalPeaks, setOriginalPeaks] = useState<number[]>([]);
   const [isOriginalMuted, setIsOriginalMuted] = useState<boolean>(false);
+  const [originalWaveScale, setOriginalWaveScale] = useState<number>(() => {
+    try {
+      const saved = parseFloat(localStorage.getItem('timing_orig_wave_scale') || '');
+      if (!isNaN(saved) && saved >= 0.25 && saved <= 12) return saved;
+    } catch (e) {}
+    return 1.8;
+  });
+  const [isOriginalWaveNormalized, setIsOriginalWaveNormalized] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('timing_orig_wave_norm') !== 'false';
+    } catch (e) {
+      return true;
+    }
+  });
+  const [originalTrackHeight, setOriginalTrackHeight] = useState<number>(() => {
+    try {
+      const saved = parseInt(localStorage.getItem('timing_orig_track_height') || '', 10);
+      if (!isNaN(saved) && saved >= 56 && saved <= 240) return saved;
+    } catch (e) {}
+    return 96;
+  });
+  const [resizingOrigTrack, setResizingOrigTrack] = useState<{
+    startMouseY: number;
+    initialHeight: number;
+  } | null>(null);
+
+  const handleChangeOriginalWaveScale = useCallback((nextVal: number) => {
+    const clamped = Number(Math.max(0.25, Math.min(10, nextVal)).toFixed(2));
+    setOriginalWaveScale(clamped);
+    try { localStorage.setItem('timing_orig_wave_scale', String(clamped)); } catch (e) {}
+  }, []);
+
+  const handleToggleOriginalWaveNorm = useCallback(() => {
+    setIsOriginalWaveNormalized(prev => {
+      const next = !prev;
+      try { localStorage.setItem('timing_orig_wave_norm', String(next)); } catch (e) {}
+      return next;
+    });
+  }, []);
+
+  const handleChangeOriginalTrackHeight = useCallback((nextHeight: number) => {
+    const clamped = Math.max(56, Math.min(220, Math.round(nextHeight)));
+    setOriginalTrackHeight(clamped);
+    try { localStorage.setItem('timing_orig_track_height', String(clamped)); } catch (e) {}
+  }, []);
+
+  useEffect(() => {
+    if (!resizingOrigTrack) return;
+    const onMove = (e: MouseEvent) => {
+      const dy = e.clientY - resizingOrigTrack.startMouseY;
+      handleChangeOriginalTrackHeight(resizingOrigTrack.initialHeight + dy);
+    };
+    const onUp = () => setResizingOrigTrack(null);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [resizingOrigTrack, handleChangeOriginalTrackHeight]);
   const [isVideoOpen, setIsVideoOpen] = useState<boolean>(() => {
     try {
       return localStorage.getItem('timing_video_open') !== 'false';
@@ -1542,6 +1688,51 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   const [volumes, setVolumes] = useState<Record<string, number>>({});
   const [originalVolume, setOriginalVolume] = useState<number>(0.4);
 
+  // AI Original Stem Separation State (Vocals & M&E Instrumental)
+  const [originalStems, setOriginalStems] = useState<{
+    hasStems: boolean;
+    modelId: string;
+    vocalsPath?: string;
+    instrumentalPath?: string;
+    vocalsPeaks: number[];
+    instrumentalPeaks: number[];
+    vocalsVolume: number;
+    instrumentalVolume: number;
+    vocalsMuted: boolean;
+    instrumentalMuted: boolean;
+    vocalsSolo: boolean;
+    instrumentalSolo: boolean;
+    vocalsWaveScale: number;
+    instrumentalWaveScale: number;
+    vocalsTrackHeight: number;
+    instrumentalTrackHeight: number;
+    isSeparating?: boolean;
+    separationProgress?: number;
+    separationStatus?: string;
+  }>({
+    hasStems: false,
+    modelId: 'uvr_mdx_voc_ft',
+    vocalsPeaks: [],
+    instrumentalPeaks: [],
+    vocalsVolume: 0.8,
+    instrumentalVolume: 0.6,
+    vocalsMuted: false,
+    instrumentalMuted: false,
+    vocalsSolo: false,
+    instrumentalSolo: false,
+    vocalsWaveScale: 1.8,
+    instrumentalWaveScale: 1.8,
+    vocalsTrackHeight: 88,
+    instrumentalTrackHeight: 88,
+    isSeparating: false,
+    separationProgress: 0,
+    separationStatus: ''
+  });
+  const [isStemsModalOpen, setIsStemsModalOpen] = useState<boolean>(false);
+  const [selectedStemModel, setSelectedStemModel] = useState<string>('uvr_mdx_voc_ft');
+  const vocalsAudioRef = useRef<HTMLAudioElement | null>(null);
+  const instrumentalAudioRef = useRef<HTMLAudioElement | null>(null);
+
   // Refs for animation & decoded audio buffers
   const playbackRef = useRef<number | null>(null);
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
@@ -1604,11 +1795,20 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
   }, [volumes, isAutoNormalize, normalizationMetrics]);
 
   const syncRealtimeClipPlayback = useCallback((playheadSec: number, forceReschedule = false) => {
-    // 1. Sync Original Video & Audio element
+    // 1. Sync Original Video & Audio element or Separated AI Stems
     const vid = videoRef.current;
+    const hasStemsActive = Boolean(originalStems.hasStems && (originalStems.vocalsPath || originalStems.instrumentalPath));
+
     if (vid) {
-      vid.muted = isOriginalMuted || originalVolume <= 0;
-      vid.volume = isOriginalMuted ? 0 : Math.max(0, Math.min(1, originalVolume));
+      if (hasStemsActive) {
+        // When AI Stems are active, mute original mixed video audio so it doesn't clash
+        vid.muted = true;
+        vid.volume = 0;
+      } else {
+        vid.muted = isOriginalMuted || originalVolume <= 0;
+        vid.volume = isOriginalMuted ? 0 : Math.max(0, Math.min(1, originalVolume));
+      }
+
       if (!isPlaying) {
         if (!vid.paused) {
           try { vid.pause(); } catch (e) {}
@@ -1623,11 +1823,54 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       }
     }
 
+    // Sync AI Stems Audio Elements
+    const vAudio = vocalsAudioRef.current;
+    const iAudio = instrumentalAudioRef.current;
+    if (hasStemsActive) {
+      const vEffVol = originalStems.instrumentalSolo 
+        ? 0 
+        : (originalStems.vocalsMuted || isOriginalMuted ? 0 : originalStems.vocalsVolume);
+      const iEffVol = originalStems.vocalsSolo 
+        ? 0 
+        : (originalStems.instrumentalMuted || isOriginalMuted ? 0 : originalStems.instrumentalVolume);
+
+      if (vAudio) {
+        vAudio.volume = Math.max(0, Math.min(1, vEffVol));
+        vAudio.muted = vEffVol <= 0;
+        if (!isPlaying) {
+          if (!vAudio.paused) try { vAudio.pause(); } catch (e) {}
+        } else {
+          if (forceReschedule || Math.abs(vAudio.currentTime - playheadSec) > 0.25) {
+            try { vAudio.currentTime = playheadSec; } catch (e) {}
+          }
+          if (vAudio.paused) vAudio.play().catch(() => {});
+        }
+      }
+
+      if (iAudio) {
+        iAudio.volume = Math.max(0, Math.min(1, iEffVol));
+        iAudio.muted = iEffVol <= 0;
+        if (!isPlaying) {
+          if (!iAudio.paused) try { iAudio.pause(); } catch (e) {}
+        } else {
+          if (forceReschedule || Math.abs(iAudio.currentTime - playheadSec) > 0.25) {
+            try { iAudio.currentTime = playheadSec; } catch (e) {}
+          }
+          if (iAudio.paused) iAudio.play().catch(() => {});
+        }
+      }
+    } else {
+      if (vAudio && !vAudio.paused) try { vAudio.pause(); } catch (e) {}
+      if (iAudio && !iAudio.paused) try { iAudio.pause(); } catch (e) {}
+    }
+
     if (!isPlaying) {
       stopAllScheduledClips();
       Object.values(audioElementsRef.current).forEach(a => {
         try { a.pause(); } catch (e) {}
       });
+      if (vAudio && !vAudio.paused) try { vAudio.pause(); } catch (e) {}
+      if (iAudio && !iAudio.paused) try { iAudio.pause(); } catch (e) {}
       return;
     }
 
@@ -1767,22 +2010,104 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         console.warn('[RealtimeClipScheduler] Failed to schedule clip:', clipId, e);
       }
     });
-  }, [isPlaying, tracks, audioClips, mutedTracks, computeEffectiveClipGain, stopAllScheduledClips, isOriginalMuted, originalVolume]);
+  }, [isPlaying, tracks, audioClips, mutedTracks, computeEffectiveClipGain, stopAllScheduledClips, isOriginalMuted, originalVolume, originalStems]);
 
   const syncRealtimeRef = useRef(syncRealtimeClipPlayback);
   useEffect(() => {
     syncRealtimeRef.current = syncRealtimeClipPlayback;
   }, [syncRealtimeClipPlayback]);
 
+  // Audio element preloading for AI stems
+  useEffect(() => {
+    let active = true;
+    const setupStems = async () => {
+      if (originalStems.vocalsPath) {
+        const vUrl = await getPlayableAudioUrl(originalStems.vocalsPath);
+        if (active && vUrl) {
+          if (!vocalsAudioRef.current) {
+            vocalsAudioRef.current = new Audio(vUrl);
+            vocalsAudioRef.current.preload = 'auto';
+          } else if (vocalsAudioRef.current.src !== vUrl) {
+            vocalsAudioRef.current.src = vUrl;
+            vocalsAudioRef.current.load();
+          }
+        }
+      } else if (vocalsAudioRef.current) {
+        try { vocalsAudioRef.current.pause(); } catch (e) {}
+        vocalsAudioRef.current = null;
+      }
+
+      if (originalStems.instrumentalPath) {
+        const iUrl = await getPlayableAudioUrl(originalStems.instrumentalPath);
+        if (active && iUrl) {
+          if (!instrumentalAudioRef.current) {
+            instrumentalAudioRef.current = new Audio(iUrl);
+            instrumentalAudioRef.current.preload = 'auto';
+          } else if (instrumentalAudioRef.current.src !== iUrl) {
+            instrumentalAudioRef.current.src = iUrl;
+            instrumentalAudioRef.current.load();
+          }
+        }
+      } else if (instrumentalAudioRef.current) {
+        try { instrumentalAudioRef.current.pause(); } catch (e) {}
+        instrumentalAudioRef.current = null;
+      }
+    };
+    setupStems();
+    return () => {
+      active = false;
+    };
+  }, [originalStems.vocalsPath, originalStems.instrumentalPath]);
+
+  // IPC listener for neural stem separation progress
+  useEffect(() => {
+    const unsub = ipcSafe.on('timing-stem-separation-progress', (data: any) => {
+      if (!data) return;
+      const pct = typeof data.percent === 'number' ? data.percent : 0;
+      const statusText = data.status || data.message || 'Разделение нейросетью...';
+      setOriginalStems(prev => ({
+        ...prev,
+        separationProgress: pct,
+        separationStatus: statusText
+      }));
+      updateProcess('Разделение стемов (AI)', `${statusText} (${pct}%)`, pct);
+    });
+    return () => {
+      if (typeof unsub === 'function') unsub();
+    };
+  }, [updateProcess]);
+
   // Immediately apply clip timing changes, mutes, volumes, or normalization in real time while playing
   useEffect(() => {
     if (isPlaying) {
       syncRealtimeClipPlayback(currentTimeRef.current, false);
-    } else if (videoRef.current) {
-      videoRef.current.muted = isOriginalMuted || originalVolume <= 0;
-      videoRef.current.volume = isOriginalMuted ? 0 : Math.max(0, Math.min(1, originalVolume));
+    } else {
+      const hasStemsActive = Boolean(originalStems.hasStems && (originalStems.vocalsPath || originalStems.instrumentalPath));
+      if (videoRef.current) {
+        if (hasStemsActive) {
+          videoRef.current.muted = true;
+          videoRef.current.volume = 0;
+        } else {
+          videoRef.current.muted = isOriginalMuted || originalVolume <= 0;
+          videoRef.current.volume = isOriginalMuted ? 0 : Math.max(0, Math.min(1, originalVolume));
+        }
+      }
+      if (vocalsAudioRef.current) {
+        const vEffVol = originalStems.instrumentalSolo 
+          ? 0 
+          : (originalStems.vocalsMuted || isOriginalMuted ? 0 : originalStems.vocalsVolume);
+        vocalsAudioRef.current.volume = Math.max(0, Math.min(1, vEffVol));
+        vocalsAudioRef.current.muted = vEffVol <= 0;
+      }
+      if (instrumentalAudioRef.current) {
+        const iEffVol = originalStems.vocalsSolo 
+          ? 0 
+          : (originalStems.instrumentalMuted || isOriginalMuted ? 0 : originalStems.instrumentalVolume);
+        instrumentalAudioRef.current.volume = Math.max(0, Math.min(1, iEffVol));
+        instrumentalAudioRef.current.muted = iEffVol <= 0;
+      }
     }
-  }, [audioClips, mutedTracks, volumes, isAutoNormalize, normalizationMetrics, isOriginalMuted, originalVolume, isPlaying, syncRealtimeClipPlayback]);
+  }, [audioClips, mutedTracks, volumes, isAutoNormalize, normalizationMetrics, isOriginalMuted, originalVolume, isPlaying, originalStems, syncRealtimeClipPlayback]);
 
   const seekToTime = useCallback((newTimeSec: number) => {
     const clamped = Math.max(0, Math.min(duration, newTimeSec));
@@ -1791,10 +2116,126 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     if (videoRef.current) {
       try { videoRef.current.currentTime = clamped; } catch (e) {}
     }
+    if (originalStems.hasStems) {
+      if (vocalsAudioRef.current) {
+        try { vocalsAudioRef.current.currentTime = clamped; } catch (e) {}
+      }
+      if (instrumentalAudioRef.current) {
+        try { instrumentalAudioRef.current.currentTime = clamped; } catch (e) {}
+      }
+    }
     if (isPlaying) {
       syncRealtimeRef.current(clamped, true);
     }
-  }, [duration, isPlaying]);
+  }, [duration, isPlaying, originalStems.hasStems]);
+
+  // AI Stem Separation Handlers
+  const handleSeparateOriginalStems = useCallback(async (modelIdToUse?: string) => {
+    const chosenModel = modelIdToUse || selectedStemModel || 'uvr_mdx_voc_ft';
+    if (!currentEpisode?.rawPath) {
+      toast.error('Оригинальное видео серии не найдено.');
+      return;
+    }
+
+    setOriginalStems(prev => ({
+      ...prev,
+      isSeparating: true,
+      separationProgress: 5,
+      separationStatus: 'Инициализация разделения аудио...'
+    }));
+    updateProcess('Разделение стемов (AI)', 'Инициализация нейросети и извлечение аудио...', 5);
+    addLog(`✂️ Запуск разделения оригинала на Голоса и Фон M&E нейросетью [${chosenModel}]...`, 'info');
+
+    try {
+      const res: any = await ipcSafe.invoke('timing-separate-original-stems', {
+        episode: currentEpisode,
+        modelId: chosenModel
+      });
+
+      if (res && res.success) {
+        setOriginalStems(prev => ({
+          ...prev,
+          hasStems: true,
+          modelId: res.modelId || chosenModel,
+          vocalsPath: res.vocalsPath,
+          instrumentalPath: res.instrumentalPath,
+          vocalsPeaks: Array.isArray(res.vocalsPeaks) ? res.vocalsPeaks : prev.vocalsPeaks,
+          instrumentalPeaks: Array.isArray(res.instrumentalPeaks) ? res.instrumentalPeaks : prev.instrumentalPeaks,
+          isSeparating: false,
+          separationProgress: 100,
+          separationStatus: 'Успешно завершено'
+        }));
+        addLog(`✅ Оригинал успешно разделен на Голоса и Фон M&E (${res.modelId || chosenModel})!`, 'success');
+        toast.success('Оригинал успешно разделен на Голоса и Фон M&E!');
+      } else {
+        throw new Error(res?.error || 'Не удалось завершить разделение');
+      }
+    } catch (err: any) {
+      console.error('[StemSeparation] Error:', err);
+      setOriginalStems(prev => ({
+        ...prev,
+        isSeparating: false,
+        separationStatus: `Ошибка: ${err.message}`
+      }));
+      addLog(`❌ Ошибка разделения стемов оригинала: ${err.message}`, 'error');
+      toast.error(`Ошибка разделения оригинала: ${err.message}`);
+    } finally {
+      setActiveProcess(null);
+    }
+  }, [currentEpisode, selectedStemModel, updateProcess, addLog]);
+
+  const handleImportOriginalStem = useCallback(async (stemType: 'vocals' | 'instrumental', customPath?: string) => {
+    if (!currentEpisode?.rawPath) {
+      toast.error('Нет выбранной серии для импорта стема.');
+      return;
+    }
+    try {
+      addLog(`📥 Импорт дорожки ${stemType === 'vocals' ? 'Голоса оригинала' : 'Фон M&E'}...`, 'info');
+      const res: any = await ipcSafe.invoke('timing-import-original-stem', {
+        episode: currentEpisode,
+        stemType,
+        customPath
+      });
+      if (res && res.success) {
+        setOriginalStems(prev => {
+          const next = { ...prev, hasStems: true };
+          if (stemType === 'vocals') {
+            next.vocalsPath = res.filePath;
+            if (Array.isArray(res.peaks)) next.vocalsPeaks = res.peaks;
+          } else {
+            next.instrumentalPath = res.filePath;
+            if (Array.isArray(res.peaks)) next.instrumentalPeaks = res.peaks;
+          }
+          return next;
+        });
+        toast.success(`Дорожка ${stemType === 'vocals' ? 'Голоса оригинала' : 'Фон M&E'} успешно импортирована!`);
+        addLog(`✅ Дорожка ${stemType === 'vocals' ? 'Голоса оригинала' : 'Фон M&E'} подключена к таймингу`, 'success');
+      } else if (!res?.canceled) {
+        toast.error(res?.error || 'Не удалось импортировать файл стема');
+      }
+    } catch (err: any) {
+      console.error('[StemImport] Error:', err);
+      toast.error(`Ошибка импорта стема: ${err.message}`);
+    }
+  }, [currentEpisode, addLog]);
+
+  const handleExportStemsToFolder = useCallback(async (format: 'wav' | 'flac' = 'wav') => {
+    if (!currentEpisode?.rawPath) return;
+    try {
+      const res: any = await ipcSafe.invoke('timing-export-stems-to-folder', {
+        episode: currentEpisode,
+        format
+      });
+      if (res && res.success) {
+        toast.success(`Стемы сохранены в папку: ${res.targetDir}`);
+        addLog(`📁 Стемы оригинала успешно экспортированы в ${res.targetDir}`, 'success');
+      } else if (!res?.canceled) {
+        toast.error(res?.error || 'Ошибка экспорта стемов');
+      }
+    } catch (err: any) {
+      toast.error(`Ошибка экспорта стемов: ${err.message}`);
+    }
+  }, [currentEpisode, addLog]);
 
   const [aiProcessingTrackId, setAiProcessingTrackId] = useState<string | null>(null);
   const [activeAiMenuTrackId, setActiveAiMenuTrackId] = useState<string | null>(null);
@@ -2205,7 +2646,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           const peaksRes: any = await ipcSafe.invoke('extract-audio-peaks', {
             videoPath: currentEpisode.rawPath,
             filePath: currentEpisode.rawPath,
-            pointsPerSecond: 5
+            pointsPerSecond: 25
           });
           const extractedPeaks = Array.isArray(peaksRes)
             ? peaksRes
@@ -2215,6 +2656,33 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             if (peaksRes && typeof peaksRes.duration === 'number' && peaksRes.duration > 0) {
               setDuration(prev => Math.max(prev, peaksRes.duration));
             }
+          } else if (resolvedVideo) {
+            // Fallback WebAudio decode if FFmpeg peaks returned empty
+            try {
+              const resp = await fetch(resolvedVideo);
+              const arr = await resp.arrayBuffer();
+              const ctx = getSharedAudioContext();
+              if (ctx) {
+                const decoded = await ctx.decodeAudioData(arr);
+                const ch = decoded.getChannelData(0);
+                const ptsPerSec = 25;
+                const totalPts = Math.max(100, Math.floor(decoded.duration * ptsPerSec));
+                const samplesPerPt = Math.max(1, Math.floor(ch.length / totalPts));
+                const webPeaks: number[] = [];
+                for (let i = 0; i < totalPts; i++) {
+                  const start = i * samplesPerPt;
+                  const end = Math.min(ch.length, start + samplesPerPt);
+                  let max = 0;
+                  for (let j = start; j < end; j++) {
+                    const v = Math.abs(ch[j]);
+                    if (v > max) max = v;
+                  }
+                  webPeaks.push(max);
+                }
+                setOriginalPeaks(webPeaks);
+                setDuration(prev => Math.max(prev, decoded.duration));
+              }
+            } catch (e) {}
           }
         } catch (e) {}
       } else {
@@ -2271,9 +2739,20 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             if (Array.isArray(st.mutedTracks)) setMutedTracks(new Set(st.mutedTracks));
             if (typeof st.originalVolume === 'number') setOriginalVolume(st.originalVolume);
             if (typeof st.isOriginalMuted === 'boolean') setIsOriginalMuted(st.isOriginalMuted);
+            if (typeof st.originalWaveScale === 'number') handleChangeOriginalWaveScale(st.originalWaveScale);
+            if (typeof st.isOriginalWaveNormalized === 'boolean') setIsOriginalWaveNormalized(st.isOriginalWaveNormalized);
+            if (typeof st.originalTrackHeight === 'number') handleChangeOriginalTrackHeight(st.originalTrackHeight);
             if (typeof st.zoomLevel === 'number') setZoomLevel(st.zoomLevel);
             if (st.trackHeightMode) setTrackHeightMode(st.trackHeightMode);
             if (st.timingSettings) setTimingSettings(prev => ({ ...prev, ...st.timingSettings }));
+            if (st.originalStems && typeof st.originalStems === 'object') {
+              setOriginalStems(prev => ({
+                ...prev,
+                ...st.originalStems,
+                isSeparating: false
+              }));
+              if (st.originalStems.modelId) setSelectedStemModel(st.originalStems.modelId);
+            }
 
             setSavedTimingStateInfo({
               savedAt: st.updatedAt || new Date().toISOString(),
@@ -3261,9 +3740,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           mutedTracks: Array.from(mutedTracks),
           originalVolume,
           isOriginalMuted,
+          originalWaveScale,
+          isOriginalWaveNormalized,
+          originalTrackHeight,
           zoomLevel,
           trackHeightMode,
-          timingSettings
+          timingSettings,
+          originalStems
         };
 
         const res: any = await ipcSafe.invoke('timing-save-state', {
@@ -3306,6 +3789,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     mutedTracks,
     originalVolume,
     isOriginalMuted,
+    originalWaveScale,
+    isOriginalWaveNormalized,
+    originalTrackHeight,
     zoomLevel,
     trackHeightMode,
     timingSettings,
@@ -6934,7 +7420,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           tracks,
           audioClips: enrichedAudioClips,
           volumes,
-          timingMetadata
+          timingMetadata,
+          originalStems: originalStems.hasStems ? {
+            hasStems: true,
+            vocalsPath: originalStems.vocalsPath,
+            instrumentalPath: originalStems.instrumentalPath,
+            modelId: originalStems.modelId
+          } : undefined
         });
       } finally {
         if (typeof unsubMix === 'function') unsubMix();
@@ -7031,7 +7523,13 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         additionalProcessing,
         autoApplyFixes,
         includeSubtitles,
-        autoTiming: autoTiming ?? false
+        autoTiming: autoTiming ?? false,
+        originalStems: originalStems.hasStems ? {
+          hasStems: true,
+          vocalsPath: originalStems.vocalsPath,
+          instrumentalPath: originalStems.instrumentalPath,
+          modelId: originalStems.modelId
+        } : undefined
       });
 
       if (res && res.success) {
@@ -7305,6 +7803,23 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           >
             <Activity className="w-3.5 h-3.5 text-amber-400 shrink-0" />
             <span>Журнал ({operationLogs.length})</span>
+          </button>
+
+          {/* AI Stem Separation Button */}
+          <button
+            onClick={() => setIsStemsModalOpen(true)}
+            className={`h-8 px-2.5 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 border transition shrink-0 ${
+              originalStems.hasStems
+                ? 'bg-sky-950/80 text-sky-300 border-sky-600/70 shadow-[0_0_10px_rgba(56,189,248,0.2)]'
+                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
+            }`}
+            title="Нейросетевое разделение оригинала на Голоса и Фон M&E"
+          >
+            <Scissors className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <span>{originalStems.hasStems ? 'Стемы (AI: Вкл)' : 'Разделить оригинал (AI)'}</span>
+            {originalStems.hasStems && (
+              <span className="w-2 h-2 rounded-full bg-sky-400 animate-pulse shrink-0" />
+            )}
           </button>
 
           <button
@@ -7753,35 +8268,86 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
           })}
         </div>
 
-        {/* Right: Height view toggle */}
-        <div className="flex items-center gap-1 shrink-0 bg-neutral-900 border border-neutral-800 rounded-lg p-0.5">
-          <button
-            onClick={() => setTrackHeightMode('standard')}
-            className={`px-2 py-1 rounded text-[11px] font-medium transition ${
-              trackHeightMode === 'standard' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-            title="Стандартная высота: 112px для детального редактирования вейвформы"
-          >
-            Стандартный (112px)
-          </button>
-          <button
-            onClick={() => setTrackHeightMode('compact')}
-            className={`px-2 py-1 rounded text-[11px] font-medium transition ${
-              trackHeightMode === 'compact' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-            title="Компактный вид: 64px — все дорожки помещаются на экране"
-          >
-            Компактный (64px)
-          </button>
-          <button
-            onClick={() => setTrackHeightMode('fit')}
-            className={`px-2 py-1 rounded text-[11px] font-medium transition ${
-              trackHeightMode === 'fit' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
-            }`}
-            title="Уместить все дорожки на одном экране без скролла"
-          >
-            Уместить все ({tracks.length})
-          </button>
+        {/* Right: Original Waveform Quick Scale + Height view toggle */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Quick Original Waveform Amplitude Scale Controls */}
+          <div className="flex items-center gap-1 bg-neutral-900 border border-sky-900/50 rounded-lg px-2 py-0.5">
+            <span className="text-[10px] text-sky-400 font-semibold mr-0.5" title="Масштабирование высоты волны оригинальной дорожки">
+              Волна ориг.:
+            </span>
+            <button
+              onClick={() => handleChangeOriginalWaveScale(originalWaveScale - 0.3)}
+              className="w-5 h-5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white flex items-center justify-center text-xs font-bold transition"
+              title="Уменьшить высоту вейвформы оригинала"
+            >
+              −
+            </button>
+            <input
+              type="range"
+              min="0.5"
+              max="8"
+              step="0.25"
+              value={originalWaveScale}
+              onChange={(e) => handleChangeOriginalWaveScale(Number(e.target.value))}
+              className="w-16 accent-amber-400 h-1 bg-neutral-800 rounded cursor-pointer"
+              title={`Масштаб амплитуды оригинала: ${originalWaveScale}x`}
+            />
+            <button
+              onClick={() => handleChangeOriginalWaveScale(originalWaveScale + 0.3)}
+              className="w-5 h-5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white flex items-center justify-center text-xs font-bold transition"
+              title="Увеличить высоту вейвформы оригинала"
+            >
+              +
+            </button>
+            <button
+              onClick={() => handleChangeOriginalWaveScale(1.8)}
+              className="px-1.5 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 font-mono tabular-nums text-[10px] font-bold transition"
+              title="Нажмите для сброса масштаба волны к 1.8x"
+            >
+              {originalWaveScale.toFixed(1)}x
+            </button>
+            <button
+              onClick={handleToggleOriginalWaveNorm}
+              className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition border ${
+                isOriginalWaveNormalized
+                  ? 'bg-sky-600 text-white border-sky-500 shadow-sm'
+                  : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:text-neutral-200'
+              }`}
+              title="Авто-нормализация и выделение фраз на вейвформе оригинала (делает тихие реплики оригинала чётко видимыми)"
+            >
+              АВТО
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 bg-neutral-900 border border-neutral-800 rounded-lg p-0.5">
+            <button
+              onClick={() => setTrackHeightMode('standard')}
+              className={`px-2 py-1 rounded text-[11px] font-medium transition ${
+                trackHeightMode === 'standard' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+              title="Стандартная высота: 112px для детального редактирования вейвформы"
+            >
+              Стандартный (112px)
+            </button>
+            <button
+              onClick={() => setTrackHeightMode('compact')}
+              className={`px-2 py-1 rounded text-[11px] font-medium transition ${
+                trackHeightMode === 'compact' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+              title="Компактный вид: 64px — все дорожки помещаются на экране"
+            >
+              Компактный (64px)
+            </button>
+            <button
+              onClick={() => setTrackHeightMode('fit')}
+              className={`px-2 py-1 rounded text-[11px] font-medium transition ${
+                trackHeightMode === 'fit' ? 'bg-indigo-600 text-white shadow-sm' : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+              title="Уместить все дорожки на одном экране без скролла"
+            >
+              Уместить все ({tracks.length})
+            </button>
+          </div>
         </div>
       </div>
 
@@ -7937,93 +8503,487 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             className="flex flex-col relative"
             style={{ width: `${256 + Math.max(800, duration * zoomLevel)}px` }}
           >
-            {/* Track 1: Original Video Audio Track Row (h-16 = 64px) */}
-            <div className="flex h-16 border-b border-neutral-800/80 bg-neutral-950/60 shrink-0">
-              {/* Sticky Header */}
-              <div className="w-64 sticky left-0 z-20 shrink-0 bg-neutral-950 border-r border-neutral-800/80 p-2.5 flex flex-col justify-between select-none">
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-xs font-bold text-sky-400 flex items-center gap-1.5 truncate">
-                    <Video className="w-3.5 h-3.5 shrink-0" />
-                    <span className="truncate">Оригинал (Видео)</span>
-                  </span>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      onClick={() => setIsVideoOpen(prev => !prev)}
-                      className={`p-1 rounded text-xs transition ${
-                        isVideoOpen ? 'bg-sky-500/20 text-sky-300' : 'text-neutral-500 hover:text-neutral-200'
-                      }`}
-                      title={isVideoOpen ? 'Скрыть окно видео' : 'Показать окно видео'}
-                    >
-                      <Video className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      onClick={() => setIsOriginalMuted(prev => !prev)}
-                      className={`p-1 rounded text-xs transition ${
-                        isOriginalMuted ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
-                      }`}
-                      title={isOriginalMuted ? 'Включить звук оригинала' : 'Заглушить звук оригинала'}
-                    >
-                      {isOriginalMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
-                    </button>
+            {/* Track 1: Original Track(s) — Dual Stems (Vocals & M&E) or Single Video Audio */}
+            {originalStems.hasStems ? (
+              <>
+                {/* Stem 1: Original Vocals (Clean Speech) */}
+                <div
+                  className="flex border-b border-sky-900/60 bg-[#07131e]/80 shrink-0 relative"
+                  style={{ height: `${originalStems.vocalsTrackHeight || 88}px` }}
+                >
+                  {/* Sticky Header */}
+                  <div className="w-64 sticky left-0 z-20 shrink-0 bg-[#07131e] border-r border-sky-800/60 px-2.5 py-1.5 flex flex-col justify-between select-none">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-bold text-sky-400 flex items-center gap-1.5 truncate">
+                        <Scissors className="w-3.5 h-3.5 shrink-0 text-sky-300" />
+                        <span className="truncate">Оригинал: Голоса</span>
+                      </span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => setIsStemsModalOpen(true)}
+                          className="px-1.5 py-0.5 rounded bg-sky-950 hover:bg-sky-900 text-sky-300 border border-sky-700/60 text-[9px] font-mono transition"
+                          title="Настройки разделения стемов нейросетью"
+                        >
+                          AI
+                        </button>
+                        <button
+                          onClick={() => {
+                            const curH = originalStems.vocalsTrackHeight || 88;
+                            const nextH = curH < 88 ? 96 : curH < 130 ? 144 : 68;
+                            setOriginalStems(prev => ({ ...prev, vocalsTrackHeight: nextH }));
+                          }}
+                          className="px-1.5 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 text-[9px] font-mono tabular-nums transition"
+                          title="Высота дорожки голосов оригинала"
+                        >
+                          {originalStems.vocalsTrackHeight || 88}px
+                        </button>
+                        <button
+                          onClick={() => setOriginalStems(prev => ({ ...prev, vocalsSolo: !prev.vocalsSolo, instrumentalSolo: false }))}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition border ${
+                            originalStems.vocalsSolo
+                              ? 'bg-amber-500 text-black border-amber-400 shadow-sm'
+                              : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:text-white'
+                          }`}
+                          title="Соло дорожки голосов оригинала"
+                        >
+                          S
+                        </button>
+                        <button
+                          onClick={() => setOriginalStems(prev => ({ ...prev, vocalsMuted: !prev.vocalsMuted }))}
+                          className={`p-1 rounded text-xs transition ${
+                            originalStems.vocalsMuted ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
+                          }`}
+                          title={originalStems.vocalsMuted ? 'Включить голоса оригинала' : 'Заглушить голоса оригинала'}
+                        >
+                          {originalStems.vocalsMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                        </button>
+                        <button
+                          onClick={() => setOriginalStems(prev => ({ ...prev, hasStems: false }))}
+                          className="p-1 rounded text-[10px] text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 transition"
+                          title="Вернуться к одной общей дорожке видео"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Playback Volume Control */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-sky-300/80 w-10 shrink-0">Голос:</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={originalStems.vocalsMuted ? 0 : originalStems.vocalsVolume}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setOriginalStems(prev => ({
+                            ...prev,
+                            vocalsVolume: val,
+                            vocalsMuted: val > 0 && prev.vocalsMuted ? false : prev.vocalsMuted
+                          }));
+                        }}
+                        className="w-full accent-sky-400 h-1 bg-neutral-800 rounded cursor-pointer"
+                      />
+                      <span className="text-[10px] font-mono tabular-nums text-sky-300 w-9 text-right shrink-0">
+                        {originalStems.vocalsMuted ? 'MUTE' : `${Math.round(originalStems.vocalsVolume * 100)}%`}
+                      </span>
+                    </div>
+
+                    {/* Visual Waveform Amplitude Scale Control */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-sky-400/90 w-10 shrink-0" title="Масштаб отображения высоты пиков вейвформы голосов">
+                        Волна:
+                      </span>
+                      <button
+                        onClick={() => setOriginalStems(prev => ({ ...prev, vocalsWaveScale: Math.max(0.5, prev.vocalsWaveScale - 0.25) }))}
+                        className="w-4 h-4 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 flex items-center justify-center text-[10px] font-bold shrink-0"
+                        title="Уменьшить масштаб волны"
+                      >
+                        −
+                      </button>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="8"
+                        step="0.25"
+                        value={originalStems.vocalsWaveScale}
+                        onChange={(e) => setOriginalStems(prev => ({ ...prev, vocalsWaveScale: Number(e.target.value) }))}
+                        className="w-full accent-sky-400 h-1 bg-neutral-800 rounded cursor-pointer"
+                        title={`Масштабирование вейвформы голосов: ${originalStems.vocalsWaveScale}x`}
+                      />
+                      <button
+                        onClick={() => setOriginalStems(prev => ({ ...prev, vocalsWaveScale: Math.min(8, prev.vocalsWaveScale + 0.25) }))}
+                        className="w-4 h-4 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 flex items-center justify-center text-[10px] font-bold shrink-0"
+                        title="Увеличить масштаб волны"
+                      >
+                        +
+                      </button>
+                      <button
+                        onClick={() => setOriginalStems(prev => ({ ...prev, vocalsWaveScale: 1.8 }))}
+                        className="text-[10px] font-mono tabular-nums text-sky-300 hover:text-sky-200 w-9 text-right shrink-0 font-bold"
+                        title="Сбросить масштаб волны (1.8x)"
+                      >
+                        {originalStems.vocalsWaveScale.toFixed(1)}x
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Stem 1 Lane */}
+                  <div
+                    onClick={handleTimelineClick}
+                    className="relative shrink-0 flex items-center bg-[#07131e]/50 overflow-hidden cursor-crosshair"
+                    style={{ width: `${Math.max(800, duration * zoomLevel)}px`, height: `${originalStems.vocalsTrackHeight || 88}px` }}
+                  >
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                      style={{ left: `${currentTime * zoomLevel}px` }}
+                    />
+                    <div className="absolute inset-0 opacity-10 bg-[linear-gradient(90deg,#38bdf8_1px,transparent_1px)] bg-[size:32px_100%]" />
+                    {originalStems.vocalsPeaks.length > 0 ? (
+                      <div className="relative w-full h-full flex items-center py-1">
+                        <OriginalPeaksWaveform
+                          peaks={originalStems.vocalsPeaks}
+                          width={Math.max(800, Math.round(duration * zoomLevel))}
+                          height={Math.max(48, (originalStems.vocalsTrackHeight || 88) - 8)}
+                          volume={originalStems.instrumentalSolo ? 0 : (originalStems.vocalsMuted ? 0 : originalStems.vocalsVolume)}
+                          isMuted={originalStems.vocalsMuted || originalStems.instrumentalSolo}
+                          waveScale={originalStems.vocalsWaveScale}
+                          autoNormalize={isOriginalWaveNormalized}
+                          theme="sky"
+                        />
+                        <span className="absolute left-3 top-1 text-[9px] font-mono tabular-nums text-sky-300 bg-[#07131e]/90 px-1.5 py-0.5 rounded border border-sky-500/30 pointer-events-none">
+                          🎙️ Голоса оригинала (AI Vocals • {originalStems.modelId}) • Масштаб: {originalStems.vocalsWaveScale.toFixed(1)}x
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="absolute inset-x-0 h-10 my-auto bg-sky-500/10 border-y border-sky-500/20 rounded flex items-center justify-center text-[10px] text-sky-300 font-mono tabular-nums">
+                        Дорожка голосов оригинала подключена ({formatSeconds(duration)})
+                      </div>
+                    )}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] text-neutral-400 shrink-0">Звук:</span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.05"
-                    value={isOriginalMuted ? 0 : originalVolume}
-                    onChange={(e) => {
-                      const val = Number(e.target.value);
-                      setOriginalVolume(val);
-                      if (val > 0 && isOriginalMuted) setIsOriginalMuted(false);
-                    }}
-                    className="w-full accent-sky-500 h-1 bg-neutral-800 rounded cursor-pointer"
-                  />
-                  <span className="text-[10px] font-mono tabular-nums text-sky-300 w-8 text-right shrink-0">
-                    {isOriginalMuted ? 'MUTE' : `${Math.round(originalVolume * 100)}%`}
-                  </span>
-                </div>
-              </div>
 
-              {/* Original Track Lane with Real Extracted Peaks Waveform */}
-              <div 
-                onClick={handleTimelineClick}
-                className={`relative shrink-0 flex items-center bg-neutral-950/40 overflow-hidden cursor-crosshair ${
-                  isOriginalMuted ? 'opacity-35' : ''
-                }`}
-                style={{ width: `${Math.max(800, duration * zoomLevel)}px` }}
-              >
-                {/* Playhead Cursor Line */}
+                {/* Stem 2: Original Background (Instrumental / M&E) */}
                 <div
-                  className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
-                  style={{ left: `${currentTime * zoomLevel}px` }}
-                />
-                <div className="absolute inset-0 opacity-10 bg-[linear-gradient(90deg,#38bdf8_1px,transparent_1px)] bg-[size:32px_100%]" />
-                {originalPeaks.length > 0 ? (
-                  <div className="relative w-full h-14 flex items-center">
-                    <OriginalPeaksWaveform
-                      peaks={originalPeaks}
-                      width={Math.max(800, Math.round(duration * zoomLevel))}
-                      height={56}
-                      volume={isOriginalMuted ? 0 : originalVolume}
-                      isMuted={isOriginalMuted}
+                  className="flex border-b border-amber-900/60 bg-[#191307]/80 shrink-0 relative"
+                  style={{ height: `${originalStems.instrumentalTrackHeight || 88}px` }}
+                >
+                  {/* Sticky Header */}
+                  <div className="w-64 sticky left-0 z-20 shrink-0 bg-[#191307] border-r border-amber-800/60 px-2.5 py-1.5 flex flex-col justify-between select-none">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-xs font-bold text-amber-400 flex items-center gap-1.5 truncate">
+                        <Radio className="w-3.5 h-3.5 shrink-0 text-amber-300" />
+                        <span className="truncate">Оригинал: Фон M&E</span>
+                      </span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={() => {
+                            const curH = originalStems.instrumentalTrackHeight || 88;
+                            const nextH = curH < 88 ? 96 : curH < 130 ? 144 : 68;
+                            setOriginalStems(prev => ({ ...prev, instrumentalTrackHeight: nextH }));
+                          }}
+                          className="px-1.5 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 text-[9px] font-mono tabular-nums transition"
+                          title="Высота дорожки фона M&E"
+                        >
+                          {originalStems.instrumentalTrackHeight || 88}px
+                        </button>
+                        <button
+                          onClick={() => setOriginalStems(prev => ({ ...prev, instrumentalSolo: !prev.instrumentalSolo, vocalsSolo: false }))}
+                          className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition border ${
+                            originalStems.instrumentalSolo
+                              ? 'bg-amber-500 text-black border-amber-400 shadow-sm'
+                              : 'bg-neutral-900 text-neutral-400 border-neutral-800 hover:text-white'
+                          }`}
+                          title="Соло дорожки фона M&E"
+                        >
+                          S
+                        </button>
+                        <button
+                          onClick={() => setOriginalStems(prev => ({ ...prev, instrumentalMuted: !prev.instrumentalMuted }))}
+                          className={`p-1 rounded text-xs transition ${
+                            originalStems.instrumentalMuted ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
+                          }`}
+                          title={originalStems.instrumentalMuted ? 'Включить фон M&E' : 'Заглушить фон M&E'}
+                        >
+                          {originalStems.instrumentalMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Playback Volume Control */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-amber-300/80 w-10 shrink-0">Фон:</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={originalStems.instrumentalMuted ? 0 : originalStems.instrumentalVolume}
+                        onChange={(e) => {
+                          const val = Number(e.target.value);
+                          setOriginalStems(prev => ({
+                            ...prev,
+                            instrumentalVolume: val,
+                            instrumentalMuted: val > 0 && prev.instrumentalMuted ? false : prev.instrumentalMuted
+                          }));
+                        }}
+                        className="w-full accent-amber-400 h-1 bg-neutral-800 rounded cursor-pointer"
+                      />
+                      <span className="text-[10px] font-mono tabular-nums text-amber-300 w-9 text-right shrink-0">
+                        {originalStems.instrumentalMuted ? 'MUTE' : `${Math.round(originalStems.instrumentalVolume * 100)}%`}
+                      </span>
+                    </div>
+
+                    {/* Visual Waveform Amplitude Scale Control */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] text-amber-400/90 w-10 shrink-0" title="Масштаб отображения высоты пиков вейвформы фона M&E">
+                        Волна:
+                      </span>
+                      <button
+                        onClick={() => setOriginalStems(prev => ({ ...prev, instrumentalWaveScale: Math.max(0.5, prev.instrumentalWaveScale - 0.25) }))}
+                        className="w-4 h-4 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 flex items-center justify-center text-[10px] font-bold shrink-0"
+                        title="Уменьшить масштаб волны"
+                      >
+                        −
+                      </button>
+                      <input
+                        type="range"
+                        min="0.5"
+                        max="8"
+                        step="0.25"
+                        value={originalStems.instrumentalWaveScale}
+                        onChange={(e) => setOriginalStems(prev => ({ ...prev, instrumentalWaveScale: Number(e.target.value) }))}
+                        className="w-full accent-amber-400 h-1 bg-neutral-800 rounded cursor-pointer"
+                        title={`Масштабирование вейвформы фона M&E: ${originalStems.instrumentalWaveScale}x`}
+                      />
+                      <button
+                        onClick={() => setOriginalStems(prev => ({ ...prev, instrumentalWaveScale: Math.min(8, prev.instrumentalWaveScale + 0.25) }))}
+                        className="w-4 h-4 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 flex items-center justify-center text-[10px] font-bold shrink-0"
+                        title="Увеличить масштаб волны"
+                      >
+                        +
+                      </button>
+                      <button
+                        onClick={() => setOriginalStems(prev => ({ ...prev, instrumentalWaveScale: 1.8 }))}
+                        className="text-[10px] font-mono tabular-nums text-amber-300 hover:text-amber-200 w-9 text-right shrink-0 font-bold"
+                        title="Сбросить масштаб волны (1.8x)"
+                      >
+                        {originalStems.instrumentalWaveScale.toFixed(1)}x
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Stem 2 Lane */}
+                  <div
+                    onClick={handleTimelineClick}
+                    className="relative shrink-0 flex items-center bg-[#191307]/50 overflow-hidden cursor-crosshair"
+                    style={{ width: `${Math.max(800, duration * zoomLevel)}px`, height: `${originalStems.instrumentalTrackHeight || 88}px` }}
+                  >
+                    <div
+                      className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                      style={{ left: `${currentTime * zoomLevel}px` }}
                     />
-                    <span className="absolute left-3 top-1 text-[9px] font-mono tabular-nums text-sky-300/80 bg-neutral-950/80 px-1.5 py-0.5 rounded border border-sky-500/20 pointer-events-none">
-                      Оригинальная дорожка видео ({formatSeconds(duration)})
+                    <div className="absolute inset-0 opacity-10 bg-[linear-gradient(90deg,#f59e0b_1px,transparent_1px)] bg-[size:32px_100%]" />
+                    {originalStems.instrumentalPeaks.length > 0 ? (
+                      <div className="relative w-full h-full flex items-center py-1">
+                        <OriginalPeaksWaveform
+                          peaks={originalStems.instrumentalPeaks}
+                          width={Math.max(800, Math.round(duration * zoomLevel))}
+                          height={Math.max(48, (originalStems.instrumentalTrackHeight || 88) - 8)}
+                          volume={originalStems.vocalsSolo ? 0 : (originalStems.instrumentalMuted ? 0 : originalStems.instrumentalVolume)}
+                          isMuted={originalStems.instrumentalMuted || originalStems.vocalsSolo}
+                          waveScale={originalStems.instrumentalWaveScale}
+                          autoNormalize={isOriginalWaveNormalized}
+                          theme="amber"
+                        />
+                        <span className="absolute left-3 top-1 text-[9px] font-mono tabular-nums text-amber-300 bg-[#191307]/90 px-1.5 py-0.5 rounded border border-amber-500/30 pointer-events-none">
+                          🎵 Фон оригинала (Music & Effects M&E) • Масштаб: {originalStems.instrumentalWaveScale.toFixed(1)}x
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="absolute inset-x-0 h-10 my-auto bg-amber-500/10 border-y border-amber-500/20 rounded flex items-center justify-center text-[10px] text-amber-300 font-mono tabular-nums">
+                        Дорожка фона оригинала M&E подключена ({formatSeconds(duration)})
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div
+                className="flex border-b border-neutral-800/80 bg-neutral-950/60 shrink-0 relative"
+                style={{ height: `${originalTrackHeight}px` }}
+              >
+                {/* Sticky Header */}
+                <div className="w-64 sticky left-0 z-20 shrink-0 bg-neutral-950 border-r border-neutral-800/80 px-2.5 py-1.5 flex flex-col justify-between select-none">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="text-xs font-bold text-sky-400 flex items-center gap-1.5 truncate">
+                      <Video className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">Оригинал (Видео)</span>
+                    </span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => setIsStemsModalOpen(true)}
+                        className="px-1.5 py-0.5 rounded text-[9px] font-bold transition border bg-sky-950/60 hover:bg-sky-900 text-sky-300 border-sky-600/50 flex items-center gap-1"
+                        title="Разделить оригинальное видео на Голоса и Фон M&E нейросетью"
+                      >
+                        <Scissors className="w-2.5 h-2.5" />
+                        <span>AI</span>
+                      </button>
+                      <button
+                        onClick={handleToggleOriginalWaveNorm}
+                        className={`px-1.5 py-0.5 rounded text-[9px] font-bold transition border ${
+                          isOriginalWaveNormalized
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                            : 'bg-neutral-900 text-neutral-500 border-neutral-800 hover:text-neutral-300'
+                        }`}
+                        title="Авто-нормализация и контраст фраз на вейвформе оригинала"
+                      >
+                        АВТО
+                      </button>
+                      <button
+                        onClick={() => {
+                          const nextH = originalTrackHeight < 88 ? 96 : originalTrackHeight < 130 ? 144 : 68;
+                          handleChangeOriginalTrackHeight(nextH);
+                        }}
+                        className="px-1.5 py-0.5 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 text-[9px] font-mono tabular-nums transition"
+                        title="Переключить высоту дорожки оригинала (68px / 96px / 144px) или потяните нижнюю границу мышкой"
+                      >
+                        {originalTrackHeight}px
+                      </button>
+                      <button
+                        onClick={() => setIsVideoOpen(prev => !prev)}
+                        className={`p-1 rounded text-xs transition ${
+                          isVideoOpen ? 'bg-sky-500/20 text-sky-300' : 'text-neutral-500 hover:text-neutral-200'
+                        }`}
+                        title={isVideoOpen ? 'Скрыть окно видео' : 'Показать окно видео'}
+                      >
+                        <Video className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => setIsOriginalMuted(prev => !prev)}
+                        className={`p-1 rounded text-xs transition ${
+                          isOriginalMuted ? 'bg-red-500/20 text-red-400' : 'text-neutral-400 hover:text-neutral-200'
+                        }`}
+                        title={isOriginalMuted ? 'Включить звук оригинала' : 'Заглушить звук оригинала'}
+                      >
+                        {isOriginalMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Playback Volume Control */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-neutral-400 w-10 shrink-0">Звук:</span>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={isOriginalMuted ? 0 : originalVolume}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setOriginalVolume(val);
+                        if (val > 0 && isOriginalMuted) setIsOriginalMuted(false);
+                      }}
+                      className="w-full accent-sky-500 h-1 bg-neutral-800 rounded cursor-pointer"
+                    />
+                    <span className="text-[10px] font-mono tabular-nums text-sky-300 w-9 text-right shrink-0">
+                      {isOriginalMuted ? 'MUTE' : `${Math.round(originalVolume * 100)}%`}
                     </span>
                   </div>
-                ) : (
-                  <div className="absolute inset-x-0 h-10 my-auto bg-sky-500/10 border-y border-sky-500/20 rounded flex items-center justify-center text-[10px] text-sky-300 font-mono tabular-nums">
-                    {videoUrl
-                      ? `Аудиопоток оригинального видео подключен (${formatSeconds(duration)})`
-                      : `Оригинальный звук серии (${formatSeconds(duration)}) — видео не найдено`}
+
+                  {/* Visual Waveform Amplitude Scale Control */}
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] text-amber-400/90 w-10 shrink-0" title="Масштаб отображения высоты пиков вейвформы оригинала (не влияет на громкость звука)">
+                      Волна:
+                    </span>
+                    <button
+                      onClick={() => handleChangeOriginalWaveScale(originalWaveScale - 0.25)}
+                      className="w-4 h-4 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 flex items-center justify-center text-[10px] font-bold shrink-0"
+                      title="Уменьшить масштаб волны"
+                    >
+                      −
+                    </button>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="8"
+                      step="0.25"
+                      value={originalWaveScale}
+                      onChange={(e) => handleChangeOriginalWaveScale(Number(e.target.value))}
+                      className="w-full accent-amber-400 h-1 bg-neutral-800 rounded cursor-pointer"
+                      title={`Масштабирование вейвформы оригинала: ${originalWaveScale}x`}
+                    />
+                    <button
+                      onClick={() => handleChangeOriginalWaveScale(originalWaveScale + 0.25)}
+                      className="w-4 h-4 rounded bg-neutral-900 hover:bg-neutral-800 text-neutral-300 border border-neutral-800 flex items-center justify-center text-[10px] font-bold shrink-0"
+                      title="Увеличить масштаб волны"
+                    >
+                      +
+                    </button>
+                    <button
+                      onClick={() => handleChangeOriginalWaveScale(1.8)}
+                      className="text-[10px] font-mono tabular-nums text-amber-300 hover:text-amber-200 w-9 text-right shrink-0 font-bold"
+                      title="Сбросить масштаб волны (1.8x)"
+                    >
+                      {originalWaveScale.toFixed(1)}x
+                    </button>
                   </div>
-                )}
+                </div>
+
+                {/* Original Track Lane with Real Extracted Peaks Waveform */}
+                <div 
+                  onClick={handleTimelineClick}
+                  className="relative shrink-0 flex items-center bg-neutral-950/40 overflow-hidden cursor-crosshair"
+                  style={{ width: `${Math.max(800, duration * zoomLevel)}px`, height: `${originalTrackHeight}px` }}
+                >
+                  {/* Playhead Cursor Line */}
+                  <div
+                    className="absolute top-0 bottom-0 w-0.5 bg-amber-400 z-10 pointer-events-none shadow-[0_0_8px_rgba(251,191,36,0.6)]"
+                    style={{ left: `${currentTime * zoomLevel}px` }}
+                  />
+                  <div className="absolute inset-0 opacity-10 bg-[linear-gradient(90deg,#38bdf8_1px,transparent_1px)] bg-[size:32px_100%]" />
+                  {originalPeaks.length > 0 ? (
+                    <div className="relative w-full h-full flex items-center py-1">
+                      <OriginalPeaksWaveform
+                        peaks={originalPeaks}
+                        width={Math.max(800, Math.round(duration * zoomLevel))}
+                        height={Math.max(48, originalTrackHeight - 8)}
+                        volume={isOriginalMuted ? 0 : originalVolume}
+                        isMuted={isOriginalMuted}
+                        waveScale={originalWaveScale}
+                        autoNormalize={isOriginalWaveNormalized}
+                      />
+                      <span className="absolute left-3 top-1 text-[9px] font-mono tabular-nums text-sky-300/90 bg-neutral-950/85 px-1.5 py-0.5 rounded border border-sky-500/20 pointer-events-none">
+                        Оригинальная дорожка видео ({formatSeconds(duration)}) • Масштаб волны: {originalWaveScale.toFixed(1)}x {isOriginalWaveNormalized ? '(АВТО-контраст фраз)' : ''}
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="absolute inset-x-0 h-10 my-auto bg-sky-500/10 border-y border-sky-500/20 rounded flex items-center justify-center text-[10px] text-sky-300 font-mono tabular-nums">
+                      {videoUrl
+                        ? `Аудиопоток оригинального видео подключен (${formatSeconds(duration)})`
+                        : `Оригинальный звук серии (${formatSeconds(duration)}) — видео не найдено`}
+                    </div>
+                  )}
+                </div>
+
+                {/* Bottom Resize Handle for Original Track Height */}
+                <div
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setResizingOrigTrack({
+                      startMouseY: e.clientY,
+                      initialHeight: originalTrackHeight
+                    });
+                  }}
+                  className="absolute left-0 right-0 bottom-0 h-1.5 cursor-ns-resize hover:bg-sky-500/50 transition z-30"
+                  title="Потяните вверх/вниз для изменения высоты дорожки оригинала"
+                />
               </div>
-            </div>
+            )}
 
             {/* Tracks 2..N: Subtitle Row + Audio Clip Track Row for each track */}
             {tracks.map(track => {
@@ -8941,6 +9901,244 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
                 <RotateCcw className="w-3.5 h-3.5" />
                 <span>Сбросить и начать сначала</span>
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI Original Stem Separation Modal */}
+      {isStemsModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-neutral-900 border border-neutral-700/80 rounded-2xl max-w-xl w-full p-6 shadow-2xl flex flex-col gap-5 text-neutral-100 max-h-[90vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-start justify-between gap-3 border-b border-neutral-800 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-sky-950/80 border border-sky-600/50 flex items-center justify-center text-sky-400 shrink-0 shadow-inner">
+                  <Scissors className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>Разделение оригинала (AI Stems)</span>
+                    <span className="px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-300 border border-sky-500/30 text-[10px] font-mono">
+                      Vocals + M&E
+                    </span>
+                  </h3>
+                  <p className="text-xs text-neutral-400 mt-0.5 leading-relaxed">
+                    Нейросетевое разделение аудиопотока оригинального видео на чистые реплики (Голоса) и инструментал (Фон M&E).
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsStemsModalOpen(false)}
+                className="p-1 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-800 transition"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Active Separation Progress Banner */}
+            {originalStems.isSeparating && (
+              <div className="p-4 rounded-xl bg-sky-950/40 border border-sky-600/50 flex flex-col gap-2.5 animate-pulse">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-sky-300 flex items-center gap-2">
+                    <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+                    <span>{originalStems.separationStatus || 'Разделение аудио нейросетью...'}</span>
+                  </span>
+                  <span className="font-mono text-sky-300 font-bold">
+                    {originalStems.separationProgress || 0}%
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-neutral-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-sky-500 to-indigo-500 transition-all duration-300 rounded-full"
+                    style={{ width: `${originalStems.separationProgress || 5}%` }}
+                  />
+                </div>
+                <span className="text-[11px] text-neutral-400">
+                  Пожалуйста, подождите. Модель извлекает чистую речь и инструментальный фон.
+                </span>
+              </div>
+            )}
+
+            {/* Model Selection */}
+            <div className="flex flex-col gap-2">
+              <label className="text-xs font-semibold text-neutral-300 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                <span>Выберите модель разделения аудио:</span>
+              </label>
+
+              <div className="grid grid-cols-1 gap-2">
+                {[
+                  {
+                    id: 'uvr_mdx_voc_ft',
+                    title: 'UVR MDX-Net Vocals FT (Рекомендуется)',
+                    desc: 'Наивысшее качество разделения вокала/речи и саундтрека. Идеально для аниме.',
+                    badge: 'ТОП'
+                  },
+                  {
+                    id: 'kim_vocal_2',
+                    title: 'Kim Vocal 2 (MDX-Net)',
+                    desc: 'Отличная детализация средних частот и разборчивость тихих диалогов.',
+                    badge: 'Речь'
+                  },
+                  {
+                    id: 'htdemucs_ft',
+                    title: 'HTDemucs Fine-Tuned (Hybrid Transformer)',
+                    desc: 'Многополосный трансформер — максимально чистый M&E инструментал.',
+                    badge: 'M&E'
+                  },
+                  {
+                    id: 'mdx23c_8step',
+                    title: 'MDX23C 8-Step (Fast Diffusion)',
+                    desc: 'Быстрая диффузионная архитектура с высокой естественностью.',
+                    badge: 'Скорость'
+                  },
+                  {
+                    id: 'ffmpeg_vocal_remover',
+                    title: 'Быстрый фильтр FFmpeg (Center Channel Splitter)',
+                    desc: 'Без применения нейросетей, мгновенный расчёт за 1–2 секунды.',
+                    badge: 'Без GPU'
+                  }
+                ].map(m => (
+                  <label
+                    key={m.id}
+                    className={`flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition select-none ${
+                      selectedStemModel === m.id
+                        ? 'bg-sky-950/60 border-sky-500/70 text-white shadow-sm'
+                        : 'bg-neutral-800/60 border-neutral-700/60 hover:bg-neutral-800 text-neutral-300'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="stemModel"
+                      value={m.id}
+                      checked={selectedStemModel === m.id}
+                      onChange={() => setSelectedStemModel(m.id)}
+                      disabled={originalStems.isSeparating}
+                      className="mt-1 accent-sky-500"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold">{m.title}</span>
+                        <span className="px-1.5 py-0.2 rounded bg-neutral-700/60 text-neutral-300 text-[10px] font-mono">
+                          {m.badge}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-neutral-400 mt-0.5 leading-snug">
+                        {m.desc}
+                      </p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Current Stems Status & Toggle */}
+            {originalStems.hasStems && (
+              <div className="p-3.5 rounded-xl bg-neutral-800/80 border border-neutral-700/80 flex flex-col gap-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-emerald-400 flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Стемы оригинала сформированы ({originalStems.modelId})</span>
+                  </span>
+                  <label className="flex items-center gap-2 cursor-pointer text-xs text-neutral-300 select-none">
+                    <input
+                      type="checkbox"
+                      checked={originalStems.hasStems}
+                      onChange={(e) => setOriginalStems(prev => ({ ...prev, hasStems: e.target.checked }))}
+                      className="accent-sky-500 rounded"
+                    />
+                    <span>Показывать 2 дорожки на таймлайне</span>
+                  </label>
+                </div>
+
+                <div className="text-[11px] text-neutral-400 font-mono space-y-1">
+                  <div className="truncate">🎙️ Vocals: {originalStems.vocalsPath || 'Готово'}</div>
+                  <div className="truncate">🎵 M&E: {originalStems.instrumentalPath || 'Готово'}</div>
+                </div>
+
+                {/* Stems Export Action Buttons */}
+                <div className="flex items-center gap-2 pt-1 border-t border-neutral-700/60">
+                  <span className="text-[11px] text-neutral-400">Экспорт стемов:</span>
+                  <button
+                    type="button"
+                    onClick={() => handleExportStemsToFolder('wav')}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-neutral-700 hover:bg-neutral-600 text-neutral-200 flex items-center gap-1 transition"
+                  >
+                    <Download className="w-3 h-3 text-sky-400" />
+                    <span>В папку (.wav)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleExportStemsToFolder('flac')}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-neutral-700 hover:bg-neutral-600 text-neutral-200 flex items-center gap-1 transition"
+                  >
+                    <Download className="w-3 h-3 text-emerald-400" />
+                    <span>В папку (.flac)</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Manual Import External Stems */}
+            <div className="p-3.5 rounded-xl bg-neutral-800/40 border border-neutral-700/50 flex flex-col gap-2">
+              <span className="text-xs font-semibold text-neutral-300 flex items-center gap-1.5">
+                <FolderOpen className="w-3.5 h-3.5 text-sky-400" />
+                <span>Импортировать готовые файлы стемов вручную:</span>
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleImportOriginalStem('vocals')}
+                  className="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 flex items-center justify-center gap-1.5 transition"
+                >
+                  <Download className="w-3.5 h-3.5 text-sky-400" />
+                  <span>Импорт Голосов (Vocals)...</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleImportOriginalStem('instrumental')}
+                  className="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 flex items-center justify-center gap-1.5 transition"
+                >
+                  <Download className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Импорт Фона (M&E)...</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Footer Actions */}
+            <div className="flex items-center justify-between pt-3 border-t border-neutral-800">
+              <span className="text-[11px] text-neutral-400">
+                Стемы автоматически передаются во вкладку «Сведение» и «Экспорт ЗР».
+              </span>
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setIsStemsModalOpen(false)}
+                  className="px-3.5 py-1.5 rounded-lg text-xs font-medium text-neutral-300 hover:text-white bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 transition"
+                >
+                  Закрыть
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSeparateOriginalStems(selectedStemModel)}
+                  disabled={originalStems.isSeparating}
+                  className="px-4 py-1.5 rounded-lg text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg flex items-center gap-1.5 transition shadow disabled:opacity-50"
+                >
+                  {originalStems.isSeparating ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Разделение...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Scissors className="w-3.5 h-3.5" />
+                      <span>Разделить нейросетью</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>

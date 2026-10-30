@@ -685,6 +685,88 @@ class ExportService {
         }
       }
 
+      // 4. Экспорт разделенных стемов оригинала (Vocals & M&E)
+      const stemsOption = (paramsOrEpisode && typeof paramsOrEpisode === 'object' && paramsOrEpisode.originalStems) || (opts && opts.originalStems);
+      let vocalsStemPath = stemsOption?.vocalsPath;
+      let meStemPath = stemsOption?.instrumentalPath;
+
+      if (!vocalsStemPath || !meStemPath) {
+        try {
+          const MixingPipelineService = require('./MixingPipelineService.cjs');
+          const baseDir = (config && config.baseDir) ? config.baseDir : (app?.getPath ? app.getPath('userData') : process.cwd());
+          const epDir = MixingPipelineService.getEpisodeDir(episode, baseDir);
+          const candVocals = path.join(epDir, 'Тайминг', 'stems', 'original_vocals.wav');
+          const candME = path.join(epDir, 'Тайминг', 'stems', 'original_instrumental.wav');
+          if (fsSync.existsSync(candVocals) && (!vocalsStemPath || !fsSync.existsSync(vocalsStemPath))) {
+            vocalsStemPath = candVocals;
+          }
+          if (fsSync.existsSync(candME) && (!meStemPath || !fsSync.existsSync(meStemPath))) {
+            meStemPath = candME;
+          }
+        } catch (e) {}
+      }
+
+      const ffmpeg = require('fluent-ffmpeg');
+      const outStemExt = skipConversion ? '.wav' : '.flac';
+
+      if (vocalsStemPath && fsSync.existsSync(vocalsStemPath)) {
+        await logStep(`[Стемы оригинала] Экспорт изолированных голосов оригинала (${outStemExt.toUpperCase()})...`, 'info', 95);
+        const vocalsOutName = `${baseVideoName}_[00_Голоса_оригинала_Vocals]${outStemExt}`;
+        const vocalsOutPath = path.join(targetDir, vocalsOutName);
+        try {
+          if (outStemExt === '.flac') {
+            await new Promise((resolve, reject) => {
+              ffmpeg(vocalsStemPath)
+                .noVideo()
+                .audioCodec('flac')
+                .audioFrequency(48000)
+                .output(vocalsOutPath)
+                .on('end', resolve)
+                .on('error', async (err) => {
+                  log.warn('[ExportService] FLAC convert error for vocals, fallback to copy:', err.message);
+                  await fs.copyFile(vocalsStemPath, path.join(targetDir, `${baseVideoName}_[00_Голоса_оригинала_Vocals].wav`));
+                  resolve();
+                })
+                .run();
+            });
+          } else {
+            await fs.copyFile(vocalsStemPath, vocalsOutPath);
+          }
+          await logStep(`[Стемы оригинала] Голоса оригинала экспортированы: ${vocalsOutName}`, 'success', 97);
+        } catch (stemErr) {
+          await logStep(`[Стемы оригинала] Не удалось экспортировать вокал: ${stemErr.message}`, 'warn', 97);
+        }
+      }
+
+      if (meStemPath && fsSync.existsSync(meStemPath)) {
+        await logStep(`[Стемы оригинала] Экспорт фонограммы M&E (${outStemExt.toUpperCase()})...`, 'info', 98);
+        const meOutName = `${baseVideoName}_[00_Фон_оригинала_ME]${outStemExt}`;
+        const meOutPath = path.join(targetDir, meOutName);
+        try {
+          if (outStemExt === '.flac') {
+            await new Promise((resolve, reject) => {
+              ffmpeg(meStemPath)
+                .noVideo()
+                .audioCodec('flac')
+                .audioFrequency(48000)
+                .output(meOutPath)
+                .on('end', resolve)
+                .on('error', async (err) => {
+                  log.warn('[ExportService] FLAC convert error for ME, fallback to copy:', err.message);
+                  await fs.copyFile(meStemPath, path.join(targetDir, `${baseVideoName}_[00_Фон_оригинала_ME].wav`));
+                  resolve();
+                })
+                .run();
+            });
+          } else {
+            await fs.copyFile(meStemPath, meOutPath);
+          }
+          await logStep(`[Стемы оригинала] Фонограмма M&E экспортирована: ${meOutName}`, 'success', 99);
+        } catch (stemErr) {
+          await logStep(`[Стемы оригинала] Не удалось экспортировать фон M&E: ${stemErr.message}`, 'warn', 99);
+        }
+      }
+
       await logStep(`🎉 Все материалы для звукорежиссера успешно экспортированы!`, 'success', 100);
       return { success: true, targetDir, logFilePath, yandexUrl: null };
     } catch (fatalErr) {

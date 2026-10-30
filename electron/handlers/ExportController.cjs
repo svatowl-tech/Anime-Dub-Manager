@@ -1,4 +1,4 @@
-const { ipcMain, app } = require('electron');
+const { ipcMain, app, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const log = require('electron-log');
@@ -132,11 +132,11 @@ function registerExportHandlers(getData, mainWindow) {
   }));
 
   ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, payloadOrEpisode, maybeTargetDir, maybeSkipConv, maybeSmartExp, maybeAddProc, maybeAutoFix, maybeIncSubs, maybeAutoTiming) => {
-    let episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming;
+    let episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems;
     
     if (payloadOrEpisode && typeof payloadOrEpisode === 'object') {
       if (payloadOrEpisode.episode) {
-        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming } = payloadOrEpisode);
+        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems } = payloadOrEpisode);
       } else if (payloadOrEpisode.id || payloadOrEpisode.number !== undefined || payloadOrEpisode.projectId) {
         episode = payloadOrEpisode;
         targetDir = maybeTargetDir;
@@ -204,8 +204,10 @@ function registerExportHandlers(getData, mainWindow) {
         additionalProcessing: additionalProcessing ?? false,
         autoApplyFixes: autoApplyFixes ?? false,
         includeSubtitles: includeSubtitles !== false,
-        autoTiming: autoTiming === true
+        autoTiming: autoTiming === true,
+        originalStems
       },
+      originalStems,
       config,
       projectsData,
       participantsData,
@@ -241,7 +243,7 @@ function registerExportHandlers(getData, mainWindow) {
     return { success: true, defaultDir, epDir, projDir };
   }));
 
-  ipcMain.handle('timing-export-to-mixing', wrapIpcHandler(async (event, { episode, targetDir, tracks, audioClips, volumes, timingMetadata }) => {
+  ipcMain.handle('timing-export-to-mixing', wrapIpcHandler(async (event, { episode, targetDir, tracks, audioClips, volumes, timingMetadata, originalStems }) => {
     if (!episode) throw new Error('Missing required parameter: episode');
 
     const config = await getData('config.json');
@@ -334,6 +336,37 @@ function registerExportHandlers(getData, mainWindow) {
             await fs.copyFile(origAudioPath, origAudioExportPath);
           }
         } catch (e) {}
+      }
+    }
+
+    // 1B. Copy separated original stems (Vocals & M&E) to exportDir & rawDir
+    let vocalsStemSrc = originalStems?.vocalsPath;
+    let instStemSrc = originalStems?.instrumentalPath;
+    if (!vocalsStemSrc || !instStemSrc) {
+      const timingStemsDir = path.join(epDir, 'Тайминг', 'stems');
+      const candV = path.join(timingStemsDir, 'original_vocals.wav');
+      const candI = path.join(timingStemsDir, 'original_instrumental.wav');
+      if (!vocalsStemSrc && require('fs').existsSync(candV)) vocalsStemSrc = candV;
+      if (!instStemSrc && require('fs').existsSync(candI)) instStemSrc = candI;
+    }
+
+    if (vocalsStemSrc && require('fs').existsSync(vocalsStemSrc)) {
+      try {
+        await fs.copyFile(vocalsStemSrc, path.join(rawDir, 'original_vocals.wav'));
+        await fs.copyFile(vocalsStemSrc, path.join(exportDir, 'original_vocals.wav'));
+        log.info(`[ExportController] Стемы оригинала: вокал скопирован в сведение -> ${path.join(exportDir, 'original_vocals.wav')}`);
+      } catch (e) {
+        log.warn('[ExportController] Error copying original_vocals.wav to mixing:', e.message);
+      }
+    }
+
+    if (instStemSrc && require('fs').existsSync(instStemSrc)) {
+      try {
+        await fs.copyFile(instStemSrc, path.join(rawDir, 'original_instrumental.wav'));
+        await fs.copyFile(instStemSrc, path.join(exportDir, 'original_instrumental.wav'));
+        log.info(`[ExportController] Стемы оригинала: фонограмма M&E скопирована в сведение -> ${path.join(exportDir, 'original_instrumental.wav')}`);
+      } catch (e) {
+        log.warn('[ExportController] Error copying original_instrumental.wav to mixing:', e.message);
       }
     }
 
@@ -823,6 +856,317 @@ function registerExportHandlers(getData, mainWindow) {
     return {
       success: true,
       timingDir
+    };
+  }));
+
+  ipcMain.handle('timing-separate-original-stems', wrapIpcHandler(async (event, { episode, videoPath, modelId = 'uvr_mdx_voc_ft' } = {}) => {
+    if (!episode) throw new Error('Параметр episode обязателен для разделения стемов оригинала');
+    const config = await getData('config.json').catch(() => ({}));
+    const baseDir = (config && config.baseDir) ? config.baseDir : app.getPath('userData');
+    const MixingPipelineService = require('../services/MixingPipelineService.cjs');
+    const AudioNeuralService = require('../services/AudioNeuralService.cjs');
+    const ffmpeg = require('fluent-ffmpeg');
+    const { extractAudioPeaks } = require('../services/ffmpegService.cjs');
+
+    const { epDir, timingDir } = await resolveEpisodeTimingDir(episode);
+    const stemsDir = path.join(timingDir, 'stems');
+    await fs.mkdir(stemsDir, { recursive: true });
+
+    const win = getWin();
+    const sendProgress = (percent, message) => {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('timing-stem-separation-progress', { percent, message });
+      }
+    };
+
+    sendProgress(5, 'Поиск оригинального видео серии...');
+
+    let effectiveVideo = videoPath && require('fs').existsSync(videoPath) ? videoPath : null;
+    if (!effectiveVideo && episode.rawPath && require('fs').existsSync(episode.rawPath)) {
+      effectiveVideo = episode.rawPath;
+    }
+    if (!effectiveVideo) {
+      const searchDirs = [epDir, path.dirname(epDir), episode.folderPath].filter(d => d && typeof d === 'string' && require('fs').existsSync(d));
+      const videoExtRegex = /\.(mp4|mkv|mov|avi|webm)$/i;
+      for (const dir of searchDirs) {
+        try {
+          const files = require('fs').readdirSync(dir);
+          const found = files.find(f => videoExtRegex.test(f) && !f.includes('[СВЕДЕНО]') && !f.includes('video_mux'));
+          if (found) { effectiveVideo = path.join(dir, found); break; }
+        } catch (e) {}
+      }
+    }
+    if (!effectiveVideo) {
+      throw new Error('Видеофайл серии не найден для разделения стемов.');
+    }
+
+    sendProgress(15, 'Извлечение несжатого аудио оригинала (WAV 48kHz)...');
+    const rawAudioPath = path.join(stemsDir, 'source_original_audio.wav');
+    if (!require('fs').existsSync(rawAudioPath) || require('fs').statSync(rawAudioPath).size < 1000) {
+      await new Promise((resolve, reject) => {
+        ffmpeg(effectiveVideo)
+          .noVideo()
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(rawAudioPath)
+          .on('end', () => resolve())
+          .on('error', (err) => reject(err))
+          .run();
+      });
+    }
+
+    const vocalsPath = path.join(stemsDir, 'original_vocals.wav');
+    const instrumentalPath = path.join(stemsDir, 'original_instrumental.wav');
+
+    sendProgress(25, `Запуск модели нейросетевого разделения: ${modelId}...`);
+
+    if (modelId === 'ffmpeg_vocal_remover') {
+      sendProgress(35, 'FFmpeg Splitter: Выделение вокального диапазона...');
+      const vocFilters = 'highpass=f=80,lowpass=f=12000,equalizer=f=1000:t=q:w=1.0:g=1.5,equalizer=f=3400:t=q:w=1.5:g=0.8,agate=threshold=-50dB:range=-15dB:attack=15:release=140';
+      await new Promise((resolve, reject) => {
+        ffmpeg(rawAudioPath)
+          .audioFilters(vocFilters)
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(vocalsPath)
+          .on('end', () => resolve())
+          .on('error', (err) => reject(err))
+          .run();
+      });
+
+      sendProgress(65, 'FFmpeg Splitter: Выделение фонограммы M&E...');
+      const instFilters = 'highpass=f=25,equalizer=f=1000:t=q:w=1.0:g=-6.0,equalizer=f=3200:t=q:w=2.0:g=-15.0';
+      await new Promise((resolve, reject) => {
+        ffmpeg(rawAudioPath)
+          .audioFilters(instFilters)
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(instrumentalPath)
+          .on('end', () => resolve())
+          .on('error', (err) => reject(err))
+          .run();
+      });
+    } else {
+      const modelDef = MixingPipelineService.moduleDatabase.find(m => m.id === modelId) ||
+                       MixingPipelineService.moduleDatabase.find(m => m.id === 'uvr_mdx_voc_ft');
+      const filename = modelDef?.filename || 'UVR-MDX-NET-Voc_FT.onnx';
+
+      const rootUserData = app ? app.getPath('userData') : process.cwd();
+      const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
+      await fs.mkdir(uvrModelsDir, { recursive: true });
+      const localModelFile = path.join(uvrModelsDir, filename);
+
+      if (!require('fs').existsSync(localModelFile) && modelDef?.urls?.length > 0) {
+        sendProgress(30, `Загрузка весов модели ${modelDef.name || filename}...`);
+        try {
+          await MixingPipelineService.downloadUvrModel({
+            modelId: modelDef.id,
+            onProgress: (p) => {
+              if (p && typeof p.percent === 'number') {
+                sendProgress(Math.round(30 + p.percent * 0.25), `Загрузка весов: ${p.percent}%`);
+              }
+            },
+            onLog: (msg) => log.info(`[TimingStems] ${msg}`)
+          });
+        } catch (downloadErr) {
+          log.warn(`[TimingStems] Model weights download warning: ${downloadErr.message}`);
+        }
+      }
+
+      sendProgress(55, `Обработка нейросетью «${modelDef?.name || modelId}»...`);
+      const tempOutputDir = path.join(stemsDir, 'temp_neural_out');
+      await fs.mkdir(tempOutputDir, { recursive: true });
+
+      const neuralRes = await AudioNeuralService.separateStems({
+        inputPath: rawAudioPath,
+        outputDir: tempOutputDir,
+        modelName: modelDef?.id || modelId,
+        modelPath: require('fs').existsSync(localModelFile) ? localModelFile : null,
+        modelId: modelDef?.id || modelId,
+        shifts: 1,
+        overlap: 0.25,
+        stems: 'both',
+        prefix: 'stem_',
+        onProgress: (p) => {
+          if (p && typeof p.percent === 'number') {
+            sendProgress(Math.round(55 + p.percent * 0.35), `Нейросеть: ${p.percent}%`);
+          }
+        },
+        onLog: (msg) => log.info(`[TimingStems] ${msg}`)
+      });
+
+      let foundVocals = null;
+      let foundInst = null;
+      if (Array.isArray(neuralRes)) {
+        foundVocals = neuralRes.find(s => s.type === 'vocals' || /vocal/i.test(s.path || s.name))?.path;
+        foundInst = neuralRes.find(s => s.type === 'instrumental' || /instrumental|no_vocal|accompaniment|other/i.test(s.path || s.name))?.path;
+      }
+      if (!foundVocals || !foundInst) {
+        const tempFiles = require('fs').readdirSync(tempOutputDir);
+        for (const tf of tempFiles) {
+          const fullTf = path.join(tempOutputDir, tf);
+          if (/vocal/i.test(tf)) foundVocals = fullTf;
+          else if (/instrumental|no_vocal|other|accompaniment/i.test(tf)) foundInst = fullTf;
+        }
+      }
+
+      if (foundVocals && require('fs').existsSync(foundVocals)) {
+        await fs.copyFile(foundVocals, vocalsPath);
+      }
+      if (foundInst && require('fs').existsSync(foundInst)) {
+        await fs.copyFile(foundInst, instrumentalPath);
+      }
+      try {
+        const tempFiles = require('fs').readdirSync(tempOutputDir);
+        for (const tf of tempFiles) await fs.unlink(path.join(tempOutputDir, tf)).catch(() => {});
+        await fs.rmdir(tempOutputDir).catch(() => {});
+      } catch (e) {}
+    }
+
+    sendProgress(92, 'Генерация вейвформ для Голосов и Фона...');
+    let vocalsPeaks = [];
+    let instrumentalPeaks = [];
+    try {
+      const vRes = await extractAudioPeaks(vocalsPath, 25);
+      vocalsPeaks = Array.isArray(vRes) ? vRes : (vRes?.peaks || []);
+    } catch (e) {}
+
+    try {
+      const iRes = await extractAudioPeaks(instrumentalPath, 25);
+      instrumentalPeaks = Array.isArray(iRes) ? iRes : (iRes?.peaks || []);
+    } catch (e) {}
+
+    sendProgress(100, 'Стемы оригинала успешно разделены!');
+
+    return {
+      success: true,
+      vocalsPath,
+      instrumentalPath,
+      modelId,
+      vocalsPeaks,
+      instrumentalPeaks
+    };
+  }));
+
+  ipcMain.handle('timing-import-original-stem', wrapIpcHandler(async (event, { episode, stemType, filePath } = {}) => {
+    if (!episode || !stemType) throw new Error('Missing parameters: episode, stemType');
+    const { timingDir } = await resolveEpisodeTimingDir(episode);
+    const stemsDir = path.join(timingDir, 'stems');
+    await fs.mkdir(stemsDir, { recursive: true });
+
+    let sourceFile = filePath;
+    if (!sourceFile) {
+      const win = getWin();
+      const res = await dialog.showOpenDialog(win, {
+        title: stemType === 'vocals' ? 'Выберите файл изолированных голосов (Vocals)' : 'Выберите файл фонограммы (M&E / Instrumental)',
+        filters: [{ name: 'Аудиофайлы', extensions: ['wav', 'flac', 'mp3', 'm4a', 'ogg', 'aac'] }],
+        properties: ['openFile']
+      });
+      if (res.canceled || !res.filePaths || res.filePaths.length === 0) {
+        return { canceled: true };
+      }
+      sourceFile = res.filePaths[0];
+    }
+
+    const targetName = stemType === 'vocals' ? 'original_vocals.wav' : 'original_instrumental.wav';
+    const targetPath = path.join(stemsDir, targetName);
+
+    const ext = path.extname(sourceFile).toLowerCase();
+    if (ext === '.wav') {
+      await fs.copyFile(sourceFile, targetPath);
+    } else {
+      const ffmpeg = require('fluent-ffmpeg');
+      await new Promise((resolve, reject) => {
+        ffmpeg(sourceFile)
+          .noVideo()
+          .audioCodec('pcm_s16le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(targetPath)
+          .on('end', () => resolve())
+          .on('error', (err) => reject(err))
+          .run();
+      });
+    }
+
+    const { extractAudioPeaks } = require('../services/ffmpegService.cjs');
+    let peaks = [];
+    try {
+      const pRes = await extractAudioPeaks(targetPath, 25);
+      peaks = Array.isArray(pRes) ? pRes : (pRes?.peaks || []);
+    } catch (e) {}
+
+    return {
+      success: true,
+      canceled: false,
+      filePath: targetPath,
+      stemType,
+      peaks
+    };
+  }));
+
+  ipcMain.handle('timing-export-stems-to-folder', wrapIpcHandler(async (event, { episode, targetFolder, format = 'flac' } = {}) => {
+    if (!episode) throw new Error('Missing parameter: episode');
+    const { epDir, timingDir } = await resolveEpisodeTimingDir(episode);
+    const stemsDir = path.join(timingDir, 'stems');
+    const vocalsPath = path.join(stemsDir, 'original_vocals.wav');
+    const instrumentalPath = path.join(stemsDir, 'original_instrumental.wav');
+
+    let outFolder = targetFolder;
+    if (!outFolder) {
+      const win = getWin();
+      const res = await dialog.showOpenDialog(win, {
+        title: 'Выберите папку для сохранения стемов оригинала',
+        properties: ['openDirectory', 'createDirectory']
+      });
+      if (res.canceled || !res.filePaths || res.filePaths.length === 0) {
+        return { canceled: true };
+      }
+      outFolder = res.filePaths[0];
+    }
+
+    await fs.mkdir(outFolder, { recursive: true });
+    const ffmpeg = require('fluent-ffmpeg');
+    const epNum = episode.number !== undefined ? `_Ep${episode.number}` : '';
+    const projTitle = sanitizeProjectTitle(episode.project?.title || 'Episode');
+    const basePrefix = `${projTitle}${epNum}`;
+
+    const ext = format === 'wav' ? '.wav' : '.flac';
+    const outVocals = path.join(outFolder, `${basePrefix}_[00_Голоса_оригинала_Vocals]${ext}`);
+    const outInst = path.join(outFolder, `${basePrefix}_[00_Фон_оригинала_ME]${ext}`);
+
+    const exportedFiles = [];
+
+    if (require('fs').existsSync(vocalsPath)) {
+      if (format === 'wav') {
+        await fs.copyFile(vocalsPath, outVocals);
+      } else {
+        await new Promise((resolve, reject) => {
+          ffmpeg(vocalsPath).noVideo().audioCodec('flac').audioFrequency(48000).output(outVocals).on('end', resolve).on('error', reject).run();
+        });
+      }
+      exportedFiles.push(outVocals);
+    }
+
+    if (require('fs').existsSync(instrumentalPath)) {
+      if (format === 'wav') {
+        await fs.copyFile(instrumentalPath, outInst);
+      } else {
+        await new Promise((resolve, reject) => {
+          ffmpeg(instrumentalPath).noVideo().audioCodec('flac').audioFrequency(48000).output(outInst).on('end', resolve).on('error', reject).run();
+        });
+      }
+      exportedFiles.push(outInst);
+    }
+
+    return {
+      success: true,
+      canceled: false,
+      targetFolder: outFolder,
+      files: exportedFiles
     };
   }));
 
