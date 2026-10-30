@@ -235,6 +235,29 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [isExportingSe, setIsExportingSe] = useState<boolean>(false);
   const [exportSeProgress, setExportSeProgress] = useState<number>(0);
   const [exportSeStatusMsg, setExportSeStatusMsg] = useState<string>('');
+  const [inspectedSeTracks, setInspectedSeTracks] = useState<any[]>([]);
+  const [selectedSeTrackPaths, setSelectedSeTrackPaths] = useState<Set<string>>(new Set());
+  const [isInspectingSeTracks, setIsInspectingSeTracks] = useState<boolean>(false);
+
+  const formatSeDuration = (sec: number): string => {
+    if (!sec || !Number.isFinite(sec) || sec <= 0) return '—';
+    const totalSec = Math.round(sec);
+    const hrs = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    if (hrs > 0) {
+      return `${hrs}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  };
+
+  const formatSeFileSize = (bytes: number): string => {
+    if (!bytes || !Number.isFinite(bytes) || bytes <= 0) return '0 Б';
+    const mb = bytes / (1024 * 1024);
+    if (mb >= 1) return `${mb.toFixed(1)} МБ`;
+    const kb = bytes / 1024;
+    return `${kb.toFixed(0)} КБ`;
+  };
 
   // Compute available processed modules with audio outputs for Sound Engineer export
   const processedAudioSteps = useMemo(() => {
@@ -260,12 +283,73 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   }, [exportSeSourceStepId, latestProcessedAudioStep, processedAudioSteps]);
 
   const resolvedExportSeTracks = useMemo(() => {
+    if (inspectedSeTracks.length > 0) return inspectedSeTracks;
     const audioExt = /\.(wav|flac|mp3|ogg|m4a|aac)$/i;
     if (resolvedExportSeStep && resolvedExportSeStep.outputFiles?.length) {
       return resolvedExportSeStep.outputFiles.filter((f) => audioExt.test(f.name || f.path));
     }
     return manifest?.sourceFiles?.dubberTracks || [];
-  }, [resolvedExportSeStep, manifest]);
+  }, [inspectedSeTracks, resolvedExportSeStep, manifest]);
+
+  useEffect(() => {
+    if (!isExportSeModalOpen || !currentEpisode) return;
+    let cancelled = false;
+    setIsInspectingSeTracks(true);
+    ipcSafe
+      .invoke('mixing-inspect-se-tracks', {
+        episode: currentEpisode,
+        workingDir: workingDir || undefined,
+        sourceStepId: exportSeSourceStepId || 'latest'
+      })
+      .then((res: any) => {
+        if (cancelled) return;
+        const list = Array.isArray(res?.tracks) ? res.tracks : [];
+        setInspectedSeTracks(list);
+        const defaultSelected = new Set<string>();
+        for (const tr of list) {
+          if (tr.exists !== false && tr.path) {
+            defaultSelected.add(tr.path);
+          }
+        }
+        setSelectedSeTrackPaths(defaultSelected);
+      })
+      .catch((err: any) => {
+        console.error('Failed to inspect mixing SE tracks:', err);
+      })
+      .finally(() => {
+        if (!cancelled) setIsInspectingSeTracks(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isExportSeModalOpen, currentEpisode, workingDir, exportSeSourceStepId]);
+
+  const handleToggleSeTrackPath = (trackPath: string) => {
+    setSelectedSeTrackPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(trackPath)) {
+        next.delete(trackPath);
+      } else {
+        next.add(trackPath);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllSeTracks = () => {
+    const next = new Set<string>();
+    for (const tr of resolvedExportSeTracks) {
+      if (tr.exists !== false && tr.path) {
+        next.add(tr.path);
+      }
+    }
+    setSelectedSeTrackPaths(next);
+  };
+
+  const handleDeselectAllSeTracks = () => {
+    setSelectedSeTrackPaths(new Set());
+  };
 
   const handleOpenExportSeModal = async () => {
     setExportSeSourceStepId('latest');
@@ -301,6 +385,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       toast.error('Сначала выберите серию для экспорта звукорежиссеру');
       return;
     }
+    if (selectedSeTrackPaths.size === 0) {
+      toast.error('Выберите хотя бы одну дорожку для экспорта звукорежиссеру');
+      return;
+    }
     try {
       setIsExportingSe(true);
       setExportSeProgress(2);
@@ -324,7 +412,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         sourceStepId: exportSeSourceStepId || 'latest',
         skipConversion: exportSeSkipConversion,
         includeSubtitles: exportSeIncludeSubtitles,
-        additionalProcessing: exportSeAdditionalProcessing
+        additionalProcessing: exportSeAdditionalProcessing,
+        selectedTrackPaths: Array.from(selectedSeTrackPaths)
       });
 
       if (typeof unsub === 'function') unsub();
@@ -2174,7 +2263,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         autoTiming: importAutoTiming,
         autoApplyFixes: importAutoFixes,
         includeSubtitles: importSubtitles,
-        smartExport: true,
+        smartExport: false,
         skipConversion: true,
         additionalProcessing: false
       });
@@ -6074,30 +6163,96 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                   </option>
                 </select>
 
-                {/* Preview of tracks to be converted WAV -> FLAC */}
+                {/* Interactive checklist of tracks to be converted WAV -> FLAC */}
                 <div className="mt-2 bg-neutral-950/80 border border-neutral-800/80 rounded-xl p-3">
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center justify-between mb-2">
                     <span className="text-[11px] font-medium text-neutral-400">
                       Источник:{' '}
                       <strong className="text-indigo-300">
                         {resolvedExportSeStep ? (getModuleMeta(resolvedExportSeStep.moduleId)?.title || resolvedExportSeStep.moduleId) : 'Исходные дорожки даберов'}
                       </strong>
                     </span>
-                    <span className="text-[11px] text-emerald-400 font-mono">
-                      К выгрузке в .flac: {resolvedExportSeTracks.length} шт.
-                    </span>
-                  </div>
-                  {resolvedExportSeTracks.length > 0 ? (
-                    <div className="max-h-28 overflow-y-auto space-y-1 pr-1">
-                      {resolvedExportSeTracks.map((tr, idx) => (
-                        <div
-                          key={`${tr.path}_${idx}`}
-                          className="flex items-center justify-between text-[11px] bg-neutral-900/80 px-2.5 py-1 rounded border border-neutral-800/60"
-                        >
-                          <span className="text-neutral-300 truncate font-mono">{tr.name}</span>
-                          <span className="text-indigo-400 font-mono shrink-0 ml-2">WAV → FLAC</span>
+                    <div className="flex items-center gap-2">
+                      {resolvedExportSeTracks.length > 0 && (
+                        <div className="flex items-center gap-1.5 text-[11px]">
+                          <button
+                            type="button"
+                            onClick={handleSelectAllSeTracks}
+                            disabled={isExportingSe}
+                            className="text-indigo-400 hover:text-indigo-300 font-medium transition-colors"
+                          >
+                            Выбрать все
+                          </button>
+                          <span className="text-neutral-700">|</span>
+                          <button
+                            type="button"
+                            onClick={handleDeselectAllSeTracks}
+                            disabled={isExportingSe}
+                            className="text-neutral-400 hover:text-neutral-300 transition-colors"
+                          >
+                            Снять выбор
+                          </button>
                         </div>
-                      ))}
+                      )}
+                      <span className="text-[11px] text-emerald-400 font-mono">
+                        Выбрано: {selectedSeTrackPaths.size} из {resolvedExportSeTracks.length} шт.
+                      </span>
+                    </div>
+                  </div>
+                  {isInspectingSeTracks ? (
+                    <div className="py-4 text-center text-xs text-neutral-400 flex items-center justify-center gap-2">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
+                      Проверка дорожек, длительности и размера...
+                    </div>
+                  ) : resolvedExportSeTracks.length > 0 ? (
+                    <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+                      {resolvedExportSeTracks.map((tr: any, idx: number) => {
+                        const checked = selectedSeTrackPaths.has(tr.path);
+                        const isFix = tr.kind === 'fix' || (tr.roleLabel && String(tr.roleLabel).toLowerCase().includes('фикс'));
+                        const roleBadge = tr.roleLabel || (isFix ? 'Фикс' : `Дорожка ${idx + 1}`);
+                        const dubberName = tr.dubberNick || tr.actor || 'Даббер';
+                        const targetFlacName = tr.exportFlacName || tr.name;
+                        return (
+                          <label
+                            key={`${tr.path}_${idx}`}
+                            className={`flex items-center gap-2.5 p-2 rounded-lg border transition-colors ${
+                              checked
+                                ? 'bg-indigo-950/30 border-indigo-500/40 hover:border-indigo-500/60 cursor-pointer'
+                                : 'bg-neutral-900/70 border-neutral-800/60 hover:border-neutral-700 cursor-pointer'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={isExportingSe}
+                              onChange={() => handleToggleSeTrackPath(tr.path)}
+                              className="w-4 h-4 rounded border-neutral-700 bg-neutral-900 text-indigo-500 focus:ring-indigo-500/20 shrink-0"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="text-xs font-bold text-white truncate">{dubberName}</span>
+                                <span
+                                  className={`text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase tracking-wide ${
+                                    isFix
+                                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                                      : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                                  }`}
+                                >
+                                  {roleBadge}
+                                </span>
+                                <span className="text-[10px] text-indigo-400 font-mono ml-auto shrink-0">WAV → FLAC</span>
+                              </div>
+                              <div className="text-[11px] text-neutral-300 font-mono truncate mt-0.5" title={targetFlacName}>
+                                {targetFlacName}
+                              </div>
+                            </div>
+                            <div className="flex flex-col items-end shrink-0 text-[11px] font-mono text-neutral-300">
+                              <span className="text-emerald-400 font-semibold">⏱ {formatSeDuration(tr.durationSec)}</span>
+                              <span className="text-neutral-400 text-[10px]">💾 {formatSeFileSize(tr.sizeBytes)}</span>
+                            </div>
+                          </label>
+                        );
+                      })}
                     </div>
                   ) : (
                     <div className="text-[11px] text-amber-400">
@@ -6223,7 +6378,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
               </button>
               <button
                 onClick={handleExportToSoundEngineer}
-                disabled={isExportingSe || resolvedExportSeTracks.length === 0}
+                disabled={isExportingSe || resolvedExportSeTracks.length === 0 || selectedSeTrackPaths.size === 0}
                 className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition shadow-lg shadow-indigo-900/20"
               >
                 {isExportingSe ? (

@@ -126,8 +126,12 @@ function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
         break;
       }
       case 'export-sound-engineer-files': {
-        const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, options } = payload;
-        taskFn = async (id, ep, tDir, sConv, sExp, addProc, autoFix, incSubs, aTiming, onProgress, onCommand) => {
+        const { episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds, options } = payload;
+        const resolvedSelectedTrackIds = Array.isArray(selectedTrackIds)
+          ? selectedTrackIds
+          : (Array.isArray(options?.selectedTrackIds) ? options.selectedTrackIds : null);
+        const resolvedOriginalStems = originalStems || options?.originalStems || null;
+        taskFn = async (id, ep, tDir, sConv, sExp, addProc, autoFix, incSubs, aTiming, selIds, origStems, onProgress, onCommand) => {
           return await ExportService.exportSoundEngineerFiles({
             episode: ep,
             targetDir: tDir,
@@ -137,8 +141,12 @@ function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
               additionalProcessing: addProc ?? options?.additionalProcessing ?? false,
               autoApplyFixes: autoFix ?? options?.autoApplyFixes ?? false,
               includeSubtitles: (incSubs ?? options?.includeSubtitles) !== false,
-              autoTiming: (aTiming ?? options?.autoTiming) === true
+              autoTiming: (aTiming ?? options?.autoTiming) === true,
+              originalStems: origStems,
+              selectedTrackIds: selIds
             },
+            originalStems: origStems,
+            selectedTrackIds: selIds,
             config,
             projectsData,
             participantsData,
@@ -146,7 +154,7 @@ function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
             onCommand
           });
         };
-        args = [episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles !== false, autoTiming === true];
+        args = [episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles !== false, autoTiming === true, resolvedSelectedTrackIds, resolvedOriginalStems];
         break;
       }
       default: throw new Error('Unknown task type');

@@ -108,7 +108,7 @@ export interface QAPlayerAndModalsViewProps {
   handleSaveDetectedGaps: (updatedGaps: MissingLineDetection[]) => void;
   isExportModalOpen: boolean;
   setIsExportModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
-  handleExportSoundEngineer: (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean, autoTiming?: boolean) => Promise<void>;
+  handleExportSoundEngineer: (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean, autoTiming?: boolean, selectedTrackIds?: string[]) => Promise<void>;
   isUploading: boolean;
   isMessageModalOpen: boolean;
   setIsMessageModalOpen: React.Dispatch<React.SetStateAction<boolean>>;

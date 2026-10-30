@@ -649,7 +649,8 @@ export default function AssEditor({
     autoApplyFixesOrAssignments?: boolean | RoleAssignment[],
     includeSubtitlesOrAssignments?: boolean | RoleAssignment[],
     autoTiming?: boolean,
-    currentAssignments?: RoleAssignment[]
+    currentAssignmentsOrTrackIds?: RoleAssignment[] | string[],
+    selectedTrackIdsArg?: string[]
   ) => {
     if (!currentEpisode) return;
     
@@ -663,12 +664,18 @@ export default function AssEditor({
       const isAutoTiming = typeof autoTiming === 'boolean' ? autoTiming : false;
       
       let rawAssignments: RoleAssignment[] = assignments;
+      let selectedTrackIds: string[] | undefined = selectedTrackIdsArg;
+
       if (Array.isArray(autoApplyFixesOrAssignments)) {
         rawAssignments = autoApplyFixesOrAssignments;
       } else if (Array.isArray(includeSubtitlesOrAssignments)) {
         rawAssignments = includeSubtitlesOrAssignments;
-      } else if (currentAssignments) {
-        rawAssignments = currentAssignments;
+      } else if (Array.isArray(currentAssignmentsOrTrackIds)) {
+        if (currentAssignmentsOrTrackIds.length === 0 || typeof currentAssignmentsOrTrackIds[0] === 'string') {
+          selectedTrackIds = currentAssignmentsOrTrackIds as string[];
+        } else {
+          rawAssignments = currentAssignmentsOrTrackIds as RoleAssignment[];
+        }
       }
       
       const updatedEpisode = {
@@ -693,7 +700,8 @@ export default function AssEditor({
           additionalProcessing,
           autoApplyFixes,
           includeSubtitles,
-          autoTiming: isAutoTiming
+          autoTiming: isAutoTiming,
+          selectedTrackIds
         },
         metadata: {
           title: `Экспорт ${roleName}: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`
@@ -2007,7 +2015,9 @@ export default function AssEditor({
           onClose={() => setIsExportModalOpen(false)}
           episode={currentEpisode}
           role={exportRole}
-          onExport={(targetDir, skipConversion, smartExport, uploadToYandex, additionalProcessing) => { handleExport(targetDir, skipConversion, smartExport, uploadToYandex, additionalProcessing, assignments); }}
+          onExport={(targetDir, skipConversion, smartExport, uploadToYandex, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, selectedTrackIds) => {
+            handleExport(targetDir, skipConversion, smartExport, uploadToYandex, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, assignments, selectedTrackIds);
+          }}
           isExporting={isExporting}
           progress={exportProgress}
         />

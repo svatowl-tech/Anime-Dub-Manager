@@ -885,7 +885,15 @@ class MixingManifestRouter {
           dubberNick = baseNoExt || 'Даббер';
         }
 
-        const displayNick = trackNum ? `${dubberNick} (Дорожка ${trackNum})` : dubberNick;
+        let displayNick = dubberNick;
+        const fixMatch = f.match(/(?:^|[_[\s-])(?:fix|фикс)\s*(\d*)(?:[_\]\s.-]|$)/i);
+        const isFixTrack = Boolean(fixMatch);
+        const fixNum = fixMatch && fixMatch[1] ? fixMatch[1] : '';
+        if (isFixTrack) {
+          displayNick = `${dubberNick} (Фикс${fixNum ? ' ' + fixNum : ''})`;
+        } else if (trackNum) {
+          displayNick = `${dubberNick} (Дорожка ${trackNum})`;
+        }
 
         if (foundDubberTracks.some(t => t.path === fullP || (t.name === f && t.size === st.size))) {
           continue;
@@ -897,6 +905,7 @@ class MixingManifestRouter {
           dubberNick: displayNick.trim(),
           baseDubberNick: dubberNick.trim(),
           trackNumber: trackNum ? parseInt(trackNum, 10) : 1,
+          isFix: isFixTrack,
           path: fullP,
           size: st.size,
           exists: true,
@@ -915,6 +924,22 @@ class MixingManifestRouter {
         !u.path.toLowerCase().includes('slice') &&
         !(u.fileName || '').toLowerCase().includes('slice')
       );
+      const dubberTrackCounts = new Map();
+      const dubberFixCounts = new Map();
+      for (const u of qaUploads) {
+        const f = path.basename(u.path);
+        const baseNick = (u.dubberNick || u.dubberName || u.name || f)
+          .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+          .replace(/^00_timed_/i, '')
+          .replace(/\.wav$/i, '')
+          .trim() || 'Даббер';
+        const key = String(u.uploadedById || baseNick).toLowerCase();
+        const isFix = u.type === 'FIXES' || /(?:^|[_[\s-])(?:fix|фикс)\d*(?:[_\]\s.-]|$)/i.test(f);
+        if (isFix) dubberFixCounts.set(key, (dubberFixCounts.get(key) || 0) + 1);
+        else dubberTrackCounts.set(key, (dubberTrackCounts.get(key) || 0) + 1);
+      }
+      const dubberTrackIdx = new Map();
+      const dubberFixIdx = new Map();
       for (const u of qaUploads) {
         const f = path.basename(u.path);
         const st = fsSync.statSync(u.path);
@@ -923,12 +948,27 @@ class MixingManifestRouter {
           .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
           .replace(/^00_timed_/i, '')
           .replace(/\.wav$/i, '')
-          .trim();
-        const dubberNick = trackMatch 
-          ? `${baseNick || 'Даббер'} (${trackMatch[1].replace('дорожка', 'Дорожка ')})` 
-          : (baseNick || 'Даббер');
+          .trim() || 'Даббер';
+        const key = String(u.uploadedById || baseNick).toLowerCase();
+        const isFix = u.type === 'FIXES' || /(?:^|[_[\s-])(?:fix|фикс)\d*(?:[_\]\s.-]|$)/i.test(f);
+        let dubberNick = baseNick;
+        if (isFix) {
+          const curFixIdx = (dubberFixIdx.get(key) || 0) + 1;
+          dubberFixIdx.set(key, curFixIdx);
+          const totalFixes = dubberFixCounts.get(key) || 1;
+          dubberNick = totalFixes > 1 ? `${baseNick} (Фикс ${curFixIdx})` : `${baseNick} (Фикс)`;
+        } else if (trackMatch) {
+          const tn = parseInt(trackMatch[1].replace(/\D+/g, ''), 10) || 1;
+          dubberNick = `${baseNick} (Дорожка ${tn})`;
+        } else {
+          const curTrkIdx = (dubberTrackIdx.get(key) || 0) + 1;
+          dubberTrackIdx.set(key, curTrkIdx);
+          if ((dubberTrackCounts.get(key) || 1) > 1) {
+            dubberNick = `${baseNick} (Дорожка ${curTrkIdx})`;
+          }
+        }
         foundDubberTracks.push({
-          id: f,
+          id: u.id || f,
           name: f,
           dubberNick: dubberNick || 'Даббер',
           path: u.path,
@@ -946,49 +986,14 @@ class MixingManifestRouter {
       filteredDubberTracks = timedMasters;
     }
 
-    // Deduplicate so each unique audio track appears once, and if a full replacement fix exists alongside a draft track for the same actor/layer, keep ONLY the full fix
-    const uniquePathList = [];
+    // Deduplicate only by exact path so all distinct dubber tracks (Track 1, Track 2, Fix) are preserved
+    const deduplicatedTracks = [];
     const seenPaths = new Set();
     for (const tr of filteredDubberTracks) {
       const key = tr.path || tr.name;
       if (!seenPaths.has(key)) {
         seenPaths.add(key);
-        uniquePathList.push(tr);
-      }
-    }
-
-    const byActorAndLayer = new Map();
-    for (const tr of uniquePathList) {
-      const baseKey = `${(tr.baseDubberNick || tr.dubberNick || '').toLowerCase()}__${tr.trackNumber || 1}`;
-      if (!byActorAndLayer.has(baseKey)) byActorAndLayer.set(baseKey, []);
-      byActorAndLayer.get(baseKey).push(tr);
-    }
-
-    const deduplicatedTracks = [];
-    for (const group of byActorAndLayer.values()) {
-      if (group.length <= 1) {
-        deduplicatedTracks.push(...group);
-        continue;
-      }
-      // Sort group files by size descending (largest file = original main track)
-      const sortedByFileSize = [...group].sort((a, b) => (b.size || 0) - (a.size || 0));
-      const mainTrack = sortedByFileSize[0];
-      const otherTracks = sortedByFileSize.slice(1);
-
-      if (otherTracks.length > 0) {
-        const candidateFix = otherTracks.find(item => /(?:^|[_[\s-])(fix|фикс)(?:\d*|[_\]\s.-]|$)/i.test(item.name || item.path || '')) || otherTracks[otherTracks.length - 1];
-        const mainSize = mainTrack.size || 1;
-        const fixSize = candidateFix?.size || 0;
-
-        if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.95) {
-          // Full replacement fix: take ONLY the full fix!
-          deduplicatedTracks.push(candidateFix);
-        } else {
-          // Fragmentary fix: keep main track and fragmentary fix for stitching in Timing
-          deduplicatedTracks.push(mainTrack, ...otherTracks);
-        }
-      } else {
-        deduplicatedTracks.push(mainTrack);
+        deduplicatedTracks.push(tr);
       }
     }
 

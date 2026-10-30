@@ -3197,8 +3197,11 @@ class MixingPipelineService {
         
         let dubberNick = f;
         const bracketMatch = f.match(/\[(.*?)\]/);
-        const trackMatch = f.match(/_дорожка(\d+)/i) || f.match(/_layer(\d+)/i) || f.match(/_take(\d+)/i);
+        const trackMatch = f.match(/_дорожка(\d+)/i) || f.match(/_layer(\d+)/i) || f.match(/_take(\d+)/i) || f.match(/\[дорожка\s*(\d+)\]/i);
         const trackNum = trackMatch ? trackMatch[1] : null;
+        const fixMatch = f.match(/(?:^|[_[\s-])(?:fix|фикс)\s*(\d*)(?:[_\]\s.-]|$)/i);
+        const isFixTrack = Boolean(fixMatch);
+        const fixNum = fixMatch && fixMatch[1] ? fixMatch[1] : '';
 
         if (f.startsWith('00_timed_')) {
           dubberNick = f.replace(/^00_timed_/, '').replace(audioExts, '');
@@ -3248,7 +3251,12 @@ class MixingPipelineService {
           dubberNick = baseNoExt || 'Даббер';
         }
 
-        const displayNick = trackNum ? `${dubberNick} (Дорожка ${trackNum})` : dubberNick;
+        let displayNick = dubberNick;
+        if (isFixTrack) {
+          displayNick = `${dubberNick} (Фикс${fixNum ? ' ' + fixNum : ''})`;
+        } else if (trackNum) {
+          displayNick = `${dubberNick} (Дорожка ${trackNum})`;
+        }
 
         if (foundDubberTracks.some(t => t.path === fullP || (t.name === f && t.size === st.size))) {
           continue;
@@ -3260,7 +3268,8 @@ class MixingPipelineService {
           dubberNick: displayNick.trim(),
           baseDubberNick: dubberNick.trim(),
           trackNumber: trackNum ? parseInt(trackNum, 10) : 1,
-          hasExplicitTrackSuffix: Boolean(trackMatch),
+          isFix: isFixTrack,
+          hasExplicitTrackSuffix: Boolean(trackMatch || isFixTrack),
           mtimeMs: st.mtimeMs || 0,
           path: fullP,
           size: st.size,
@@ -3280,6 +3289,27 @@ class MixingPipelineService {
         !u.path.toLowerCase().includes('slice') &&
         !(u.fileName || '').toLowerCase().includes('slice')
       );
+      // Count how many DUBBER_FILE and FIXES each dubber has so we label Track 1, Track 2, Fix accurately
+      const dubberTrackCounts = new Map();
+      const dubberFixCounts = new Map();
+      for (const u of qaUploads) {
+        const f = path.basename(u.path);
+        const baseNick = (u.dubberNick || u.dubberName || u.name || f)
+          .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+          .replace(/^00_timed_/i, '')
+          .replace(/\.wav$/i, '')
+          .trim() || 'Даббер';
+        const key = String(u.uploadedById || baseNick).toLowerCase();
+        const isFix = u.type === 'FIXES' || /(?:^|[_[\s-])(?:fix|фикс)\d*(?:[_\]\s.-]|$)/i.test(f);
+        if (isFix) {
+          dubberFixCounts.set(key, (dubberFixCounts.get(key) || 0) + 1);
+        } else {
+          dubberTrackCounts.set(key, (dubberTrackCounts.get(key) || 0) + 1);
+        }
+      }
+
+      const dubberTrackIdx = new Map();
+      const dubberFixIdx = new Map();
       for (const u of qaUploads) {
         const f = path.basename(u.path);
         const st = fsSync.statSync(u.path);
@@ -3288,17 +3318,38 @@ class MixingPipelineService {
           .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
           .replace(/^00_timed_/i, '')
           .replace(/\.wav$/i, '')
-          .trim();
-        const dubberNick = trackMatch 
-          ? `${baseNick || 'Даббер'} (${trackMatch[1].replace('дорожка', 'Дорожка ')})` 
-          : (baseNick || 'Даббер');
+          .trim() || 'Даббер';
+        const key = String(u.uploadedById || baseNick).toLowerCase();
+        const isFix = u.type === 'FIXES' || /(?:^|[_[\s-])(?:fix|фикс)\d*(?:[_\]\s.-]|$)/i.test(f);
+
+        let trackNumber = 1;
+        let dubberNick = baseNick;
+        if (isFix) {
+          const curFixIdx = (dubberFixIdx.get(key) || 0) + 1;
+          dubberFixIdx.set(key, curFixIdx);
+          const totalFixes = dubberFixCounts.get(key) || 1;
+          dubberNick = totalFixes > 1 ? `${baseNick} (Фикс ${curFixIdx})` : `${baseNick} (Фикс)`;
+        } else if (trackMatch) {
+          trackNumber = parseInt(trackMatch[1].replace(/\D+/g, ''), 10) || 1;
+          dubberNick = `${baseNick} (Дорожка ${trackNumber})`;
+        } else {
+          const curTrkIdx = (dubberTrackIdx.get(key) || 0) + 1;
+          dubberTrackIdx.set(key, curTrkIdx);
+          trackNumber = curTrkIdx;
+          const totalTracks = dubberTrackCounts.get(key) || 1;
+          if (totalTracks > 1) {
+            dubberNick = `${baseNick} (Дорожка ${curTrkIdx})`;
+          }
+        }
+
         foundDubberTracks.push({
-          id: f,
+          id: u.id || f,
           name: f,
           dubberNick: dubberNick || 'Даббер',
           baseDubberNick: baseNick || 'Даббер',
-          trackNumber: trackMatch ? (parseInt(trackMatch[1].replace(/\D+/g, ''), 10) || 1) : 1,
-          hasExplicitTrackSuffix: Boolean(trackMatch),
+          trackNumber,
+          isFix,
+          hasExplicitTrackSuffix: Boolean(trackMatch || isFix || (dubberTrackCounts.get(key) || 0) > 1),
           mtimeMs: st.mtimeMs || 0,
           path: u.path,
           size: st.size,
@@ -3384,51 +3435,14 @@ class MixingPipelineService {
       filteredDubberTracks = resolvedTimedMasters;
     }
 
-    // Deduplicate so each unique audio track appears once, and if a full replacement fix exists alongside a draft track for the same actor/layer, keep ONLY the full fix
-    const uniquePathList = [];
+    // Deduplicate only by exact file path so all distinct dubber tracks (Track 1, Track 2, Fix) are preserved
+    const deduplicatedTracks = [];
     const seenPaths = new Set();
     for (const tr of filteredDubberTracks) {
       const key = tr.path || tr.name;
       if (!seenPaths.has(key)) {
         seenPaths.add(key);
-        uniquePathList.push(tr);
-      }
-    }
-
-    const byActorAndLayer = new Map();
-    for (const tr of uniquePathList) {
-      const baseKey = `${(tr.baseDubberNick || tr.dubberNick || '').toLowerCase()}__${tr.trackNumber || 1}`;
-      if (!byActorAndLayer.has(baseKey)) byActorAndLayer.set(baseKey, []);
-      byActorAndLayer.get(baseKey).push(tr);
-    }
-
-    const deduplicatedTracks = [];
-    for (const group of byActorAndLayer.values()) {
-      if (group.length <= 1) {
-        deduplicatedTracks.push(...group);
-        continue;
-      }
-      const isFixEntry = (item) => /(?:^|[_[\s-])(fix|фикс)(?:\d*|[_\]\s.-]|$)/i.test(item.name || item.path || '');
-      const fixesInGroup = group.filter(isFixEntry);
-      const mainsInGroup = group.filter(item => !isFixEntry(item));
-
-      if (fixesInGroup.length > 0 && mainsInGroup.length > 0) {
-        const newestFix = fixesInGroup[fixesInGroup.length - 1];
-        const newestMain = mainsInGroup[mainsInGroup.length - 1];
-        const mainSize = newestMain.size || 1;
-        const fixSize = newestFix.size || 0;
-        const ratio = fixSize > 0 ? fixSize / mainSize : 0;
-        const diffMb = Math.abs(mainSize - fixSize) / (1024 * 1024);
-
-        if (fixSize > 0 && (ratio >= 0.65 || diffMb <= 3.5)) {
-          // Full replacement fix: take ONLY the full fix!
-          deduplicatedTracks.push(newestFix);
-        } else {
-          // Fragmentary fix: keep main track and fragmentary fix for stitching in Timing
-          deduplicatedTracks.push(newestMain, newestFix);
-        }
-      } else {
-        deduplicatedTracks.push(...group);
+        deduplicatedTracks.push(tr);
       }
     }
 
@@ -3588,11 +3602,12 @@ class MixingPipelineService {
     projectsData,
     participantsData,
     skipConversion = false,
-    smartExport = true,
+    smartExport = false,
     additionalProcessing = false,
     autoApplyFixes = true,
     includeSubtitles = true,
     autoTiming = true,
+    selectedTrackIds = null,
     onProgress,
     onLog
   }) {
@@ -3610,25 +3625,28 @@ class MixingPipelineService {
 
     logFn(`Запуск экспорта звукорежиссеру в папку сведения: ${workingDir}`);
 
-    await ExportService.exportSoundEngineerFiles(
+    await ExportService.exportSoundEngineerFiles({
       episode,
-      workingDir,
-      skipConversion,
-      smartExport,
-      additionalProcessing,
-      autoApplyFixes,
+      targetDir: workingDir,
+      options: {
+        skipConversion,
+        smartExport,
+        additionalProcessing,
+        autoApplyFixes,
+        includeSubtitles,
+        autoTiming,
+        selectedTrackIds
+      },
+      selectedTrackIds,
       config,
       projectsData,
       participantsData,
-      (p) => {
+      onProgress: (p) => {
         if (onProgress && p && typeof p.percent === 'number') {
           onProgress({ percent: Math.round(p.percent * 0.85), message: p.message || 'Экспорт дорожек...' });
         }
-      },
-      undefined,
-      includeSubtitles,
-      autoTiming
-    );
+      }
+    });
 
     logFn('Экспорт завершен. Анализ полученных дорожек...');
 
@@ -3664,45 +3682,10 @@ class MixingPipelineService {
   }
 
   /**
-   * Export processed audio tracks from the Mixing pipeline (or selected step) into FLAC format
-   * for an external Sound Engineer, along with the burned-in subtitle video and general subtitle file.
+   * Resolve candidate audio tracks for Sound Engineer export from Mixing pipeline
    */
-  async exportProcessedToSoundEngineer({
-    episode,
-    workingDir,
-    targetDir,
-    baseDir,
-    config,
-    projectsData,
-    participantsData,
-    sourceStepId = 'latest',
-    skipConversion = false,
-    includeSubtitles = true,
-    additionalProcessing = false,
-    onProgress,
-    onLog
-  }) {
-    const logFn = (msg, level = 'info', meta = null) => {
-      log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](`[Mixing-ExportSE] ${msg}`);
-      if (onLog) onLog(msg, level, meta);
-    };
-
-    const epDir = this.getEpisodeDir(episode, baseDir);
-    const epName = path.basename(epDir) || `Серия_${episode?.number || 1}`;
-    const exportDir = targetDir && String(targetDir).trim()
-      ? path.resolve(String(targetDir).trim())
-      : path.join(path.dirname(epDir), `${epName} для звукорежиссёра`);
-
-    logFn(`Подготовка экспорта звукорежиссёру в папку: ${exportDir}`);
-    await this.ensureDirectory(exportDir, logFn);
-
-    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
-    const manifest = statusData?.manifest;
-    if (!manifest) {
-      throw new Error('Манифест сведения не найден. Сначала импортируйте дорожки в модуль Сведения.');
-    }
-
-    const pipeline = Array.isArray(manifest.pipeline) ? manifest.pipeline : [];
+  _resolveSourceTracksForSeExport(manifest, sourceStepId = 'latest') {
+    const pipeline = Array.isArray(manifest?.pipeline) ? manifest.pipeline : [];
     const audioExtRegex = /\.(wav|flac|mp3|ogg|m4a|aac)$/i;
 
     let selectedStep = null;
@@ -3728,9 +3711,7 @@ class MixingPipelineService {
         }
       }
     } else if (sourceStepId !== 'source') {
-      // Find the last processed module in the pipeline that produced audio tracks (excluding final video mux)
       const latestVoiceStep = this._findLatestCompletedVoiceStep(manifest);
-      // Also check if there is any later completed step in pipeline (e.g. mixdown or voice chain) with audio outputFiles
       let latestAudioStep = null;
       for (let i = pipeline.length - 1; i >= 0; i--) {
         const s = pipeline[i];
@@ -3763,7 +3744,6 @@ class MixingPipelineService {
       }
     }
 
-    // Fallback to raw dubber tracks if no processed step was found or 'source' was requested
     if (sourceTracks.length === 0) {
       const dubberTracks = Array.isArray(manifest?.sourceFiles?.dubberTracks)
         ? manifest.sourceFiles.dubberTracks.filter((f) => f?.path && fsSync.existsSync(f.path))
@@ -3771,6 +3751,181 @@ class MixingPipelineService {
       sourceTracks = dubberTracks;
       selectedStep = null;
       sourceStepTitle = 'Исходные дорожки даберов (без обработки модулями)';
+    }
+
+    return { selectedStep, sourceTracks, sourceStepTitle };
+  }
+
+  _buildSeFlacMetadata(track, baseVideoName, selectedStep, index, usedFlacNames) {
+    const rawName = track.name || path.basename(track.path);
+    const rawBase = path.basename(rawName, path.extname(rawName));
+
+    // Detect track number or fix suffix from rawName or dubberNick
+    const trackMatch = rawBase.match(/_дорожка(\d+)/i) || rawBase.match(/\[дорожка\s*(\d+)\]/i) || (track.dubberNick || '').match(/Дорожка\s*(\d+)/i);
+    const fixMatch = rawBase.match(/(?:^|[_[\s-])(?:fix|фикс)\s*(\d*)(?:[_\]\s.-]|$)/i) || (track.dubberNick || '').match(/Фикс\s*(\d*)/i);
+
+    let cleanNick = track.dubberNick || this._deriveDubberNickFromFilename(rawName, selectedStep?.prefix);
+    if (!cleanNick || cleanNick === rawBase) {
+      cleanNick = rawBase
+        .replace(/^(?:\d{2}_[a-zA-Z0-9]+_)+/i, '')
+        .replace(/^00_timed_/i, '')
+        .replace(/^00_raw_/i, '');
+    }
+
+    // Strip parenthetical role badge and raw suffixes from cleanNick so we can format consistently
+    cleanNick = String(cleanNick || '')
+      .replace(/\((?:Дорожка|Фикс|Fix)\s*\d*\)/gi, '')
+      .replace(/\[?(?:дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
+      .replace(/_дорожка\d+/gi, '')
+      .replace(/[_\s-]+$/, '')
+      .trim();
+
+    let layerSuffix = '';
+    let roleLabel = 'Основная дорожка';
+    if (/_main$/i.test(rawBase) || /\[главные\]/i.test(rawBase)) {
+      layerSuffix = '_[главные]';
+      roleLabel = 'Главные роли';
+      cleanNick = cleanNick.replace(/_main$/i, '').replace(/\[главные\]/gi, '').trim();
+    } else if (/_secondary$/i.test(rawBase) || /\[второстепенные\]/i.test(rawBase)) {
+      layerSuffix = '_[второстепенные]';
+      roleLabel = 'Второстепенные';
+      cleanNick = cleanNick.replace(/_secondary$/i, '').replace(/\[второстепенные\]/gi, '').trim();
+    } else if (fixMatch) {
+      const fNum = fixMatch[1] ? fixMatch[1] : '';
+      layerSuffix = fNum ? `_[фикс${fNum}]` : '_[фикс]';
+      roleLabel = fNum ? `Фикс ${fNum}` : 'Фикс';
+    } else if (trackMatch && trackMatch[1]) {
+      layerSuffix = `_дорожка${trackMatch[1]}`;
+      roleLabel = `Дорожка ${trackMatch[1]}`;
+    }
+
+    const safeNick = String(cleanNick || `Track_${index + 1}`).replace(/[<>:"/\\|?*]/g, '_').trim();
+    let outFlacName = `${baseVideoName}_[${safeNick}]${layerSuffix}.flac`;
+    let dupCounter = 2;
+    while (usedFlacNames.has(outFlacName.toLowerCase())) {
+      const fallbackSuffix = layerSuffix || `_дорожка${dupCounter}`;
+      outFlacName = layerSuffix
+        ? `${baseVideoName}_[${safeNick}_${dupCounter}]${layerSuffix}.flac`
+        : `${baseVideoName}_[${safeNick}]${fallbackSuffix}.flac`;
+      if (!layerSuffix && roleLabel === 'Основная дорожка') {
+        roleLabel = `Дорожка ${dupCounter}`;
+      }
+      dupCounter++;
+    }
+    usedFlacNames.add(outFlacName.toLowerCase());
+
+    return {
+      outFlacName,
+      cleanNick: safeNick,
+      roleLabel,
+      isFix: Boolean(fixMatch)
+    };
+  }
+
+  async inspectTracksForSoundEngineerExport({
+    episode,
+    workingDir,
+    baseDir,
+    sourceStepId = 'latest'
+  }) {
+    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
+    const manifest = statusData?.manifest;
+    if (!manifest) {
+      return { tracks: [], sourceStepTitle: 'Манифест не найден' };
+    }
+
+    const { selectedStep, sourceTracks, sourceStepTitle } = this._resolveSourceTracksForSeExport(manifest, sourceStepId);
+    const videoSource = manifest?.sourceFiles?.video?.path || episode?.rawPath;
+    const baseVideoName = videoSource
+      ? path.basename(videoSource, path.extname(videoSource))
+      : `Episode_${episode?.number || 1}`;
+
+    const usedFlacNames = new Set();
+    const inspectedTracks = [];
+
+    for (let i = 0; i < sourceTracks.length; i++) {
+      const track = sourceTracks[i];
+      const rawName = track.name || path.basename(track.path || '');
+      const { outFlacName, cleanNick, roleLabel, isFix } = this._buildSeFlacMetadata(
+        track,
+        baseVideoName,
+        selectedStep,
+        i,
+        usedFlacNames
+      );
+      const probe = await ExportService.probeAudioFileFast(track.path);
+      inspectedTracks.push({
+        id: track.path || rawName,
+        path: track.path,
+        name: rawName,
+        dubberNick: cleanNick,
+        roleLabel,
+        isFix,
+        exportFlacName: outFlacName,
+        sizeBytes: probe.sizeBytes || track.size || 0,
+        durationSec: probe.durationSec || 0,
+        exists: probe.exists
+      });
+    }
+
+    return {
+      tracks: inspectedTracks,
+      sourceStepTitle,
+      baseVideoName
+    };
+  }
+
+  /**
+   * Export processed audio tracks from the Mixing pipeline (or selected step) into FLAC format
+   * for an external Sound Engineer, along with the burned-in subtitle video and general subtitle file.
+   */
+  async exportProcessedToSoundEngineer({
+    episode,
+    workingDir,
+    targetDir,
+    baseDir,
+    config,
+    projectsData,
+    participantsData,
+    sourceStepId = 'latest',
+    skipConversion = false,
+    includeSubtitles = true,
+    additionalProcessing = false,
+    selectedTrackPaths = null,
+    onProgress,
+    onLog
+  }) {
+    const logFn = (msg, level = 'info', meta = null) => {
+      log[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'info'](`[Mixing-ExportSE] ${msg}`);
+      if (onLog) onLog(msg, level, meta);
+    };
+
+    const epDir = this.getEpisodeDir(episode, baseDir);
+    const epName = path.basename(epDir) || `Серия_${episode?.number || 1}`;
+    const exportDir = targetDir && String(targetDir).trim()
+      ? path.resolve(String(targetDir).trim())
+      : path.join(path.dirname(epDir), `${epName} для звукорежиссёра`);
+
+    logFn(`Подготовка экспорта звукорежиссёру в папку: ${exportDir}`);
+    await this.ensureDirectory(exportDir, logFn);
+
+    const statusData = await this.getStatus({ episode, targetDir: workingDir, baseDir });
+    const manifest = statusData?.manifest;
+    if (!manifest) {
+      throw new Error('Манифест сведения не найден. Сначала импортируйте дорожки в модуль Сведения.');
+    }
+
+    let { selectedStep, sourceTracks, sourceStepTitle } = this._resolveSourceTracksForSeExport(manifest, sourceStepId);
+
+    if (Array.isArray(selectedTrackPaths) && selectedTrackPaths.length > 0) {
+      const selectedSet = new Set(selectedTrackPaths.map(String));
+      const filtered = sourceTracks.filter(
+        (t) => selectedSet.has(String(t.path)) || selectedSet.has(String(t.name))
+      );
+      if (filtered.length > 0) {
+        logFn(`Применён пользовательский выбор дорожек: выбрано ${filtered.length} из ${sourceTracks.length}`);
+        sourceTracks = filtered;
+      }
     }
 
     if (sourceTracks.length === 0) {
@@ -3843,35 +3998,13 @@ class MixingPipelineService {
       const track = sourceTracks[i];
       const trackPctStart = 15 + Math.round((i / sourceTracks.length) * 50);
       const rawName = track.name || path.basename(track.path);
-      const rawBase = path.basename(rawName, path.extname(rawName));
-
-      // Derive clean dubber nick or track label
-      let cleanNick = track.dubberNick || this._deriveDubberNickFromFilename(rawName, selectedStep?.prefix);
-      if (!cleanNick || cleanNick === rawBase) {
-        cleanNick = rawBase
-          .replace(/^(?:\d{2}_[a-zA-Z0-9]+_)+/i, '')
-          .replace(/^00_timed_/i, '')
-          .replace(/^00_raw_/i, '');
-      }
-
-      // Preserve main/secondary suffix if split tracks exist
-      let layerSuffix = '';
-      if (/_main$/i.test(rawBase) || /\[главные\]/i.test(rawBase)) {
-        layerSuffix = '_[главные]';
-        cleanNick = cleanNick.replace(/_main$/i, '').replace(/\[главные\]/gi, '').trim();
-      } else if (/_secondary$/i.test(rawBase) || /\[второстепенные\]/i.test(rawBase)) {
-        layerSuffix = '_[второстепенные]';
-        cleanNick = cleanNick.replace(/_secondary$/i, '').replace(/\[второстепенные\]/gi, '').trim();
-      }
-
-      const safeNick = String(cleanNick || `Track_${i + 1}`).replace(/[<>:"/\\|?*]/g, '_').trim();
-      let outFlacName = `${baseVideoName}_[${safeNick}]${layerSuffix}.flac`;
-      let dupCounter = 2;
-      while (usedFlacNames.has(outFlacName.toLowerCase())) {
-        outFlacName = `${baseVideoName}_[${safeNick}_${dupCounter}]${layerSuffix}.flac`;
-        dupCounter++;
-      }
-      usedFlacNames.add(outFlacName.toLowerCase());
+      const { outFlacName } = this._buildSeFlacMetadata(
+        track,
+        baseVideoName,
+        selectedStep,
+        i,
+        usedFlacNames
+      );
 
       const outFlacPath = path.join(exportDir, outFlacName);
       logFn(`[${i + 1}/${sourceTracks.length}] Конвертация в FLAC: ${rawName} -> ${outFlacName}`);

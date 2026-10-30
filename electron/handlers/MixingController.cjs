@@ -109,13 +109,27 @@ function registerMixingHandlers(getData, mainWindow) {
       projectsData,
       participantsData,
       skipConversion: !!skipConversion,
-      smartExport: smartExport !== false,
+      smartExport: !!smartExport,
       additionalProcessing: !!additionalProcessing,
       autoApplyFixes: autoApplyFixes !== false,
       includeSubtitles: includeSubtitles !== false,
       autoTiming: autoTiming !== false,
+      selectedTrackIds: Array.isArray(params?.selectedTrackIds) ? params.selectedTrackIds : null,
       onProgress,
       onLog
+    });
+  }));
+
+  ipcMain.handle('mixing-inspect-se-tracks', wrapIpcHandler(async (event, params) => {
+    const { episode, workingDir, sourceStepId } = params || {};
+    if (!episode) return { tracks: [], sourceStepTitle: '' };
+    const config = await getData('config.json').catch(() => ({}));
+    const baseDir = config.baseDir || app.getPath('userData');
+    return await MixingPipelineService.inspectTracksForSoundEngineerExport({
+      episode,
+      workingDir,
+      baseDir,
+      sourceStepId: sourceStepId || 'latest'
     });
   }));
 
@@ -127,7 +141,8 @@ function registerMixingHandlers(getData, mainWindow) {
       sourceStepId,
       skipConversion,
       includeSubtitles,
-      additionalProcessing
+      additionalProcessing,
+      selectedTrackPaths
     } = params || {};
 
     if (!episode) throw new Error('Не выбрана серия для экспорта звукорежиссеру');
@@ -157,6 +172,7 @@ function registerMixingHandlers(getData, mainWindow) {
       skipConversion: !!skipConversion,
       includeSubtitles: includeSubtitles !== false,
       additionalProcessing: !!additionalProcessing,
+      selectedTrackPaths: Array.isArray(selectedTrackPaths) ? selectedTrackPaths : null,
       onProgress,
       onLog
     });

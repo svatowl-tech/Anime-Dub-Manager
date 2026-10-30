@@ -260,7 +260,7 @@ export default function Dashboard({
     syncEpisodeWithGlobalMapping();
   }, [currentEpisode?.id, selectedProject?.globalMapping, syncEpisodeWithGlobalMapping]);
 
-  const handleExport = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean, autoTiming?: boolean) => {
+  const handleExport = async (targetDir: string, skipConversion: boolean, smartExport?: boolean, uploadToYandex?: boolean, additionalProcessing?: boolean, autoApplyFixes?: boolean, includeSubtitles?: boolean, autoTiming?: boolean, selectedTrackIds?: string[]) => {
     if (!currentEpisode) return;
     
     try {
@@ -285,7 +285,8 @@ export default function Dashboard({
           additionalProcessing,
           autoApplyFixes,
           includeSubtitles: includeSubtitles ?? true,
-          autoTiming: autoTiming ?? false
+          autoTiming: autoTiming ?? false,
+          selectedTrackIds: Array.isArray(selectedTrackIds) ? selectedTrackIds : undefined
         },
         metadata: {
           title: `Экспорт ${roleName}: ${currentEpisode.project?.title || 'Проект'} - Серия ${currentEpisode.number}`,

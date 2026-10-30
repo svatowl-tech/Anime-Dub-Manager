@@ -7457,7 +7457,8 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     additionalProcessing?: boolean,
     autoApplyFixes?: boolean,
     includeSubtitles?: boolean,
-    autoTiming?: boolean
+    autoTiming?: boolean,
+    selectedTrackIds?: string[]
   ) => {
     if (!currentEpisode || !targetDir) return;
 
@@ -7524,6 +7525,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         autoApplyFixes,
         includeSubtitles,
         autoTiming: autoTiming ?? false,
+        selectedTrackIds: Array.isArray(selectedTrackIds) ? selectedTrackIds : undefined,
         originalStems: originalStems.hasStems ? {
           hasStems: true,
           vocalsPath: originalStems.vocalsPath,

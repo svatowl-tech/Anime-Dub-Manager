@@ -131,12 +131,37 @@ function registerExportHandlers(getData, mainWindow) {
     };
   }));
 
-  ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, payloadOrEpisode, maybeTargetDir, maybeSkipConv, maybeSmartExp, maybeAddProc, maybeAutoFix, maybeIncSubs, maybeAutoTiming) => {
-    let episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems;
+  ipcMain.handle('inspect-sound-engineer-tracks', wrapIpcHandler(async (event, { episode } = {}) => {
+    let targetEpisode = episode;
+    if (!targetEpisode) {
+      const episodesData = await getData('episodes.json').catch(() => []);
+      if (Array.isArray(episodesData) && episodesData.length > 0) {
+        targetEpisode = episodesData[0];
+      }
+    }
+    if (!targetEpisode) {
+      return { tracks: [], baseVideoName: 'Episode_1' };
+    }
+    const config = await getData('config.json').catch(() => ({}));
+    const projectsData = await getData('projects.json').catch(() => []);
+    const participantsData = await getData('participants.json').catch(() => []);
+    return await ExportService.resolveSoundEngineerTrackCatalog(
+      targetEpisode,
+      projectsData,
+      participantsData,
+      config
+    );
+  }));
+
+  ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, payloadOrEpisode, maybeTargetDir, maybeSkipConv, maybeSmartExp, maybeAddProc, maybeAutoFix, maybeIncSubs, maybeAutoTiming, maybeSelectedTrackIds) => {
+    let episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds;
     
     if (payloadOrEpisode && typeof payloadOrEpisode === 'object') {
       if (payloadOrEpisode.episode) {
-        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems } = payloadOrEpisode);
+        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds } = payloadOrEpisode);
+        if (!selectedTrackIds && payloadOrEpisode.options?.selectedTrackIds) {
+          selectedTrackIds = payloadOrEpisode.options.selectedTrackIds;
+        }
       } else if (payloadOrEpisode.id || payloadOrEpisode.number !== undefined || payloadOrEpisode.projectId) {
         episode = payloadOrEpisode;
         targetDir = maybeTargetDir;
@@ -146,8 +171,9 @@ function registerExportHandlers(getData, mainWindow) {
         autoApplyFixes = maybeAutoFix;
         includeSubtitles = maybeIncSubs;
         autoTiming = maybeAutoTiming;
+        selectedTrackIds = maybeSelectedTrackIds;
       } else {
-        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming } = payloadOrEpisode);
+        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds } = payloadOrEpisode);
       }
     } else {
       episode = payloadOrEpisode;
@@ -158,6 +184,7 @@ function registerExportHandlers(getData, mainWindow) {
       autoApplyFixes = maybeAutoFix;
       includeSubtitles = maybeIncSubs;
       autoTiming = maybeAutoTiming;
+      selectedTrackIds = maybeSelectedTrackIds;
     }
 
     if (!episode) {
@@ -205,9 +232,11 @@ function registerExportHandlers(getData, mainWindow) {
         autoApplyFixes: autoApplyFixes ?? false,
         includeSubtitles: includeSubtitles !== false,
         autoTiming: autoTiming === true,
-        originalStems
+        originalStems,
+        selectedTrackIds: Array.isArray(selectedTrackIds) ? selectedTrackIds : null
       },
       originalStems,
+      selectedTrackIds: Array.isArray(selectedTrackIds) ? selectedTrackIds : null,
       config,
       projectsData,
       participantsData,
