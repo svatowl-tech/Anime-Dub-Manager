@@ -187,7 +187,11 @@ const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = 
   deessIntensity: { min: 0.0, max: 1.0, step: 0.05 },
   popIntensity: { min: 0.0, max: 1.0, step: 0.05 },
   slewIntensity: { min: 0.0, max: 1.0, step: 0.05 },
-  densityDrive: { min: 0.0, max: 1.0, step: 0.05 }
+  densityDrive: { min: 0.0, max: 1.0, step: 0.05 },
+  // Native VST3 Plugin Rack Specs
+  wetMixPercent: { min: 0, max: 100, step: 1 },
+  outputGainDb: { min: -12.0, max: 12.0, step: 0.5 },
+  snippetDurationSec: { min: 5, max: 25, step: 1 }
 };
 
 export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelProps) {
@@ -448,6 +452,30 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [reverbStrength, setReverbStrength] = useState<number>(100);
   const [eqStrength, setEqStrength] = useState<number>(100);
   const [targetLufsOffset, setTargetLufsOffset] = useState<number>(0.0);
+
+  // Native VST3 Plugin Host & Rack State
+  const [systemVst3Plugins, setSystemVst3Plugins] = useState<any[]>([]);
+  const [isScanningVst3, setIsScanningVst3] = useState<boolean>(false);
+  const [vst3SearchQuery, setVst3SearchQuery] = useState<string>('');
+  const [vst3UserPresets, setVst3UserPresets] = useState<any[]>([]);
+  const [newVst3PresetTitle, setNewVst3PresetTitle] = useState<string>('');
+  const [openingVst3EditorKey, setOpeningVst3EditorKey] = useState<string | null>(null);
+  const [isRenderingVst3Preview, setIsRenderingVst3Preview] = useState<string | null>(null);
+  const [vst3PreviewTrackPathByStep, setVst3PreviewTrackPathByStep] = useState<Record<string, string>>({});
+  const [vst3PreviewAutoStartByStep, setVst3PreviewAutoStartByStep] = useState<Record<string, boolean>>({});
+  const [vst3PreviewDataByStep, setVst3PreviewDataByStep] = useState<Record<string, {
+    pluginName: string;
+    trackLabel: string;
+    startSec: number;
+    durationSec: number;
+    dryPath: string;
+    wetPath: string;
+    peakDbBefore: number;
+    peakDbAfter: number;
+    activeMode: 'wet' | 'dry';
+  }>>({});
+  const vst3PreviewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlayingVst3PreviewStepId, setIsPlayingVst3PreviewStepId] = useState<string | null>(null);
   const [acousticMatchResult, setAcousticMatchResult] = useState<any | null>(null);
   const [selectedEffectFilter, setSelectedEffectFilter] = useState<string>('all');
 
@@ -1576,6 +1604,354 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     savePipeline(newPipeline, false);
   };
 
+  // Pipeline manager: Update multiple parameters for a step atomically
+  const handleUpdateStepParamsBatch = (stepId: string, patch: Record<string, any>, immediateSave: boolean = true) => {
+    if (!manifest?.pipeline) return;
+    const newPipeline = manifest.pipeline.map(s => {
+      if (s.stepId === stepId) {
+        return { ...s, params: { ...(s.params || {}), ...patch } };
+      }
+      return s;
+    });
+    savePipeline(newPipeline, immediateSave);
+  };
+
+  // Scan system VST3 plugins & load user VST3 presets when pipeline has a vst3_rack_processor step
+  const handleScanSystemVst3Plugins = useCallback(async (showNotification: boolean = false) => {
+    try {
+      setIsScanningVst3(true);
+      const res: any = await ipcSafe.invoke('mixing-scan-vst3-plugins', {});
+      const list = Array.isArray(res?.plugins) ? res.plugins : [];
+      setSystemVst3Plugins(list);
+      if (showNotification) {
+        toast.success(`Найдено VST3 плагинов в системе: ${list.length}`);
+      }
+    } catch (e: any) {
+      if (showNotification) {
+        toast.error(`Ошибка сканирования VST3 плагинов: ${e.message || String(e)}`);
+      }
+    } finally {
+      setIsScanningVst3(false);
+    }
+  }, []);
+
+  const loadVst3UserPresets = useCallback(async () => {
+    try {
+      const res: any = await ipcSafe.invoke('mixing-list-vst3-presets', {});
+      if (Array.isArray(res?.presets)) {
+        setVst3UserPresets(res.presets);
+      }
+    } catch (e) {}
+  }, []);
+
+  const hasVst3StepInPipeline = useMemo(() => {
+    return (manifest?.pipeline || []).some(s => s.moduleId === 'vst3_rack_processor');
+  }, [manifest]);
+
+  useEffect(() => {
+    if (hasVst3StepInPipeline) {
+      handleScanSystemVst3Plugins(false);
+      loadVst3UserPresets();
+    }
+  }, [hasVst3StepInPipeline, handleScanSystemVst3Plugins, loadVst3UserPresets]);
+
+  const handleSelectVst3PluginForStep = async (step: PipelineStep, vst3Path: string, fallbackName?: string) => {
+    if (!vst3Path) return;
+    const cleanName = fallbackName || vst3Path.split(/[/\\]/).pop()?.replace(/\.vst3$/i, '') || 'VST3 Plugin';
+    handleUpdateStepParamsBatch(step.stepId, {
+      vst3Path,
+      pluginName: cleanName,
+      subPluginName: ''
+    }, true);
+    mixLog('info', 'VST3', `Выбран VST3 плагин «${cleanName}»: ${vst3Path}`);
+
+    try {
+      const inspectRes: any = await ipcSafe.invoke('mixing-inspect-vst3-plugin', {
+        vst3Path
+      });
+      if (inspectRes && inspectRes.success) {
+        const subPlugins = Array.isArray(inspectRes.subPlugins) ? inspectRes.subPlugins : [];
+        handleUpdateStepParamsBatch(step.stepId, {
+          vst3Path,
+          pluginName: inspectRes.pluginName || cleanName,
+          subPluginName: subPlugins.length > 0 ? subPlugins[0] : '',
+          availableSubPlugins: subPlugins,
+          totalParameters: inspectRes.totalParameters || 0
+        }, true);
+        toast.success(`Плагин «${inspectRes.pluginName || cleanName}» подключен (${inspectRes.totalParameters || 0} параметров)`);
+      }
+    } catch (e: any) {
+      mixLog('warn', 'VST3', `Предупреждение при инспекции VST3 плагина: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleBrowseVst3File = async (step: PipelineStep) => {
+    try {
+      const res: any = await ipcSafe.invoke('mixing-select-vst3-file', {});
+      if (res && !res.canceled && res.vst3Path) {
+        await handleSelectVst3PluginForStep(step, res.vst3Path, res.name);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка выбора файла .vst3: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleOpenVst3NativeEditor = async (step: PipelineStep, trackKey?: string, trackLabel?: string) => {
+    const vst3Path = step.params?.vst3Path;
+    if (!vst3Path) {
+      toast.error('Сначала выберите VST3 плагин (.vst3) из списка или через кнопку «Обзор .vst3»');
+      return;
+    }
+
+    const editorLockKey = trackKey ? `${step.stepId}::${trackKey}` : `${step.stepId}::global`;
+    const perTrackMap = step.params?.perTrackStates || step.params?.perTrackStateFiles || {};
+    const currentStateFile = trackKey
+      ? (perTrackMap[trackKey]?.stateFile || step.params?.globalStateFile || '')
+      : (step.params?.globalStateFile || '');
+
+    try {
+      setOpeningVst3EditorKey(editorLockKey);
+      const targetDesc = trackLabel ? `дорожки «${trackLabel}»` : 'всего шага';
+      toast.info(`Открывается нативное окно VST3 «${step.params?.pluginName || 'Плагин'}» для ${targetDesc}. Настройте звук и закройте окно плагина для сохранения слепка.`);
+      mixLog('info', 'VST3 GUI', `Открытие нативного интерфейса VST3 «${step.params?.pluginName || vst3Path}» (${targetDesc})...`);
+
+      const res: any = await ipcSafe.invoke('mixing-open-vst3-editor', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir,
+        stepId: step.stepId,
+        vst3Path,
+        subPluginName: step.params?.subPluginName || '',
+        trackKey: trackKey || '',
+        stateFile: currentStateFile
+      });
+
+      if (res && res.success) {
+        if (trackKey) {
+          const prevMap = { ...(step.params?.perTrackStates || step.params?.perTrackStateFiles || {}) };
+          prevMap[trackKey] = {
+            stateFile: res.stateFile,
+            stateSizeBytes: res.stateSizeBytes || 0,
+            updatedAt: res.updatedAt || new Date().toISOString(),
+            pluginName: res.pluginName || step.params?.pluginName
+          };
+          handleUpdateStepParamsBatch(step.stepId, {
+            pluginName: res.pluginName || step.params?.pluginName,
+            perTrackStates: prevMap,
+            perTrackStateFiles: prevMap
+          }, true);
+        } else {
+          handleUpdateStepParamsBatch(step.stepId, {
+            pluginName: res.pluginName || step.params?.pluginName,
+            globalStateFile: res.stateFile,
+            globalStateSizeBytes: res.stateSizeBytes || 0,
+            globalStateUpdatedAt: res.updatedAt || new Date().toISOString(),
+            parametersPreview: res.parametersPreview || {}
+          }, true);
+        }
+        const kb = ((res.stateSizeBytes || 0) / 1024).toFixed(1);
+        toast.success(`Настройки нативного окна VST3 сохранены (${kb} КБ)!`);
+        mixLog('success', 'VST3 GUI', `Слепок состояния VST3 «${res.pluginName || step.params?.pluginName}» сохранен: ${res.stateFile} (${kb} КБ)`);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка открытия нативного окна VST3: ${e.message || String(e)}`);
+      mixLog('error', 'VST3 GUI', `Ошибка нативного редактора VST3: ${e.message || String(e)}`);
+    } finally {
+      setOpeningVst3EditorKey(null);
+    }
+  };
+
+  const handleRenderVst3PreviewSnippet = async (step: PipelineStep, candidateTracks: any[], forcedTrack?: any) => {
+    const vst3Path = step.params?.vst3Path;
+    if (!vst3Path) {
+      toast.error('Сначала выберите VST3 плагин (.vst3)');
+      return;
+    }
+
+    const chosenTrackPath = forcedTrack?.path || vst3PreviewTrackPathByStep[step.stepId] || candidateTracks[0]?.path;
+    const chosenTrackObj = forcedTrack || candidateTracks.find(t => t.path === chosenTrackPath) || candidateTracks[0];
+    if (!chosenTrackObj || !chosenTrackObj.path) {
+      toast.error('Нет доступной аудиодорожки для рендера превью');
+      return;
+    }
+
+    const tKey = chosenTrackObj.trackKey || chosenTrackObj.dubberNick || chosenTrackObj.name;
+    const routingMode = step.params?.routingMode || 'batch_all';
+    const perTrackMap = step.params?.perTrackStates || step.params?.perTrackStateFiles || {};
+    const stateFile = (routingMode === 'per_track' && perTrackMap[tKey]?.stateFile)
+      ? perTrackMap[tKey].stateFile
+      : (step.params?.globalStateFile || '');
+
+    const autoStart = vst3PreviewAutoStartByStep[step.stepId] !== false;
+    const snippetStartSec = autoStart ? -1 : Number(step.params?.snippetStartSec ?? 0);
+    const snippetDurationSec = Number(step.params?.snippetDurationSec ?? 12);
+
+    try {
+      setIsRenderingVst3Preview(step.stepId);
+      mixLog('info', 'VST3 Превью', `Быстрый рендер превью фрагмента (${snippetDurationSec} сек) дорожки «${chosenTrackObj.dubberNick || chosenTrackObj.name}» через VST3 «${step.params?.pluginName || 'Плагин'}»...`);
+
+      const res: any = await ipcSafe.invoke('mixing-preview-vst3-snippet', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir,
+        stepId: step.stepId,
+        vst3Path,
+        subPluginName: step.params?.subPluginName || '',
+        stateFile,
+        inputPath: chosenTrackObj.path,
+        trackKey: tKey,
+        wetMixPercent: step.params?.wetMixPercent ?? 100,
+        outputGainDb: step.params?.outputGainDb ?? 0,
+        snippetStartSec,
+        snippetDurationSec
+      });
+
+      if (res && res.success) {
+        const previewEntry = {
+          pluginName: res.pluginName || step.params?.pluginName || 'VST3',
+          trackLabel: chosenTrackObj.dubberNick || chosenTrackObj.name,
+          startSec: res.startSec ?? 0,
+          durationSec: res.durationSec ?? snippetDurationSec,
+          dryPath: res.dryPath,
+          wetPath: res.wetPath,
+          peakDbBefore: res.peakDbBefore ?? 0,
+          peakDbAfter: res.peakDbAfter ?? 0,
+          activeMode: 'wet' as const
+        };
+        setVst3PreviewDataByStep(prev => ({
+          ...prev,
+          [step.stepId]: previewEntry
+        }));
+        toast.success(`Превью VST3 готово (${previewEntry.startSec}с – ${(previewEntry.startSec + previewEntry.durationSec).toFixed(1)}с)!`);
+        handlePlayVst3PreviewAudio(step.stepId, res.wetPath, 'wet');
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка рендера превью VST3: ${e.message || String(e)}`);
+      mixLog('error', 'VST3 Превью', `Сбой рендера превью VST3: ${e.message || String(e)}`);
+    } finally {
+      setIsRenderingVst3Preview(null);
+    }
+  };
+
+  const handlePlayVst3PreviewAudio = (stepId: string, filePath: string, mode: 'wet' | 'dry') => {
+    if (!filePath) return;
+    setVst3PreviewDataByStep(prev => {
+      const existing = prev[stepId];
+      if (!existing) return prev;
+      return {
+        ...prev,
+        [stepId]: { ...existing, activeMode: mode }
+      };
+    });
+
+    try {
+      if (!vst3PreviewAudioRef.current) {
+        vst3PreviewAudioRef.current = new Audio();
+        vst3PreviewAudioRef.current.onended = () => {
+          setIsPlayingVst3PreviewStepId(null);
+        };
+      }
+      const audioEl = vst3PreviewAudioRef.current;
+      const prevTime = isPlayingVst3PreviewStepId === stepId ? audioEl.currentTime : 0;
+      const resolvedUrl = `${resolveLocalPath(filePath)}?t=${Date.now()}`;
+      audioEl.src = resolvedUrl;
+      audioEl.currentTime = prevTime || 0;
+      audioEl.play().then(() => {
+        setIsPlayingVst3PreviewStepId(stepId);
+      }).catch(() => {
+        setIsPlayingVst3PreviewStepId(null);
+      });
+    } catch (e) {
+      setIsPlayingVst3PreviewStepId(null);
+    }
+  };
+
+  const handleStopVst3PreviewAudio = () => {
+    if (vst3PreviewAudioRef.current) {
+      vst3PreviewAudioRef.current.pause();
+    }
+    setIsPlayingVst3PreviewStepId(null);
+  };
+
+  const handleSaveVst3UserPreset = async (step: PipelineStep) => {
+    const stateFile = step.params?.globalStateFile;
+    if (!stateFile) {
+      toast.error('Сначала откройте нативный интерфейс VST3 плагина и настройте звук, чтобы создать слепок состояния (.vststate)');
+      return;
+    }
+    const title = (newVst3PresetTitle || '').trim() || `${step.params?.pluginName || 'VST3'} Пресет`;
+    try {
+      const res: any = await ipcSafe.invoke('mixing-save-vst3-preset', {
+        title,
+        vst3Path: step.params?.vst3Path || '',
+        pluginName: step.params?.pluginName || '',
+        subPluginName: step.params?.subPluginName || '',
+        stateFile,
+        wetMixPercent: step.params?.wetMixPercent ?? 100,
+        outputGainDb: step.params?.outputGainDb ?? 0
+      });
+      if (res && res.success) {
+        setNewVst3PresetTitle('');
+        await loadVst3UserPresets();
+        toast.success(`Пользовательский VST3 пресет «${title}» сохранен в библиотеку!`);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка сохранения VST3 пресета: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleApplyVst3UserPreset = async (step: PipelineStep, presetId: string, trackKey?: string) => {
+    try {
+      const res: any = await ipcSafe.invoke('mixing-apply-vst3-preset', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir,
+        presetId,
+        stepId: step.stepId,
+        trackKey: trackKey || ''
+      });
+      if (res && res.success && res.preset) {
+        const p = res.preset;
+        if (trackKey) {
+          const prevMap = { ...(step.params?.perTrackStates || step.params?.perTrackStateFiles || {}) };
+          prevMap[trackKey] = {
+            stateFile: res.stateFile,
+            stateSizeBytes: res.stateSizeBytes || 0,
+            updatedAt: new Date().toISOString(),
+            pluginName: p.pluginName || step.params?.pluginName
+          };
+          handleUpdateStepParamsBatch(step.stepId, {
+            perTrackStates: prevMap,
+            perTrackStateFiles: prevMap
+          }, true);
+        } else {
+          handleUpdateStepParamsBatch(step.stepId, {
+            vst3Path: p.vst3Path || step.params?.vst3Path,
+            pluginName: p.pluginName || step.params?.pluginName,
+            subPluginName: p.subPluginName || step.params?.subPluginName || '',
+            globalStateFile: res.stateFile,
+            globalStateSizeBytes: res.stateSizeBytes || 0,
+            globalStateUpdatedAt: new Date().toISOString(),
+            wetMixPercent: p.wetMixPercent ?? step.params?.wetMixPercent ?? 100,
+            outputGainDb: p.outputGainDb ?? step.params?.outputGainDb ?? 0
+          }, true);
+        }
+        toast.success(`Применен VST3 пресет «${p.title || p.name}»!`);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка применения VST3 пресета: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleDeleteVst3UserPreset = async (presetId: string) => {
+    try {
+      const res: any = await ipcSafe.invoke('mixing-delete-vst3-preset', { presetId });
+      if (res && res.success) {
+        await loadVst3UserPresets();
+        toast.success('VST3 пресет удален');
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка удаления VST3 пресета: ${e.message || String(e)}`);
+    }
+  };
+
   // Pipeline manager: Apply Preset to a step
   const handleApplyPreset = (stepId: string, preset: MixingModulePreset) => {
     if (!manifest?.pipeline) return;
@@ -2523,7 +2899,13 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     eqMatchStrength: { label: 'Автоматизация АЧХ и фильтров (Телефон / За стеной / EQ)', unit: '%' },
     targetLufsOffset: { label: 'Смещение целевой громкости голосов', unit: 'dB' },
     strictOriginalVocalsRequired: { label: 'Строгая проверка разделения вокала оригинала' },
-    strictGluedVoicesRequired: { label: 'Строгая проверка склеивания всех голосов (voices_master)' }
+    strictGluedVoicesRequired: { label: 'Строгая проверка склеивания всех голосов (voices_master)' },
+    // Native VST3 Plugin Rack Labels
+    wetMixPercent: { label: 'Параллельный подмес (Dry/Wet Mix)', unit: '%' },
+    outputGainDb: { label: 'Выходное усиление после VST3 (Output Gain)', unit: 'dB' },
+    snippetDurationSec: { label: 'Длительность фрагмента быстрого превью', unit: 'с' },
+    resetBetweenTracks: { label: 'Сбрасывать буфер и хвосты плагина между дорожками' },
+    passThroughUnselected: { label: 'Передавать неотмеченные дорожки дальше по цепочке без изменений' }
   };
 
   const formatFileSize = (bytes?: number) => {
@@ -3787,10 +4169,489 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           </div>
                         )}
 
+                        {/* Dedicated VST3 Native Plugin Rack UI (iZotope Ozone, FabFilter, Waves, etc.) */}
+                        {step.moduleId === 'vst3_rack_processor' && (() => {
+                          const routingMode = step.params?.routingMode || 'batch_all';
+                          const vst3Path = step.params?.vst3Path || '';
+                          const pluginName = step.params?.pluginName || (vst3Path ? vst3Path.split(/[/\\]/).pop()?.replace(/\.vst3$/i, '') : 'Не выбран');
+                          const globalStateFile = step.params?.globalStateFile || '';
+                          const globalStateSizeKb = step.params?.globalStateSizeBytes ? (step.params.globalStateSizeBytes / 1024).toFixed(1) : null;
+                          const perTrackStates: Record<string, any> = step.params?.perTrackStates || step.params?.perTrackStateFiles || {};
+                          const subPlugins: string[] = Array.isArray(step.params?.availableSubPlugins) ? step.params.availableSubPlugins : [];
+                          const rawCandidates: any[] = step.candidateInputs || step.inputSlots?.[0]?.tracks || manifest?.sourceFiles?.dubberTracks || [];
+                          const candidateTracks: any[] = rawCandidates.filter((c: any) => !c.excluded);
+                          const previewData = vst3PreviewDataByStep[step.stepId];
+                          const isGlobalEditorOpening = openingVst3EditorKey === `${step.stepId}::global`;
+                          const isPreviewRendering = isRenderingVst3Preview === step.stepId;
+                          const autoStartEnabled = vst3PreviewAutoStartByStep[step.stepId] !== false;
+                          const filteredSystemPlugins = systemVst3Plugins.filter(p => {
+                            if (!vst3SearchQuery.trim()) return true;
+                            const q = vst3SearchQuery.toLowerCase();
+                            return (p.name || '').toLowerCase().includes(q) || (p.vendor || '').toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q);
+                          });
+
+                          return (
+                            <div className="p-3.5 bg-neutral-900/95 border border-neutral-800 rounded-xl space-y-4">
+                              {/* Top Status Header */}
+                              <div className="flex items-start justify-between gap-3 border-b border-neutral-800 pb-3">
+                                <div className="space-y-1 min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="font-semibold text-xs text-neutral-100">
+                                      Студийный VST3 модуль с нативным окном плагина
+                                    </span>
+                                    <span className="text-[11px] font-mono tabular-nums text-neutral-400">
+                                      64-bit VST3 · 48 кГц / 24-bit WAV · Полный слепок raw_state
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-neutral-400 leading-snug">
+                                    Откройте родной графический интерфейс плагина (например, iZotope Ozone, FabFilter Pro-Q 3, TDR Nova), настройте цепочку модулей или пресет и закройте окно — бинарный слепок состояния автоматически сохранится в проект.
+                                  </p>
+                                </div>
+
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleScanSystemVst3Plugins(true)}
+                                    disabled={isScanningVst3}
+                                    className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-[11px] font-medium flex items-center gap-1.5 transition"
+                                    title="Пересканировать системные папки VST3 (C:\Program Files\Common Files\VST3 и др.)"
+                                  >
+                                    <RefreshCw className={`w-3.5 h-3.5 ${isScanningVst3 ? 'animate-spin text-purple-400' : 'text-neutral-400'}`} />
+                                    <span>{isScanningVst3 ? 'Поиск...' : `Плагины (${systemVst3Plugins.length})`}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleBrowseVst3File(step)}
+                                    className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-purple-300 border border-purple-700/50 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition"
+                                    title="Указать файл .vst3 вручную на диске"
+                                  >
+                                    <FolderOpen className="w-3.5 h-3.5" />
+                                    <span>Обзор .vst3...</span>
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* 1. VST3 Plugin Selector */}
+                              <div className="space-y-2 bg-neutral-950/80 p-3 rounded-lg border border-neutral-800">
+                                <div className="flex items-center justify-between gap-2">
+                                  <label className="text-[11px] font-semibold text-neutral-200">
+                                    1. Выберите 64-bit VST3 плагин:
+                                  </label>
+                                  <div className="relative w-52">
+                                    <Search className="w-3 h-3 text-neutral-500 absolute left-2.5 top-2" />
+                                    <input
+                                      type="text"
+                                      value={vst3SearchQuery}
+                                      onChange={(e) => setVst3SearchQuery(e.target.value)}
+                                      placeholder="Фильтр (Ozone, FabFilter...)"
+                                      className="w-full pl-7 pr-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-[11px] text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-purple-500"
+                                    />
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                  <div className="sm:col-span-2">
+                                    <select
+                                      value={vst3Path}
+                                      onChange={(e) => {
+                                        const found = systemVst3Plugins.find(p => p.vst3Path === e.target.value);
+                                        handleSelectVst3PluginForStep(step, e.target.value, found?.name);
+                                      }}
+                                      className="w-full px-2.5 py-1.5 bg-neutral-900 border border-neutral-800 rounded-lg text-xs text-neutral-100 font-medium focus:outline-none focus:border-purple-500"
+                                    >
+                                      <option value="">
+                                        {systemVst3Plugins.length > 0
+                                          ? `— Выберите из ${filteredSystemPlugins.length} найденных VST3 плагинов —`
+                                          : '— Системные плагинов не найдены (используйте «Обзор .vst3...») —'}
+                                      </option>
+                                      {vst3Path && !systemVst3Plugins.some(p => p.vst3Path === vst3Path) && (
+                                        <option value={vst3Path}>
+                                          {pluginName} ({vst3Path})
+                                        </option>
+                                      )}
+                                      {filteredSystemPlugins.map((plug, pIdx) => (
+                                        <option key={`${plug.vst3Path}_${pIdx}`} value={plug.vst3Path}>
+                                          {plug.name} · {plug.vendor || 'VST3'} ({plug.category || 'FX'})
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+
+                                  {subPlugins.length > 1 ? (
+                                    <div>
+                                      <select
+                                        value={step.params?.subPluginName || subPlugins[0] || ''}
+                                        onChange={(e) => handleUpdateStepParams(step.stepId, 'subPluginName', e.target.value)}
+                                        className="w-full px-2.5 py-1.5 bg-neutral-900 border border-purple-800/60 rounded-lg text-xs text-purple-200 font-medium"
+                                        title="Выбор суб-плагина внутри контейнера .vst3"
+                                      >
+                                        {subPlugins.map((sp) => (
+                                          <option key={sp} value={sp}>{sp}</option>
+                                        ))}
+                                      </select>
+                                    </div>
+                                  ) : (
+                                    <div className="px-2.5 py-1.5 bg-neutral-900 border border-neutral-800/80 rounded-lg flex items-center justify-between text-[11px] font-mono tabular-nums text-neutral-400 truncate">
+                                      <span className="truncate" title={vst3Path || 'Файл не выбран'}>
+                                        {vst3Path ? pluginName : 'Плагин не выбран'}
+                                      </span>
+                                      {step.params?.totalParameters ? (
+                                        <span className="text-purple-300 shrink-0 ml-1.5">{step.params.totalParameters} пар.</span>
+                                      ) : null}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* 2. Routing Mode Selector (3 Modes) */}
+                              <div className="space-y-1.5">
+                                <label className="text-[11px] font-semibold text-neutral-200 block">
+                                  2. Схема маршрутизации дорожек в конвейере:
+                                </label>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-1.5 p-1 bg-neutral-950 rounded-lg border border-neutral-800">
+                                  {[
+                                    {
+                                      id: 'batch_all',
+                                      title: 'Все дорожки (Единый пресет)',
+                                      desc: 'Один слепок настроек VST3 ко всем отмеченным дабберам'
+                                    },
+                                    {
+                                      id: 'per_track',
+                                      title: 'Индивидуально по дабберам',
+                                      desc: 'Своё окно настроек VST3 и свой .vststate для каждого актера'
+                                    },
+                                    {
+                                      id: 'master_bus',
+                                      title: 'Общая шина / Мастер (Ozone)',
+                                      desc: 'Обработка склеенной шины голосов voices_master единым мастером'
+                                    }
+                                  ].map((modeTab) => {
+                                    const active = routingMode === modeTab.id;
+                                    return (
+                                      <button
+                                        key={modeTab.id}
+                                        type="button"
+                                        onClick={() => handleUpdateStepParams(step.stepId, 'routingMode', modeTab.id)}
+                                        className={`p-2 rounded-md text-left transition border ${
+                                          active
+                                            ? 'bg-purple-950/60 border-purple-500/70 text-purple-100'
+                                            : 'bg-transparent border-transparent hover:bg-neutral-900 text-neutral-400 hover:text-neutral-200'
+                                        }`}
+                                      >
+                                        <div className="text-[11px] font-semibold leading-tight">{modeTab.title}</div>
+                                        <div className="text-[10px] text-neutral-400 mt-0.5 leading-snug">{modeTab.desc}</div>
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+
+                              {/* 3. Native GUI Launcher & Per-Track State Matrix */}
+                              <div className="bg-neutral-950/90 p-3 rounded-lg border border-neutral-800 space-y-3">
+                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                  <div className="space-y-0.5">
+                                    <div className="text-[11px] font-semibold text-neutral-100">
+                                      3. Нативный интерфейс VST3 плагина (Native GUI) и слепок состояния
+                                    </div>
+                                    <div className="text-[11px] font-mono tabular-nums text-neutral-400">
+                                      {globalStateFile
+                                        ? `Активен слепок .vststate · ${globalStateSizeKb || '—'} КБ${step.params?.globalStateUpdatedAt ? ` · обновлен ${new Date(step.params.globalStateUpdatedAt).toLocaleTimeString('ru-RU')}` : ''}`
+                                        : 'Слепок состояния ещё не создан (будет использован заводской пресет плагина или нажмите кнопку справа)'}
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenVst3NativeEditor(step)}
+                                    disabled={!vst3Path || isGlobalEditorOpening}
+                                    className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 transition shadow-sm shrink-0"
+                                  >
+                                    {isGlobalEditorOpening ? (
+                                      <Loader2 className="w-4 h-4 animate-spin" />
+                                    ) : (
+                                      <Sliders className="w-4 h-4" />
+                                    )}
+                                    <span>
+                                      {isGlobalEditorOpening
+                                        ? 'Ожидание закрытия окна VST3...'
+                                        : `Открыть нативный интерфейс VST3 (${pluginName})`}
+                                    </span>
+                                  </button>
+                                </div>
+
+                                {/* Per-Track Individual Native GUI Setup Matrix */}
+                                {routingMode === 'per_track' && (
+                                  <div className="space-y-1.5 pt-2 border-t border-neutral-800/80">
+                                    <div className="text-[11px] font-semibold text-neutral-300 flex items-center justify-between">
+                                      <span>Индивидуальные слепки состояния по дорожкам дабберов ({candidateTracks.length}):</span>
+                                      <span className="text-[10px] font-mono text-neutral-400">
+                                        Если индивидуальный слепок не задан — используется общий слепок шага
+                                      </span>
+                                    </div>
+
+                                    {candidateTracks.length === 0 ? (
+                                      <div className="text-[11px] text-neutral-500 italic py-2">
+                                        Нет активных входных дорожек в слоте шага.
+                                      </div>
+                                    ) : (
+                                      <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                                        {candidateTracks.map((cand, cIdx) => {
+                                          const tKey = cand.trackKey || cand.dubberNick || cand.name;
+                                          const tLabel = cand.dubberNick || cand.name;
+                                          const tState = perTrackStates[tKey];
+                                          const isTrackOpening = openingVst3EditorKey === `${step.stepId}::${tKey}`;
+                                          const sizeKb = tState?.stateSizeBytes ? (tState.stateSizeBytes / 1024).toFixed(1) : null;
+
+                                          return (
+                                            <div
+                                              key={`${tKey}_${cIdx}`}
+                                              className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-neutral-900 border border-neutral-800 text-[11px]"
+                                            >
+                                              <div className="min-w-0 truncate">
+                                                <span className="font-semibold text-neutral-100">{tLabel}</span>
+                                                <span className="ml-2 font-mono tabular-nums text-[10px] text-neutral-400">
+                                                  {tState?.stateFile
+                                                    ? `Индивидуальный .vststate · ${sizeKb || '—'} КБ`
+                                                    : globalStateFile
+                                                      ? 'Использует общий слепок шага'
+                                                      : 'Заводской пресет'}
+                                                </span>
+                                              </div>
+
+                                              <div className="flex items-center gap-1.5 shrink-0">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleRenderVst3PreviewSnippet(step, candidateTracks, cand)}
+                                                  disabled={!vst3Path || isPreviewRendering}
+                                                  className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-emerald-300 rounded text-[10px] font-medium transition"
+                                                  title={`Быстрое превью фрагмента дорожки «${tLabel}»`}
+                                                >
+                                                  ▶ Превью
+                                                </button>
+                                                <button
+                                                  type="button"
+                                                  onClick={() => handleOpenVst3NativeEditor(step, tKey, tLabel)}
+                                                  disabled={!vst3Path || isTrackOpening}
+                                                  className="px-2.5 py-1 bg-purple-950/80 hover:bg-purple-900 text-purple-200 border border-purple-700/60 rounded text-[10px] font-semibold flex items-center gap-1 transition"
+                                                >
+                                                  {isTrackOpening ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sliders className="w-3 h-3" />}
+                                                  <span>{isTrackOpening ? 'Окно открыто...' : 'Настроить GUI'}</span>
+                                                </button>
+                                              </div>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+
+                                {/* User VST3 Preset Library Bar (.vststate snapshots) */}
+                                <div className="pt-2 border-t border-neutral-800/80 space-y-2">
+                                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                                    <span className="text-[11px] font-semibold text-neutral-300">
+                                      Библиотека сохраненных слепков VST3 (.vststate):
+                                    </span>
+                                    <div className="flex items-center gap-1.5">
+                                      <input
+                                        type="text"
+                                        value={newVst3PresetTitle}
+                                        onChange={(e) => setNewVst3PresetTitle(e.target.value)}
+                                        placeholder="Имя пресета (напр. Ozone Master Anime)..."
+                                        className="px-2.5 py-1 bg-neutral-900 border border-neutral-800 rounded text-[11px] text-neutral-200 placeholder-neutral-500 w-56 focus:outline-none focus:border-purple-500"
+                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSaveVst3UserPreset(step)}
+                                        disabled={!globalStateFile}
+                                        className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-emerald-300 border border-emerald-700/50 rounded text-[11px] font-semibold flex items-center gap-1 transition"
+                                        title="Сохранить текущий настроенный слепок .vststate в библиотеку пресетов"
+                                      >
+                                        <Bookmark className="w-3 h-3" />
+                                        <span>Сохранить слепок</span>
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {vst3UserPresets.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {vst3UserPresets.map((up) => (
+                                        <div
+                                          key={up.id}
+                                          className="inline-flex items-center bg-neutral-900 border border-neutral-800 rounded-md overflow-hidden text-[11px]"
+                                        >
+                                          <button
+                                            type="button"
+                                            onClick={() => handleApplyVst3UserPreset(step, up.id)}
+                                            className="px-2.5 py-1 text-neutral-200 hover:text-purple-200 hover:bg-purple-950/40 transition text-left"
+                                            title={`Загрузить слепок «${up.title || up.name}» (${up.pluginName || 'VST3'})`}
+                                          >
+                                            <span className="font-medium">{up.title || up.name}</span>
+                                            <span className="text-[10px] font-mono text-neutral-400 ml-1.5">· {up.pluginName}</span>
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => handleDeleteVst3UserPreset(up.id)}
+                                            className="px-1.5 py-1 text-neutral-500 hover:text-red-400 hover:bg-red-950/40 border-l border-neutral-800 transition"
+                                            title="Удалить пресет из библиотеки"
+                                          >
+                                            ✕
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* 4. Fast Snippet Preview (5-15 sec) with Dry/Wet A/B Comparison */}
+                              <div className="bg-neutral-950/90 p-3 rounded-lg border border-neutral-800 space-y-2.5">
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <div>
+                                    <span className="text-[11px] font-semibold text-neutral-100 block">
+                                      4. Быстрое превью фрагмента (A/B сравнение До / После плагина)
+                                    </span>
+                                    <span className="text-[10px] text-neutral-400">
+                                      Автоматически находит самый насыщенный речью фрагмент дорожки и рендерит его через VST3 за 1–2 секунды
+                                    </span>
+                                  </div>
+
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <select
+                                      value={vst3PreviewTrackPathByStep[step.stepId] || candidateTracks[0]?.path || ''}
+                                      onChange={(e) =>
+                                        setVst3PreviewTrackPathByStep(prev => ({ ...prev, [step.stepId]: e.target.value }))
+                                      }
+                                      className="px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-[11px] text-neutral-200 max-w-[200px]"
+                                    >
+                                      {candidateTracks.map((c, i) => (
+                                        <option key={`${c.path}_${i}`} value={c.path}>
+                                          {c.dubberNick || c.name}
+                                        </option>
+                                      ))}
+                                    </select>
+
+                                    <label className="flex items-center gap-1.5 text-[11px] text-neutral-300 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={autoStartEnabled}
+                                        onChange={(e) =>
+                                          setVst3PreviewAutoStartByStep(prev => ({ ...prev, [step.stepId]: e.target.checked }))
+                                        }
+                                        className="rounded accent-purple-500"
+                                      />
+                                      <span>Автопоиск речи</span>
+                                    </label>
+
+                                    {!autoStartEnabled && (
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        step={1}
+                                        value={step.params?.snippetStartSec && step.params.snippetStartSec >= 0 ? step.params.snippetStartSec : 0}
+                                        onChange={(e) => handleUpdateStepParams(step.stepId, 'snippetStartSec', Math.max(0, parseFloat(e.target.value) || 0))}
+                                        className="w-16 px-1.5 py-1 bg-neutral-900 border border-neutral-800 rounded text-[11px] font-mono tabular-nums text-neutral-200 text-center"
+                                        title="Старт фрагмента превью (сек)"
+                                      />
+                                    )}
+
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRenderVst3PreviewSnippet(step, candidateTracks)}
+                                      disabled={!vst3Path || candidateTracks.length === 0 || isPreviewRendering}
+                                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition"
+                                    >
+                                      {isPreviewRendering ? (
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                      ) : (
+                                        <Headphones className="w-3.5 h-3.5" />
+                                      )}
+                                      <span>{isPreviewRendering ? 'Рендер...' : `Превью фрагмента (${step.params?.snippetDurationSec ?? 12}с)`}</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {previewData && (
+                                  <div className="p-2.5 bg-neutral-900 rounded-lg border border-neutral-800 flex items-center justify-between gap-3 flex-wrap">
+                                    <div className="text-[11px] font-mono tabular-nums text-neutral-300">
+                                      <span className="font-sans font-semibold text-neutral-100">{previewData.trackLabel}</span>
+                                      {' · '}
+                                      <span>{formatTime(previewData.startSec)} – {formatTime(previewData.startSec + previewData.durationSec)}</span>
+                                      {' · '}
+                                      <span>Пик До: {previewData.peakDbBefore} дБ</span>
+                                      {' · '}
+                                      <span className="text-emerald-400">Пик После: {previewData.peakDbAfter} дБ</span>
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handlePlayVst3PreviewAudio(step.stepId, previewData.dryPath, 'dry')}
+                                        className={`px-2.5 py-1 rounded text-[11px] font-medium border transition ${
+                                          previewData.activeMode === 'dry' && isPlayingVst3PreviewStepId === step.stepId
+                                            ? 'bg-amber-600 text-white border-amber-400'
+                                            : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border-neutral-700'
+                                        }`}
+                                      >
+                                        ▶ До (Оригинал Dry)
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handlePlayVst3PreviewAudio(step.stepId, previewData.wetPath, 'wet')}
+                                        className={`px-2.5 py-1 rounded text-[11px] font-semibold border transition ${
+                                          previewData.activeMode === 'wet' && isPlayingVst3PreviewStepId === step.stepId
+                                            ? 'bg-emerald-600 text-white border-emerald-400'
+                                            : 'bg-emerald-950/70 hover:bg-emerald-900/70 text-emerald-300 border-emerald-700/60'
+                                        }`}
+                                      >
+                                        ▶ После (С плагином VST3)
+                                      </button>
+                                      {isPlayingVst3PreviewStepId === step.stepId && (
+                                        <button
+                                          type="button"
+                                          onClick={handleStopVst3PreviewAudio}
+                                          className="px-2 py-1 bg-neutral-800 hover:bg-red-950/70 text-neutral-300 hover:text-red-300 rounded text-[11px] transition"
+                                        >
+                                          Стоп
+                                        </button>
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })()}
+
                         {/* Granular Sliders and Controls */}
                         <div className="grid grid-cols-2 gap-3 pt-1">
                           {Object.keys(step.params || {}).map(paramKey => {
+                            if (
+                              step.moduleId === 'vst3_rack_processor' &&
+                              [
+                                'vst3Path',
+                                'pluginName',
+                                'subPluginName',
+                                'vendor',
+                                'availableSubPlugins',
+                                'totalParameters',
+                                'routingMode',
+                                'globalStateFile',
+                                'globalStateSizeBytes',
+                                'globalStateUpdatedAt',
+                                'perTrackStates',
+                                'perTrackStateFiles',
+                                'parametersPreview',
+                                'snippetStartSec',
+                                'snippetAutoFindSpeech'
+                              ].includes(paramKey)
+                            ) {
+                              return null;
+                            }
                             const val = step.params[paramKey];
+                            if (val === null || val === undefined || typeof val === 'object') {
+                              return null;
+                            }
 
                             // Boolean checkbox
                             if (typeof val === 'boolean') {

@@ -2061,6 +2061,53 @@ const MODULE_DATABASE = [
         params: { targetLufs: -23.0, truePeak: -1.0, lra: 11.0 }
       }
     ]
+  },
+  {
+    id: 'vst3_rack_processor',
+    category: 'vst3',
+    defaultPrefix: 'vst3_',
+    title: 'VST3 Плагин — Нативный интерфейс (iZotope Ozone / FabFilter / Waves)',
+    description: 'Подключает любой 64-битный VST3-плагин с открытием его оригинального графического окна (Native GUI), сохранением бинарного слепка состояния (.vststate), быстрым A/B превью фрагмента и поддержкой поканальной, индивидуальной и шинной маршрутизации.',
+    icon: 'Sliders',
+    isUltimate: true,
+    defaultParams: {
+      vst3Path: '',
+      pluginName: '',
+      subPluginName: '',
+      vendor: '',
+      routingMode: 'batch_all',
+      globalStateFile: '',
+      globalStateUpdatedAt: '',
+      globalStateSizeBytes: 0,
+      perTrackStateFiles: {},
+      wetMixPercent: 100,
+      outputGainDb: 0.0,
+      resetBetweenTracks: true,
+      passThroughUnselected: true,
+      snippetDurationSec: 12,
+      snippetAutoFindSpeech: true,
+      snippetStartSec: 0
+    },
+    presets: [
+      {
+        id: 'vst3_batch_dubbers',
+        title: '🎙 Пакетная обработка всех дабберов (Единый слепок VST3)',
+        description: 'Применяет один настроенный VST3-плагин ко всем отмеченным дорожкам дабберов',
+        params: { routingMode: 'batch_all', wetMixPercent: 100, outputGainDb: 0.0, resetBetweenTracks: true, passThroughUnselected: true }
+      },
+      {
+        id: 'vst3_per_actor_custom',
+        title: '🎭 Индивидуальный VST3 под каждого даббера (Персональное окно GUI)',
+        description: 'Позволяет открыть окно VST3 и сохранить отдельный слепок настроек для каждого актера',
+        params: { routingMode: 'per_track', wetMixPercent: 100, outputGainDb: 0.0, resetBetweenTracks: true, passThroughUnselected: true }
+      },
+      {
+        id: 'vst3_ozone_master_bus',
+        title: '👑 Мастеринг общей шины голосов (iZotope Ozone / Master Bus)',
+        description: 'Обрабатывает склеенную шину голосов (voices_master) или суммарный микс мастеринговым плагином',
+        params: { routingMode: 'master_bus', wetMixPercent: 100, outputGainDb: 0.0, resetBetweenTracks: true, passThroughUnselected: false }
+      }
+    ]
   }
 ];
 
@@ -4759,6 +4806,24 @@ class MixingPipelineService {
         case 'ffmpeg_airwindows_strip':
           resultFiles = await this._execFfmpegAirwindowsStrip({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
+        case 'vst3_rack_processor':
+        case 'vst3_process': {
+          const allCandidateFiles = this._resolveCandidateInputsForStep(manifest, stepIndex);
+          resultFiles = await this._execVst3Plugin({
+            episode,
+            workingDir,
+            stepFolder,
+            stepId: step.stepId,
+            prefix: step.prefix,
+            manifest,
+            inputFiles,
+            allCandidateFiles,
+            params: step.params,
+            logFn,
+            onProgress
+          });
+          break;
+        }
         case 'glue_compress':
           resultFiles = await this._execGlueCompress({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;
@@ -9072,6 +9137,591 @@ class MixingPipelineService {
 
     logFn(`Все внешние материалы успешно импортированы в ${workingDir}`);
     return await this.getStatus({ episode, targetDir: workingDir, baseDir });
+  }
+
+  // ============================================================================
+  // NATIVE VST3 PLUGIN HOSTING, SYSTEM SCANNER, PRESETS & STEP EXECUTOR
+  // ============================================================================
+
+  _inferVst3VendorAndCategory(vst3Path, rawName) {
+    const fullLower = `${vst3Path} ${rawName}`.toLowerCase();
+    let vendor = 'VST3 Studio';
+    if (fullLower.includes('izotope') || fullLower.includes('ozone') || fullLower.includes('neutron') || fullLower.includes('nectar') || fullLower.includes('rx ')) {
+      vendor = 'iZotope';
+    } else if (fullLower.includes('fabfilter') || fullLower.includes('pro-q') || fullLower.includes('pro-c') || fullLower.includes('pro-ds') || fullLower.includes('pro-l') || fullLower.includes('pro-mb')) {
+      vendor = 'FabFilter';
+    } else if (fullLower.includes('waves')) {
+      vendor = 'Waves';
+    } else if (fullLower.includes('valhalla')) {
+      vendor = 'Valhalla DSP';
+    } else if (fullLower.includes('tdr') || fullLower.includes('tokyo dawn') || fullLower.includes('nova') || fullLower.includes('kotelnikov')) {
+      vendor = 'Tokyo Dawn Labs';
+    } else if (fullLower.includes('soothe') || fullLower.includes('oeksound')) {
+      vendor = 'oeksound';
+    } else if (fullLower.includes('soundtoys')) {
+      vendor = 'Soundtoys';
+    } else if (fullLower.includes('slate')) {
+      vendor = 'Slate Digital';
+    } else if (fullLower.includes('airwindows')) {
+      vendor = 'Airwindows';
+    } else if (fullLower.includes('melda')) {
+      vendor = 'MeldaProduction';
+    } else if (fullLower.includes('voxengo')) {
+      vendor = 'Voxengo';
+    } else {
+      const parentDir = path.basename(path.dirname(vst3Path));
+      if (parentDir && !/^(vst3|plug-ins|common files|x86_64-win|x86_64-linux|contents|macos)$/i.test(parentDir)) {
+        vendor = parentDir;
+      }
+    }
+
+    let category = 'Audio Effect';
+    if (/ozone|master|limiter|pro-l|maximizer/i.test(fullLower)) category = 'Mastering / Limiter';
+    else if (/eq|pro-q|nova|equalizer|filter/i.test(fullLower)) category = 'Equalizer';
+    else if (/comp|pro-c|pro-mb|kotelnikov|leveler|cla-/i.test(fullLower)) category = 'Dynamics / Compressor';
+    else if (/deess|pro-ds|sibilance|soothe/i.test(fullLower)) category = 'De-Esser / Resonance';
+    else if (/reverb|valhalla|room|hall|delay|echo/i.test(fullLower)) category = 'Reverb / Delay';
+    else if (/rx|denoise|dereverb|restore|voice/i.test(fullLower)) category = 'Restoration / Vocal';
+
+    return { vendor, category };
+  }
+
+  /**
+   * Scans OS system VST3 folders + user custom folders for .vst3 bundles and files
+   */
+  async scanSystemVst3Plugins({ customDirs = [] } = {}) {
+    const os = require('os');
+    const home = os.homedir();
+    const candidateDirs = new Set();
+
+    if (process.platform === 'win32') {
+      candidateDirs.add('C:\\Program Files\\Common Files\\VST3');
+      candidateDirs.add('C:\\Program Files\\Steinberg\\VSTPlugins');
+      candidateDirs.add('C:\\Program Files\\VSTPlugins');
+      candidateDirs.add('C:\\Program Files (x86)\\Common Files\\VST3');
+      if (process.env.COMMONPROGRAMFILES) {
+        candidateDirs.add(path.join(process.env.COMMONPROGRAMFILES, 'VST3'));
+      }
+      if (process.env.LOCALAPPDATA) {
+        candidateDirs.add(path.join(process.env.LOCALAPPDATA, 'Programs', 'Common', 'VST3'));
+      }
+    } else if (process.platform === 'darwin') {
+      candidateDirs.add('/Library/Audio/Plug-Ins/VST3');
+      candidateDirs.add(path.join(home, 'Library', 'Audio', 'Plug-Ins', 'VST3'));
+    } else {
+      candidateDirs.add('/usr/lib/vst3');
+      candidateDirs.add('/usr/local/lib/vst3');
+      candidateDirs.add(path.join(home, '.vst3'));
+    }
+
+    // Also include bundled Airwindows VST3 folder if present
+    const userData = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
+    candidateDirs.add(path.join(userData, 'ai_env', 'airwindows_plugins'));
+    candidateDirs.add(path.join(userData, 'vst3_plugins'));
+
+    if (Array.isArray(customDirs)) {
+      for (const d of customDirs) {
+        if (d && typeof d === 'string' && d.trim()) {
+          candidateDirs.add(d.trim());
+        }
+      }
+    }
+
+    const foundMap = new Map();
+    const walkVst3Dir = (dirPath, depth = 0) => {
+      if (depth > 4 || !dirPath || !fsSync.existsSync(dirPath)) return;
+      let entries = [];
+      try {
+        entries = fsSync.readdirSync(dirPath, { withFileTypes: true });
+      } catch (_) {
+        return;
+      }
+
+      for (const entry of entries) {
+        const fullPath = path.join(dirPath, entry.name);
+        if (entry.name.toLowerCase().endsWith('.vst3')) {
+          const normKey = path.resolve(fullPath).toLowerCase();
+          if (!foundMap.has(normKey)) {
+            let st = null;
+            try {
+              st = fsSync.statSync(fullPath);
+            } catch (_) {}
+            const rawName = path.basename(entry.name, '.vst3');
+            const { vendor, category } = this._inferVst3VendorAndCategory(fullPath, rawName);
+            foundMap.set(normKey, {
+              id: normKey,
+              name: rawName,
+              fileName: entry.name,
+              vst3Path: fullPath,
+              vendor,
+              category,
+              isBundle: entry.isDirectory(),
+              sizeBytes: st ? st.size : 0,
+              modifiedAt: st ? st.mtime.toISOString() : ''
+            });
+          }
+          // Do not recurse inside a .vst3 bundle directory itself
+          continue;
+        }
+
+        if (entry.isDirectory() && !entry.name.startsWith('.')) {
+          walkVst3Dir(fullPath, depth + 1);
+        }
+      }
+    };
+
+    for (const dir of candidateDirs) {
+      walkVst3Dir(dir, 0);
+    }
+
+    const plugins = Array.from(foundMap.values()).sort((a, b) => {
+      const aPriority = /ozone|izotope|fabfilter|pro-q|pro-ds|waves|valhalla|tdr|soothe/i.test(`${a.vendor} ${a.name}`) ? 0 : 1;
+      const bPriority = /ozone|izotope|fabfilter|pro-q|pro-ds|waves|valhalla|tdr|soothe/i.test(`${b.vendor} ${b.name}`) ? 0 : 1;
+      if (aPriority !== bPriority) return aPriority - bPriority;
+      return a.name.localeCompare(b.name, 'ru');
+    });
+
+    return {
+      plugins,
+      scannedDirs: Array.from(candidateDirs).filter((d) => fsSync.existsSync(d))
+    };
+  }
+
+  /**
+   * Opens the native OS VST3 plugin editor window (e.g. iZotope Ozone GUI)
+   * and persists its binary raw_state (.vststate) into the episode's vst3_states folder.
+   */
+  async openVst3NativeEditor({
+    episode,
+    workingDir,
+    baseDir,
+    stepId = 'step_vst3',
+    trackKey = 'global',
+    vst3Path,
+    subPluginName = '',
+    existingStateFile = '',
+    stateFile = '',
+    onLog
+  }) {
+    if (!vst3Path || !fsSync.existsSync(vst3Path)) {
+      throw new Error(`Файл VST3 плагина не найден: ${vst3Path || 'не выбран'}`);
+    }
+
+    const resolvedWorkDir = workingDir || baseDir || (episode ? this._resolveDefaultWorkingDir(episode, baseDir) : path.join(app.getPath('userData'), 'vst3_work'));
+    const statesDir = path.join(resolvedWorkDir, 'vst3_states');
+    await fs.mkdir(statesDir, { recursive: true });
+
+    const safeStep = String(stepId || 'vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeTrack = String(trackKey || 'global').replace(/[^a-zA-Z0-9_\u0400-\u04FF-]/g, '_');
+    const pluginSlug = path.basename(vst3Path, '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const targetStateFile = path.join(statesDir, `${safeStep}_${safeTrack}_${pluginSlug}.vststate`);
+
+    const seedStateFile = existingStateFile || stateFile;
+    // If user had an existing state file at another location and targetStateFile doesn't exist yet, seed it
+    if (
+      seedStateFile &&
+      fsSync.existsSync(seedStateFile) &&
+      path.resolve(seedStateFile) !== path.resolve(targetStateFile) &&
+      !fsSync.existsSync(targetStateFile)
+    ) {
+      try {
+        await fs.copyFile(seedStateFile, targetStateFile);
+      } catch (_) {}
+    }
+
+    const res = await AudioNeuralService.openVst3NativeEditor({
+      vst3Path,
+      subPluginName,
+      stateFile: targetStateFile,
+      onLog
+    });
+
+    let sizeBytes = res?.stateSizeBytes || 0;
+    if (!sizeBytes && fsSync.existsSync(targetStateFile)) {
+      try {
+        sizeBytes = fsSync.statSync(targetStateFile).size;
+      } catch (_) {}
+    }
+
+    return {
+      success: true,
+      vst3Path,
+      pluginName: res?.pluginName || path.basename(vst3Path, '.vst3'),
+      subPlugins: res?.subPlugins || [],
+      stateFile: targetStateFile,
+      stateSizeBytes: sizeBytes,
+      updatedAt: res?.updatedAt || new Date().toISOString(),
+      parametersPreview: res?.parametersPreview || {},
+      trackKey
+    };
+  }
+
+  /**
+   * Renders a fast 5-15s preview snippet (Dry Before + Wet After) for a selected track and VST3 plugin
+   */
+  async previewVst3Snippet({
+    episode,
+    workingDir,
+    baseDir,
+    stepId = 'step_vst3',
+    inputPath,
+    vst3Path,
+    subPluginName = '',
+    stateFile = '',
+    snippetStartSec = -1,
+    snippetDurationSec = 12,
+    wetMixPercent = 100,
+    outputGainDb = 0,
+    onProgress,
+    onLog
+  }) {
+    if (!vst3Path || !fsSync.existsSync(vst3Path)) {
+      throw new Error(`VST3 плагин не найден: ${vst3Path || 'не выбран'}`);
+    }
+    if (!inputPath || !fsSync.existsSync(inputPath)) {
+      throw new Error(`Аудиодорожка для превью не найдена: ${inputPath || 'не выбрана'}`);
+    }
+
+    const resolvedWorkDir = workingDir || baseDir || (episode ? this._resolveDefaultWorkingDir(episode, baseDir) : path.join(app.getPath('userData'), 'vst3_work'));
+    const previewDir = path.join(resolvedWorkDir, 'vst3_previews');
+    await fs.mkdir(previewDir, { recursive: true });
+
+    const stamp = Date.now();
+    const safeStep = String(stepId || 'vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const dryOutputPath = path.join(previewDir, `preview_${safeStep}_${stamp}_dry.wav`);
+    const wetOutputPath = path.join(previewDir, `preview_${safeStep}_${stamp}_wet.wav`);
+
+    // Clean up old preview files in previewDir so disk doesn't clutter
+    try {
+      const oldFiles = fsSync.readdirSync(previewDir);
+      for (const f of oldFiles) {
+        if (f.startsWith(`preview_${safeStep}_`) && f.endsWith('.wav')) {
+          try { fsSync.unlinkSync(path.join(previewDir, f)); } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    const res = await AudioNeuralService.previewVst3Snippet({
+      inputPath,
+      outputPath: wetOutputPath,
+      dryOutputPath,
+      vst3Path,
+      subPluginName,
+      stateFile,
+      snippetStartSec,
+      snippetDurationSec,
+      wetMixPercent,
+      outputGainDb,
+      onProgress,
+      onLog
+    });
+
+    return {
+      success: true,
+      pluginName: res?.pluginName || path.basename(vst3Path, '.vst3'),
+      startSec: res?.startSec ?? 0,
+      durationSec: res?.durationSec ?? snippetDurationSec,
+      dryPath: res?.dryPath || dryOutputPath,
+      wetPath: res?.wetPath || wetOutputPath,
+      peakDbBefore: res?.peakDbBefore ?? 0,
+      peakDbAfter: res?.peakDbAfter ?? 0
+    };
+  }
+
+  /**
+   * User VST3 Presets Library (saves .vststate + metadata in userData/vst3_presets)
+   */
+  _getVst3PresetsDir() {
+    const userData = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
+    const dir = path.join(userData, 'vst3_presets');
+    if (!fsSync.existsSync(dir)) {
+      try { fsSync.mkdirSync(dir, { recursive: true }); } catch (_) {}
+    }
+    return dir;
+  }
+
+  async listVst3UserPresets() {
+    const dir = this._getVst3PresetsDir();
+    const indexFile = path.join(dir, 'presets_index.json');
+    if (!fsSync.existsSync(indexFile)) return [];
+    try {
+      const raw = await fs.readFile(indexFile, 'utf8');
+      const list = JSON.parse(raw);
+      return Array.isArray(list) ? list.filter((p) => p && p.stateFile && fsSync.existsSync(p.stateFile)) : [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  async saveVst3UserPreset({ name, title, description = '', vst3Path, pluginName = '', subPluginName = '', stateFile, wetMixPercent = 100, outputGainDb = 0 }) {
+    const presetTitle = String(title || name || '').trim();
+    if (!presetTitle) {
+      throw new Error('Введите название пресета VST3');
+    }
+    if (!stateFile || !fsSync.existsSync(stateFile)) {
+      throw new Error('Сначала настройте плагин в нативном окне VST3, чтобы сформировался слепок состояния (.vststate)');
+    }
+
+    const dir = this._getVst3PresetsDir();
+    const presetId = `vst3_preset_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const savedStatePath = path.join(dir, `${presetId}.vststate`);
+    await fs.copyFile(stateFile, savedStatePath);
+    const st = fsSync.statSync(savedStatePath);
+
+    const presets = await this.listVst3UserPresets();
+    const newPreset = {
+      id: presetId,
+      name: presetTitle,
+      title: presetTitle,
+      description: String(description || '').trim(),
+      vst3Path,
+      pluginName: pluginName || path.basename(vst3Path || '', '.vst3'),
+      subPluginName: subPluginName || '',
+      stateFile: savedStatePath,
+      stateSizeBytes: st.size,
+      wetMixPercent: Number(wetMixPercent ?? 100),
+      outputGainDb: Number(outputGainDb ?? 0),
+      createdAt: new Date().toISOString()
+    };
+
+    presets.unshift(newPreset);
+    await fs.writeFile(path.join(dir, 'presets_index.json'), JSON.stringify(presets, null, 2), 'utf8');
+    return { success: true, preset: newPreset, presets };
+  }
+
+  async applyVst3UserPreset({ presetId, episode, workingDir, baseDir, stepId = 'step_vst3', trackKey = 'global' }) {
+    const presets = await this.listVst3UserPresets();
+    const found = presets.find((p) => p.id === presetId);
+    if (!found || !fsSync.existsSync(found.stateFile)) {
+      throw new Error('Выбранный пресет VST3 не найден на диске');
+    }
+
+    const resolvedWorkDir = workingDir || baseDir || (episode ? this._resolveDefaultWorkingDir(episode, baseDir) : path.join(app.getPath('userData'), 'vst3_work'));
+    const statesDir = path.join(resolvedWorkDir, 'vst3_states');
+    await fs.mkdir(statesDir, { recursive: true });
+
+    const safeStep = String(stepId || 'vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeTrack = String(trackKey || 'global').replace(/[^a-zA-Z0-9_\u0400-\u04FF-]/g, '_');
+    const pluginSlug = path.basename(found.vst3Path || found.pluginName || 'plugin', '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const targetStateFile = path.join(statesDir, `${safeStep}_${safeTrack}_${pluginSlug}.vststate`);
+
+    await fs.copyFile(found.stateFile, targetStateFile);
+    const st = fsSync.statSync(targetStateFile);
+
+    return {
+      success: true,
+      preset: found,
+      stateFile: targetStateFile,
+      stateSizeBytes: st.size,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  async deleteVst3UserPreset({ presetId }) {
+    const dir = this._getVst3PresetsDir();
+    const presets = await this.listVst3UserPresets();
+    const target = presets.find((p) => p.id === presetId);
+    if (target && target.stateFile && fsSync.existsSync(target.stateFile)) {
+      try { await fs.unlink(target.stateFile); } catch (_) {}
+    }
+    const filtered = presets.filter((p) => p.id !== presetId);
+    await fs.writeFile(path.join(dir, 'presets_index.json'), JSON.stringify(filtered, null, 2), 'utf8');
+    return { success: true, presets: filtered };
+  }
+
+  /**
+   * EXEC: Native 64-bit VST3 Plugin Processor Step
+   * Supports 3 routing schemes:
+   * - 'batch_all': applies globalStateFile to all selected dubber tracks (and optionally passes through unselected tracks)
+   * - 'per_track': applies each track's dedicated state file (from perTrackStateFiles[trackKey]) or globalStateFile
+   * - 'master_bus': sums multiple input tracks into a stereo voices bus (or processes voices_master directly) via the VST3 plugin (e.g. iZotope Ozone)
+   */
+  async _execVst3Plugin({
+    episode,
+    workingDir,
+    stepFolder,
+    stepId,
+    prefix,
+    manifest,
+    inputFiles,
+    allCandidateFiles = [],
+    params = {},
+    logFn,
+    onProgress
+  }) {
+    const vst3Path = params.vst3Path || '';
+    const subPluginName = params.subPluginName || '';
+    const routingMode = params.routingMode || 'batch_all';
+    const globalStateFile = params.globalStateFile || '';
+    const perTrackStateFiles = params.perTrackStates || params.perTrackStateFiles || {};
+    const wetMixPercent = Number(params.wetMixPercent ?? 100);
+    const outputGainDb = Number(params.outputGainDb ?? 0.0);
+    const resetBetweenTracks = params.resetBetweenTracks !== false;
+    const passThroughUnselected = params.passThroughUnselected !== false;
+
+    if (!vst3Path || !fsSync.existsSync(vst3Path)) {
+      throw new Error('Для шага VST3 не выбран плагин (.vst3) или файл плагина не найден на диске. Выберите плагин в карточке модуля.');
+    }
+
+    if (!inputFiles || inputFiles.length === 0) {
+      throw new Error('Нет активных входных дорожек для обработки VST3 плагином.');
+    }
+
+    const pluginTitle = params.pluginName || path.basename(vst3Path, '.vst3');
+    logFn(`[VST3 Хост] Старт модуля «${pluginTitle}» (Режим: ${routingMode}, Дорожек: ${inputFiles.length}, Mix: ${wetMixPercent}%, Gain: ${outputGainDb} dB)...`);
+
+    const results = [];
+
+    // MODE 3: MASTER BUS / GLUED VOICES BUS (e.g. iZotope Ozone on combined voices)
+    if (routingMode === 'master_bus') {
+      let busInputPath = inputFiles[0].path;
+      let tempPreBusPath = null;
+
+      if (inputFiles.length > 1) {
+        logFn(`[VST3 Master Bus] Суммирование ${inputFiles.length} голосовых дорожек в единую стерео-шину перед подачей в «${pluginTitle}»...`);
+        tempPreBusPath = path.join(stepFolder, `_temp_pre_vst3_bus_${Date.now()}.wav`);
+        const cmd = ffmpeg();
+        inputFiles.forEach((f) => cmd.input(f.path));
+        const inLabels = inputFiles.map((_, idx) => `[${idx}:a]`).join('');
+        const mixFilter = `${inLabels}amix=inputs=${inputFiles.length}:duration=longest:dropout_transition=0:normalize=0,alimiter=limit=-0.3dB:attack=1:release=30:level=false[outa]`;
+        cmd
+          .complexFilter(mixFilter, ['outa'])
+          .audioCodec('pcm_s24le')
+          .audioChannels(2)
+          .audioFrequency(48000)
+          .output(tempPreBusPath);
+
+        await this._execFfmpeg(cmd, {
+          logFn,
+          outPath: tempPreBusPath,
+          description: `Pre-VST3 Bus Mix (${inputFiles.length} tracks)`
+        });
+        busInputPath = tempPreBusPath;
+      }
+
+      const outName = `${prefix || 'vst3_'}voices_master.wav`;
+      const outPath = path.join(stepFolder, outName);
+
+      try {
+        await AudioNeuralService.processVst3Plugin({
+          inputPath: busInputPath,
+          outputPath: outPath,
+          vst3Path,
+          subPluginName,
+          stateFile: globalStateFile,
+          wetMixPercent,
+          outputGainDb,
+          resetBetweenTracks: true,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              onProgress({ percent: p.percent, message: `VST3 Master [${pluginTitle}]: ${Math.round(p.percent)}%` });
+            }
+          },
+          onLog: (msg, level) => logFn(`  [Master Bus] ${msg}`, level || 'info')
+        });
+      } finally {
+        if (tempPreBusPath && fsSync.existsSync(tempPreBusPath)) {
+          try { await fs.unlink(tempPreBusPath); } catch (_) {}
+        }
+      }
+
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error(`VST3 плагин «${pluginTitle}» не создал выходной мастер-файл.`);
+      }
+      const st = fsSync.statSync(outPath);
+      results.push({
+        name: outName,
+        path: outPath,
+        size: st.size,
+        dubberNick: 'Склеенная шина голосов',
+        trackKey: 'voices_master'
+      });
+      return results;
+    }
+
+    // MODE 1 & 2: BATCH ALL TRACKS or PER-TRACK INDIVIDUAL STATE
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const trackKey = track.trackKey || this._getTrackKey(track);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      let effectiveStateFile = globalStateFile;
+      if (routingMode === 'per_track') {
+        const perEntry = perTrackStateFiles[trackKey] || perTrackStateFiles[track.name] || perTrackStateFiles[nick];
+        const candState = typeof perEntry === 'string' ? perEntry : perEntry?.stateFile;
+        if (candState && fsSync.existsSync(candState)) {
+          effectiveStateFile = candState;
+          logFn(`[${i + 1}/${inputFiles.length}] Применение индивидуального слепка VST3 «${pluginTitle}» для дорожки «${nick}»...`);
+        } else {
+          logFn(`[${i + 1}/${inputFiles.length}] Для дорожки «${nick}» используется общий/базовый слепок VST3 «${pluginTitle}»...`);
+        }
+      } else {
+        logFn(`[${i + 1}/${inputFiles.length}] Обработка дорожки «${nick}» через VST3 «${pluginTitle}»...`);
+      }
+
+      await AudioNeuralService.processVst3Plugin({
+        inputPath: track.path,
+        outputPath: outPath,
+        vst3Path,
+        subPluginName,
+        stateFile: effectiveStateFile,
+        wetMixPercent,
+        outputGainDb,
+        resetBetweenTracks,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `VST3 [${pluginTitle}] — ${nick}: ${Math.round(p.percent)}%` });
+          }
+        },
+        onLog: (msg, level) => logFn(`  [${nick}] ${msg}`, level || 'debug')
+      });
+
+      if (!fsSync.existsSync(outPath)) {
+        throw new Error(`VST3 плагин «${pluginTitle}» не создал выходной файл для дорожки «${nick}».`);
+      }
+
+      const st = fsSync.statSync(outPath);
+      results.push({
+        name: outName,
+        path: outPath,
+        size: st.size,
+        dubberNick: nick,
+        trackKey
+      });
+    }
+
+    // Pass-through unselected tracks if enabled so downstream modules & Sound Engineer export keep all dubber tracks
+    if (passThroughUnselected && Array.isArray(allCandidateFiles) && allCandidateFiles.length > inputFiles.length) {
+      const processedPaths = new Set(inputFiles.map((f) => path.resolve(f.path).toLowerCase()));
+      const unselected = allCandidateFiles.filter(
+        (cand) => cand && cand.path && fsSync.existsSync(cand.path) && !processedPaths.has(path.resolve(cand.path).toLowerCase())
+      );
+      for (let u = 0; u < unselected.length; u++) {
+        const tr = unselected[u];
+        const nick = this._resolveTrackNick(tr, allCandidateFiles, u);
+        const outName = this._resolveTrackOutName(tr, allCandidateFiles, inputFiles.length + u, prefix);
+        const outPath = path.join(stepFolder, outName);
+        logFn(`[Прямая передача без VST3] Копирование неотмеченной дорожки «${nick}» в выход шага для сохранения полного комплекта...`);
+        await fs.copyFile(tr.path, outPath);
+        const st = fsSync.statSync(outPath);
+        results.push({
+          name: outName,
+          path: outPath,
+          size: st.size,
+          dubberNick: nick,
+          trackKey: tr.trackKey || this._getTrackKey(tr)
+        });
+      }
+    }
+
+    logFn(`✔ Шаг VST3 «${pluginTitle}» завершен: готово ${results.length} дорожек.`);
+    return results;
   }
 }
 

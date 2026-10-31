@@ -61,7 +61,7 @@ class AudioNeuralService {
             if (!fallbackContent || content.length > fallbackContent.length) {
               fallbackContent = content;
             }
-            if (content.includes('--noise_reduction_db') && content.includes('--post_filter')) {
+            if (content.includes('--noise_reduction_db') && content.includes('vst3_open_editor')) {
               sourceContent = content;
               break;
             }
@@ -157,7 +157,7 @@ class AudioNeuralService {
    * Spawns Python sidecar CLI process directly without cmd.exe / shell: true
    * and handles streaming stdout / stderr / progress.
    */
-  async _runPythonSidecar(args, { onProgress, onLog, abortSignal, operationName = 'AudioNeural' }) {
+  async _runPythonSidecar(args, { onProgress, onLog, abortSignal, operationName = 'AudioNeural', allowGuiWindow = false }) {
     const pythonPath = EnvironmentManager.getPythonPath();
     const scriptPath = this.getSidecarScriptPath();
 
@@ -259,7 +259,7 @@ class AudioNeuralService {
         cwd: workingDir,
         env,
         shell: false,
-        windowsHide: true
+        windowsHide: !allowGuiWindow
       });
 
       // Track process for emergency SIGKILL cancellation
@@ -316,6 +316,18 @@ class AudioNeuralService {
           } else if (line.startsWith('RESULT:')) {
             try {
               resultData = JSON.parse(line.replace('RESULT:', '').trim());
+            } catch (e) {}
+          } else if (line.startsWith('VST3_INFO_JSON:')) {
+            try {
+              resultData = JSON.parse(line.replace('VST3_INFO_JSON:', '').trim());
+            } catch (e) {}
+          } else if (line.startsWith('VST3_EDITOR_SAVED_JSON:')) {
+            try {
+              resultData = JSON.parse(line.replace('VST3_EDITOR_SAVED_JSON:', '').trim());
+            } catch (e) {}
+          } else if (line.startsWith('VST3_PREVIEW_JSON:')) {
+            try {
+              resultData = JSON.parse(line.replace('VST3_PREVIEW_JSON:', '').trim());
             } catch (e) {}
           } else if (line.startsWith('ENV_STATUS:')) {
             try {
@@ -708,6 +720,150 @@ class AudioNeuralService {
     });
 
     return res;
+  }
+
+  /**
+   * Inspects a 64-bit VST3 plugin bundle/file and returns metadata, sub-plugins, and parameters
+   */
+  async inspectVst3Plugin({ vst3Path, subPluginName = '', stateFile = '', onLog, abortSignal }) {
+    if (!vst3Path || !fs.existsSync(vst3Path)) {
+      throw new Error(`VST3 плагин не найден по пути: ${vst3Path}`);
+    }
+
+    const args = [
+      '--mode', 'vst3_inspect',
+      '--vst3_path', vst3Path,
+      '--sub_plugin_name', subPluginName || '',
+      '--state_file', stateFile || ''
+    ];
+
+    return await this._runPythonSidecar(args, {
+      onLog,
+      abortSignal,
+      operationName: `Инспекция VST3 [${path.basename(vst3Path)}]`
+    });
+  }
+
+  /**
+   * Opens the native OS VST3 GUI window (plugin.show_editor()) and saves the resulting binary raw_state to stateFile
+   */
+  async openVst3NativeEditor({ vst3Path, subPluginName = '', stateFile, onLog, abortSignal }) {
+    if (!vst3Path || !fs.existsSync(vst3Path)) {
+      throw new Error(`VST3 плагин не найден по пути: ${vst3Path}`);
+    }
+    if (!stateFile) {
+      throw new Error('Не указан файл состояния (.vststate) для сохранения настроек VST3 плагина.');
+    }
+
+    await fsPromises.mkdir(path.dirname(stateFile), { recursive: true });
+
+    const args = [
+      '--mode', 'vst3_open_editor',
+      '--vst3_path', vst3Path,
+      '--sub_plugin_name', subPluginName || '',
+      '--state_file', stateFile
+    ];
+
+    return await this._runPythonSidecar(args, {
+      onLog,
+      abortSignal,
+      allowGuiWindow: true,
+      operationName: `Нативный интерфейс VST3 [${path.basename(vst3Path)}]`
+    });
+  }
+
+  /**
+   * Renders a fast 5-15s active speech preview snippet (Before Dry WAV + After Wet WAV) through a VST3 plugin
+   */
+  async previewVst3Snippet({
+    inputPath,
+    outputPath,
+    dryOutputPath,
+    vst3Path,
+    subPluginName = '',
+    stateFile = '',
+    snippetStartSec = -1,
+    snippetDurationSec = 12,
+    wetMixPercent = 100,
+    outputGainDb = 0,
+    onProgress,
+    onLog,
+    abortSignal
+  }) {
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      throw new Error(`Входная аудиодорожка для превью не найдена: ${inputPath}`);
+    }
+    if (!vst3Path || !fs.existsSync(vst3Path)) {
+      throw new Error(`VST3 плагин не найден по пути: ${vst3Path}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'vst3_preview_snippet',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--dry_output', dryOutputPath || '',
+      '--vst3_path', vst3Path,
+      '--sub_plugin_name', subPluginName || '',
+      '--state_file', stateFile || '',
+      '--snippet_start_sec', String(snippetStartSec ?? -1),
+      '--snippet_duration_sec', String(snippetDurationSec ?? 12),
+      '--wet_mix_percent', String(wetMixPercent ?? 100),
+      '--output_gain_db', String(outputGainDb ?? 0)
+    ];
+
+    return await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Превью VST3 [${path.basename(vst3Path)}]`
+    });
+  }
+
+  /**
+   * Processes a full audio track through a 64-bit VST3 plugin using its binary raw_state (.vststate)
+   */
+  async processVst3Plugin({
+    inputPath,
+    outputPath,
+    vst3Path,
+    subPluginName = '',
+    stateFile = '',
+    wetMixPercent = 100,
+    outputGainDb = 0,
+    resetBetweenTracks = true,
+    onProgress,
+    onLog,
+    abortSignal
+  }) {
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      throw new Error(`Входной аудиофайл не существует: ${inputPath}`);
+    }
+    if (!vst3Path || !fs.existsSync(vst3Path)) {
+      throw new Error(`VST3 плагин не найден по пути: ${vst3Path}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const args = [
+      '--mode', 'vst3_process',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--vst3_path', vst3Path,
+      '--sub_plugin_name', subPluginName || '',
+      '--state_file', stateFile || '',
+      '--wet_mix_percent', String(wetMixPercent ?? 100),
+      '--output_gain_db', String(outputGainDb ?? 0),
+      '--reset_between_tracks', resetBetweenTracks === false ? 'false' : 'true'
+    ];
+
+    return await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `VST3 Обработка [${path.basename(vst3Path)}]`
+    });
   }
 }
 

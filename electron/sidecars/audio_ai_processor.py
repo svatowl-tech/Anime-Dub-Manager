@@ -2460,6 +2460,457 @@ def download_model_cli(args):
     else:
         raise RuntimeError("Downloaded model file is corrupted or empty")
 
+
+# ------------------------------------------------------------------------------
+# 9B. NATIVE VST3 PLUGIN HOST (PEDALBOARD C++/JUCE: NATIVE GUI + RAW_STATE + RENDER)
+# ------------------------------------------------------------------------------
+def _load_vst3_plugin_instance(vst3_path, sub_plugin_name=None):
+    """
+    Loads a 64-bit VST3 plugin bundle/file via Spotify Pedalboard (JUCE C++ host).
+    Automatically resolves multi-plugin VST3 bundles (such as iZotope Ozone / WavesShell).
+    Returns (plugin, resolved_name, available_subplugins).
+    """
+    if not vst3_path or not os.path.exists(vst3_path):
+        raise FileNotFoundError(f"VST3 плагин не найден по пути: {vst3_path}")
+
+    try:
+        from pedalboard import load_plugin
+    except ImportError as e:
+        raise RuntimeError(
+            "Библиотека pedalboard (C++ VST3 хост) не установлена в окружении Python. "
+            "Проверьте установку AI-окружения."
+        ) from e
+
+    available_subplugins = []
+    try:
+        if sub_plugin_name and str(sub_plugin_name).strip():
+            plugin = load_plugin(vst3_path, plugin_name=str(sub_plugin_name).strip())
+            return plugin, getattr(plugin, "name", str(sub_plugin_name).strip()), [str(sub_plugin_name).strip()]
+        else:
+            plugin = load_plugin(vst3_path)
+            return plugin, getattr(plugin, "name", os.path.basename(vst3_path)), []
+    except Exception as first_err:
+        err_msg = str(first_err)
+        import re
+        quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', err_msg)
+        candidates = [q[0] or q[1] for q in quoted if (q[0] or q[1]) and not (q[0] or q[1]).endswith('.vst3')]
+        if candidates:
+            available_subplugins = candidates
+            chosen_name = candidates[0]
+            if sub_plugin_name and sub_plugin_name in candidates:
+                chosen_name = sub_plugin_name
+            plugin = load_plugin(vst3_path, plugin_name=chosen_name)
+            return plugin, chosen_name, available_subplugins
+        raise RuntimeError(f"Не удалось загрузить VST3 плагин «{os.path.basename(vst3_path)}»: {first_err}") from first_err
+
+
+def _extract_vst3_params_snapshot(plugin, max_params=48):
+    """Extracts a lightweight readable dictionary of exposed VST3 parameters for UI display."""
+    snapshot = {}
+    try:
+        params_dict = getattr(plugin, "parameters", {}) or {}
+        count = 0
+        for k, param_obj in params_dict.items():
+            if count >= max_params:
+                break
+            try:
+                val = getattr(plugin, k, None)
+                if isinstance(val, (int, float, bool, str)):
+                    snapshot[k] = round(val, 4) if isinstance(val, float) else val
+                else:
+                    raw_v = getattr(param_obj, "raw_value", None)
+                    snapshot[k] = round(float(raw_v), 4) if raw_v is not None else str(val)
+                count += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return snapshot
+
+
+def process_vst3_inspect(args):
+    """
+    Inspects a .vst3 plugin, returns its name, sub-plugins, parameter count, and optionally writes initial raw_state.
+    """
+    vst3_path = getattr(args, "vst3_path", None) or args.input
+    sub_plugin = getattr(args, "sub_plugin_name", None) or ""
+    state_file = getattr(args, "state_file", None) or ""
+
+    plugin, resolved_name, sub_plugins = _load_vst3_plugin_instance(vst3_path, sub_plugin)
+
+    if state_file and os.path.isfile(state_file) and os.path.getsize(state_file) > 0:
+        try:
+            with open(state_file, "rb") as f:
+                plugin.raw_state = f.read()
+        except Exception as e:
+            sys.stdout.write(f"LOG:Предупреждение при чтении сохраненного состояния VST3: {e}\n")
+            sys.stdout.flush()
+
+    raw_bytes = b""
+    try:
+        raw_bytes = plugin.raw_state or b""
+    except Exception:
+        pass
+
+    if state_file and not os.path.exists(state_file) and len(raw_bytes) > 0:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(state_file)), exist_ok=True)
+            with open(state_file, "wb") as f:
+                f.write(raw_bytes)
+        except Exception:
+            pass
+
+    params_snapshot = _extract_vst3_params_snapshot(plugin)
+    total_params = len(getattr(plugin, "parameters", {}) or {})
+
+    info = {
+        "success": True,
+        "vst3Path": vst3_path,
+        "pluginName": resolved_name,
+        "subPlugins": sub_plugins,
+        "totalParameters": total_params,
+        "parametersPreview": params_snapshot,
+        "stateSizeBytes": len(raw_bytes),
+        "stateFile": state_file if (state_file and os.path.exists(state_file)) else ""
+    }
+    sys.stdout.write(f"VST3_INFO_JSON:{json.dumps(info, ensure_ascii=False)}\n")
+    sys.stdout.flush()
+
+
+def process_vst3_open_editor(args):
+    """
+    Loads a .vst3 plugin, restores its binary raw_state (if state_file exists),
+    opens the native OS VST3 GUI window (plugin.show_editor()), waits for the user
+    to finish configuring (e.g. inside iZotope Ozone / FabFilter) and close the window,
+    and immediately serializes the updated binary raw_state to disk.
+    """
+    import time
+    vst3_path = getattr(args, "vst3_path", None) or args.input
+    sub_plugin = getattr(args, "sub_plugin_name", None) or ""
+    state_file = getattr(args, "state_file", None) or args.output
+
+    if not state_file:
+        raise ValueError("Не указан путь state_file для сохранения состояния VST3 плагина")
+
+    sys.stdout.write(f"LOG:Загрузка VST3 плагина: {os.path.basename(vst3_path)}...\n")
+    sys.stdout.flush()
+
+    plugin, resolved_name, sub_plugins = _load_vst3_plugin_instance(vst3_path, sub_plugin)
+
+    restored_prev_state = False
+    if os.path.isfile(state_file) and os.path.getsize(state_file) > 0:
+        try:
+            with open(state_file, "rb") as f:
+                prev_bytes = f.read()
+            if prev_bytes:
+                plugin.raw_state = prev_bytes
+                restored_prev_state = True
+                sys.stdout.write(f"LOG:Восстановлен предыдущий слепок состояния VST3 ({len(prev_bytes)} байт).\n")
+                sys.stdout.flush()
+        except Exception as e:
+            sys.stdout.write(f"LOG:Не удалось применить предыдущий слепок состояния, открываем заводской пресет: {e}\n")
+            sys.stdout.flush()
+
+    sys.stdout.write(f"LOG:Открытие нативного интерфейса VST3 «{resolved_name}». Настройте плагин и закройте его окно для сохранения...\n")
+    sys.stdout.flush()
+
+    if not hasattr(plugin, "show_editor"):
+        raise RuntimeError(f"Данная сборка pedalboard не поддерживает вызов нативного окна show_editor() для {resolved_name}")
+
+    plugin.show_editor()
+
+    raw_bytes = plugin.raw_state
+    os.makedirs(os.path.dirname(os.path.abspath(state_file)), exist_ok=True)
+    temp_state = f"{state_file}.tmp_{os.getpid()}"
+    with open(temp_state, "wb") as f:
+        f.write(raw_bytes)
+    if os.path.exists(state_file):
+        try:
+            os.remove(state_file)
+        except Exception:
+            pass
+    os.rename(temp_state, state_file)
+
+    params_snapshot = _extract_vst3_params_snapshot(plugin)
+    saved_report = {
+        "success": True,
+        "vst3Path": vst3_path,
+        "pluginName": resolved_name,
+        "subPlugins": sub_plugins,
+        "stateFile": state_file,
+        "stateSizeBytes": len(raw_bytes),
+        "restoredPrevious": restored_prev_state,
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "parametersPreview": params_snapshot
+    }
+    sys.stdout.write(f"LOG:Слепок состояния VST3 «{resolved_name}» успешно сохранен ({len(raw_bytes)} байт).\n")
+    sys.stdout.write(f"VST3_EDITOR_SAVED_JSON:{json.dumps(saved_report, ensure_ascii=False)}\n")
+    sys.stdout.flush()
+
+
+def _find_best_speech_window(audio_stereo, sample_rate, snippet_duration_sec=12.0):
+    """
+    Scans the audio track in 0.25s hops to locate the window of length snippet_duration_sec
+    with the highest active speech energy (avoiding silence).
+    """
+    import numpy as np
+    total_samples = audio_stereo.shape[-1]
+    win_samples = int(round(snippet_duration_sec * sample_rate))
+    if total_samples <= win_samples or total_samples == 0:
+        return 0.0, min(snippet_duration_sec, total_samples / float(sample_rate))
+
+    mono = np.mean(audio_stereo, axis=0) if audio_stereo.ndim > 1 else audio_stereo
+    hop = max(1, int(0.25 * sample_rate))
+    n_blocks = total_samples // hop
+    if n_blocks < 2:
+        return 0.0, snippet_duration_sec
+
+    trimmed = mono[: n_blocks * hop].reshape(n_blocks, hop)
+    block_energy = np.mean(trimmed ** 2, axis=1)
+
+    blocks_per_win = max(1, int(round(snippet_duration_sec / 0.25)))
+    if n_blocks <= blocks_per_win:
+        return 0.0, snippet_duration_sec
+
+    kernel = np.ones(blocks_per_win, dtype=np.float32)
+    window_sums = np.convolve(block_energy, kernel, mode="valid")
+    best_block_idx = int(np.argmax(window_sums))
+    start_sec = round(best_block_idx * 0.25, 2)
+    max_start = max(0.0, (total_samples / float(sample_rate)) - snippet_duration_sec)
+    start_sec = min(start_sec, round(max_start, 2))
+    return start_sec, snippet_duration_sec
+
+
+def _run_vst3_on_audio_array(plugin, audio_stereo, sample_rate, wet_mix_percent=100.0, output_gain_db=0.0, reset_plugin=True, emit_prog=False):
+    """
+    Runs a loaded VST3 plugin on a stereo float32 C-contiguous array [2, samples],
+    with tail warmup/padding, sample-accurate length preservation, parallel Dry/Wet mix,
+    and output gain + True Peak protection.
+    """
+    import numpy as np
+    orig_len = audio_stereo.shape[-1]
+    if orig_len == 0:
+        return audio_stereo
+
+    if audio_stereo.ndim == 1:
+        work_audio = np.vstack([audio_stereo, audio_stereo])
+    elif audio_stereo.shape[0] == 1:
+        work_audio = np.vstack([audio_stereo, audio_stereo])
+    elif audio_stereo.shape[0] > 2:
+        work_audio = audio_stereo[:2, :]
+    else:
+        work_audio = audio_stereo
+
+    work_audio = np.ascontiguousarray(work_audio, dtype=np.float32)
+
+    if reset_plugin and hasattr(plugin, "reset"):
+        try:
+            plugin.reset()
+        except Exception:
+            pass
+
+    pad_samples = int(0.25 * sample_rate)
+    padded_input = np.pad(work_audio, ((0, 0), (0, pad_samples)), mode="constant")
+    padded_input = np.ascontiguousarray(padded_input, dtype=np.float32)
+
+    block_seconds = 30.0
+    block_samples = int(block_seconds * sample_rate)
+    total_padded = padded_input.shape[-1]
+
+    if total_padded <= block_samples * 1.5:
+        if emit_prog:
+            emit_progress(45.0, "Рендер звука через нативный движок VST3...")
+        wet_padded = plugin(padded_input, sample_rate, reset=False)
+    else:
+        out_chunks = []
+        cursor = 0
+        while cursor < total_padded:
+            end_c = min(total_padded, cursor + block_samples)
+            chunk = np.ascontiguousarray(padded_input[:, cursor:end_c], dtype=np.float32)
+            proc_chunk = plugin(chunk, sample_rate, reset=False)
+            out_chunks.append(proc_chunk)
+            cursor = end_c
+            if emit_prog:
+                pct = 20.0 + 65.0 * (cursor / float(total_padded))
+                emit_progress(pct, f"Обработка VST3 плагином: {int((cursor / float(total_padded)) * 100)}%...")
+        wet_padded = np.concatenate(out_chunks, axis=-1)
+
+    wet_audio = np.ascontiguousarray(wet_padded[:, :orig_len], dtype=np.float32)
+
+    wet_ratio = max(0.0, min(1.0, float(wet_mix_percent) / 100.0))
+    if wet_ratio < 0.999:
+        blended = work_audio * (1.0 - wet_ratio) + wet_audio * wet_ratio
+    else:
+        blended = wet_audio
+
+    if abs(float(output_gain_db)) > 0.05:
+        gain_lin = 10.0 ** (float(output_gain_db) / 20.0)
+        blended = blended * gain_lin
+
+    peak = float(np.max(np.abs(blended))) if blended.size > 0 else 0.0
+    if peak > 0.985:
+        blended = blended * (0.985 / peak)
+
+    return np.ascontiguousarray(blended, dtype=np.float32)
+
+
+def process_vst3_preview_snippet(args):
+    """
+    Renders a fast 5-15s preview snippet (Before Dry WAV + After Wet WAV) using the selected VST3 plugin and .vststate.
+    Automatically finds the loudest speech segment if snippet_start_sec < 0.
+    """
+    import numpy as np
+    input_path = args.input
+    wet_output_path = args.output
+    dry_output_path = getattr(args, "dry_output", None)
+    vst3_path = getattr(args, "vst3_path", None)
+    sub_plugin = getattr(args, "sub_plugin_name", None) or ""
+    state_file = getattr(args, "state_file", None) or ""
+    wet_mix_percent = float(getattr(args, "wet_mix_percent", 100.0))
+    output_gain_db = float(getattr(args, "output_gain_db", 0.0))
+    snippet_start_sec = float(getattr(args, "snippet_start_sec", -1.0))
+    snippet_duration_sec = max(3.0, min(30.0, float(getattr(args, "snippet_duration_sec", 12.0))))
+
+    if not dry_output_path:
+        base, ext = os.path.splitext(wet_output_path)
+        dry_output_path = f"{base}_dry.wav"
+
+    emit_progress(10.0, "Загрузка дорожки для быстрого превью VST3...")
+    audio_data, sample_rate, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=48000, force_stereo=True, remove_dc=True
+    )
+
+    if snippet_start_sec < 0.0:
+        start_sec, dur_sec = _find_best_speech_window(audio_data, sample_rate, snippet_duration_sec)
+    else:
+        total_sec = audio_data.shape[-1] / float(sample_rate)
+        start_sec = max(0.0, min(snippet_start_sec, max(0.0, total_sec - 1.0)))
+        dur_sec = min(snippet_duration_sec, max(1.0, total_sec - start_sec))
+
+    warmup_sec = min(0.5, start_sec)
+    extract_start_sample = int(round((start_sec - warmup_sec) * sample_rate))
+    warmup_samples = int(round(warmup_sec * sample_rate))
+    snippet_samples = int(round(dur_sec * sample_rate))
+    extract_end_sample = min(audio_data.shape[-1], extract_start_sample + warmup_samples + snippet_samples)
+
+    raw_slice = np.ascontiguousarray(audio_data[:, extract_start_sample:extract_end_sample], dtype=np.float32)
+    dry_slice = np.ascontiguousarray(raw_slice[:, warmup_samples:], dtype=np.float32)
+
+    emit_progress(35.0, f"Инициализация VST3 плагина «{os.path.basename(vst3_path)}»...")
+    plugin, resolved_name, _ = _load_vst3_plugin_instance(vst3_path, sub_plugin)
+
+    if state_file and os.path.isfile(state_file) and os.path.getsize(state_file) > 0:
+        with open(state_file, "rb") as f:
+            plugin.raw_state = f.read()
+
+    emit_progress(60.0, f"Рендер превью фрагмента ({start_sec:.1f}с – {start_sec + dur_sec:.1f}с)...")
+    processed_full = _run_vst3_on_audio_array(
+        plugin,
+        raw_slice,
+        sample_rate,
+        wet_mix_percent=wet_mix_percent,
+        output_gain_db=output_gain_db,
+        reset_plugin=True,
+        emit_prog=False
+    )
+    wet_slice = np.ascontiguousarray(processed_full[:, warmup_samples:], dtype=np.float32)
+
+    os.makedirs(os.path.dirname(os.path.abspath(wet_output_path)), exist_ok=True)
+    os.makedirs(os.path.dirname(os.path.abspath(dry_output_path)), exist_ok=True)
+
+    AudioConditioner.save_audio(dry_output_path, dry_slice, current_sr=sample_rate, target_sr=48000, orig_channels=2, bit_depth="PCM_24")
+    AudioConditioner.save_audio(wet_output_path, wet_slice, current_sr=sample_rate, target_sr=48000, orig_channels=2, bit_depth="PCM_24")
+
+    peak_before = float(np.max(np.abs(dry_slice))) if dry_slice.size > 0 else 0.0
+    peak_after = float(np.max(np.abs(wet_slice))) if wet_slice.size > 0 else 0.0
+    peak_db_before = round(20.0 * math.log10(max(peak_before, 1e-6)), 2)
+    peak_db_after = round(20.0 * math.log10(max(peak_after, 1e-6)), 2)
+
+    preview_info = {
+        "success": True,
+        "pluginName": resolved_name,
+        "startSec": round(start_sec, 2),
+        "durationSec": round(dur_sec, 2),
+        "dryPath": dry_output_path,
+        "wetPath": wet_output_path,
+        "peakDbBefore": peak_db_before,
+        "peakDbAfter": peak_db_after
+    }
+    emit_progress(100.0, "Превью фрагмента VST3 готово!")
+    sys.stdout.write(f"VST3_PREVIEW_JSON:{json.dumps(preview_info, ensure_ascii=False)}\n")
+    sys.stdout.flush()
+
+
+def process_vst3_process(args):
+    """
+    Processes a full audio track through a 64-bit VST3 plugin with restored binary raw_state.
+    """
+    import numpy as np
+    input_path = args.input
+    output_path = args.output
+    vst3_path = getattr(args, "vst3_path", None)
+    sub_plugin = getattr(args, "sub_plugin_name", None) or ""
+    state_file = getattr(args, "state_file", None) or ""
+    wet_mix_percent = float(getattr(args, "wet_mix_percent", 100.0))
+    output_gain_db = float(getattr(args, "output_gain_db", 0.0))
+    reset_between = str(getattr(args, "reset_between_tracks", "true")).lower() in ["true", "1", "yes"]
+
+    emit_progress(5.0, f"Загрузка VST3 плагина: {os.path.basename(vst3_path or '')}...")
+    plugin, resolved_name, _ = _load_vst3_plugin_instance(vst3_path, sub_plugin)
+
+    state_loaded = False
+    if state_file and os.path.isfile(state_file) and os.path.getsize(state_file) > 0:
+        try:
+            with open(state_file, "rb") as f:
+                raw_bytes = f.read()
+            if raw_bytes:
+                plugin.raw_state = raw_bytes
+                state_loaded = True
+                sys.stdout.write(f"LOG:Успешно загружен слепок состояния VST3 «{resolved_name}» ({len(raw_bytes)} байт).\n")
+                sys.stdout.flush()
+        except Exception as e:
+            sys.stdout.write(f"LOG:Предупреждение при загрузке состояния VST3: {e}\n")
+            sys.stdout.flush()
+
+    emit_progress(15.0, f"Чтение аудиодорожки: {os.path.basename(input_path)}...")
+    audio_data, sample_rate, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=48000, force_stereo=True, remove_dc=True
+    )
+
+    processed = _run_vst3_on_audio_array(
+        plugin,
+        audio_data,
+        sample_rate,
+        wet_mix_percent=wet_mix_percent,
+        output_gain_db=output_gain_db,
+        reset_plugin=reset_between,
+        emit_prog=True
+    )
+
+    emit_progress(92.0, f"Сохранение обработанного WAV 24-bit 48kHz: {os.path.basename(output_path)}...")
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    AudioConditioner.save_audio(
+        output_path,
+        processed,
+        current_sr=sample_rate,
+        target_sr=48000,
+        orig_channels=2,
+        bit_depth="PCM_24"
+    )
+
+    emit_progress(100.0, f"VST3 обработка «{resolved_name}» завершена!")
+    report = {
+        "success": True,
+        "output": output_path,
+        "pluginName": resolved_name,
+        "stateLoaded": state_loaded,
+        "wetMixPercent": wet_mix_percent,
+        "outputGainDb": output_gain_db
+    }
+    sys.stdout.write(f"RESULT:{json.dumps(report, ensure_ascii=False)}\n")
+    sys.stdout.flush()
+
+
 # ------------------------------------------------------------------------------
 # 10. CLI ROUTER
 # ------------------------------------------------------------------------------
@@ -2549,6 +3000,17 @@ def main():
     parser.add_argument("--air_limit_db", type=float, default=3.0, help="Air/sibilance boost limit in dB")
     parser.add_argument("--smoothness", type=int, default=3, help="Spectral curve smoothing factor")
 
+    # Native VST3 Plugin Host Parameters
+    parser.add_argument("--vst3_path", default="", help="Path to .vst3 plugin bundle or binary")
+    parser.add_argument("--sub_plugin_name", default="", help="Optional sub-plugin name for multi-plugin .vst3 bundles")
+    parser.add_argument("--state_file", default="", help="Path to .vststate binary raw_state file")
+    parser.add_argument("--wet_mix_percent", type=float, default=100.0, help="Parallel Dry/Wet mix 0..100")
+    parser.add_argument("--output_gain_db", type=float, default=0.0, help="Post-plugin output gain in dB")
+    parser.add_argument("--reset_between_tracks", default="true", help="Reset plugin internal buffers before processing")
+    parser.add_argument("--snippet_start_sec", type=float, default=-1.0, help="Preview snippet start time in seconds (-1 for auto speech detection)")
+    parser.add_argument("--snippet_duration_sec", type=float, default=12.0, help="Preview snippet duration in seconds")
+    parser.add_argument("--dry_output", default="", help="Path to save dry (unprocessed) preview snippet WAV")
+
     # Whisper / Diarization
     parser.add_argument("--language", default="ru")
     parser.add_argument("--hf_token", default="")
@@ -2563,7 +3025,15 @@ def main():
         download_model_cli(args)
         return
 
-    if not (args.input or getattr(args, "dub_audio", None)) and args.mode not in ["check_env", "download_model"]:
+    if args.mode == "vst3_inspect":
+        process_vst3_inspect(args)
+        return
+
+    if args.mode == "vst3_open_editor":
+        process_vst3_open_editor(args)
+        return
+
+    if not (args.input or getattr(args, "dub_audio", None)) and args.mode not in ["check_env", "download_model", "vst3_inspect", "vst3_open_editor"]:
         sys.stderr.write(f"ERROR in {args.mode}: Input file not found: {args.input}\n")
         sys.exit(1)
 
@@ -2615,6 +3085,10 @@ def main():
             process_mfa_analyze(args)
         elif args.mode == "loudness_norm":
             process_loudness_norm(args)
+        elif args.mode == "vst3_preview_snippet":
+            process_vst3_preview_snippet(args)
+        elif args.mode in ["vst3_process", "vst3_rack_processor"]:
+            process_vst3_process(args)
         else:
             raise ValueError(f"Неизвестный режим: {args.mode}")
 
@@ -2626,3 +3100,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

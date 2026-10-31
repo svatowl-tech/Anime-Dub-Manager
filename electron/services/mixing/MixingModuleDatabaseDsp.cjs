@@ -1024,7 +1024,55 @@ const MODULE_DATABASE_DSP = [
         params: { targetLufs: -23.0, truePeak: -1.0, lra: 11.0 }
       }
     ]
+  },
+  {
+    id: 'vst3_rack_processor',
+    category: 'vst3',
+    defaultPrefix: 'vst3_',
+    title: 'VST3 Плагин — Нативный интерфейс (iZotope Ozone / FabFilter / Waves)',
+    description: 'Подключает любой 64-битный VST3-плагин с открытием его оригинального графического окна (Native GUI), сохранением бинарного слепка состояния (.vststate), быстрым A/B превью фрагмента и поддержкой поканальной, индивидуальной и шинной маршрутизации.',
+    icon: 'Sliders',
+    isUltimate: true,
+    defaultParams: {
+      vst3Path: '',
+      pluginName: '',
+      subPluginName: '',
+      vendor: '',
+      routingMode: 'batch_all',
+      globalStateFile: '',
+      globalStateUpdatedAt: '',
+      globalStateSizeBytes: 0,
+      perTrackStateFiles: {},
+      wetMixPercent: 100,
+      outputGainDb: 0.0,
+      resetBetweenTracks: true,
+      passThroughUnselected: true,
+      snippetDurationSec: 12,
+      snippetAutoFindSpeech: true,
+      snippetStartSec: 0
+    },
+    presets: [
+      {
+        id: 'vst3_batch_dubbers',
+        title: '🎙 Пакетная обработка всех дабберов (Единый слепок VST3)',
+        description: 'Применяет один настроенный VST3-плагин ко всем отмеченным дорожкам дабберов',
+        params: { routingMode: 'batch_all', wetMixPercent: 100, outputGainDb: 0.0, resetBetweenTracks: true, passThroughUnselected: true }
+      },
+      {
+        id: 'vst3_per_actor_custom',
+        title: '🎭 Индивидуальный VST3 под каждого даббера (Персональное окно GUI)',
+        description: 'Позволяет открыть окно VST3 и сохранить отдельный слепок настроек для каждого актера',
+        params: { routingMode: 'per_track', wetMixPercent: 100, outputGainDb: 0.0, resetBetweenTracks: true, passThroughUnselected: true }
+      },
+      {
+        id: 'vst3_ozone_master_bus',
+        title: '👑 Мастеринг общей шины голосов (iZotope Ozone / Master Bus)',
+        description: 'Обрабатывает склеенную шину голосов (voices_master) или суммарный микс мастеринговым плагином',
+        params: { routingMode: 'master_bus', wetMixPercent: 100, outputGainDb: 0.0, resetBetweenTracks: true, passThroughUnselected: false }
+      }
+    ]
   }
 ];
 
 module.exports = { MODULE_DATABASE_DSP };
+

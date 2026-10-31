@@ -507,6 +507,133 @@ function registerMixingHandlers(getData, mainWindow) {
       onLog
     });
   }));
+
+  // ============================================================================
+  // VST3 NATIVE PLUGIN Rack & Editor IPC Handlers (iZotope Ozone, FabFilter, etc.)
+  // ============================================================================
+  ipcMain.handle('mixing-scan-vst3-plugins', wrapIpcHandler(async (event, params) => {
+    const { customDirs } = params || {};
+    return await MixingPipelineService.scanSystemVst3Plugins({ customDirs });
+  }));
+
+  ipcMain.handle('mixing-select-vst3-file', wrapIpcHandler(async () => {
+    const isMac = process.platform === 'darwin';
+    const result = await dialog.showOpenDialog({
+      title: 'Выбрать 64-bit VST3 плагин (.vst3)',
+      properties: isMac ? ['openFile', 'openDirectory'] : ['openFile'],
+      filters: [
+        { name: 'Плагины VST3 (*.vst3)', extensions: ['vst3'] },
+        { name: 'Все файлы', extensions: ['*'] }
+      ]
+    });
+
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return { canceled: true, vst3Path: '' };
+    }
+
+    const vst3Path = result.filePaths[0];
+    const baseName = path.basename(vst3Path, '.vst3');
+    return {
+      canceled: false,
+      vst3Path,
+      name: baseName
+    };
+  }));
+
+  ipcMain.handle('mixing-inspect-vst3-plugin', wrapIpcHandler(async (event, params) => {
+    const { vst3Path, subPluginName, stateFile } = params || {};
+    const onLog = createLogSender('vst3_inspect');
+    return await AudioNeuralService.inspectVst3Plugin({
+      vst3Path,
+      subPluginName,
+      stateFile,
+      onLog
+    });
+  }));
+
+  ipcMain.handle('mixing-open-vst3-editor', wrapIpcHandler(async (event, params) => {
+    const { episode, targetDir, stepId, vst3Path, subPluginName, trackKey, stateFile } = params || {};
+    const baseDir = resolveMixingDir(episode, targetDir);
+    const onLog = createLogSender(stepId || 'vst3_editor');
+    return await MixingPipelineService.openVst3NativeEditor({
+      baseDir,
+      stepId,
+      vst3Path,
+      subPluginName,
+      trackKey,
+      stateFile,
+      onLog
+    });
+  }));
+
+  ipcMain.handle('mixing-preview-vst3-snippet', wrapIpcHandler(async (event, params) => {
+    const {
+      episode,
+      targetDir,
+      stepId,
+      vst3Path,
+      subPluginName,
+      stateFile,
+      inputPath,
+      trackKey,
+      wetMixPercent,
+      outputGainDb,
+      snippetStartSec,
+      snippetDurationSec
+    } = params || {};
+    const baseDir = resolveMixingDir(episode, targetDir);
+    const onProgress = (p) => sendProgress('mixing-progress', { ...p, stepId: stepId || 'vst3_preview' });
+    const onLog = createLogSender(stepId || 'vst3_preview');
+    return await MixingPipelineService.previewVst3Snippet({
+      baseDir,
+      stepId,
+      vst3Path,
+      subPluginName,
+      stateFile,
+      inputPath,
+      trackKey,
+      wetMixPercent,
+      outputGainDb,
+      snippetStartSec,
+      snippetDurationSec,
+      onProgress,
+      onLog
+    });
+  }));
+
+  ipcMain.handle('mixing-list-vst3-presets', wrapIpcHandler(async () => {
+    return await MixingPipelineService.listVst3UserPresets();
+  }));
+
+  ipcMain.handle('mixing-save-vst3-preset', wrapIpcHandler(async (event, params) => {
+    const { title, description, vst3Path, pluginName, subPluginName, stateFile, wetMixPercent, outputGainDb } = params || {};
+    return await MixingPipelineService.saveVst3UserPreset({
+      title,
+      description,
+      vst3Path,
+      pluginName,
+      subPluginName,
+      stateFile,
+      wetMixPercent,
+      outputGainDb
+    });
+  }));
+
+  ipcMain.handle('mixing-apply-vst3-preset', wrapIpcHandler(async (event, params) => {
+    const { episode, targetDir, presetId, stepId, trackKey } = params || {};
+    const baseDir = resolveMixingDir(episode, targetDir);
+    return await MixingPipelineService.applyVst3UserPreset({
+      presetId,
+      baseDir,
+      stepId,
+      trackKey
+    });
+  }));
+
+  ipcMain.handle('mixing-delete-vst3-preset', wrapIpcHandler(async (event, params) => {
+    const { presetId } = params || {};
+    return await MixingPipelineService.deleteVst3UserPreset({ presetId });
+  }));
 }
 
 module.exports = { registerMixingHandlers };
