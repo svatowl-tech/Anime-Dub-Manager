@@ -457,6 +457,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [systemVst3Plugins, setSystemVst3Plugins] = useState<any[]>([]);
   const [isScanningVst3, setIsScanningVst3] = useState<boolean>(false);
   const [vst3SearchQuery, setVst3SearchQuery] = useState<string>('');
+  const [vst3SubPluginSearchQuery, setVst3SubPluginSearchQuery] = useState<string>('');
   const [vst3UserPresets, setVst3UserPresets] = useState<any[]>([]);
   const [newVst3PresetTitle, setNewVst3PresetTitle] = useState<string>('');
   const [openingVst3EditorKey, setOpeningVst3EditorKey] = useState<string | null>(null);
@@ -1655,30 +1656,85 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }
   }, [hasVst3StepInPipeline, handleScanSystemVst3Plugins, loadVst3UserPresets]);
 
-  const handleSelectVst3PluginForStep = async (step: PipelineStep, vst3Path: string, fallbackName?: string) => {
-    if (!vst3Path) return;
-    const cleanName = fallbackName || vst3Path.split(/[/\\]/).pop()?.replace(/\.vst3$/i, '') || 'VST3 Plugin';
+  const handleSelectVst3PluginForStep = async (
+    step: PipelineStep,
+    rawVst3Value: string,
+    fallbackName?: string,
+    explicitSubPluginName?: string,
+    knownSubPlugins?: string[]
+  ) => {
+    if (!rawVst3Value) return;
+
+    let vst3Path = rawVst3Value;
+    let targetSubPlugin = explicitSubPluginName || '';
+    if (rawVst3Value.includes(':::')) {
+      const [parsedPath, parsedSub] = rawVst3Value.split(':::');
+      vst3Path = parsedPath;
+      if (!targetSubPlugin && parsedSub) {
+        targetSubPlugin = parsedSub;
+      }
+    }
+
+    const matchingSystemEntry = systemVst3Plugins.find(
+      (p) => p.vst3Path === vst3Path && Array.isArray(p.subPlugins) && p.subPlugins.length > 0
+    );
+    const initialSubPlugins = Array.isArray(knownSubPlugins) && knownSubPlugins.length > 0
+      ? knownSubPlugins
+      : (matchingSystemEntry?.subPlugins || (step.params?.vst3Path === vst3Path && Array.isArray(step.params?.availableSubPlugins) ? step.params.availableSubPlugins : []));
+
+    const cleanName =
+      targetSubPlugin ||
+      fallbackName ||
+      vst3Path.split(/[/\\]/).pop()?.replace(/\.vst3$/i, '') ||
+      'VST3 Plugin';
+
+    const isPluginChanged =
+      step.params?.vst3Path !== vst3Path ||
+      (targetSubPlugin && step.params?.subPluginName && step.params.subPluginName !== targetSubPlugin);
+
     handleUpdateStepParamsBatch(step.stepId, {
       vst3Path,
       pluginName: cleanName,
-      subPluginName: ''
+      subPluginName: targetSubPlugin || (initialSubPlugins.length > 0 ? initialSubPlugins[0] : ''),
+      availableSubPlugins: initialSubPlugins,
+      ...(isPluginChanged ? {
+        globalStateFile: '',
+        globalStateSizeBytes: 0,
+        parametersPreview: {}
+      } : {})
     }, true);
-    mixLog('info', 'VST3', `Выбран VST3 плагин «${cleanName}»: ${vst3Path}`);
+    mixLog('info', 'VST3', `Выбран VST3 плагин «${cleanName}»: ${vst3Path}${targetSubPlugin ? ` [Sub-Plugin: ${targetSubPlugin}]` : ''}`);
 
     try {
       const inspectRes: any = await ipcSafe.invoke('mixing-inspect-vst3-plugin', {
-        vst3Path
+        vst3Path,
+        subPluginName: targetSubPlugin
       });
       if (inspectRes && inspectRes.success) {
-        const subPlugins = Array.isArray(inspectRes.subPlugins) ? inspectRes.subPlugins : [];
+        const subPlugins =
+          Array.isArray(inspectRes.subPlugins) && inspectRes.subPlugins.length > 0
+            ? inspectRes.subPlugins
+            : initialSubPlugins;
+        const resolvedSub =
+          targetSubPlugin ||
+          (subPlugins.length > 1 && inspectRes.pluginName && subPlugins.includes(inspectRes.pluginName)
+            ? inspectRes.pluginName
+            : (subPlugins.length > 0 ? subPlugins[0] : ''));
+        const resolvedDisplay = resolvedSub || inspectRes.pluginName || cleanName;
+
         handleUpdateStepParamsBatch(step.stepId, {
           vst3Path,
-          pluginName: inspectRes.pluginName || cleanName,
-          subPluginName: subPlugins.length > 0 ? subPlugins[0] : '',
+          pluginName: resolvedDisplay,
+          subPluginName: resolvedSub,
           availableSubPlugins: subPlugins,
-          totalParameters: inspectRes.totalParameters || 0
+          totalParameters: inspectRes.totalParameters || 0,
+          parametersPreview: inspectRes.parametersPreview || {}
         }, true);
-        toast.success(`Плагин «${inspectRes.pluginName || cleanName}» подключен (${inspectRes.totalParameters || 0} параметров)`);
+        toast.success(
+          subPlugins.length > 1
+            ? `Плагин «${resolvedDisplay}» подключен из контейнера (${subPlugins.length} плагинов в WaveShell, ${inspectRes.totalParameters || 0} пар.)`
+            : `Плагин «${resolvedDisplay}» подключен (${inspectRes.totalParameters || 0} параметров)`
+        );
       }
     } catch (e: any) {
       mixLog('warn', 'VST3', `Предупреждение при инспекции VST3 плагина: ${e.message || String(e)}`);
@@ -4177,7 +4233,19 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           const globalStateFile = step.params?.globalStateFile || '';
                           const globalStateSizeKb = step.params?.globalStateSizeBytes ? (step.params.globalStateSizeBytes / 1024).toFixed(1) : null;
                           const perTrackStates: Record<string, any> = step.params?.perTrackStates || step.params?.perTrackStateFiles || {};
-                          const subPlugins: string[] = Array.isArray(step.params?.availableSubPlugins) ? step.params.availableSubPlugins : [];
+                          const matchingShellEntry = systemVst3Plugins.find(
+                            (p) => p.vst3Path === vst3Path && Array.isArray(p.subPlugins) && p.subPlugins.length > 1
+                          );
+                          const subPlugins: string[] =
+                            Array.isArray(step.params?.availableSubPlugins) && step.params.availableSubPlugins.length > 1
+                              ? step.params.availableSubPlugins
+                              : (matchingShellEntry?.subPlugins || (Array.isArray(step.params?.availableSubPlugins) ? step.params.availableSubPlugins : []));
+                          const activeSubPlugin = step.params?.subPluginName || (subPlugins.length > 0 ? subPlugins[0] : '');
+                          const isWaveShellPath = /waveshell/i.test(vst3Path);
+                          const filteredSubPlugins = subPlugins.filter((sp) => {
+                            if (!vst3SubPluginSearchQuery.trim()) return true;
+                            return sp.toLowerCase().includes(vst3SubPluginSearchQuery.toLowerCase());
+                          });
                           const rawCandidates: any[] = step.candidateInputs || step.inputSlots?.[0]?.tracks || manifest?.sourceFiles?.dubberTracks || [];
                           const candidateTracks: any[] = rawCandidates.filter((c: any) => !c.excluded);
                           const previewData = vst3PreviewDataByStep[step.stepId];
@@ -4187,8 +4255,17 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                           const filteredSystemPlugins = systemVst3Plugins.filter(p => {
                             if (!vst3SearchQuery.trim()) return true;
                             const q = vst3SearchQuery.toLowerCase();
-                            return (p.name || '').toLowerCase().includes(q) || (p.vendor || '').toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q);
+                            return (
+                              (p.name || '').toLowerCase().includes(q) ||
+                              (p.vendor || '').toLowerCase().includes(q) ||
+                              (p.category || '').toLowerCase().includes(q) ||
+                              (p.shellName || '').toLowerCase().includes(q)
+                            );
                           });
+                          const compositeCurrentValue =
+                            activeSubPlugin && systemVst3Plugins.some((p) => p.vst3Path === vst3Path && p.subPluginName === activeSubPlugin)
+                              ? `${vst3Path}:::${activeSubPlugin}`
+                              : vst3Path;
 
                           return (
                             <div className="p-3.5 bg-neutral-900/95 border border-neutral-800 rounded-xl space-y-4">
@@ -4204,7 +4281,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     </span>
                                   </div>
                                   <p className="text-[11px] text-neutral-400 leading-snug">
-                                    Откройте родной графический интерфейс плагина (например, iZotope Ozone, FabFilter Pro-Q 3, TDR Nova), настройте цепочку модулей или пресет и закройте окно — бинарный слепок состояния автоматически сохранится в проект.
+                                    Откройте родной графический интерфейс плагина (например, iZotope Ozone, FabFilter Pro-Q 3, Waves CLA-2A / RVox / Clarity Vx), настройте цепочку модулей или пресет и закройте окно — бинарный слепок состояния автоматически сохранится в проект.
                                   </p>
                                 </div>
 
@@ -4214,7 +4291,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     onClick={() => handleScanSystemVst3Plugins(true)}
                                     disabled={isScanningVst3}
                                     className="px-2.5 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 rounded-lg text-[11px] font-medium flex items-center gap-1.5 transition"
-                                    title="Пересканировать системные папки VST3 (C:\Program Files\Common Files\VST3 и др.)"
+                                    title="Пересканировать системные папки VST3 и контейнеры WaveShell"
                                   >
                                     <RefreshCw className={`w-3.5 h-3.5 ${isScanningVst3 ? 'animate-spin text-purple-400' : 'text-neutral-400'}`} />
                                     <span>{isScanningVst3 ? 'Поиск...' : `Плагины (${systemVst3Plugins.length})`}</span>
@@ -4232,18 +4309,18 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                               </div>
 
                               {/* 1. VST3 Plugin Selector */}
-                              <div className="space-y-2 bg-neutral-950/80 p-3 rounded-lg border border-neutral-800">
+                              <div className="space-y-2.5 bg-neutral-950/80 p-3 rounded-lg border border-neutral-800">
                                 <div className="flex items-center justify-between gap-2">
                                   <label className="text-[11px] font-semibold text-neutral-200">
                                     1. Выберите 64-bit VST3 плагин:
                                   </label>
-                                  <div className="relative w-52">
+                                  <div className="relative w-60">
                                     <Search className="w-3 h-3 text-neutral-500 absolute left-2.5 top-2" />
                                     <input
                                       type="text"
                                       value={vst3SearchQuery}
                                       onChange={(e) => setVst3SearchQuery(e.target.value)}
-                                      placeholder="Фильтр (Ozone, FabFilter...)"
+                                      placeholder="Фильтр (Ozone, CLA-2A, RVox, FabFilter...)"
                                       className="w-full pl-7 pr-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-[11px] text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-purple-500"
                                     />
                                   </div>
@@ -4252,55 +4329,110 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                                   <div className="sm:col-span-2">
                                     <select
-                                      value={vst3Path}
+                                      value={compositeCurrentValue}
                                       onChange={(e) => {
-                                        const found = systemVst3Plugins.find(p => p.vst3Path === e.target.value);
-                                        handleSelectVst3PluginForStep(step, e.target.value, found?.name);
+                                        const val = e.target.value;
+                                        const found = systemVst3Plugins.find(
+                                          (p) => (p.subPluginName ? `${p.vst3Path}:::${p.subPluginName}` : p.vst3Path) === val || p.vst3Path === val
+                                        );
+                                        handleSelectVst3PluginForStep(
+                                          step,
+                                          val,
+                                          found?.name,
+                                          found?.subPluginName || '',
+                                          found?.subPlugins
+                                        );
                                       }}
                                       className="w-full px-2.5 py-1.5 bg-neutral-900 border border-neutral-800 rounded-lg text-xs text-neutral-100 font-medium focus:outline-none focus:border-purple-500"
                                     >
                                       <option value="">
                                         {systemVst3Plugins.length > 0
                                           ? `— Выберите из ${filteredSystemPlugins.length} найденных VST3 плагинов —`
-                                          : '— Системные плагинов не найдены (используйте «Обзор .vst3...») —'}
+                                          : '— Системные плагины не найдены (используйте «Обзор .vst3...») —'}
                                       </option>
-                                      {vst3Path && !systemVst3Plugins.some(p => p.vst3Path === vst3Path) && (
+                                      {vst3Path &&
+                                        !systemVst3Plugins.some(
+                                          (p) => (p.subPluginName ? `${p.vst3Path}:::${p.subPluginName}` : p.vst3Path) === compositeCurrentValue || p.vst3Path === vst3Path
+                                        ) && (
                                         <option value={vst3Path}>
                                           {pluginName} ({vst3Path})
                                         </option>
                                       )}
-                                      {filteredSystemPlugins.map((plug, pIdx) => (
-                                        <option key={`${plug.vst3Path}_${pIdx}`} value={plug.vst3Path}>
-                                          {plug.name} · {plug.vendor || 'VST3'} ({plug.category || 'FX'})
-                                        </option>
-                                      ))}
+                                      {filteredSystemPlugins.map((plug, pIdx) => {
+                                        const optValue = plug.subPluginName ? `${plug.vst3Path}:::${plug.subPluginName}` : plug.vst3Path;
+                                        return (
+                                          <option key={`${optValue}_${pIdx}`} value={optValue}>
+                                            {plug.name} · {plug.vendor || 'VST3'}{plug.shellName ? ` [${plug.shellName}]` : ''} ({plug.category || 'FX'})
+                                          </option>
+                                        );
+                                      })}
                                     </select>
                                   </div>
 
-                                  {subPlugins.length > 1 ? (
-                                    <div>
+                                  <div className="px-2.5 py-1.5 bg-neutral-900 border border-neutral-800/80 rounded-lg flex items-center justify-between text-[11px] font-mono tabular-nums text-neutral-300 truncate">
+                                    <span className="truncate" title={activeSubPlugin || pluginName || vst3Path || 'Файл не выбран'}>
+                                      {vst3Path ? (activeSubPlugin || pluginName) : 'Плагин не выбран'}
+                                    </span>
+                                    {step.params?.totalParameters ? (
+                                      <span className="text-purple-300 shrink-0 ml-1.5">{step.params.totalParameters} пар.</span>
+                                    ) : null}
+                                  </div>
+                                </div>
+
+                                {/* WaveShell / Multi-Plugin Sub-Plugin Selector */}
+                                {(subPlugins.length > 1 || isWaveShellPath) && (
+                                  <div className="pt-2 border-t border-neutral-800/80 space-y-1.5">
+                                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                                      <div className="flex items-center gap-2">
+                                        <span className="text-[11px] font-semibold text-purple-300">
+                                          Внутренний плагин контейнера WaveShell ({subPlugins.length} шт.):
+                                        </span>
+                                        {subPlugins.length === 0 && isWaveShellPath && (
+                                          <button
+                                            type="button"
+                                            onClick={() => handleSelectVst3PluginForStep(step, vst3Path, pluginName)}
+                                            className="px-2 py-0.5 bg-purple-900/50 hover:bg-purple-800/60 border border-purple-600/50 rounded text-[10px] text-purple-200 font-medium transition"
+                                          >
+                                            Загрузить список плагинов из шелла
+                                          </button>
+                                        )}
+                                      </div>
+                                      {subPlugins.length > 5 && (
+                                        <div className="relative w-56">
+                                          <Search className="w-3 h-3 text-neutral-500 absolute left-2.5 top-1.5" />
+                                          <input
+                                            type="text"
+                                            value={vst3SubPluginSearchQuery}
+                                            onChange={(e) => setVst3SubPluginSearchQuery(e.target.value)}
+                                            placeholder="Поиск в шелле (CLA, RVox, DeEsser, C6...)"
+                                            className="w-full pl-7 pr-2 py-0.5 bg-neutral-900 border border-neutral-800 rounded text-[11px] text-neutral-200 placeholder-neutral-500 focus:outline-none focus:border-purple-500"
+                                          />
+                                        </div>
+                                      )}
+                                    </div>
+
+                                    {subPlugins.length > 0 && (
                                       <select
-                                        value={step.params?.subPluginName || subPlugins[0] || ''}
-                                        onChange={(e) => handleUpdateStepParams(step.stepId, 'subPluginName', e.target.value)}
-                                        className="w-full px-2.5 py-1.5 bg-neutral-900 border border-purple-800/60 rounded-lg text-xs text-purple-200 font-medium"
-                                        title="Выбор суб-плагина внутри контейнера .vst3"
+                                        value={activeSubPlugin}
+                                        onChange={(e) => {
+                                          const chosenSub = e.target.value;
+                                          handleSelectVst3PluginForStep(step, vst3Path, chosenSub, chosenSub, subPlugins);
+                                        }}
+                                        className="w-full px-2.5 py-1.5 bg-neutral-900 border border-purple-700/60 rounded-lg text-xs text-purple-100 font-semibold focus:outline-none focus:border-purple-400"
+                                        title="Выбор конкретного плагина внутри контейнера WaveShell / .vst3"
                                       >
-                                        {subPlugins.map((sp) => (
-                                          <option key={sp} value={sp}>{sp}</option>
+                                        {activeSubPlugin && !filteredSubPlugins.includes(activeSubPlugin) && (
+                                          <option value={activeSubPlugin}>{activeSubPlugin}</option>
+                                        )}
+                                        {filteredSubPlugins.map((sp) => (
+                                          <option key={sp} value={sp}>
+                                            {sp}
+                                          </option>
                                         ))}
                                       </select>
-                                    </div>
-                                  ) : (
-                                    <div className="px-2.5 py-1.5 bg-neutral-900 border border-neutral-800/80 rounded-lg flex items-center justify-between text-[11px] font-mono tabular-nums text-neutral-400 truncate">
-                                      <span className="truncate" title={vst3Path || 'Файл не выбран'}>
-                                        {vst3Path ? pluginName : 'Плагин не выбран'}
-                                      </span>
-                                      {step.params?.totalParameters ? (
-                                        <span className="text-purple-300 shrink-0 ml-1.5">{step.params.totalParameters} пар.</span>
-                                      ) : null}
-                                    </div>
-                                  )}
-                                </div>
+                                    )}
+                                  </div>
+                                )}
                               </div>
 
                               {/* 2. Routing Mode Selector (3 Modes) */}
@@ -4356,7 +4488,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     <div className="text-[11px] font-mono tabular-nums text-neutral-400">
                                       {globalStateFile
                                         ? `Активен слепок .vststate · ${globalStateSizeKb || '—'} КБ${step.params?.globalStateUpdatedAt ? ` · обновлен ${new Date(step.params.globalStateUpdatedAt).toLocaleTimeString('ru-RU')}` : ''}`
-                                        : 'Слепок состояния ещё не создан (будет использован заводской пресет плагина или нажмите кнопку справа)'}
+                                        : 'Слепок состояния ещё не создан (будет использован заводской пресет плагина — нажмите кнопку справа для настройки)'}
                                     </div>
                                   </div>
 
@@ -4378,6 +4510,29 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     </span>
                                   </button>
                                 </div>
+
+                                {step.params?.parametersPreview && typeof step.params.parametersPreview === 'object' && Object.keys(step.params.parametersPreview).length > 0 && (
+                                  <div className="pt-2 border-t border-neutral-800/80">
+                                    <div className="text-[10px] text-neutral-400 mb-1.5 flex items-center justify-between">
+                                      <span>Текущие параметры плагина ({Object.keys(step.params.parametersPreview).length}):</span>
+                                      <span className="font-mono text-neutral-500">
+                                        {globalStateFile ? 'Из сохраненного .vststate' : 'Заводские значения по умолчанию'}
+                                      </span>
+                                    </div>
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 max-h-28 overflow-y-auto pr-1">
+                                      {Object.entries(step.params.parametersPreview).slice(0, 16).map(([pKey, pInfo]: [string, any]) => (
+                                        <div key={pKey} className="px-2 py-1 rounded bg-neutral-900 border border-neutral-800/80 flex items-center justify-between gap-1.5 text-[10px]">
+                                          <span className="text-neutral-400 truncate" title={pInfo?.label || pKey}>
+                                            {pInfo?.label || pKey}
+                                          </span>
+                                          <span className="font-mono tabular-nums text-purple-300 shrink-0 font-semibold">
+                                            {typeof pInfo?.value === 'boolean' ? (pInfo.value ? 'ON' : 'OFF') : String(pInfo?.value ?? '')}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
 
                                 {/* Per-Track Individual Native GUI Setup Matrix */}
                                 {routingMode === 'per_track' && (

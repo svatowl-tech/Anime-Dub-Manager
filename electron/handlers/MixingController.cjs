@@ -552,10 +552,14 @@ function registerMixingHandlers(getData, mainWindow) {
   }));
 
   ipcMain.handle('mixing-open-vst3-editor', wrapIpcHandler(async (event, params) => {
-    const { episode, targetDir, stepId, vst3Path, subPluginName, trackKey, stateFile } = params || {};
-    const baseDir = resolveMixingDir(episode, targetDir);
+    const { episode, targetDir, workingDir, stepId, vst3Path, subPluginName, trackKey, stateFile } = params || {};
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
     const onLog = createLogSender(stepId || 'vst3_editor');
     return await MixingPipelineService.openVst3NativeEditor({
+      episode,
+      workingDir: workingDir || targetDir,
+      targetDir: targetDir || workingDir,
       baseDir,
       stepId,
       vst3Path,
@@ -570,6 +574,7 @@ function registerMixingHandlers(getData, mainWindow) {
     const {
       episode,
       targetDir,
+      workingDir,
       stepId,
       vst3Path,
       subPluginName,
@@ -581,10 +586,14 @@ function registerMixingHandlers(getData, mainWindow) {
       snippetStartSec,
       snippetDurationSec
     } = params || {};
-    const baseDir = resolveMixingDir(episode, targetDir);
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
     const onProgress = (p) => sendProgress('mixing-progress', { ...p, stepId: stepId || 'vst3_preview' });
     const onLog = createLogSender(stepId || 'vst3_preview');
     return await MixingPipelineService.previewVst3Snippet({
+      episode,
+      workingDir: workingDir || targetDir,
+      targetDir: targetDir || workingDir,
       baseDir,
       stepId,
       vst3Path,
@@ -606,9 +615,10 @@ function registerMixingHandlers(getData, mainWindow) {
   }));
 
   ipcMain.handle('mixing-save-vst3-preset', wrapIpcHandler(async (event, params) => {
-    const { title, description, vst3Path, pluginName, subPluginName, stateFile, wetMixPercent, outputGainDb } = params || {};
+    const { title, name, description, vst3Path, pluginName, subPluginName, stateFile, wetMixPercent, outputGainDb } = params || {};
     return await MixingPipelineService.saveVst3UserPreset({
-      title,
+      title: title || name,
+      name: name || title,
       description,
       vst3Path,
       pluginName,
@@ -620,10 +630,14 @@ function registerMixingHandlers(getData, mainWindow) {
   }));
 
   ipcMain.handle('mixing-apply-vst3-preset', wrapIpcHandler(async (event, params) => {
-    const { episode, targetDir, presetId, stepId, trackKey } = params || {};
-    const baseDir = resolveMixingDir(episode, targetDir);
+    const { episode, targetDir, workingDir, presetId, stepId, trackKey } = params || {};
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
     return await MixingPipelineService.applyVst3UserPreset({
       presetId,
+      episode,
+      workingDir: workingDir || targetDir,
+      targetDir: targetDir || workingDir,
       baseDir,
       stepId,
       trackKey

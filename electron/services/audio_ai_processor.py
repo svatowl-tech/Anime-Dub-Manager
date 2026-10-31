@@ -2464,10 +2464,74 @@ def download_model_cli(args):
 # ------------------------------------------------------------------------------
 # 9B. NATIVE VST3 PLUGIN HOST (PEDALBOARD C++/JUCE: NATIVE GUI + RAW_STATE + RENDER)
 # ------------------------------------------------------------------------------
+def _get_vst3_subplugins_list(vst3_path):
+    """
+    VST3_WAVESHELL_V3
+    Returns a clean, deduplicated list of all sub-plugin names inside a .vst3 container
+    (e.g. WaveShell1-VST3 15.x_x64.vst3 or multi-module bundles) without instantiating audio processors.
+    """
+    if not vst3_path or not os.path.exists(vst3_path):
+        return []
+
+    sub_names = []
+    try:
+        from pedalboard import VST3Plugin
+        if hasattr(VST3Plugin, "get_plugin_names_for_file"):
+            raw_list = VST3Plugin.get_plugin_names_for_file(vst3_path)
+            if isinstance(raw_list, (list, tuple, set)):
+                for item in raw_list:
+                    s = str(item).strip()
+                    if s and not s.lower().endswith(".vst3") and s not in sub_names:
+                        sub_names.append(s)
+    except Exception:
+        pass
+
+    if not sub_names:
+        try:
+            from pedalboard import load_plugin
+            plugin = load_plugin(vst3_path)
+            pname = getattr(plugin, "name", "")
+            if pname and not pname.lower().endswith(".vst3"):
+                sub_names.append(str(pname).strip())
+        except Exception as err:
+            import re
+            err_msg = str(err)
+            quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', err_msg)
+            for q in quoted:
+                cand = (q[0] or q[1] or "").strip()
+                if cand and not cand.lower().endswith(".vst3") and cand not in sub_names:
+                    sub_names.append(cand)
+            if not sub_names:
+                for line in err_msg.splitlines():
+                    clean_line = line.strip().lstrip("-*•").strip()
+                    if clean_line and not clean_line.endswith(":") and "vst3" not in clean_line.lower() and len(clean_line) < 90:
+                        if clean_line not in sub_names:
+                            sub_names.append(clean_line)
+
+    return sub_names
+
+
+def _prioritize_vst3_subplugin_candidates(candidates):
+    """
+    Orders sub-plugin candidates so standard Stereo / Mono audio effects come before
+    Surround (5.0, 5.1, 7.1, Ambisonics, B360, Quad) plugins that may fail stereo initialization.
+    """
+    import re
+    surround_re = re.compile(r"\b(5\.0|5\.1|7\.0|7\.1|ambisonic|b360|quad|lcr|360|surround|dolby|atmos)\b", re.I)
+    stereo_re = re.compile(r"\bstereo\b", re.I)
+
+    def sort_key(name):
+        is_surround = 1 if surround_re.search(name) else 0
+        is_stereo = 0 if stereo_re.search(name) else 1
+        return (is_surround, is_stereo, name.lower())
+
+    return sorted(candidates, key=sort_key)
+
+
 def _load_vst3_plugin_instance(vst3_path, sub_plugin_name=None):
     """
     Loads a 64-bit VST3 plugin bundle/file via Spotify Pedalboard (JUCE C++ host).
-    Automatically resolves multi-plugin VST3 bundles (such as iZotope Ozone / WavesShell).
+    Automatically resolves multi-plugin VST3 bundles (such as WaveShell / iZotope Ozone).
     Returns (plugin, resolved_name, available_subplugins).
     """
     if not vst3_path or not os.path.exists(vst3_path):
@@ -2481,27 +2545,46 @@ def _load_vst3_plugin_instance(vst3_path, sub_plugin_name=None):
             "Проверьте установку AI-окружения."
         ) from e
 
-    available_subplugins = []
+    available_subplugins = _get_vst3_subplugins_list(vst3_path)
+    req_sub = str(sub_plugin_name or "").strip()
+
+    if req_sub:
+        matched_sub = req_sub
+        if available_subplugins and req_sub not in available_subplugins:
+            lower_map = {s.lower(): s for s in available_subplugins}
+            if req_sub.lower() in lower_map:
+                matched_sub = lower_map[req_sub.lower()]
+        plugin = load_plugin(vst3_path, plugin_name=matched_sub)
+        full_list = available_subplugins if len(available_subplugins) > 0 else [matched_sub]
+        return plugin, getattr(plugin, "name", matched_sub) or matched_sub, full_list
+
+    if len(available_subplugins) > 1:
+        ordered = _prioritize_vst3_subplugin_candidates(available_subplugins)
+        last_err = None
+        for cand in ordered[:16]:
+            try:
+                plugin = load_plugin(vst3_path, plugin_name=cand)
+                return plugin, getattr(plugin, "name", cand) or cand, available_subplugins
+            except Exception as e:
+                last_err = e
+        raise RuntimeError(
+            f"Контейнер «{os.path.basename(vst3_path)}» содержит {len(available_subplugins)} плагинов. "
+            f"Выберите конкретный плагин из списка (последняя ошибка: {last_err})"
+        )
+
     try:
-        if sub_plugin_name and str(sub_plugin_name).strip():
-            plugin = load_plugin(vst3_path, plugin_name=str(sub_plugin_name).strip())
-            return plugin, getattr(plugin, "name", str(sub_plugin_name).strip()), [str(sub_plugin_name).strip()]
+        if len(available_subplugins) == 1:
+            only_name = available_subplugins[0]
+            try:
+                plugin = load_plugin(vst3_path, plugin_name=only_name)
+            except Exception:
+                plugin = load_plugin(vst3_path)
+            return plugin, getattr(plugin, "name", only_name) or only_name, available_subplugins
         else:
             plugin = load_plugin(vst3_path)
-            return plugin, getattr(plugin, "name", os.path.basename(vst3_path)), []
+            resolved = getattr(plugin, "name", os.path.basename(vst3_path))
+            return plugin, resolved, available_subplugins
     except Exception as first_err:
-        err_msg = str(first_err)
-        # Pedalboard raises an exception listing sub-plugin names when a .vst3 container holds multiple plugins
-        import re
-        quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', err_msg)
-        candidates = [q[0] or q[1] for q in quoted if (q[0] or q[1]) and not (q[0] or q[1]).endswith('.vst3')]
-        if candidates:
-            available_subplugins = candidates
-            chosen_name = candidates[0]
-            if sub_plugin_name and sub_plugin_name in candidates:
-                chosen_name = sub_plugin_name
-            plugin = load_plugin(vst3_path, plugin_name=chosen_name)
-            return plugin, chosen_name, available_subplugins
         raise RuntimeError(f"Не удалось загрузить VST3 плагин «{os.path.basename(vst3_path)}»: {first_err}") from first_err
 
 
@@ -2529,6 +2612,39 @@ def _extract_vst3_params_snapshot(plugin, max_params=48):
     return snapshot
 
 
+def process_vst3_list_shells(args):
+    """
+    Batch-enumerates sub-plugins inside one or more multi-plugin .vst3 containers (such as WaveShell1-VST3*.vst3)
+    without instantiating plugin GUIs or audio buffers.
+    """
+    paths = []
+    if getattr(args, "vst3_path", None):
+        paths.append(args.vst3_path)
+    if getattr(args, "params_json", None):
+        try:
+            parsed = json.loads(args.params_json)
+            if isinstance(parsed, dict) and isinstance(parsed.get("vst3Paths"), list):
+                for p in parsed["vst3Paths"]:
+                    if p and p not in paths:
+                        paths.append(p)
+        except Exception:
+            pass
+
+    shells_map = {}
+    for p in paths:
+        try:
+            shells_map[p] = _get_vst3_subplugins_list(p)
+        except Exception:
+            shells_map[p] = []
+
+    res = {
+        "success": True,
+        "shells": shells_map
+    }
+    sys.stdout.write(f"RESULT:{json.dumps(res, ensure_ascii=False)}\n")
+    sys.stdout.flush()
+
+
 def process_vst3_inspect(args):
     """
     Inspects a .vst3 plugin, returns its name, sub-plugins, parameter count, and optionally writes initial raw_state.
@@ -2537,7 +2653,28 @@ def process_vst3_inspect(args):
     sub_plugin = getattr(args, "sub_plugin_name", None) or ""
     state_file = getattr(args, "state_file", None) or ""
 
-    plugin, resolved_name, sub_plugins = _load_vst3_plugin_instance(vst3_path, sub_plugin)
+    pre_sub_plugins = _get_vst3_subplugins_list(vst3_path)
+
+    try:
+        plugin, resolved_name, sub_plugins = _load_vst3_plugin_instance(vst3_path, sub_plugin)
+    except Exception as load_err:
+        if len(pre_sub_plugins) > 0 and not sub_plugin:
+            ordered = _prioritize_vst3_subplugin_candidates(pre_sub_plugins)
+            fallback_sub = ordered[0] if ordered else pre_sub_plugins[0]
+            info = {
+                "success": True,
+                "vst3Path": vst3_path,
+                "pluginName": fallback_sub,
+                "subPlugins": pre_sub_plugins,
+                "totalParameters": 0,
+                "parametersPreview": {},
+                "stateSizeBytes": 0,
+                "stateFile": ""
+            }
+            sys.stdout.write(f"VST3_INFO_JSON:{json.dumps(info, ensure_ascii=False)}\n")
+            sys.stdout.flush()
+            return
+        raise load_err
 
     if state_file and os.path.isfile(state_file) and os.path.getsize(state_file) > 0:
         try:
@@ -2568,7 +2705,7 @@ def process_vst3_inspect(args):
         "success": True,
         "vst3Path": vst3_path,
         "pluginName": resolved_name,
-        "subPlugins": sub_plugins,
+        "subPlugins": sub_plugins if len(sub_plugins) > 0 else pre_sub_plugins,
         "totalParameters": total_params,
         "parametersPreview": params_snapshot,
         "stateSizeBytes": len(raw_bytes),
@@ -2580,9 +2717,10 @@ def process_vst3_inspect(args):
 
 def process_vst3_open_editor(args):
     """
+    VST3_EDITOR_DPI_V2 | VST3_WAVESHELL_V3
     Loads a .vst3 plugin, restores its binary raw_state (if state_file exists),
     opens the native OS VST3 GUI window (plugin.show_editor()), waits for the user
-    to finish configuring (e.g. inside iZotope Ozone / FabFilter) and close the window,
+    to finish configuring (e.g. inside iZotope Ozone / RX / FabFilter) and close the window,
     and immediately serializes the updated binary raw_state to disk.
     """
     import time
@@ -2592,6 +2730,16 @@ def process_vst3_open_editor(args):
 
     if not state_file:
         raise ValueError("Не указан путь state_file для сохранения состояния VST3 плагина")
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if hwnd:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
     sys.stdout.write(f"LOG:Загрузка VST3 плагина: {os.path.basename(vst3_path)}...\n")
     sys.stdout.flush()
@@ -2621,7 +2769,7 @@ def process_vst3_open_editor(args):
     # Open native VST3 GUI editor window (blocks until user closes the plugin window)
     plugin.show_editor()
 
-    # Immediately capture full binary state (raw_state includes all internal iZotope Ozone / FabFilter curves & modules)
+    # Immediately capture full binary state (raw_state includes all internal iZotope Ozone / RX / FabFilter curves & modules)
     raw_bytes = plugin.raw_state
     os.makedirs(os.path.dirname(os.path.abspath(state_file)), exist_ok=True)
     temp_state = f"{state_file}.tmp_{os.getpid()}"
@@ -2635,6 +2783,11 @@ def process_vst3_open_editor(args):
     os.rename(temp_state, state_file)
 
     params_snapshot = _extract_vst3_params_snapshot(plugin)
+    if params_snapshot:
+        summary_pairs = [f"{info.get('label') or k}={info.get('value')}" for k, info in list(params_snapshot.items())[:8]]
+        sys.stdout.write(f"LOG:Сохраненные параметры плагина «{resolved_name}»: {', '.join(summary_pairs)}\n")
+        sys.stdout.flush()
+
     saved_report = {
         "success": True,
         "vst3Path": vst3_path,
@@ -2882,6 +3035,15 @@ def process_vst3_process(args):
         except Exception as e:
             sys.stdout.write(f"LOG:Предупреждение при загрузке состояния VST3: {e}\n")
             sys.stdout.flush()
+    else:
+        sys.stdout.write(f"LOG:Слепок настроек (.vststate) не был создан — плагин «{resolved_name}» запущен с заводскими настройками по умолчанию.\n")
+        sys.stdout.flush()
+
+    active_params = _extract_vst3_params_snapshot(plugin)
+    if active_params:
+        param_items = [f"{info.get('label') or k}={info.get('value')}" for k, info in list(active_params.items())[:8]]
+        sys.stdout.write(f"LOG:Активные параметры VST3 «{resolved_name}»: {', '.join(param_items)}\n")
+        sys.stdout.flush()
 
     emit_progress(15.0, f"Чтение аудиодорожки: {os.path.basename(input_path)}...")
     audio_data, sample_rate, orig_channels, _ = AudioConditioner.load_audio(
@@ -2897,6 +3059,27 @@ def process_vst3_process(args):
         reset_plugin=reset_between,
         emit_prog=True
     )
+
+    try:
+        in_peak = float(np.max(np.abs(audio_data))) if audio_data.size > 0 else 0.0
+        out_peak = float(np.max(np.abs(processed))) if processed.size > 0 else 0.0
+        in_rms = float(np.sqrt(np.mean(audio_data ** 2))) if audio_data.size > 0 else 0.0
+        out_rms = float(np.sqrt(np.mean(processed ** 2))) if processed.size > 0 else 0.0
+        min_ch = min(audio_data.shape[0], processed.shape[0])
+        min_len = min(audio_data.shape[-1], processed.shape[-1])
+        max_diff = float(np.max(np.abs(processed[:min_ch, :min_len] - audio_data[:min_ch, :min_len]))) if min_len > 0 else 0.0
+        in_peak_db = round(20.0 * math.log10(max(in_peak, 1e-6)), 2)
+        out_peak_db = round(20.0 * math.log10(max(out_peak, 1e-6)), 2)
+        in_rms_db = round(20.0 * math.log10(max(in_rms, 1e-6)), 2)
+        out_rms_db = round(20.0 * math.log10(max(out_rms, 1e-6)), 2)
+        diff_db = round(20.0 * math.log10(max(max_diff, 1e-6)), 2)
+        sys.stdout.write(
+            f"LOG:Анализ сигнала До/После VST3 «{resolved_name}»: "
+            f"Peak {in_peak_db} -> {out_peak_db} dBFS | RMS {in_rms_db} -> {out_rms_db} dBFS | Макс. дельта воздействия: {diff_db} dBFS\n"
+        )
+        sys.stdout.flush()
+    except Exception:
+        pass
 
     emit_progress(92.0, f"Сохранение обработанного WAV 24-bit 48kHz: {os.path.basename(output_path)}...")
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -3036,6 +3219,10 @@ def main():
         download_model_cli(args)
         return
 
+    if args.mode == "vst3_list_shells":
+        process_vst3_list_shells(args)
+        return
+
     if args.mode == "vst3_inspect":
         process_vst3_inspect(args)
         return
@@ -3044,7 +3231,7 @@ def main():
         process_vst3_open_editor(args)
         return
 
-    if not (args.input or getattr(args, "dub_audio", None)) and args.mode not in ["check_env", "download_model", "vst3_inspect", "vst3_open_editor"]:
+    if not (args.input or getattr(args, "dub_audio", None)) and args.mode not in ["check_env", "download_model", "vst3_list_shells", "vst3_inspect", "vst3_open_editor"]:
         sys.stderr.write(f"ERROR in {args.mode}: Input file not found: {args.input}\n")
         sys.exit(1)
 

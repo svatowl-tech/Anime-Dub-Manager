@@ -9176,12 +9176,12 @@ class MixingPipelineService {
     }
 
     let category = 'Audio Effect';
-    if (/ozone|master|limiter|pro-l|maximizer/i.test(fullLower)) category = 'Mastering / Limiter';
-    else if (/eq|pro-q|nova|equalizer|filter/i.test(fullLower)) category = 'Equalizer';
-    else if (/comp|pro-c|pro-mb|kotelnikov|leveler|cla-/i.test(fullLower)) category = 'Dynamics / Compressor';
-    else if (/deess|pro-ds|sibilance|soothe/i.test(fullLower)) category = 'De-Esser / Resonance';
-    else if (/reverb|valhalla|room|hall|delay|echo/i.test(fullLower)) category = 'Reverb / Delay';
-    else if (/rx|denoise|dereverb|restore|voice/i.test(fullLower)) category = 'Restoration / Vocal';
+    if (/ozone|master|limiter|pro-l|maximizer|\bl1\b|\bl2\b|\bl3\b|wlm/i.test(fullLower)) category = 'Mastering / Limiter';
+    else if (/eq|pro-q|nova|equalizer|filter|\bf6\b|\bq10\b|\breq\b|puigtec|veq|api-550|api-560|h-eq|linear phase eq/i.test(fullLower)) category = 'Equalizer';
+    else if (/comp|pro-c|pro-mb|kotelnikov|leveler|cla-2a|cla-76|cla-3a|rvox|rcomp|\bc1\b|\bc4\b|\bc6\b|vocal rider|mv2|api-2500|dbx-160|puigchild|sslcomp/i.test(fullLower)) category = 'Dynamics / Compressor';
+    else if (/deess|pro-ds|sibilance|soothe|de-ess/i.test(fullLower)) category = 'De-Esser / Resonance';
+    else if (/reverb|valhalla|room|hall|delay|echo|abbey road plates|abbey road chambers|rverb|h-reverb|h-delay|trueverb|ir1|ir-l/i.test(fullLower)) category = 'Reverb / Delay';
+    else if (/rx|denoise|dereverb|restore|voice|clarity|ns1|wns|x-noise|z-noise|x-click|x-crackle|x-hum|debreath/i.test(fullLower)) category = 'Restoration / Vocal';
 
     return { vendor, category };
   }
@@ -9274,7 +9274,95 @@ class MixingPipelineService {
       walkVst3Dir(dir, 0);
     }
 
+    // Automatically enumerate sub-plugins inside multi-plugin VST3 shell containers (e.g. WaveShell1-VST3*.vst3)
+    const rawPlugins = Array.from(foundMap.values());
+    const shellEntries = rawPlugins
+      .filter((p) => /waveshell/i.test(p.name) || /waveshell/i.test(p.fileName))
+      .sort((a, b) => b.name.localeCompare(a.name, 'en', { numeric: true }));
+
+    if (shellEntries.length > 0) {
+      const cacheFile = path.join(userData, 'vst3_shells_cache_v1.json');
+      let shellCache = {};
+      if (fsSync.existsSync(cacheFile)) {
+        try {
+          shellCache = JSON.parse(fsSync.readFileSync(cacheFile, 'utf8')) || {};
+        } catch (_) {
+          shellCache = {};
+        }
+      }
+
+      const uncachedPaths = [];
+      for (const sh of shellEntries) {
+        const cacheKey = `${sh.id}::${sh.modifiedAt}::${sh.sizeBytes}`;
+        const cachedList = shellCache[cacheKey];
+        if (!Array.isArray(cachedList) || cachedList.length === 0) {
+          uncachedPaths.push(sh.vst3Path);
+        }
+      }
+
+      if (uncachedPaths.length > 0) {
+        try {
+          const queriedMap = await AudioNeuralService.listVst3ShellSubPlugins(uncachedPaths);
+          let cacheUpdated = false;
+          for (const sh of shellEntries) {
+            const subList = queriedMap[sh.vst3Path];
+            if (Array.isArray(subList) && subList.length > 0) {
+              const cacheKey = `${sh.id}::${sh.modifiedAt}::${sh.sizeBytes}`;
+              shellCache[cacheKey] = subList;
+              cacheUpdated = true;
+            }
+          }
+          if (cacheUpdated) {
+            try {
+              fsSync.writeFileSync(cacheFile, JSON.stringify(shellCache, null, 2), 'utf8');
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+
+      const seenExpandedSubNames = new Set();
+      for (const sh of shellEntries) {
+        const cacheKey = `${sh.id}::${sh.modifiedAt}::${sh.sizeBytes}`;
+        const subList = Array.isArray(shellCache[cacheKey]) ? shellCache[cacheKey] : [];
+        if (subList.length > 0) {
+          sh.subPlugins = subList;
+          sh.isShellContainer = true;
+          sh.category = `Контейнер Waves (${subList.length} плагинов)`;
+
+          for (const subName of subList) {
+            const cleanSub = String(subName || '').trim();
+            if (!cleanSub) continue;
+            const dedupSubKey = `${sh.vendor.toLowerCase()}::${cleanSub.toLowerCase()}`;
+            if (seenExpandedSubNames.has(dedupSubKey)) continue;
+            seenExpandedSubNames.add(dedupSubKey);
+
+            const compositeId = `${sh.vst3Path}:::${cleanSub}`;
+            const { category: subCat } = this._inferVst3VendorAndCategory(sh.vst3Path, cleanSub);
+            foundMap.set(compositeId.toLowerCase(), {
+              id: compositeId,
+              name: cleanSub,
+              fileName: sh.fileName,
+              vst3Path: sh.vst3Path,
+              subPluginName: cleanSub,
+              shellName: sh.name,
+              subPlugins: subList,
+              vendor: sh.vendor || 'Waves',
+              category: subCat,
+              isBundle: sh.isBundle,
+              isExpandedSubPlugin: true,
+              sizeBytes: sh.sizeBytes,
+              modifiedAt: sh.modifiedAt
+            });
+          }
+        }
+      }
+    }
+
     const plugins = Array.from(foundMap.values()).sort((a, b) => {
+      // Put expanded individual plugins before raw WaveShell containers so specific Waves plugins are easiest to pick
+      if (Boolean(a.isShellContainer) !== Boolean(b.isShellContainer)) {
+        return a.isShellContainer ? 1 : -1;
+      }
       const aPriority = /ozone|izotope|fabfilter|pro-q|pro-ds|waves|valhalla|tdr|soothe/i.test(`${a.vendor} ${a.name}`) ? 0 : 1;
       const bPriority = /ozone|izotope|fabfilter|pro-q|pro-ds|waves|valhalla|tdr|soothe/i.test(`${b.vendor} ${b.name}`) ? 0 : 1;
       if (aPriority !== bPriority) return aPriority - bPriority;
@@ -9294,6 +9382,7 @@ class MixingPipelineService {
   async openVst3NativeEditor({
     episode,
     workingDir,
+    targetDir,
     baseDir,
     stepId = 'step_vst3',
     trackKey = 'global',
@@ -9307,13 +9396,17 @@ class MixingPipelineService {
       throw new Error(`Файл VST3 плагина не найден: ${vst3Path || 'не выбран'}`);
     }
 
-    const resolvedWorkDir = workingDir || baseDir || (episode ? this._resolveDefaultWorkingDir(episode, baseDir) : path.join(app.getPath('userData'), 'vst3_work'));
+    const resolvedWorkDir =
+      this.resolveWorkingDir(workingDir || targetDir, episode, baseDir) ||
+      path.join(app.getPath('userData'), 'vst3_work');
     const statesDir = path.join(resolvedWorkDir, 'vst3_states');
     await fs.mkdir(statesDir, { recursive: true });
 
     const safeStep = String(stepId || 'vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
     const safeTrack = String(trackKey || 'global').replace(/[^a-zA-Z0-9_\u0400-\u04FF-]/g, '_');
-    const pluginSlug = path.basename(vst3Path, '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const baseSlug = path.basename(vst3Path, '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const subSlug = subPluginName ? `_${String(subPluginName).replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
+    const pluginSlug = `${baseSlug}${subSlug}`;
     const targetStateFile = path.join(statesDir, `${safeStep}_${safeTrack}_${pluginSlug}.vststate`);
 
     const seedStateFile = existingStateFile || stateFile;
@@ -9362,6 +9455,7 @@ class MixingPipelineService {
   async previewVst3Snippet({
     episode,
     workingDir,
+    targetDir,
     baseDir,
     stepId = 'step_vst3',
     inputPath,
@@ -9382,7 +9476,9 @@ class MixingPipelineService {
       throw new Error(`Аудиодорожка для превью не найдена: ${inputPath || 'не выбрана'}`);
     }
 
-    const resolvedWorkDir = workingDir || baseDir || (episode ? this._resolveDefaultWorkingDir(episode, baseDir) : path.join(app.getPath('userData'), 'vst3_work'));
+    const resolvedWorkDir =
+      this.resolveWorkingDir(workingDir || targetDir, episode, baseDir) ||
+      path.join(app.getPath('userData'), 'vst3_work');
     const previewDir = path.join(resolvedWorkDir, 'vst3_previews');
     await fs.mkdir(previewDir, { recursive: true });
 
@@ -9489,20 +9585,24 @@ class MixingPipelineService {
     return { success: true, preset: newPreset, presets };
   }
 
-  async applyVst3UserPreset({ presetId, episode, workingDir, baseDir, stepId = 'step_vst3', trackKey = 'global' }) {
+  async applyVst3UserPreset({ presetId, episode, workingDir, targetDir, baseDir, stepId = 'step_vst3', trackKey = 'global' }) {
     const presets = await this.listVst3UserPresets();
     const found = presets.find((p) => p.id === presetId);
     if (!found || !fsSync.existsSync(found.stateFile)) {
       throw new Error('Выбранный пресет VST3 не найден на диске');
     }
 
-    const resolvedWorkDir = workingDir || baseDir || (episode ? this._resolveDefaultWorkingDir(episode, baseDir) : path.join(app.getPath('userData'), 'vst3_work'));
+    const resolvedWorkDir =
+      this.resolveWorkingDir(workingDir || targetDir, episode, baseDir) ||
+      path.join(app.getPath('userData'), 'vst3_work');
     const statesDir = path.join(resolvedWorkDir, 'vst3_states');
     await fs.mkdir(statesDir, { recursive: true });
 
     const safeStep = String(stepId || 'vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
     const safeTrack = String(trackKey || 'global').replace(/[^a-zA-Z0-9_\u0400-\u04FF-]/g, '_');
-    const pluginSlug = path.basename(found.vst3Path || found.pluginName || 'plugin', '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const baseSlug = path.basename(found.vst3Path || found.pluginName || 'plugin', '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const subSlug = found.subPluginName ? `_${String(found.subPluginName).replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
+    const pluginSlug = `${baseSlug}${subSlug}`;
     const targetStateFile = path.join(statesDir, `${safeStep}_${safeTrack}_${pluginSlug}.vststate`);
 
     await fs.copyFile(found.stateFile, targetStateFile);

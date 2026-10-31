@@ -122,7 +122,8 @@ class AudioNeuralService {
         !code.includes('_match_audio_length') ||
         !code.includes('--noise_reduction_db') ||
         !code.includes('--post_filter') ||
-        !code.includes('parse_known_args')
+        !code.includes('parse_known_args') ||
+        !code.includes('VST3_WAVESHELL_V3')
       ) {
         const bundledCandidates = [
           path.join(__dirname, 'audio_ai_processor.py'),
@@ -139,7 +140,7 @@ class AudioNeuralService {
           if (fs.existsSync(c)) {
             try {
               const fresh = fs.readFileSync(c, 'utf8');
-              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('--noise_reduction_db')) {
+              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('VST3_WAVESHELL_V3')) {
                 fs.writeFileSync(scriptPath, fresh, 'utf8');
                 log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на актуальную версию.`);
                 break;
@@ -289,53 +290,60 @@ class AudioNeuralService {
         });
       }
 
+      let stdoutLineRemainder = '';
+      const processStdoutLine = (rawLine) => {
+        const line = rawLine.trim();
+        if (!line) return;
+
+        if (line.startsWith('PROGRESS:')) {
+          const numStr = line.replace('PROGRESS:', '').trim();
+          const pct = parseFloat(numStr);
+          if (!isNaN(pct)) {
+            lastProgress = pct;
+            if (onProgress) {
+              onProgress({ percent: Math.round(pct), message: `${operationName}: ${Math.round(pct)}%` });
+            }
+          }
+        } else if (line.startsWith('LOG:')) {
+          const msg = line.replace('LOG:', '').trim();
+          if (onLog) onLog(msg, 'info');
+        } else if (line.startsWith('DEVICE:')) {
+          const dev = line.replace('DEVICE:', '').trim();
+          if (onLog) onLog(`Используемое аппаратное ускорение: ${dev}`, 'info');
+        } else if (line.startsWith('RESULT:')) {
+          try {
+            resultData = JSON.parse(line.replace('RESULT:', '').trim());
+          } catch (e) {}
+        } else if (line.startsWith('VST3_INFO_JSON:')) {
+          try {
+            resultData = JSON.parse(line.replace('VST3_INFO_JSON:', '').trim());
+          } catch (e) {}
+        } else if (line.startsWith('VST3_EDITOR_SAVED_JSON:')) {
+          try {
+            resultData = JSON.parse(line.replace('VST3_EDITOR_SAVED_JSON:', '').trim());
+          } catch (e) {}
+        } else if (line.startsWith('VST3_PREVIEW_JSON:')) {
+          try {
+            resultData = JSON.parse(line.replace('VST3_PREVIEW_JSON:', '').trim());
+          } catch (e) {}
+        } else if (line.startsWith('ENV_STATUS:')) {
+          try {
+            resultData = JSON.parse(line.replace('ENV_STATUS:', '').trim());
+          } catch (e) {}
+        } else {
+          if (onLog) onLog(line, 'info');
+        }
+      };
+
       child.stdout.on('data', (chunk) => {
         const text = chunk.toString('utf8');
         stdoutBuffer += text;
-        const lines = text.split('\n');
+        const combined = stdoutLineRemainder + text;
+        const lines = combined.split('\n');
+        stdoutLineRemainder = lines.pop() || '';
 
         for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line) continue;
-
-          if (line.startsWith('PROGRESS:')) {
-            const numStr = line.replace('PROGRESS:', '').trim();
-            const pct = parseFloat(numStr);
-            if (!isNaN(pct)) {
-              lastProgress = pct;
-              if (onProgress) {
-                onProgress({ percent: Math.round(pct), message: `${operationName}: ${Math.round(pct)}%` });
-              }
-            }
-          } else if (line.startsWith('LOG:')) {
-            const msg = line.replace('LOG:', '').trim();
-            if (onLog) onLog(msg, 'info');
-          } else if (line.startsWith('DEVICE:')) {
-            const dev = line.replace('DEVICE:', '').trim();
-            if (onLog) onLog(`Используемое аппаратное ускорение: ${dev}`, 'info');
-          } else if (line.startsWith('RESULT:')) {
-            try {
-              resultData = JSON.parse(line.replace('RESULT:', '').trim());
-            } catch (e) {}
-          } else if (line.startsWith('VST3_INFO_JSON:')) {
-            try {
-              resultData = JSON.parse(line.replace('VST3_INFO_JSON:', '').trim());
-            } catch (e) {}
-          } else if (line.startsWith('VST3_EDITOR_SAVED_JSON:')) {
-            try {
-              resultData = JSON.parse(line.replace('VST3_EDITOR_SAVED_JSON:', '').trim());
-            } catch (e) {}
-          } else if (line.startsWith('VST3_PREVIEW_JSON:')) {
-            try {
-              resultData = JSON.parse(line.replace('VST3_PREVIEW_JSON:', '').trim());
-            } catch (e) {}
-          } else if (line.startsWith('ENV_STATUS:')) {
-            try {
-              resultData = JSON.parse(line.replace('ENV_STATUS:', '').trim());
-            } catch (e) {}
-          } else {
-            if (onLog) onLog(line, 'info');
-          }
+          processStdoutLine(rawLine);
         }
       });
 
@@ -360,6 +368,11 @@ class AudioNeuralService {
         this._activeJobs.delete(jobHandle);
         if (isSettled) return;
         isSettled = true;
+
+        if (stdoutLineRemainder) {
+          processStdoutLine(stdoutLineRemainder);
+          stdoutLineRemainder = '';
+        }
 
         if (code === 0) {
           log.info(`[AudioNeuralService] ${operationName} finished successfully.`);
@@ -720,6 +733,29 @@ class AudioNeuralService {
     });
 
     return res;
+  }
+
+  /**
+   * Batch-enumerates sub-plugins inside multi-plugin VST3 shell containers (e.g. WaveShell1-VST3*.vst3)
+   */
+  async listVst3ShellSubPlugins(vst3Paths = []) {
+    const validPaths = (Array.isArray(vst3Paths) ? vst3Paths : []).filter((p) => p && fs.existsSync(p));
+    if (validPaths.length === 0) return {};
+
+    const args = [
+      '--mode', 'vst3_list_shells',
+      '--params_json', JSON.stringify({ vst3Paths: validPaths })
+    ];
+
+    try {
+      const res = await this._runPythonSidecar(args, {
+        operationName: 'Инспекция VST3 контейнеров (WaveShell)'
+      });
+      return (res && res.shells && typeof res.shells === 'object') ? res.shells : {};
+    } catch (err) {
+      log.warn('[AudioNeuralService] Предупреждение при чтении суб-плагинов WaveShell:', err.message);
+      return {};
+    }
   }
 
   /**
