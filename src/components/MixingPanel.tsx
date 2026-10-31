@@ -1794,7 +1794,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             stateFile: res.stateFile,
             stateSizeBytes: res.stateSizeBytes || 0,
             updatedAt: res.updatedAt || new Date().toISOString(),
-            pluginName: res.pluginName || step.params?.pluginName
+            pluginName: res.pluginName || step.params?.pluginName,
+            parametersPreview: res.parametersPreview || {}
           };
           handleUpdateStepParamsBatch(step.stepId, {
             pluginName: res.pluginName || step.params?.pluginName,
@@ -1863,6 +1864,9 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     const stateFile = (routingMode === 'per_track' && perTrackMap[tKey]?.stateFile)
       ? perTrackMap[tKey].stateFile
       : (step.params?.globalStateFile || '');
+    const activeParamsJson = (routingMode === 'per_track' && perTrackMap[tKey]?.parametersPreview)
+      ? perTrackMap[tKey].parametersPreview
+      : (step.params?.parametersPreview || null);
 
     const autoStart = vst3PreviewAutoStartByStep[step.stepId] !== false;
     const snippetStartSec = autoStart ? -1 : Number(step.params?.snippetStartSec ?? 0);
@@ -1879,6 +1883,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         vst3Path,
         subPluginName: step.params?.subPluginName || '',
         stateFile,
+        paramsJson: activeParamsJson,
+        parametersPreview: activeParamsJson,
         inputPath: chosenTrackObj.path,
         trackKey: tKey,
         wetMixPercent: step.params?.wetMixPercent ?? 100,
@@ -1998,7 +2004,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             stateFile: res.stateFile,
             stateSizeBytes: res.stateSizeBytes || 0,
             updatedAt: new Date().toISOString(),
-            pluginName: p.pluginName || step.params?.pluginName
+            pluginName: p.pluginName || step.params?.pluginName,
+            parametersPreview: res.parametersPreview || {}
           };
           handleUpdateStepParamsBatch(step.stepId, {
             perTrackStates: prevMap,
@@ -2012,6 +2019,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
             globalStateFile: res.stateFile,
             globalStateSizeBytes: res.stateSizeBytes || 0,
             globalStateUpdatedAt: new Date().toISOString(),
+            parametersPreview: res.parametersPreview || {},
             wetMixPercent: p.wetMixPercent ?? step.params?.wetMixPercent ?? 100,
             outputGainDb: p.outputGainDb ?? step.params?.outputGainDb ?? 0
           }, true);

@@ -10,6 +10,7 @@ import { SIGN_KEYWORDS } from "../constants";
 import GettingStartedGuide from "./GettingStartedGuide";
 import GeneralHub from "./dashboard/GeneralHub";
 import { generateStartEpisodeMessage, generateStatusMessage, generateSoundEngineerMessage } from "../lib/templates";
+import { initNewProjectWithPreset } from "../lib/releasePresetsService";
 import { sanitizeFolderName } from "../lib/pathUtils";
 import { calculateDeadline } from "../lib/dateUtils";
 import { SubFileItem } from "./MultiSubtitleMergeModal";
@@ -1082,7 +1083,7 @@ export default function Dashboard({
 
   const handleCreateProject = async (projectData: any) => {
     try {
-      const newProject = {
+      const baseProject = {
         id: Date.now().toString(),
         title: projectData.title,
         originalTitle: projectData.originalTitle || '',
@@ -1103,6 +1104,7 @@ export default function Dashboard({
         updatedAt: new Date().toISOString()
       };
       
+      const newProject = initNewProjectWithPreset(baseProject);
       await ipcSafe.invoke('save-project', newProject);
       toast.success('Проект успешно создан!');
       onRefresh();

@@ -519,61 +519,86 @@ class AutoTimingService {
       const mainTracks = actorTracks.filter(t => !t.isFix);
       const fixTracks = actorTracks.filter(t => t.isFix);
 
+      // Helper to extract explicit track index (e.g. дорожка1, дорожка2, track1, layer2, фикс1, fix2)
+      const getTrackNum = (nameOrPath) => {
+        const m = String(nameOrPath || '').match(/(?:дорожка|слой|track|take|layer|фикс|fix)[_\s-]*(\d+)/i);
+        return m ? parseInt(m[1], 10) : null;
+      };
+
       // СЦЕНАРИЙ 1: У даббера 1 основная дорожка (или только фиксы)
       if (mainTracks.length <= 1) {
         const newestMain = mainTracks[0] || null;
-        const newestFix = fixTracks.length > 0 ? fixTracks[fixTracks.length - 1] : null;
 
-        if (newestMain && newestFix && newestFix.trackPath !== newestMain.trackPath) {
+        // Check if ANY of the fix tracks is a full-track replacement (>= 75% size of main)
+        const fullFix = fixTracks.slice().reverse().find(f => {
+          if (!newestMain) return true;
           const mainSize = newestMain.size || 1;
-          const fixSize = newestFix.size || 0;
+          const fixSize = f.size || 0;
+          return mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.75;
+        });
 
-          // Тип 1: Цельный фикс (перезапись всей дорожки, >= 75% размера оригинала)
-          // Заменяет предыдущую дорожку целиком, вшивание не требуется!
-          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.75) {
-            newestFix.isFix = false;
-            deduplicatedMatchedTracks.push(newestFix);
-          } else {
-            // Тип 2: Фиксы частями (отдельные фразы, меньше оригинала) — вшиваются в оригинал
-            if (!newestMain.fixTargetLines || newestMain.fixTargetLines.length === 0) {
-              newestMain.fixTargetLines = newestFix.fixTargetLines;
-            }
-            newestMain.patchSnippetPath = newestFix.trackPath;
-            deduplicatedMatchedTracks.push(newestMain);
-          }
-        } else if (newestFix && !newestMain) {
-          newestFix.isFix = false;
-          deduplicatedMatchedTracks.push(newestFix);
+        if (fullFix) {
+          // Цельный фикс заменяет предыдущую дорожку целиком
+          fullFix.isFix = false;
+          deduplicatedMatchedTracks.push(fullFix);
         } else if (newestMain) {
+          // Тип 2: Фиксы частями (отдельные фразы, меньше оригинала) — все вшиваются в оригинал
+          if (fixTracks.length > 0) {
+            newestMain.patchSnippetPath = fixTracks[fixTracks.length - 1].trackPath;
+            newestMain.patchSnippetPaths = fixTracks.map(f => f.trackPath);
+            const combinedFixTargetLines = [];
+            for (const fx of fixTracks) {
+              if (Array.isArray(fx.fixTargetLines)) {
+                combinedFixTargetLines.push(...fx.fixTargetLines);
+              }
+            }
+            if (combinedFixTargetLines.length > 0) {
+              newestMain.fixTargetLines = combinedFixTargetLines;
+            }
+          }
           deduplicatedMatchedTracks.push(newestMain);
+        } else if (fixTracks.length > 0) {
+          for (let fIdx = 0; fIdx < fixTracks.length; fIdx++) {
+            const f = fixTracks[fIdx];
+            f.isFix = false;
+            f.subTrackIndex = fIdx + 1;
+            deduplicatedMatchedTracks.push(f);
+          }
         }
         continue;
       }
 
       // СЦЕНАРИЙ 2: У даббера 2 (или более) основных дорожек
-      // Все основные дорожки сохраняются как отдельные дорожки, а фикс применяется к своей целевой дорожке
+      // Все основные дорожки сохраняются как отдельные дорожки, а фиксы применяются к своей целевой дорожке
       for (let mIdx = 0; mIdx < mainTracks.length; mIdx++) {
         const mainTr = mainTracks[mIdx];
-        const assignedFix = fixTracks.find(f => {
+        const trNum = mIdx + 1;
+
+        const assignedFixes = fixTracks.filter(f => {
           if (f.targetTrackId && mainTr.id && f.targetTrackId === mainTr.id) return true;
+          const fTrackNum = getTrackNum(f.trackPath);
+          if (fTrackNum !== null && fTrackNum === trNum) return true;
           const fName = (f.trackPath || '').toLowerCase();
-          const trNum = mIdx + 1;
-          return fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`);
-        }) || (mIdx === 0 && fixTracks.length === 1 ? fixTracks[0] : null);
+          if (fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`) || fName.includes(`фикс${trNum}`) || fName.includes(`fix${trNum}`)) return true;
+          if (mIdx === 0 && fixTracks.length === 1 && fTrackNum === null) return true;
+          return false;
+        });
 
-        if (assignedFix) {
-          const mainSize = mainTr.size || 1;
-          const fixSize = assignedFix.size || 0;
+        const mainSize = mainTr.size || 1;
+        const fullFix = assignedFixes.slice().reverse().find(f => {
+          const fixSize = f.size || 0;
+          return mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.75;
+        });
 
-          if (mainSize > 0 && fixSize > 0 && fixSize >= mainSize * 0.75) {
-            // Цельный фикс заменяет данную дорожку целиком
-            assignedFix.isFix = false;
-            deduplicatedMatchedTracks.push(assignedFix);
-          } else {
-            // Фикс частями — прикрепляем сниппет для вшивания
-            mainTr.patchSnippetPath = assignedFix.trackPath;
-            deduplicatedMatchedTracks.push(mainTr);
-          }
+        if (fullFix) {
+          // Цельный фикс заменяет данную дорожку целиком
+          fullFix.isFix = false;
+          deduplicatedMatchedTracks.push(fullFix);
+        } else if (assignedFixes.length > 0) {
+          // Фиксы частями — прикрепляем сниппеты для вшивания
+          mainTr.patchSnippetPath = assignedFixes[assignedFixes.length - 1].trackPath;
+          mainTr.patchSnippetPaths = assignedFixes.map(f => f.trackPath);
+          deduplicatedMatchedTracks.push(mainTr);
         } else {
           deduplicatedMatchedTracks.push(mainTr);
         }

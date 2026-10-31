@@ -85,9 +85,10 @@ function calculateTextSimilarity(text1: string, text2: string): number {
 export const isFixTrack = (t: any): boolean => {
   if (!t) return false;
   if (t.role === 'fix' || t.isFix === true || t.type === 'FIXES') return true;
-  if (t.id && (t.id.endsWith('_fix') || t.id.includes('_fix_') || t.id.startsWith('fix_'))) return true;
-  if (t.role === 'dubber') return false;
+  if (t.id && (t.id.endsWith('_fix') || t.id.includes('_fix_') || t.id.startsWith('fix_') || /_fix\d*$/i.test(t.id))) return true;
   if (t.filePath && (/(?:_fix|фикс|\[fix\]|\[фикс\])/i.test(t.filePath))) return true;
+  if (t.participant && (/(?:_fix|фикс|\[fix\]|\[фикс\]|\(фикс)/i.test(t.participant))) return true;
+  if (t.role === 'dubber') return false;
   return false;
 };
 
@@ -2900,25 +2901,33 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       const fetchedTracks: Track[] = [];
       for (const tr of rawFetched) {
         fetchedTracks.push(tr);
-        if ((tr as any).patchSnippet && (tr as any).patchSnippet.path) {
-          const snip = (tr as any).patchSnippet;
+        const snippets: any[] = (tr as any).patchSnippets && (tr as any).patchSnippets.length > 0
+          ? (tr as any).patchSnippets
+          : ((tr as any).patchSnippet && (tr as any).patchSnippet.path ? [(tr as any).patchSnippet] : []);
+
+        snippets.forEach((snip, sIdx) => {
+          if (!snip || !snip.path) return;
+          const fixNum = snip.trackIndex || (sIdx + 1);
+          const fixId = snippets.length > 1 ? `${tr.id}_fix_${fixNum}` : `${tr.id}_fix`;
+          const fixLabel = snippets.length > 1 ? `${tr.participant} (Фикс ${fixNum})` : `${tr.participant} (Фикс)`;
           fetchedTracks.push({
-            id: `${tr.id}_fix`,
+            id: fixId,
             targetMainTrackId: tr.id,
+            subTrackIndex: fixNum,
             projectId: tr.projectId,
             episodeId: tr.episodeId,
-            participant: `${tr.participant} (Фикс)`,
+            participant: fixLabel,
             character: tr.character,
             dubberName: tr.dubberName,
             characterName: tr.characterName,
             filePath: snip.path,
             role: 'fix',
             status: 'fixes_needed',
-            files: [{ id: snip.id || `${tr.id}_fix_file`, path: snip.path, createdAt: '', type: 'FIXES', isFix: true, targetTrackId: tr.id }],
-            selectedFileId: snip.id || `${tr.id}_fix_file`,
+            files: [{ id: snip.id || `${fixId}_file`, path: snip.path, createdAt: '', type: 'FIXES', isFix: true, targetTrackId: tr.id }],
+            selectedFileId: snip.id || `${fixId}_file`,
             comments: tr.comments || []
           } as any);
-        }
+        });
       }
 
       setTracks(fetchedTracks);
@@ -3108,7 +3117,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         } else if (mainTracks.length === 1) {
           trackSubMap[mainTracks[0].id] = matchedLines;
         } else if (mainTracks.length === 0 && fixTracks.length > 0) {
-          trackSubMap[fixTracks[0].id] = matchedLines;
+          fixTracks.forEach(fx => {
+            trackSubMap[fx.id] = [...matchedLines];
+          });
         }
 
         if (fixTracks.length > 0 && mainTracks.length > 0) {
@@ -3138,13 +3149,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
             candidateFixLines = matchedLines.slice(0, Math.min(3, matchedLines.length));
           }
 
-          if (fixTracks.length === 1) {
-            trackSubMap[fixTracks[0].id] = candidateFixLines;
-          } else {
-            const mid = Math.ceil(candidateFixLines.length / 2);
-            trackSubMap[fixTracks[0].id] = candidateFixLines.slice(0, mid);
-            trackSubMap[fixTracks[1].id] = candidateFixLines.slice(mid);
-          }
+          fixTracks.forEach(fx => {
+            trackSubMap[fx.id] = candidateFixLines.length > 0 ? [...candidateFixLines] : [...matchedLines];
+          });
         }
       });
 
@@ -4147,10 +4154,16 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
 
           const fixDuration = fixBuf ? fixBuf.duration : (fixClips[fixClips.length - 1]?.clipStartSec || 0);
 
+          const strippedId = fixTrack.id.replace(/_fix(?:_\d+)?$/, '');
+          const fixIdxMatch = fixTrack.id.match(/_fix_(\d+)$/);
+          const fixTrackNum = fixIdxMatch ? parseInt(fixIdxMatch[1], 10) : (fixTrack as any).subTrackIndex;
+
           let bestMainTrackForFull =
-            mainTracks.find(mt => mt.id === (fixTrack as any).targetMainTrackId || mt.id === fixTrack.id.replace(/_fix$/, '')) ||
+            mainTracks.find(mt => mt.id === (fixTrack as any).targetMainTrackId) ||
+            (fixTrackNum ? mainTracks.find(mt => (mt as any).subTrackIndex === fixTrackNum) : null) ||
+            mainTracks.find(mt => mt.id === strippedId) ||
             mainTracks[0];
-          if (!mainTracks.some(mt => mt.id === (fixTrack as any).targetMainTrackId || mt.id === fixTrack.id.replace(/_fix$/, ''))) {
+          if (!mainTracks.some(mt => mt.id === (fixTrack as any).targetMainTrackId || mt.id === strippedId || (fixTrackNum && (mt as any).subTrackIndex === fixTrackNum))) {
             let bestDurDiff = Infinity;
             for (const mt of mainTracks) {
               const buf = audioBuffersRef.current[mt.id];

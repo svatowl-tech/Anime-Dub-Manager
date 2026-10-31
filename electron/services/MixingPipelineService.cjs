@@ -9492,6 +9492,8 @@ class MixingPipelineService {
     vst3Path,
     subPluginName = '',
     stateFile = '',
+    paramsJson = null,
+    parametersPreview = null,
     snippetStartSec = -1,
     snippetDurationSec = 12,
     wetMixPercent = 100,
@@ -9543,6 +9545,7 @@ class MixingPipelineService {
       vst3Path,
       subPluginName,
       stateFile: effectiveStateFile,
+      paramsJson: paramsJson || parametersPreview || null,
       snippetStartSec,
       snippetDurationSec,
       wetMixPercent,
@@ -9601,6 +9604,11 @@ class MixingPipelineService {
     const presetId = `vst3_preset_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const savedStatePath = path.join(dir, `${presetId}.vststate`);
     await fs.copyFile(stateFile, savedStatePath);
+    if (fsSync.existsSync(`${stateFile}.params.json`)) {
+      try {
+        await fs.copyFile(`${stateFile}.params.json`, `${savedStatePath}.params.json`);
+      } catch (_) {}
+    }
     const st = fsSync.statSync(savedStatePath);
 
     const presets = await this.listVst3UserPresets();
@@ -9645,6 +9653,13 @@ class MixingPipelineService {
     const targetStateFile = path.join(statesDir, `${safeStep}_${safeTrack}_${pluginSlug}.vststate`);
 
     await fs.copyFile(found.stateFile, targetStateFile);
+    let parametersPreview = {};
+    if (fsSync.existsSync(`${found.stateFile}.params.json`)) {
+      try {
+        await fs.copyFile(`${found.stateFile}.params.json`, `${targetStateFile}.params.json`);
+        parametersPreview = JSON.parse(await fs.readFile(`${targetStateFile}.params.json`, 'utf8'));
+      } catch (_) {}
+    }
     const st = fsSync.statSync(targetStateFile);
 
     return {
@@ -9652,7 +9667,8 @@ class MixingPipelineService {
       preset: found,
       stateFile: targetStateFile,
       stateSizeBytes: st.size,
-      updatedAt: new Date().toISOString()
+      updatedAt: new Date().toISOString(),
+      parametersPreview
     };
   }
 
@@ -9662,6 +9678,11 @@ class MixingPipelineService {
     const target = presets.find((p) => p.id === presetId);
     if (target && target.stateFile && fsSync.existsSync(target.stateFile)) {
       try { await fs.unlink(target.stateFile); } catch (_) {}
+      try {
+        if (fsSync.existsSync(`${target.stateFile}.params.json`)) {
+          await fs.unlink(`${target.stateFile}.params.json`);
+        }
+      } catch (_) {}
     }
     const filtered = presets.filter((p) => p.id !== presetId);
     await fs.writeFile(path.join(dir, 'presets_index.json'), JSON.stringify(filtered, null, 2), 'utf8');
@@ -9793,6 +9814,7 @@ class MixingPipelineService {
 
       const outName = `${prefix || 'vst3_'}voices_master.wav`;
       const outPath = path.join(stepFolder, outName);
+      const busParamsJson = params.parametersPreview || params.paramsJson || null;
 
       try {
         await AudioNeuralService.processVst3Plugin({
@@ -9801,6 +9823,7 @@ class MixingPipelineService {
           vst3Path,
           subPluginName,
           stateFile: globalStateFile,
+          paramsJson: busParamsJson,
           wetMixPercent,
           outputGainDb,
           resetBetweenTracks: true,
@@ -9843,9 +9866,14 @@ class MixingPipelineService {
       const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
 
       let effectiveStateFile = globalStateFile;
+      let effectiveParamsJson = params.parametersPreview || params.paramsJson || null;
       if (routingMode === 'per_track') {
         const perEntry = perTrackStateFiles[trackKey] || perTrackStateFiles[track.name] || perTrackStateFiles[nick];
         const candState = typeof perEntry === 'string' ? perEntry : perEntry?.stateFile;
+        const candParams = typeof perEntry === 'object' && perEntry ? (perEntry.parametersPreview || perEntry.paramsJson || null) : null;
+        if (candParams) {
+          effectiveParamsJson = candParams;
+        }
         const resolvedPerTrack = this._resolveExistingVst3StateFile({
           workingDir,
           stepId,
@@ -9870,6 +9898,7 @@ class MixingPipelineService {
         vst3Path,
         subPluginName,
         stateFile: effectiveStateFile,
+        paramsJson: effectiveParamsJson,
         wetMixPercent,
         outputGainDb,
         resetBetweenTracks,

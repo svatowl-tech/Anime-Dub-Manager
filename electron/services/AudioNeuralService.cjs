@@ -65,7 +65,7 @@ class AudioNeuralService {
             if (
               content.includes('--noise_reduction_db') &&
               content.includes('vst3_open_editor') &&
-              content.includes('VST3_WAVESHELL_V6')
+              content.includes('VST3_WAVESHELL_V7')
             ) {
               sourceContent = content;
               break;
@@ -128,7 +128,7 @@ class AudioNeuralService {
         !code.includes('--noise_reduction_db') ||
         !code.includes('--post_filter') ||
         !code.includes('parse_known_args') ||
-        !code.includes('VST3_WAVESHELL_V6')
+        !code.includes('VST3_WAVESHELL_V7')
       ) {
         const bundledCandidates = [
           path.join(__dirname, 'audio_ai_processor.py'),
@@ -145,7 +145,7 @@ class AudioNeuralService {
           if (fs.existsSync(c)) {
             try {
               const fresh = fs.readFileSync(c, 'utf8');
-              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('VST3_WAVESHELL_V6')) {
+              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('VST3_WAVESHELL_V7')) {
                 fs.writeFileSync(scriptPath, fresh, 'utf8');
                 log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на актуальную версию.`);
                 break;
@@ -877,6 +877,7 @@ class AudioNeuralService {
     vst3Path,
     subPluginName = '',
     stateFile = '',
+    paramsJson = null,
     snippetStartSec = -1,
     snippetDurationSec = 12,
     wetMixPercent = 100,
@@ -908,6 +909,10 @@ class AudioNeuralService {
       '--output_gain_db', String(outputGainDb ?? 0)
     ];
 
+    if (paramsJson) {
+      args.push('--params_json', typeof paramsJson === 'string' ? paramsJson : JSON.stringify(paramsJson));
+    }
+
     return await this._runPythonSidecar(args, {
       onProgress,
       onLog,
@@ -925,6 +930,7 @@ class AudioNeuralService {
     vst3Path,
     subPluginName = '',
     stateFile = '',
+    paramsJson = null,
     wetMixPercent = 100,
     outputGainDb = 0,
     resetBetweenTracks = true,
@@ -952,6 +958,10 @@ class AudioNeuralService {
       '--output_gain_db', String(outputGainDb ?? 0),
       '--reset_between_tracks', resetBetweenTracks === false ? 'false' : 'true'
     ];
+
+    if (paramsJson) {
+      args.push('--params_json', typeof paramsJson === 'string' ? paramsJson : JSON.stringify(paramsJson));
+    }
 
     return await this._runPythonSidecar(args, {
       onProgress,

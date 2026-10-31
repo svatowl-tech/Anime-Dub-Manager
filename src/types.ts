@@ -272,6 +272,13 @@ export interface Track {
     path: string;
     size?: number;
   };
+  patchSnippets?: {
+    id: string;
+    name: string;
+    path: string;
+    size?: number;
+    trackIndex?: number | null;
+  }[];
 }
 
 export interface MixingFileItem {

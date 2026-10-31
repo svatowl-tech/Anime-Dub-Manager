@@ -1,5 +1,6 @@
 import { Episode, Participant } from '../types';
 import { MissingLineDetection } from './qa/missingLinesDetector';
+import { getReleasePresetSync } from './releasePresetsService';
 
 export const formatDeadline = (dateStr?: string, includeTime: boolean = true) => {
   if (!dateStr) return 'не указан';
@@ -683,56 +684,67 @@ export const applyTemplate = (template: string, vars: Record<string, any>) => {
 };
 
 export const generateTGPostMessage = (episode: Episode, participants: Participant[]) => {
-  const isRecastOrRedub = episode.project?.releaseType === 'RECAST' || episode.project?.releaseType === 'REDUB';
+  const relType = episode.project?.releaseType || 'VOICEOVER';
+  const isRecastOrRedub = relType === 'RECAST' || relType === 'REDUB';
   const defaultTpl = isRecastOrRedub ? DEFAULT_TG_TEMPLATE_RECAST : DEFAULT_TG_TEMPLATE_VOICEOVER;
-  const tplStr = episode.tgPostTemplate || episode.project?.tgPostTemplate || defaultTpl;
+  const preset = getReleasePresetSync(relType);
+  const tplStr = episode.tgPostTemplate || episode.project?.tgPostTemplate || preset.tgPostTemplate || defaultTpl;
   const vars = getTemplateVariables(episode, participants);
   return applyTemplate(tplStr, vars);
 };
 
 export const generateVKPostMessage = (episode: Episode, participants: Participant[]) => {
-  const isRecastOrRedub = episode.project?.releaseType === 'RECAST' || episode.project?.releaseType === 'REDUB';
+  const relType = episode.project?.releaseType || 'VOICEOVER';
+  const isRecastOrRedub = relType === 'RECAST' || relType === 'REDUB';
   const defaultTpl = isRecastOrRedub ? DEFAULT_VK_TEMPLATE_RECAST : DEFAULT_VK_TEMPLATE_VOICEOVER;
-  const tplStr = episode.vkPostTemplate || episode.project?.vkPostTemplate || defaultTpl;
+  const preset = getReleasePresetSync(relType);
+  const tplStr = episode.vkPostTemplate || episode.project?.vkPostTemplate || preset.vkPostTemplate || defaultTpl;
   const vars = getTemplateVariables(episode, participants);
   return applyTemplate(tplStr, vars);
 };
 
 export const generateTGArticleMessage = (episode: Episode, participants: Participant[]) => {
-  const isRecastOrRedub = episode.project?.releaseType === 'RECAST' || episode.project?.releaseType === 'REDUB';
+  const relType = episode.project?.releaseType || 'VOICEOVER';
+  const isRecastOrRedub = relType === 'RECAST' || relType === 'REDUB';
   const defaultTpl = isRecastOrRedub ? DEFAULT_TG_ARTICLE_TEMPLATE_RECAST : DEFAULT_TG_ARTICLE_TEMPLATE_VOICEOVER;
-  const tplStr = episode.tgArticleTemplate || episode.project?.tgArticleTemplate || defaultTpl;
+  const preset = getReleasePresetSync(relType);
+  const tplStr = episode.tgArticleTemplate || episode.project?.tgArticleTemplate || preset.tgArticleTemplate || defaultTpl;
   const vars = getTemplateVariables(episode, participants);
   return applyTemplate(tplStr, vars);
 };
 
 export const getTemplateString = (episode: Episode, type: 'TG' | 'VK' | 'FINAL_TG' | 'TG_ARTICLE' | 'LINKS'): string => {
-  const isRecastOrRedub = episode.project?.releaseType === 'RECAST' || episode.project?.releaseType === 'REDUB';
+  const relType = episode.project?.releaseType || 'VOICEOVER';
+  const isRecastOrRedub = relType === 'RECAST' || relType === 'REDUB';
+  const preset = getReleasePresetSync(relType);
+
   if (type === 'TG') {
     const defaultTpl = isRecastOrRedub ? DEFAULT_TG_TEMPLATE_RECAST : DEFAULT_TG_TEMPLATE_VOICEOVER;
-    return episode.tgPostTemplate || episode.project?.tgPostTemplate || defaultTpl;
+    return episode.tgPostTemplate || episode.project?.tgPostTemplate || preset.tgPostTemplate || defaultTpl;
   }
   if (type === 'TG_ARTICLE') {
     const defaultTpl = isRecastOrRedub ? DEFAULT_TG_ARTICLE_TEMPLATE_RECAST : DEFAULT_TG_ARTICLE_TEMPLATE_VOICEOVER;
-    return episode.tgArticleTemplate || episode.project?.tgArticleTemplate || defaultTpl;
+    return episode.tgArticleTemplate || episode.project?.tgArticleTemplate || preset.tgArticleTemplate || defaultTpl;
   }
   if (type === 'VK') {
     const defaultTpl = isRecastOrRedub ? DEFAULT_VK_TEMPLATE_RECAST : DEFAULT_VK_TEMPLATE_VOICEOVER;
-    return episode.vkPostTemplate || episode.project?.vkPostTemplate || defaultTpl;
+    return episode.vkPostTemplate || episode.project?.vkPostTemplate || preset.vkPostTemplate || defaultTpl;
   }
   if (type === 'FINAL_TG') {
-    return episode.finalTgPostTemplate || episode.project?.finalTgPostTemplate || DEFAULT_FINAL_TG_TEMPLATE;
+    return episode.finalTgPostTemplate || episode.project?.finalTgPostTemplate || preset.finalTgPostTemplate || DEFAULT_FINAL_TG_TEMPLATE;
   }
   if (type === 'LINKS') {
-    return episode.linksTemplate || episode.project?.linksTemplate || DEFAULT_LINKS_TEMPLATE;
+    return episode.linksTemplate || episode.project?.linksTemplate || preset.linksTemplate || DEFAULT_LINKS_TEMPLATE;
   }
   return '';
 };
 
 export const generateFinalTGMessage = (episode: Episode, participants: Participant[]) => {
+  const relType = episode.project?.releaseType || 'VOICEOVER';
+  const preset = getReleasePresetSync(relType);
   const vars = getTemplateVariables(episode, participants);
-  const defaultTpl = DEFAULT_FINAL_TG_TEMPLATE;
-  return applyTemplate(defaultTpl, vars);
+  const tplStr = episode.finalTgPostTemplate || episode.project?.finalTgPostTemplate || preset.finalTgPostTemplate || DEFAULT_FINAL_TG_TEMPLATE;
+  return applyTemplate(tplStr, vars);
 };
 
 export const isTableSeparatorLine = (line: string): boolean => {

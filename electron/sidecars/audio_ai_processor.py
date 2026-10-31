@@ -2466,7 +2466,7 @@ def download_model_cli(args):
 # ------------------------------------------------------------------------------
 def _get_vst3_subplugins_list(vst3_path):
     """
-    VST3_WAVESHELL_V6
+    VST3_WAVESHELL_V7
     Returns a clean, deduplicated list of all sub-plugin names inside a .vst3 container
     (e.g. WaveShell1-VST3 15.x_x64.vst3 or multi-module bundles) using VST3Plugin.get_plugin_names_for_file
     WITHOUT instantiating any C++ audio processor or GUI.
@@ -2601,9 +2601,9 @@ def _load_vst3_plugin_instance(vst3_path, sub_plugin_name=None):
         raise RuntimeError(f"Не удалось загрузить VST3 плагин «{os.path.basename(vst3_path)}»: {first_err}") from first_err
 
 
-def _extract_vst3_params_snapshot(plugin, max_params=48):
+def _extract_vst3_params_snapshot(plugin, max_params=4096):
     """
-    Extracts a lightweight readable dictionary of exposed VST3 parameters for UI display.
+    Extracts a readable dictionary of exposed VST3 parameters for UI display and dual-layer state restoration.
     Explicitly casts pedalboard WrappedParameterValue objects to pure Python primitives (bool, int, float, str)
     so JSON serialization and attribute access never trigger WrappedParameterValue.__getattr__ errors.
     """
@@ -2634,6 +2634,39 @@ def _extract_vst3_params_snapshot(plugin, max_params=48):
     except Exception:
         pass
     return snapshot
+
+
+def _apply_vst3_params_dict(plugin, params_dict):
+    """
+    Applies a dictionary of parameter names and values directly to a loaded VST3Plugin instance.
+    This guarantees that plugins (such as FabFilter Pro-Q 3/4, iZotope Ozone, or Waves) where raw_state loading
+    in headless mode doesn't automatically synchronize to audio processor filter coefficients have all their exact
+    EQ bands, frequencies, gains, Q factors, slopes, shapes, and dynamics actively applied during DSP processing.
+    """
+    if not plugin or not params_dict or not isinstance(params_dict, dict):
+        return 0
+    applied_count = 0
+    params_coll = getattr(plugin, "parameters", {}) or {}
+    for k, v in params_dict.items():
+        if v is None:
+            continue
+        val_to_set = v.get("value") if isinstance(v, dict) and "value" in v else v
+        try:
+            setattr(plugin, k, val_to_set)
+            applied_count += 1
+            continue
+        except Exception:
+            pass
+
+        try:
+            param_obj = params_coll.get(k)
+            if param_obj is not None:
+                if isinstance(val_to_set, (int, float)):
+                    param_obj.raw_value = float(val_to_set)
+                    applied_count += 1
+        except Exception:
+            pass
+    return applied_count
 
 
 def _format_vst3_params_summary(params_snapshot, limit=8):
@@ -3288,10 +3321,19 @@ def process_vst3_open_editor(args):
             pass
     os.rename(temp_state, state_file)
 
-    params_snapshot = _extract_vst3_params_snapshot(plugin)
+    params_snapshot = _extract_vst3_params_snapshot(plugin, max_params=4096)
     summary_text = _format_vst3_params_summary(params_snapshot, limit=8)
     if summary_text:
         sys.stdout.write(f"LOG:Сохраненные параметры плагина «{resolved_name}»: {summary_text}\n")
+        sys.stdout.flush()
+
+    # Save companion .params.json file alongside .vststate for dual-layer DSP parameter guarantee
+    params_json_path = f"{state_file}.params.json"
+    try:
+        with open(params_json_path, "w", encoding="utf-8") as pf:
+            json.dump(params_snapshot, pf, ensure_ascii=False, indent=2)
+    except Exception as pe:
+        sys.stdout.write(f"LOG:Предупреждение при сохранении companion params.json: {pe}\n")
         sys.stdout.flush()
 
     saved_report = {
@@ -3465,6 +3507,29 @@ def process_vst3_preview_snippet(args):
         with open(state_file, "rb") as f:
             plugin.raw_state = f.read()
 
+    # DUAL-LAYER STATE RESTORATION: Companion .params.json / --params_json
+    params_json_path = f"{state_file}.params.json" if state_file else ""
+    loaded_params = None
+    if params_json_path and os.path.isfile(params_json_path) and os.path.getsize(params_json_path) > 0:
+        try:
+            with open(params_json_path, "r", encoding="utf-8") as pf:
+                loaded_params = json.load(pf)
+        except Exception:
+            pass
+    elif getattr(args, "params_json", None):
+        try:
+            parsed = json.loads(args.params_json)
+            if isinstance(parsed, dict):
+                loaded_params = parsed.get("parametersPreview") or parsed
+        except Exception:
+            pass
+
+    if loaded_params and isinstance(loaded_params, dict):
+        applied = _apply_vst3_params_dict(plugin, loaded_params)
+        if applied > 0:
+            sys.stdout.write(f"LOG:Синхронизировано {applied} параметров VST3 для превью.\n")
+            sys.stdout.flush()
+
     emit_progress(60.0, f"Рендер превью фрагмента ({start_sec:.1f}с – {start_sec + dur_sec:.1f}с)...")
     processed_full = _run_vst3_on_audio_array(
         plugin,
@@ -3537,7 +3602,30 @@ def process_vst3_process(args):
         sys.stdout.write(f"LOG:Слепок настроек (.vststate) не был создан — плагин «{resolved_name}» запущен с заводскими настройками по умолчанию.\n")
         sys.stdout.flush()
 
-    active_params = _extract_vst3_params_snapshot(plugin)
+    # DUAL-LAYER STATE RESTORATION: Companion .params.json / --params_json
+    params_json_path = f"{state_file}.params.json" if state_file else ""
+    loaded_params = None
+    if params_json_path and os.path.isfile(params_json_path) and os.path.getsize(params_json_path) > 0:
+        try:
+            with open(params_json_path, "r", encoding="utf-8") as pf:
+                loaded_params = json.load(pf)
+        except Exception:
+            pass
+    elif getattr(args, "params_json", None):
+        try:
+            parsed = json.loads(args.params_json)
+            if isinstance(parsed, dict):
+                loaded_params = parsed.get("parametersPreview") or parsed
+        except Exception:
+            pass
+
+    if loaded_params and isinstance(loaded_params, dict):
+        applied = _apply_vst3_params_dict(plugin, loaded_params)
+        if applied > 0:
+            sys.stdout.write(f"LOG:Синхронизировано {applied} активных параметров VST3 в звуковой процессор.\n")
+            sys.stdout.flush()
+
+    active_params = _extract_vst3_params_snapshot(plugin, max_params=4096)
     summary_text = _format_vst3_params_summary(active_params, limit=8)
     if summary_text:
         sys.stdout.write(f"LOG:Активные параметры VST3 «{resolved_name}»: {summary_text}\n")

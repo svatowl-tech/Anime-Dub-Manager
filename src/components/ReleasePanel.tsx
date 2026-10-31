@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
   PlaySquare, Send, Copy, MessageSquare, Sparkles, CheckCircle2, Globe, Link2, Save, 
   Package, Loader2, Download, Upload, Plus, Trash2, Edit3, Check, X,
-  Table, ExternalLink, Columns, Eye, Code
+  Table, ExternalLink, Columns, Eye, Code, Sliders
 } from 'lucide-react';
 import { getParticipants } from '../services/dbService';
 import { Participant, Episode, Project } from '../types';
@@ -13,6 +13,13 @@ import { TelegramClientPanel } from './TelegramClientPanel';
 import AnimeSourcesModal from './AnimeSourcesModal';
 import TemplateVariablesBar from './TemplateVariablesBar';
 import TemplateBlockConfiguratorModal from './TemplateBlockConfiguratorModal';
+import ReleasePresetsModal from './release/ReleasePresetsModal';
+import { 
+  getReleasePreset, 
+  saveReleasePreset, 
+  getReleasePresetSync, 
+  DEFAULT_QUICK_UPLOAD_LINKS 
+} from '../lib/releasePresetsService';
 import { 
   generateTGPostMessage, 
   generateVKPostMessage, 
@@ -81,6 +88,9 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
   const [isAnimeSourcesModalOpen, setIsAnimeSourcesModalOpen] = useState(false);
   const [isAutoFillingLinks, setIsAutoFillingLinks] = useState(false);
   const [autoFillFeedback, setAutoFillFeedback] = useState<string | null>(null);
+
+  // Global Release Presets Modal State
+  const [isPresetsModalOpen, setIsPresetsModalOpen] = useState(false);
 
   // Template Block Configurator State
   const [isTemplateBlockConfiguratorOpen, setIsTemplateBlockConfiguratorOpen] = useState(false);
@@ -329,28 +339,53 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
     }
   }, [currentEpisode?.id]);
 
+  // Auto-activate default template and generate content immediately on load
+  useEffect(() => {
+    if (!currentEpisode) return;
+    const relType = currentEpisode.project?.releaseType || 'VOICEOVER';
+    const preset = getReleasePresetSync(relType);
+    const targetType = activeTemplate || preset.defaultTemplateType || 'TG';
+
+    if (!activeTemplate) {
+      setActiveTemplate(targetType);
+    }
+
+    if (targetType === 'TG') {
+      setPostContent(generateTGPostMessage(currentEpisode, participants));
+    } else if (targetType === 'TG_ARTICLE') {
+      setPostContent(generateTGArticleMessage(currentEpisode, participants));
+    } else if (targetType === 'VK') {
+      setPostContent(generateVKPostMessage(currentEpisode, participants));
+    } else if (targetType === 'FINAL_TG') {
+      setPostContent(generateFinalTGMessage(currentEpisode, participants));
+    }
+  }, [currentEpisode?.id, currentEpisode?.project?.releaseType, participants.length, activeTemplate]);
+
   useEffect(() => {
     const defaultRequiredLinks = { tg: '', vk: '', anime365: '', shikimori: '', kodik: '' };
+    const relType = currentEpisode?.project?.releaseType || 'VOICEOVER';
+    const preset = getReleasePresetSync(relType);
+
     if (currentEpisode?.project?.links) {
       try {
         const parsed = JSON.parse(currentEpisode.project.links) as ProjectLinks;
-        const mergedLinks = { ...defaultRequiredLinks, ...parsed };
+        const mergedLinks = { ...defaultRequiredLinks, ...preset.defaultPlatformLinks, ...parsed };
         setLinks(mergedLinks);
-        if (parsed.quickUploadLinks && Array.isArray(parsed.quickUploadLinks)) {
+        if (parsed.quickUploadLinks && Array.isArray(parsed.quickUploadLinks) && parsed.quickUploadLinks.length > 0) {
           setQuickLinks(parsed.quickUploadLinks);
         } else {
-          setQuickLinks(DEFAULT_QUICK_LINKS);
+          setQuickLinks(preset.quickUploadLinks || DEFAULT_QUICK_LINKS);
         }
       } catch (e) {
         console.error('Failed to parse project links', e);
-        setLinks(defaultRequiredLinks);
-        setQuickLinks(DEFAULT_QUICK_LINKS);
+        setLinks({ ...defaultRequiredLinks, ...preset.defaultPlatformLinks });
+        setQuickLinks(preset.quickUploadLinks || DEFAULT_QUICK_LINKS);
       }
     } else {
-      setLinks(defaultRequiredLinks);
-      setQuickLinks(DEFAULT_QUICK_LINKS);
+      setLinks({ ...defaultRequiredLinks, ...preset.defaultPlatformLinks });
+      setQuickLinks(preset.quickUploadLinks || DEFAULT_QUICK_LINKS);
     }
-  }, [currentEpisode?.project?.id, currentEpisode?.project?.links]);
+  }, [currentEpisode?.project?.id, currentEpisode?.project?.links, currentEpisode?.project?.releaseType]);
 
   const updateLinksAndSync = (newLinks: ProjectLinks) => {
     setLinks(newLinks);
@@ -573,6 +608,14 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
         [propName]: editingTemplateStr
       };
       await ipcSafe.invoke('save-project', updatedProject);
+
+      // Save to global release preset for all future projects of this releaseType
+      const relType = currentEpisode.project.releaseType || 'VOICEOVER';
+      const preset = await getReleasePreset(relType);
+      preset[propName] = editingTemplateStr;
+      preset.defaultTemplateType = activeTemplate;
+      await saveReleasePreset(preset);
+
       setIsEditingTemplate(false);
       
       const epUpdate = { ...currentEpisode };
@@ -729,7 +772,16 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
           <div>
             <h1 className="text-3xl font-bold text-white">Сборка релиза</h1>
             <p className="text-neutral-400">Формирование постов и сборка финального файла</p>
-            <div className="flex items-center gap-2 mt-4">
+            <div className="flex flex-wrap items-center gap-2 mt-4">
+              <button
+                onClick={() => setIsPresetsModalOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-gradient-to-r from-purple-600/30 to-indigo-600/30 hover:from-purple-600/40 hover:to-indigo-600/40 text-purple-300 rounded-lg text-xs font-bold transition-all border border-purple-500/30 hover:border-purple-500/50 cursor-pointer shadow-sm shadow-purple-500/10"
+                title="Настроить глобальные шаблоны сообщений и ссылки по типам релизов (Закадр, Рекаст, Дубляж)"
+              >
+                <Sliders className="w-3.5 h-3.5 text-purple-400" />
+                <span>Глобальные шаблоны типов релизов</span>
+              </button>
+
               <button
                 onClick={handleExportConfig}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 hover:bg-neutral-800 text-purple-400 hover:text-purple-300 rounded-lg text-xs font-bold transition-all border border-neutral-800 hover:border-neutral-700 cursor-pointer"
@@ -1575,6 +1627,25 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
         currentEpisode={currentEpisode}
         activeTemplateType={activeTemplate || 'TG'}
         onApplyTemplate={handleApplyConfiguratorTemplate}
+      />
+
+      <ReleasePresetsModal
+        isOpen={isPresetsModalOpen}
+        onClose={() => setIsPresetsModalOpen(false)}
+        currentReleaseType={currentEpisode?.project?.releaseType || 'VOICEOVER'}
+        allProjects={allProjects}
+        onPresetUpdated={() => {
+          onRefresh();
+          if (currentEpisode) {
+            const relType = currentEpisode.project?.releaseType || 'VOICEOVER';
+            const preset = getReleasePresetSync(relType);
+            const targetType = activeTemplate || preset.defaultTemplateType || 'TG';
+            if (targetType === 'TG') setPostContent(generateTGPostMessage(currentEpisode, participants));
+            else if (targetType === 'TG_ARTICLE') setPostContent(generateTGArticleMessage(currentEpisode, participants));
+            else if (targetType === 'VK') setPostContent(generateVKPostMessage(currentEpisode, participants));
+            else if (targetType === 'FINAL_TG') setPostContent(generateFinalTGMessage(currentEpisode, participants));
+          }
+        }}
       />
     </div>
   );

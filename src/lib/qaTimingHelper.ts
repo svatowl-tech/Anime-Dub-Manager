@@ -166,9 +166,9 @@ export function prepareQATracksForTiming(
       return mtNick && (mtNick === normKey || mtNick.includes(normKey) || normKey.includes(mtNick));
     });
 
-    // Helper to extract explicit track index (e.g. дорожка1, дорожка2, track1, layer2)
+    // Helper to extract explicit track index (e.g. дорожка1, дорожка2, track1, layer2, фикс1, fix2)
     const getExplicitTrackIndex = (nameOrPath: string): number | null => {
-      const m = (nameOrPath || '').match(/(?:дорожка|слой|track|take|layer)[_\s-]*(\d+)/i);
+      const m = (nameOrPath || '').match(/(?:дорожка|слой|track|take|layer|фикс|fix)[_\s-]*(\d+)/i);
       return m ? parseInt(m[1], 10) : null;
     };
 
@@ -208,23 +208,26 @@ export function prepareQATracksForTiming(
       else rawUploadOriginals.push(entry);
     });
 
-    // 2. Fallback ONLY if there are no QA uploads for this actor (e.g. external files placed directly in folder)
-    if (rawUploadOriginals.length === 0 && rawUploadFixes.length === 0 && actorManifestFiles.length > 0) {
+    // 2. Fallback and enrichment for any external files placed in folder
+    if (actorManifestFiles.length > 0) {
       actorManifestFiles.filter(m => m.path).forEach(m => {
         const name = m.name || m.path.split(/[/\\]/).pop() || 'Дорожка';
         const fixFlag = /(?:^|[_[\s-])(fix|фикс)(?:\d*|[_\]\s.-]|$)/i.test(name);
-        const entry: FileEntry = {
-          id: m.id || m.path,
-          name,
-          path: m.path,
-          size: m.size || 0,
-          createdAt: '',
-          type: fixFlag ? 'FIXES' : 'DUBBER_FILE',
-          isFix: fixFlag,
-          trackIndex: getExplicitTrackIndex(name)
-        };
-        if (fixFlag) rawUploadFixes.push(entry);
-        else rawUploadOriginals.push(entry);
+        const alreadyExists = [...rawUploadOriginals, ...rawUploadFixes].some(f => f.path === m.path || f.name === name);
+        if (!alreadyExists) {
+          const entry: FileEntry = {
+            id: m.id || m.path,
+            name,
+            path: m.path,
+            size: m.size || 0,
+            createdAt: '',
+            type: fixFlag ? 'FIXES' : 'DUBBER_FILE',
+            isFix: fixFlag,
+            trackIndex: getExplicitTrackIndex(name)
+          };
+          if (fixFlag) rawUploadFixes.push(entry);
+          else if (rawUploadOriginals.length === 0) rawUploadOriginals.push(entry);
+        }
       });
     }
 
@@ -301,7 +304,14 @@ export function prepareQATracksForTiming(
             name: latestFix.name,
             path: latestFix.path,
             size: latestFix.size
-          } : undefined
+          } : undefined,
+          patchSnippets: matchingFixes.map(f => ({
+            id: f.id,
+            name: f.name,
+            path: f.path,
+            size: f.size,
+            trackIndex: f.trackIndex
+          }))
         } as any);
       });
     } else {
@@ -339,7 +349,14 @@ export function prepareQATracksForTiming(
           name: latestFix.name,
           path: latestFix.path,
           size: latestFix.size
-        } : undefined
+        } : undefined,
+        patchSnippets: availableFixes.map(f => ({
+          id: f.id,
+          name: f.name,
+          path: f.path,
+          size: f.size,
+          trackIndex: f.trackIndex
+        }))
       } as any);
     }
   });
