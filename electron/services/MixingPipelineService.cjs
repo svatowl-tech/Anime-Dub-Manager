@@ -9450,6 +9450,36 @@ class MixingPipelineService {
   }
 
   /**
+   * Signals an active native VST3 GUI window to close cleanly and save its current state (.vststate)
+   */
+  async closeVst3PluginEditor({
+    episode,
+    workingDir,
+    targetDir,
+    baseDir,
+    stepId = 'step_vst3',
+    trackKey = 'global',
+    vst3Path = '',
+    subPluginName = '',
+    stateFile = ''
+  } = {}) {
+    let targetStateFile = stateFile || '';
+    if (!targetStateFile && vst3Path) {
+      const resolvedWorkDir =
+        this.resolveWorkingDir(workingDir || targetDir, episode, baseDir) ||
+        path.join(app.getPath('userData'), 'vst3_work');
+      const statesDir = path.join(resolvedWorkDir, 'vst3_states');
+      const safeStep = String(stepId || 'vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const safeTrack = String(trackKey || 'global').replace(/[^a-zA-Z0-9_\u0400-\u04FF-]/g, '_');
+      const baseSlug = path.basename(vst3Path, '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const subSlug = subPluginName ? `_${String(subPluginName).replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
+      const pluginSlug = `${baseSlug}${subSlug}`;
+      targetStateFile = path.join(statesDir, `${safeStep}_${safeTrack}_${pluginSlug}.vststate`);
+    }
+    return await AudioNeuralService.closeActiveVst3Editor({ stateFile: targetStateFile });
+  }
+
+  /**
    * Renders a fast 5-15s preview snippet (Dry Before + Wet After) for a selected track and VST3 plugin
    */
   async previewVst3Snippet({
@@ -9497,13 +9527,22 @@ class MixingPipelineService {
       }
     } catch (_) {}
 
+    const effectiveStateFile = this._resolveExistingVst3StateFile({
+      workingDir: resolvedWorkDir,
+      stepId,
+      trackKey: 'global',
+      vst3Path,
+      subPluginName,
+      explicitStateFile: stateFile
+    });
+
     const res = await AudioNeuralService.previewVst3Snippet({
       inputPath,
       outputPath: wetOutputPath,
       dryOutputPath,
       vst3Path,
       subPluginName,
-      stateFile,
+      stateFile: effectiveStateFile,
       snippetStartSec,
       snippetDurationSec,
       wetMixPercent,
@@ -9630,6 +9669,50 @@ class MixingPipelineService {
   }
 
   /**
+   * Resolves an existing .vststate file on disk for a given step, trackKey, and VST3 plugin.
+   * Ensures that if a user already saved a state file in `vst3_states/` via the native editor,
+   * it is automatically picked up even if `globalStateFile` in step params was empty.
+   */
+  _resolveExistingVst3StateFile({
+    workingDir,
+    stepId = 'step_vst3',
+    trackKey = 'global',
+    vst3Path = '',
+    subPluginName = '',
+    explicitStateFile = ''
+  }) {
+    if (explicitStateFile && fsSync.existsSync(explicitStateFile)) {
+      try {
+        if (fsSync.statSync(explicitStateFile).size > 0) return explicitStateFile;
+      } catch (_) {}
+    }
+    if (!workingDir || !vst3Path) return '';
+    const statesDir = path.join(workingDir, 'vst3_states');
+    if (!fsSync.existsSync(statesDir)) return '';
+
+    const safeStep = String(stepId || 'vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const safeTrack = String(trackKey || 'global').replace(/[^a-zA-Z0-9_\u0400-\u04FF-]/g, '_');
+    const baseSlug = path.basename(vst3Path, '.vst3').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const subSlug = subPluginName ? `_${String(subPluginName).replace(/[^a-zA-Z0-9_-]/g, '_')}` : '';
+    const pluginSlug = `${baseSlug}${subSlug}`;
+
+    const candidates = [
+      path.join(statesDir, `${safeStep}_${safeTrack}_${pluginSlug}.vststate`),
+      path.join(statesDir, `${safeStep}_global_${pluginSlug}.vststate`),
+      path.join(statesDir, `${safeStep}_${safeTrack}_${baseSlug}.vststate`),
+      path.join(statesDir, `${safeStep}_global_${baseSlug}.vststate`)
+    ];
+    for (const cand of candidates) {
+      if (fsSync.existsSync(cand)) {
+        try {
+          if (fsSync.statSync(cand).size > 0) return cand;
+        } catch (_) {}
+      }
+    }
+    return '';
+  }
+
+  /**
    * EXEC: Native 64-bit VST3 Plugin Processor Step
    * Supports 3 routing schemes:
    * - 'batch_all': applies globalStateFile to all selected dubber tracks (and optionally passes through unselected tracks)
@@ -9652,7 +9735,7 @@ class MixingPipelineService {
     const vst3Path = params.vst3Path || '';
     const subPluginName = params.subPluginName || '';
     const routingMode = params.routingMode || 'batch_all';
-    const globalStateFile = params.globalStateFile || '';
+    const rawGlobalStateFile = params.globalStateFile || '';
     const perTrackStateFiles = params.perTrackStates || params.perTrackStateFiles || {};
     const wetMixPercent = Number(params.wetMixPercent ?? 100);
     const outputGainDb = Number(params.outputGainDb ?? 0.0);
@@ -9667,7 +9750,16 @@ class MixingPipelineService {
       throw new Error('Нет активных входных дорожек для обработки VST3 плагином.');
     }
 
-    const pluginTitle = params.pluginName || path.basename(vst3Path, '.vst3');
+    const globalStateFile = this._resolveExistingVst3StateFile({
+      workingDir,
+      stepId,
+      trackKey: 'global',
+      vst3Path,
+      subPluginName,
+      explicitStateFile: rawGlobalStateFile
+    });
+
+    const pluginTitle = params.pluginName || subPluginName || path.basename(vst3Path, '.vst3');
     logFn(`[VST3 Хост] Старт модуля «${pluginTitle}» (Режим: ${routingMode}, Дорожек: ${inputFiles.length}, Mix: ${wetMixPercent}%, Gain: ${outputGainDb} dB)...`);
 
     const results = [];
@@ -9754,8 +9846,16 @@ class MixingPipelineService {
       if (routingMode === 'per_track') {
         const perEntry = perTrackStateFiles[trackKey] || perTrackStateFiles[track.name] || perTrackStateFiles[nick];
         const candState = typeof perEntry === 'string' ? perEntry : perEntry?.stateFile;
-        if (candState && fsSync.existsSync(candState)) {
-          effectiveStateFile = candState;
+        const resolvedPerTrack = this._resolveExistingVst3StateFile({
+          workingDir,
+          stepId,
+          trackKey,
+          vst3Path,
+          subPluginName,
+          explicitStateFile: candState || ''
+        });
+        if (resolvedPerTrack) {
+          effectiveStateFile = resolvedPerTrack;
           logFn(`[${i + 1}/${inputFiles.length}] Применение индивидуального слепка VST3 «${pluginTitle}» для дорожки «${nick}»...`);
         } else {
           logFn(`[${i + 1}/${inputFiles.length}] Для дорожки «${nick}» используется общий/базовый слепок VST3 «${pluginTitle}»...`);

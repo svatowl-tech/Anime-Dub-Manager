@@ -1705,6 +1705,12 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }, true);
     mixLog('info', 'VST3', `Выбран VST3 плагин «${cleanName}»: ${vst3Path}${targetSubPlugin ? ` [Sub-Plugin: ${targetSubPlugin}]` : ''}`);
 
+    // If a specific sub-plugin inside an already enumerated shell is chosen, no background Python process is needed
+    if (targetSubPlugin && initialSubPlugins.length > 0) {
+      toast.success(`Выбран плагин «${targetSubPlugin}» (${initialSubPlugins.length} плагинов в контейнере)`);
+      return;
+    }
+
     try {
       const inspectRes: any = await ipcSafe.invoke('mixing-inspect-vst3-plugin', {
         vst3Path,
@@ -1732,8 +1738,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         }, true);
         toast.success(
           subPlugins.length > 1
-            ? `Плагин «${resolvedDisplay}» подключен из контейнера (${subPlugins.length} плагинов в WaveShell, ${inspectRes.totalParameters || 0} пар.)`
-            : `Плагин «${resolvedDisplay}» подключен (${inspectRes.totalParameters || 0} параметров)`
+            ? `Контейнер подключен (${subPlugins.length} плагинов в WaveShell) — активен «${resolvedDisplay}»`
+            : `Плагин «${resolvedDisplay}» подключен`
         );
       }
     } catch (e: any) {
@@ -1813,6 +1819,27 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
       mixLog('error', 'VST3 GUI', `Ошибка нативного редактора VST3: ${e.message || String(e)}`);
     } finally {
       setOpeningVst3EditorKey(null);
+    }
+  };
+
+  const handleCloseVst3NativeEditor = async (step: PipelineStep, trackKey?: string) => {
+    try {
+      const perTrackMap = step.params?.perTrackStates || step.params?.perTrackStateFiles || {};
+      const currentStateFile = trackKey
+        ? (perTrackMap[trackKey]?.stateFile || step.params?.globalStateFile || '')
+        : (step.params?.globalStateFile || '');
+      await ipcSafe.invoke('mixing-close-vst3-editor', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir,
+        stepId: step.stepId,
+        vst3Path: step.params?.vst3Path || '',
+        subPluginName: step.params?.subPluginName || '',
+        trackKey: trackKey || 'global',
+        stateFile: currentStateFile
+      });
+      toast.info('Отправлен сигнал сохранения и закрытия окна VST3...');
+    } catch (e: any) {
+      toast.error(`Не удалось закрыть окно VST3: ${e.message || String(e)}`);
     }
   };
 
@@ -4492,23 +4519,36 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                     </div>
                                   </div>
 
-                                  <button
-                                    type="button"
-                                    onClick={() => handleOpenVst3NativeEditor(step)}
-                                    disabled={!vst3Path || isGlobalEditorOpening}
-                                    className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 transition shadow-sm shrink-0"
-                                  >
-                                    {isGlobalEditorOpening ? (
-                                      <Loader2 className="w-4 h-4 animate-spin" />
-                                    ) : (
-                                      <Sliders className="w-4 h-4" />
+                                  <div className="flex items-center gap-2 flex-wrap shrink-0">
+                                    {isGlobalEditorOpening && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCloseVst3NativeEditor(step)}
+                                        className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold flex items-center gap-1.5 transition shadow-sm"
+                                        title="Сохранить текущие настройки плагина в .vststate и закрыть окно VST3"
+                                      >
+                                        <Check className="w-4 h-4" />
+                                        <span>Сохранить и закрыть окно VST3</span>
+                                      </button>
                                     )}
-                                    <span>
-                                      {isGlobalEditorOpening
-                                        ? 'Ожидание закрытия окна VST3...'
-                                        : `Открыть нативный интерфейс VST3 (${pluginName})`}
-                                    </span>
-                                  </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenVst3NativeEditor(step)}
+                                      disabled={!vst3Path || isGlobalEditorOpening}
+                                      className="px-3.5 py-2 bg-purple-600 hover:bg-purple-500 disabled:bg-neutral-800 disabled:text-neutral-500 text-white rounded-lg text-xs font-semibold flex items-center gap-2 transition shadow-sm shrink-0"
+                                    >
+                                      {isGlobalEditorOpening ? (
+                                        <Loader2 className="w-4 h-4 animate-spin" />
+                                      ) : (
+                                        <Sliders className="w-4 h-4" />
+                                      )}
+                                      <span>
+                                        {isGlobalEditorOpening
+                                          ? 'Окно плагина открыто...'
+                                          : `Открыть нативный интерфейс VST3 (${pluginName})`}
+                                      </span>
+                                    </button>
+                                  </div>
                                 </div>
 
                                 {step.params?.parametersPreview && typeof step.params.parametersPreview === 'object' && Object.keys(step.params.parametersPreview).length > 0 && (
@@ -4520,16 +4560,21 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                       </span>
                                     </div>
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 max-h-28 overflow-y-auto pr-1">
-                                      {Object.entries(step.params.parametersPreview).slice(0, 16).map(([pKey, pInfo]: [string, any]) => (
-                                        <div key={pKey} className="px-2 py-1 rounded bg-neutral-900 border border-neutral-800/80 flex items-center justify-between gap-1.5 text-[10px]">
-                                          <span className="text-neutral-400 truncate" title={pInfo?.label || pKey}>
-                                            {pInfo?.label || pKey}
-                                          </span>
-                                          <span className="font-mono tabular-nums text-purple-300 shrink-0 font-semibold">
-                                            {typeof pInfo?.value === 'boolean' ? (pInfo.value ? 'ON' : 'OFF') : String(pInfo?.value ?? '')}
-                                          </span>
-                                        </div>
-                                      ))}
+                                      {Object.entries(step.params.parametersPreview).slice(0, 16).map(([pKey, pInfo]: [string, any]) => {
+                                        const displayLabel = pInfo && typeof pInfo === 'object' && pInfo.label ? pInfo.label : pKey;
+                                        const rawVal = pInfo && typeof pInfo === 'object' && 'value' in pInfo ? pInfo.value : pInfo;
+                                        const displayVal = typeof rawVal === 'boolean' ? (rawVal ? 'ON' : 'OFF') : String(rawVal ?? '');
+                                        return (
+                                          <div key={pKey} className="px-2 py-1 rounded bg-neutral-900 border border-neutral-800/80 flex items-center justify-between gap-1.5 text-[10px]">
+                                            <span className="text-neutral-400 truncate" title={String(displayLabel)}>
+                                              {String(displayLabel)}
+                                            </span>
+                                            <span className="font-mono tabular-nums text-purple-300 shrink-0 font-semibold">
+                                              {displayVal}
+                                            </span>
+                                          </div>
+                                        );
+                                      })}
                                     </div>
                                   </div>
                                 )}
@@ -4583,6 +4628,17 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
                                                 >
                                                   ▶ Превью
                                                 </button>
+                                                {isTrackOpening && (
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleCloseVst3NativeEditor(step, tKey)}
+                                                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-semibold flex items-center gap-1 transition"
+                                                    title="Сохранить настройки и закрыть окно VST3"
+                                                  >
+                                                    <Check className="w-3 h-3" />
+                                                    <span>Сохранить и закрыть</span>
+                                                  </button>
+                                                )}
                                                 <button
                                                   type="button"
                                                   onClick={() => handleOpenVst3NativeEditor(step, tKey, tLabel)}

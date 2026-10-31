@@ -570,6 +570,23 @@ function registerMixingHandlers(getData, mainWindow) {
     });
   }));
 
+  ipcMain.handle('mixing-close-vst3-editor', wrapIpcHandler(async (event, params) => {
+    const { episode, targetDir, workingDir, stepId, vst3Path, subPluginName, trackKey, stateFile } = params || {};
+    const config = await getData('config.json');
+    const baseDir = config.baseDir || app.getPath('userData');
+    return await MixingPipelineService.closeVst3PluginEditor({
+      episode,
+      workingDir: workingDir || targetDir,
+      targetDir: targetDir || workingDir,
+      baseDir,
+      stepId,
+      vst3Path,
+      subPluginName,
+      trackKey,
+      stateFile
+    });
+  }));
+
   ipcMain.handle('mixing-preview-vst3-snippet', wrapIpcHandler(async (event, params) => {
     const {
       episode,

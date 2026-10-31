@@ -11,6 +11,7 @@ class AudioNeuralService {
   constructor() {
     this._cachedEnvStatus = null;
     this._activeJobs = new Set();
+    this._activeVst3EditorStateFiles = new Set();
   }
 
   /**
@@ -61,7 +62,11 @@ class AudioNeuralService {
             if (!fallbackContent || content.length > fallbackContent.length) {
               fallbackContent = content;
             }
-            if (content.includes('--noise_reduction_db') && content.includes('vst3_open_editor')) {
+            if (
+              content.includes('--noise_reduction_db') &&
+              content.includes('vst3_open_editor') &&
+              content.includes('VST3_WAVESHELL_V6')
+            ) {
               sourceContent = content;
               break;
             }
@@ -123,7 +128,7 @@ class AudioNeuralService {
         !code.includes('--noise_reduction_db') ||
         !code.includes('--post_filter') ||
         !code.includes('parse_known_args') ||
-        !code.includes('VST3_WAVESHELL_V3')
+        !code.includes('VST3_WAVESHELL_V6')
       ) {
         const bundledCandidates = [
           path.join(__dirname, 'audio_ai_processor.py'),
@@ -140,7 +145,7 @@ class AudioNeuralService {
           if (fs.existsSync(c)) {
             try {
               const fresh = fs.readFileSync(c, 'utf8');
-              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('VST3_WAVESHELL_V3')) {
+              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('VST3_WAVESHELL_V6')) {
                 fs.writeFileSync(scriptPath, fresh, 'utf8');
                 log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на актуальную версию.`);
                 break;
@@ -158,7 +163,7 @@ class AudioNeuralService {
    * Spawns Python sidecar CLI process directly without cmd.exe / shell: true
    * and handles streaming stdout / stderr / progress.
    */
-  async _runPythonSidecar(args, { onProgress, onLog, abortSignal, operationName = 'AudioNeural', allowGuiWindow = false }) {
+  async _runPythonSidecar(args, { onProgress, onLog, abortSignal, operationName = 'AudioNeural', allowGuiWindow = false, timeoutMs = 0 }) {
     const pythonPath = EnvironmentManager.getPythonPath();
     const scriptPath = this.getSidecarScriptPath();
 
@@ -266,10 +271,13 @@ class AudioNeuralService {
       // Track process for emergency SIGKILL cancellation
       trackProcess(child, operationName);
 
+      let timeoutHandle = null;
       const jobHandle = {
-        abort: () => {
+        operationName,
+        abort: (reasonMsg) => {
           if (!isSettled) {
             isSettled = true;
+            if (timeoutHandle) clearTimeout(timeoutHandle);
             this._activeJobs.delete(jobHandle);
             try {
               if (process.platform === 'win32' && child.pid) {
@@ -278,11 +286,17 @@ class AudioNeuralService {
                 child.kill('SIGKILL');
               }
             } catch (e) {}
-            reject(new Error(`Операция «${operationName}» остановлена пользователем.`));
+            reject(new Error(reasonMsg || `Операция «${operationName}» остановлена пользователем.`));
           }
         }
       };
       this._activeJobs.add(jobHandle);
+
+      if (timeoutMs && timeoutMs > 0) {
+        timeoutHandle = setTimeout(() => {
+          jobHandle.abort(`Превышено время ожидания операции «${operationName}» (${Math.round(timeoutMs / 1000)} сек).`);
+        }, timeoutMs);
+      }
 
       if (abortSignal) {
         abortSignal.addEventListener('abort', () => {
@@ -365,6 +379,7 @@ class AudioNeuralService {
       });
 
       child.on('close', (code) => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
         this._activeJobs.delete(jobHandle);
         if (isSettled) return;
         isSettled = true;
@@ -735,6 +750,16 @@ class AudioNeuralService {
     return res;
   }
 
+  _abortActiveVst3Inspections() {
+    try {
+      for (const job of Array.from(this._activeJobs)) {
+        if (job && typeof job.operationName === 'string' && job.operationName.startsWith('Инспекция VST3')) {
+          job.abort('Прервано для запуска основного окна/обработки VST3');
+        }
+      }
+    } catch (_) {}
+  }
+
   /**
    * Batch-enumerates sub-plugins inside multi-plugin VST3 shell containers (e.g. WaveShell1-VST3*.vst3)
    */
@@ -749,7 +774,8 @@ class AudioNeuralService {
 
     try {
       const res = await this._runPythonSidecar(args, {
-        operationName: 'Инспекция VST3 контейнеров (WaveShell)'
+        operationName: 'Инспекция VST3 контейнеров (WaveShell)',
+        timeoutMs: 12000
       });
       return (res && res.shells && typeof res.shells === 'object') ? res.shells : {};
     } catch (err) {
@@ -776,7 +802,8 @@ class AudioNeuralService {
     return await this._runPythonSidecar(args, {
       onLog,
       abortSignal,
-      operationName: `Инспекция VST3 [${path.basename(vst3Path)}]`
+      operationName: `Инспекция VST3 [${path.basename(vst3Path)}]`,
+      timeoutMs: 10000
     });
   }
 
@@ -791,6 +818,7 @@ class AudioNeuralService {
       throw new Error('Не указан файл состояния (.vststate) для сохранения настроек VST3 плагина.');
     }
 
+    this._abortActiveVst3Inspections();
     await fsPromises.mkdir(path.dirname(stateFile), { recursive: true });
 
     const args = [
@@ -800,12 +828,43 @@ class AudioNeuralService {
       '--state_file', stateFile
     ];
 
-    return await this._runPythonSidecar(args, {
-      onLog,
-      abortSignal,
-      allowGuiWindow: true,
-      operationName: `Нативный интерфейс VST3 [${path.basename(vst3Path)}]`
-    });
+    this._activeVst3EditorStateFiles.add(stateFile);
+    try {
+      return await this._runPythonSidecar(args, {
+        onLog,
+        abortSignal,
+        allowGuiWindow: true,
+        operationName: `Нативный интерфейс VST3 [${subPluginName || path.basename(vst3Path)}]`
+      });
+    } finally {
+      this._activeVst3EditorStateFiles.delete(stateFile);
+      try {
+        const sig = `${stateFile}.close_signal`;
+        if (fs.existsSync(sig)) fs.unlinkSync(sig);
+      } catch (_) {}
+    }
+  }
+
+  /**
+   * Signals any open VST3 native editor window to cleanly close and save its binary raw_state (.vststate)
+   */
+  async closeActiveVst3Editor({ stateFile = '' } = {}) {
+    const targets = new Set(this._activeVst3EditorStateFiles);
+    if (stateFile) targets.add(stateFile);
+
+    let signaled = 0;
+    for (const sf of targets) {
+      if (!sf) continue;
+      try {
+        const sigFile = `${sf}.close_signal`;
+        await fsPromises.mkdir(path.dirname(sigFile), { recursive: true });
+        await fsPromises.writeFile(sigFile, 'CLOSE', 'utf8');
+        signaled++;
+      } catch (e) {
+        log.warn('[AudioNeuralService] Не удалось записать close_signal для VST3 окна:', e.message);
+      }
+    }
+    return { success: true, signaled };
   }
 
   /**

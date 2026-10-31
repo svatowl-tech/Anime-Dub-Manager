@@ -2466,9 +2466,10 @@ def download_model_cli(args):
 # ------------------------------------------------------------------------------
 def _get_vst3_subplugins_list(vst3_path):
     """
-    VST3_WAVESHELL_V3
+    VST3_WAVESHELL_V6
     Returns a clean, deduplicated list of all sub-plugin names inside a .vst3 container
-    (e.g. WaveShell1-VST3 15.x_x64.vst3 or multi-module bundles) without instantiating audio processors.
+    (e.g. WaveShell1-VST3 15.x_x64.vst3 or multi-module bundles) using VST3Plugin.get_plugin_names_for_file
+    WITHOUT instantiating any C++ audio processor or GUI.
     """
     if not vst3_path or not os.path.exists(vst3_path):
         return []
@@ -2483,30 +2484,15 @@ def _get_vst3_subplugins_list(vst3_path):
                     s = str(item).strip()
                     if s and not s.lower().endswith(".vst3") and s not in sub_names:
                         sub_names.append(s)
-    except Exception:
-        pass
-
-    if not sub_names:
-        try:
-            from pedalboard import load_plugin
-            plugin = load_plugin(vst3_path)
-            pname = getattr(plugin, "name", "")
-            if pname and not pname.lower().endswith(".vst3"):
-                sub_names.append(str(pname).strip())
-        except Exception as err:
-            import re
-            err_msg = str(err)
-            quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', err_msg)
-            for q in quoted:
-                cand = (q[0] or q[1] or "").strip()
-                if cand and not cand.lower().endswith(".vst3") and cand not in sub_names:
-                    sub_names.append(cand)
-            if not sub_names:
-                for line in err_msg.splitlines():
-                    clean_line = line.strip().lstrip("-*•").strip()
-                    if clean_line and not clean_line.endswith(":") and "vst3" not in clean_line.lower() and len(clean_line) < 90:
-                        if clean_line not in sub_names:
-                            sub_names.append(clean_line)
+            return sub_names
+    except Exception as err:
+        import re
+        err_msg = str(err)
+        quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', err_msg)
+        for q in quoted:
+            cand = (q[0] or q[1] or "").strip()
+            if cand and not cand.lower().endswith(".vst3") and cand not in sub_names:
+                sub_names.append(cand)
 
     return sub_names
 
@@ -2528,10 +2514,35 @@ def _prioritize_vst3_subplugin_candidates(candidates):
     return sorted(candidates, key=sort_key)
 
 
+def _find_sibling_waveshell_paths(vst3_path):
+    """
+    If a WaveShell container (e.g. WaveShell1-VST3 15.0_x64.vst3) fails to load a sub-plugin because
+    Waves Central updated the plugin to a newer WaveShell (e.g. 15.3_x64.vst3) in the same folder,
+    returns sibling WaveShell .vst3 paths ordered newest-first.
+    """
+    if not vst3_path or "waveshell" not in os.path.basename(vst3_path).lower():
+        return []
+    parent_dir = os.path.dirname(os.path.abspath(vst3_path))
+    if not os.path.isdir(parent_dir):
+        return []
+    siblings = []
+    try:
+        for fname in os.listdir(parent_dir):
+            if fname.lower().endswith(".vst3") and "waveshell" in fname.lower():
+                full_p = os.path.join(parent_dir, fname)
+                if os.path.normcase(os.path.abspath(full_p)) != os.path.normcase(os.path.abspath(vst3_path)):
+                    siblings.append(full_p)
+    except Exception:
+        pass
+    siblings.sort(key=lambda p: os.path.basename(p).lower(), reverse=True)
+    return siblings
+
+
 def _load_vst3_plugin_instance(vst3_path, sub_plugin_name=None):
     """
     Loads a 64-bit VST3 plugin bundle/file via Spotify Pedalboard (JUCE C++ host).
-    Automatically resolves multi-plugin VST3 bundles (such as WaveShell / iZotope Ozone).
+    CRITICAL FOR WAVESHELL: When sub_plugin_name is specified, loads the sub-plugin DIRECTLY
+    without calling get_plugin_names_for_file beforehand in the same process (preventing WaveShell DLL deadlocks).
     Returns (plugin, resolved_name, available_subplugins).
     """
     if not vst3_path or not os.path.exists(vst3_path):
@@ -2545,51 +2556,57 @@ def _load_vst3_plugin_instance(vst3_path, sub_plugin_name=None):
             "Проверьте установку AI-окружения."
         ) from e
 
-    available_subplugins = _get_vst3_subplugins_list(vst3_path)
     req_sub = str(sub_plugin_name or "").strip()
 
+    # Fast, direct path when sub_plugin_name is already known (e.g. "RBass Stereo", "CLA-2A Stereo")
     if req_sub:
-        matched_sub = req_sub
-        if available_subplugins and req_sub not in available_subplugins:
-            lower_map = {s.lower(): s for s in available_subplugins}
-            if req_sub.lower() in lower_map:
-                matched_sub = lower_map[req_sub.lower()]
-        plugin = load_plugin(vst3_path, plugin_name=matched_sub)
-        full_list = available_subplugins if len(available_subplugins) > 0 else [matched_sub]
-        return plugin, getattr(plugin, "name", matched_sub) or matched_sub, full_list
+        try:
+            plugin = load_plugin(vst3_path, plugin_name=req_sub)
+            return plugin, getattr(plugin, "name", req_sub) or req_sub, []
+        except Exception as direct_err:
+            # If this is a WaveShell and the plugin resides in a newer sibling WaveShell (e.g. 15.3 vs 15.0), try siblings
+            for sib_path in _find_sibling_waveshell_paths(vst3_path):
+                try:
+                    sys.stdout.write(f"LOG:Пробуем загрузить «{req_sub}» через контейнер {os.path.basename(sib_path)}...\n")
+                    sys.stdout.flush()
+                    plugin = load_plugin(sib_path, plugin_name=req_sub)
+                    return plugin, getattr(plugin, "name", req_sub) or req_sub, []
+                except Exception:
+                    pass
+            raise RuntimeError(
+                f"Не удалось загрузить суб-плагин «{req_sub}» из «{os.path.basename(vst3_path)}»: {direct_err}"
+            ) from direct_err
 
-    if len(available_subplugins) > 1:
-        ordered = _prioritize_vst3_subplugin_candidates(available_subplugins)
-        last_err = None
-        for cand in ordered[:16]:
-            try:
-                plugin = load_plugin(vst3_path, plugin_name=cand)
-                return plugin, getattr(plugin, "name", cand) or cand, available_subplugins
-            except Exception as e:
-                last_err = e
-        raise RuntimeError(
-            f"Контейнер «{os.path.basename(vst3_path)}» содержит {len(available_subplugins)} плагинов. "
-            f"Выберите конкретный плагин из списка (последняя ошибка: {last_err})"
-        )
-
+    # When sub_plugin_name is not specified, try loading directly first (single-plugin .vst3)
     try:
-        if len(available_subplugins) == 1:
-            only_name = available_subplugins[0]
-            try:
-                plugin = load_plugin(vst3_path, plugin_name=only_name)
-            except Exception:
-                plugin = load_plugin(vst3_path)
-            return plugin, getattr(plugin, "name", only_name) or only_name, available_subplugins
-        else:
-            plugin = load_plugin(vst3_path)
-            resolved = getattr(plugin, "name", os.path.basename(vst3_path))
-            return plugin, resolved, available_subplugins
+        plugin = load_plugin(vst3_path)
+        resolved = getattr(plugin, "name", os.path.basename(vst3_path))
+        return plugin, resolved, []
     except Exception as first_err:
+        # Multi-plugin container (e.g. WaveShell or multi-plugin bundle): enumerate sub-plugins and load first stereo effect
+        available_subplugins = _get_vst3_subplugins_list(vst3_path)
+        if len(available_subplugins) >= 1:
+            ordered = _prioritize_vst3_subplugin_candidates(available_subplugins)
+            last_err = first_err
+            for cand in ordered[:8]:
+                try:
+                    plugin = load_plugin(vst3_path, plugin_name=cand)
+                    return plugin, getattr(plugin, "name", cand) or cand, available_subplugins
+                except Exception as e:
+                    last_err = e
+            raise RuntimeError(
+                f"Контейнер «{os.path.basename(vst3_path)}» содержит {len(available_subplugins)} плагинов. "
+                f"Выберите конкретный плагин из списка (последняя ошибка: {last_err})"
+            )
         raise RuntimeError(f"Не удалось загрузить VST3 плагин «{os.path.basename(vst3_path)}»: {first_err}") from first_err
 
 
 def _extract_vst3_params_snapshot(plugin, max_params=48):
-    """Extracts a lightweight readable dictionary of exposed VST3 parameters for UI display."""
+    """
+    Extracts a lightweight readable dictionary of exposed VST3 parameters for UI display.
+    Explicitly casts pedalboard WrappedParameterValue objects to pure Python primitives (bool, int, float, str)
+    so JSON serialization and attribute access never trigger WrappedParameterValue.__getattr__ errors.
+    """
     snapshot = {}
     try:
         params_dict = getattr(plugin, "parameters", {}) or {}
@@ -2598,18 +2615,44 @@ def _extract_vst3_params_snapshot(plugin, max_params=48):
             if count >= max_params:
                 break
             try:
+                key_str = str(k)
                 val = getattr(plugin, k, None)
-                if isinstance(val, (int, float, bool, str)):
-                    snapshot[k] = round(val, 4) if isinstance(val, float) else val
+                if isinstance(val, bool):
+                    snapshot[key_str] = bool(val)
+                elif isinstance(val, int) and not isinstance(val, bool):
+                    snapshot[key_str] = int(val)
+                elif isinstance(val, float):
+                    snapshot[key_str] = round(float(val), 4)
+                elif isinstance(val, str):
+                    snapshot[key_str] = str(val)
                 else:
                     raw_v = getattr(param_obj, "raw_value", None)
-                    snapshot[k] = round(float(raw_v), 4) if raw_v is not None else str(val)
+                    snapshot[key_str] = round(float(raw_v), 4) if raw_v is not None else str(val)
                 count += 1
             except Exception:
                 pass
     except Exception:
         pass
     return snapshot
+
+
+def _format_vst3_params_summary(params_snapshot, limit=8):
+    """Safely formats up to `limit` parameter key=value pairs for logging without calling .get() on non-dicts."""
+    if not params_snapshot or not isinstance(params_snapshot, dict):
+        return ""
+    items = []
+    try:
+        for k, info in list(params_snapshot.items())[:limit]:
+            if type(info) is dict:
+                lbl = info.get("label") or k
+                val = info.get("value")
+            else:
+                lbl = str(k)
+                val = str(info)
+            items.append(f"{lbl}={val}")
+    except Exception:
+        pass
+    return ", ".join(items)
 
 
 def process_vst3_list_shells(args):
@@ -2647,83 +2690,532 @@ def process_vst3_list_shells(args):
 
 def process_vst3_inspect(args):
     """
-    Inspects a .vst3 plugin, returns its name, sub-plugins, parameter count, and optionally writes initial raw_state.
+    Fast, non-blocking inspection of a .vst3 file or container.
+    Queries VST3Plugin.get_plugin_names_for_file(vst3_path) WITHOUT calling load_plugin() so that
+    WaveShell / iZotope / heavy plugins never hang or lock background processes when selected in the UI.
     """
     vst3_path = getattr(args, "vst3_path", None) or args.input
-    sub_plugin = getattr(args, "sub_plugin_name", None) or ""
+    sub_plugin = str(getattr(args, "sub_plugin_name", None) or "").strip()
     state_file = getattr(args, "state_file", None) or ""
 
-    pre_sub_plugins = _get_vst3_subplugins_list(vst3_path)
+    sub_plugins = _get_vst3_subplugins_list(vst3_path)
+    fallback_name = os.path.splitext(os.path.basename(vst3_path))[0]
 
-    try:
-        plugin, resolved_name, sub_plugins = _load_vst3_plugin_instance(vst3_path, sub_plugin)
-    except Exception as load_err:
-        if len(pre_sub_plugins) > 0 and not sub_plugin:
-            ordered = _prioritize_vst3_subplugin_candidates(pre_sub_plugins)
-            fallback_sub = ordered[0] if ordered else pre_sub_plugins[0]
-            info = {
-                "success": True,
-                "vst3Path": vst3_path,
-                "pluginName": fallback_sub,
-                "subPlugins": pre_sub_plugins,
-                "totalParameters": 0,
-                "parametersPreview": {},
-                "stateSizeBytes": 0,
-                "stateFile": ""
-            }
-            sys.stdout.write(f"VST3_INFO_JSON:{json.dumps(info, ensure_ascii=False)}\n")
-            sys.stdout.flush()
-            return
-        raise load_err
+    if sub_plugin:
+        resolved_name = sub_plugin
+    elif len(sub_plugins) == 1:
+        resolved_name = sub_plugins[0]
+    elif len(sub_plugins) > 1:
+        ordered = _prioritize_vst3_subplugin_candidates(sub_plugins)
+        resolved_name = ordered[0] if ordered else sub_plugins[0]
+    else:
+        resolved_name = fallback_name
 
-    if state_file and os.path.isfile(state_file) and os.path.getsize(state_file) > 0:
+    state_size = 0
+    if state_file and os.path.isfile(state_file):
         try:
-            with open(state_file, "rb") as f:
-                plugin.raw_state = f.read()
-        except Exception as e:
-            sys.stdout.write(f"LOG:Предупреждение при чтении сохраненного состояния VST3: {e}\n")
-            sys.stdout.flush()
-
-    raw_bytes = b""
-    try:
-        raw_bytes = plugin.raw_state or b""
-    except Exception:
-        pass
-
-    if state_file and not os.path.exists(state_file) and len(raw_bytes) > 0:
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(state_file)), exist_ok=True)
-            with open(state_file, "wb") as f:
-                f.write(raw_bytes)
+            state_size = os.path.getsize(state_file)
         except Exception:
-            pass
-
-    params_snapshot = _extract_vst3_params_snapshot(plugin)
-    total_params = len(getattr(plugin, "parameters", {}) or {})
+            state_size = 0
 
     info = {
         "success": True,
         "vst3Path": vst3_path,
         "pluginName": resolved_name,
-        "subPlugins": sub_plugins if len(sub_plugins) > 0 else pre_sub_plugins,
-        "totalParameters": total_params,
-        "parametersPreview": params_snapshot,
-        "stateSizeBytes": len(raw_bytes),
+        "subPlugins": sub_plugins,
+        "totalParameters": 0,
+        "parametersPreview": {},
+        "stateSizeBytes": state_size,
         "stateFile": state_file if (state_file and os.path.exists(state_file)) else ""
     }
     sys.stdout.write(f"VST3_INFO_JSON:{json.dumps(info, ensure_ascii=False)}\n")
     sys.stdout.flush()
 
 
+def _start_vst3_editor_helper_thread(resolved_name, state_file, term_event, stop_helper_event, console_hwnd=0):
+    """
+    Spawns a companion daemon thread while plugin.show_editor() is blocking on the main thread:
+    1. Watches for a `<state_file>.close_signal` file created by the Electron app UI ("Сохранить и закрыть окно VST3").
+    2. On Windows, locates the VST3 plugin's HWND, ensures it is positioned safely on screen (not cut off at the top),
+       and attaches a sleek floating Studio Header Bar right above the VST3 window with:
+       - Draggable title bar (so borderless OpenGL plugins like FabFilter Pro-Q 3/4 can be moved easily)
+       - Bright emerald "✔ Сохранить и закрыть" button and red "✕" button that cleanly close the editor and trigger raw_state saving.
+    """
+    import threading
+    import time
+
+    close_signal_file = f"{state_file}.close_signal" if state_file else ""
+    if close_signal_file and os.path.exists(close_signal_file):
+        try:
+            os.remove(close_signal_file)
+        except Exception:
+            pass
+
+    def _helper_worker():
+        if sys.platform != "win32":
+            while not stop_helper_event.is_set():
+                if close_signal_file and os.path.exists(close_signal_file):
+                    try:
+                        os.remove(close_signal_file)
+                    except Exception:
+                        pass
+                    term_event.set()
+                    break
+                time.sleep(0.15)
+            return
+
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+            LRESULT = ctypes.c_ssize_t
+            WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+            class WNDCLASSEXW(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.UINT),
+                    ("style", wintypes.UINT),
+                    ("lpfnWndProc", WNDPROC),
+                    ("cbClsExtra", ctypes.c_int),
+                    ("cbWndExtra", ctypes.c_int),
+                    ("hInstance", wintypes.HINSTANCE),
+                    ("hIcon", wintypes.HICON),
+                    ("hCursor", wintypes.HCURSOR),
+                    ("hbrBackground", wintypes.HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR),
+                    ("lpszClassName", wintypes.LPCWSTR),
+                    ("hIconSm", wintypes.HICON),
+                ]
+
+            class PAINTSTRUCT(ctypes.Structure):
+                _fields_ = [
+                    ("hdc", wintypes.HDC),
+                    ("fErase", wintypes.BOOL),
+                    ("rcPaint", wintypes.RECT),
+                    ("fRestore", wintypes.BOOL),
+                    ("fIncUpdate", wintypes.BOOL),
+                    ("rgbReserved", wintypes.BYTE * 32),
+                ]
+
+            user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+            user32.EnumWindows.restype = wintypes.BOOL
+            user32.IsWindow.argtypes = [wintypes.HWND]
+            user32.IsWindow.restype = wintypes.BOOL
+            user32.IsWindowVisible.argtypes = [wintypes.HWND]
+            user32.IsWindowVisible.restype = wintypes.BOOL
+            user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+            user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+            user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+            user32.GetClassNameW.restype = ctypes.c_int
+            user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetWindowRect.restype = wintypes.BOOL
+            user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+            user32.GetClientRect.restype = wintypes.BOOL
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            user32.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+            user32.SetWindowTextW.restype = wintypes.BOOL
+            user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            user32.PostMessageW.restype = wintypes.BOOL
+            user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            user32.DefWindowProcW.restype = LRESULT
+            user32.RegisterClassExW.argtypes = [ctypes.POINTER(WNDCLASSEXW)]
+            user32.RegisterClassExW.restype = wintypes.ATOM
+            user32.CreateWindowExW.argtypes = [
+                wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID
+            ]
+            user32.CreateWindowExW.restype = wintypes.HWND
+            user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+            user32.ShowWindow.restype = wintypes.BOOL
+            user32.UpdateWindow.argtypes = [wintypes.HWND]
+            user32.UpdateWindow.restype = wintypes.BOOL
+            user32.DestroyWindow.argtypes = [wintypes.HWND]
+            user32.DestroyWindow.restype = wintypes.BOOL
+            user32.BeginPaint.argtypes = [wintypes.HWND, ctypes.POINTER(PAINTSTRUCT)]
+            user32.BeginPaint.restype = wintypes.HDC
+            user32.EndPaint.argtypes = [wintypes.HWND, ctypes.POINTER(PAINTSTRUCT)]
+            user32.EndPaint.restype = wintypes.BOOL
+            user32.FillRect.argtypes = [wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.HBRUSH]
+            user32.FillRect.restype = ctypes.c_int
+            user32.DrawTextW.argtypes = [wintypes.HDC, wintypes.LPCWSTR, ctypes.c_int, ctypes.POINTER(wintypes.RECT), wintypes.UINT]
+            user32.DrawTextW.restype = ctypes.c_int
+            user32.SetTimer.argtypes = [wintypes.HWND, ctypes.c_size_t, wintypes.UINT, ctypes.c_void_p]
+            user32.SetTimer.restype = ctypes.c_size_t
+            user32.KillTimer.argtypes = [wintypes.HWND, ctypes.c_size_t]
+            user32.KillTimer.restype = wintypes.BOOL
+            user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+            user32.GetMessageW.restype = wintypes.BOOL
+            user32.TranslateMessage.argtypes = [ctypes.POINTER(wintypes.MSG)]
+            user32.TranslateMessage.restype = wintypes.BOOL
+            user32.DispatchMessageW.argtypes = [ctypes.POINTER(wintypes.MSG)]
+            user32.DispatchMessageW.restype = LRESULT
+            user32.PostQuitMessage.argtypes = [ctypes.c_int]
+            user32.PostQuitMessage.restype = None
+            user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+            user32.GetCursorPos.restype = wintypes.BOOL
+            user32.SetCapture.argtypes = [wintypes.HWND]
+            user32.SetCapture.restype = wintypes.HWND
+            user32.ReleaseCapture.argtypes = []
+            user32.ReleaseCapture.restype = wintypes.BOOL
+            user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+            user32.SetForegroundWindow.restype = wintypes.BOOL
+            user32.GetSystemMetrics.argtypes = [ctypes.c_int]
+            user32.GetSystemMetrics.restype = ctypes.c_int
+
+            gdi32.CreateSolidBrush.argtypes = [wintypes.COLORREF]
+            gdi32.CreateSolidBrush.restype = wintypes.HBRUSH
+            gdi32.CreateFontW.argtypes = [
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPCWSTR
+            ]
+            gdi32.CreateFontW.restype = wintypes.HFONT
+            gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+            gdi32.SelectObject.restype = wintypes.HGDIOBJ
+            gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+            gdi32.DeleteObject.restype = wintypes.BOOL
+            gdi32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
+            gdi32.SetBkMode.restype = ctypes.c_int
+            gdi32.SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
+            gdi32.SetTextColor.restype = wintypes.COLORREF
+
+            kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+            kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+            current_pid = os.getpid()
+            found_vst_hwnd = [None]
+            bar_hwnd_ref = [None]
+            BAR_H = 40
+            SAVE_BTN_W = 190
+            CLOSE_BTN_W = 36
+
+            def _find_plugin_hwnd():
+                result = []
+
+                def _enum_cb(hwnd, _lparam):
+                    try:
+                        if not user32.IsWindowVisible(hwnd):
+                            return True
+                        if console_hwnd and hwnd == console_hwnd:
+                            return True
+                        if bar_hwnd_ref[0] and hwnd == bar_hwnd_ref[0]:
+                            return True
+                        pid = wintypes.DWORD(0)
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value != current_pid:
+                            return True
+                        cls_buf = ctypes.create_unicode_buffer(256)
+                        user32.GetClassNameW(hwnd, cls_buf, 256)
+                        cls_name = cls_buf.value or ""
+                        if cls_name in ("IME", "MSCTFIME UI", "tooltips_class32") or cls_name.startswith("ADM_VST3_"):
+                            return True
+                        rc = wintypes.RECT()
+                        if user32.GetWindowRect(hwnd, ctypes.byref(rc)):
+                            w = rc.right - rc.left
+                            h = rc.bottom - rc.top
+                            if w >= 120 and h >= 80:
+                                result.append(hwnd)
+                                return False
+                    except Exception:
+                        pass
+                    return True
+
+                cb_func = WNDENUMPROC(_enum_cb)
+                user32.EnumWindows(cb_func, 0)
+                return result[0] if result else None
+
+            # Wait up to 30s for the VST3 plugin GUI window to appear
+            wait_start = time.time()
+            while not stop_helper_event.is_set() and (time.time() - wait_start) < 30.0:
+                if close_signal_file and os.path.exists(close_signal_file):
+                    try:
+                        os.remove(close_signal_file)
+                    except Exception:
+                        pass
+                    term_event.set()
+                    return
+                cand_hwnd = _find_plugin_hwnd()
+                if cand_hwnd:
+                    found_vst_hwnd[0] = cand_hwnd
+                    break
+                time.sleep(0.08)
+
+            vst_hwnd = found_vst_hwnd[0]
+            if not vst_hwnd or stop_helper_event.is_set():
+                return
+
+            # Ensure VST3 window is safely positioned on screen with space at the top for our header bar
+            rc = wintypes.RECT()
+            if user32.GetWindowRect(vst_hwnd, ctypes.byref(rc)):
+                w = rc.right - rc.left
+                h = rc.bottom - rc.top
+                screen_w = max(800, user32.GetSystemMetrics(0))
+                screen_h = max(600, user32.GetSystemMetrics(1))
+                new_left = rc.left
+                new_top = rc.top
+                needs_move = False
+                if new_top < BAR_H + 12 or new_top > screen_h - 100:
+                    new_top = max(BAR_H + 20, (screen_h - h) // 2)
+                    needs_move = True
+                if new_left < 0 or new_left > screen_w - 100:
+                    new_left = max(16, (screen_w - w) // 2)
+                    needs_move = True
+                if needs_move:
+                    user32.SetWindowPos(vst_hwnd, None, new_left, new_top, 0, 0, 0x0001 | 0x0004 | 0x0010)
+                    user32.GetWindowRect(vst_hwnd, ctypes.byref(rc))
+
+            try:
+                user32.SetWindowTextW(vst_hwnd, f"{resolved_name} — VST3")
+                user32.SetForegroundWindow(vst_hwnd)
+            except Exception:
+                pass
+
+            # Create GDI resources for the floating Studio Header Bar
+            def _rgb(r, g, b):
+                return (r & 0xFF) | ((g & 0xFF) << 8) | ((b & 0xFF) << 16)
+
+            brush_bg = gdi32.CreateSolidBrush(_rgb(24, 24, 34))
+            brush_accent = gdi32.CreateSolidBrush(_rgb(147, 51, 234))
+            brush_save_btn = gdi32.CreateSolidBrush(_rgb(22, 163, 74))
+            brush_close_btn = gdi32.CreateSolidBrush(_rgb(220, 38, 38))
+            font_bold = gdi32.CreateFontW(-13, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI")
+
+            drag_state = {"active": False, "start_x": 0, "start_y": 0, "vst_left": 0, "vst_top": 0}
+
+            def _trigger_save_and_close(bar_h):
+                try:
+                    term_event.set()
+                except Exception:
+                    pass
+                try:
+                    if vst_hwnd and user32.IsWindow(vst_hwnd):
+                        user32.PostMessageW(vst_hwnd, 0x0010, 0, 0)  # WM_CLOSE
+                except Exception:
+                    pass
+                try:
+                    if bar_h and user32.IsWindow(bar_h):
+                        user32.DestroyWindow(bar_h)
+                except Exception:
+                    pass
+
+            def _wnd_proc(hwnd, msg, wparam, lparam):
+                if msg == 0x000F:  # WM_PAINT
+                    ps = PAINTSTRUCT()
+                    hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
+                    if hdc:
+                        crc = wintypes.RECT()
+                        user32.GetClientRect(hwnd, ctypes.byref(crc))
+                        bw = crc.right - crc.left
+                        bh = crc.bottom - crc.top
+
+                        # Background
+                        user32.FillRect(hdc, ctypes.byref(crc), brush_bg)
+
+                        # Top 2px purple studio stripe
+                        top_rc = wintypes.RECT(0, 0, bw, 2)
+                        user32.FillRect(hdc, ctypes.byref(top_rc), brush_accent)
+
+                        # Save & Close green button
+                        save_left = max(120, bw - SAVE_BTN_W - CLOSE_BTN_W - 14)
+                        save_right = bw - CLOSE_BTN_W - 10
+                        save_rc = wintypes.RECT(save_left, 6, save_right, bh - 6)
+                        user32.FillRect(hdc, ctypes.byref(save_rc), brush_save_btn)
+
+                        # Close [X] red button
+                        close_left = bw - CLOSE_BTN_W - 6
+                        close_right = bw - 6
+                        close_rc = wintypes.RECT(close_left, 6, close_right, bh - 6)
+                        user32.FillRect(hdc, ctypes.byref(close_rc), brush_close_btn)
+
+                        gdi32.SetBkMode(hdc, 1)  # TRANSPARENT
+                        old_font = gdi32.SelectObject(hdc, font_bold) if font_bold else None
+
+                        # Title text on the left (draggable area)
+                        gdi32.SetTextColor(hdc, _rgb(235, 235, 245))
+                        title_rc = wintypes.RECT(12, 2, max(110, save_left - 8), bh)
+                        title_str = f"🎛 {resolved_name}  •  Перетащите панель для перемещения"
+                        user32.DrawTextW(hdc, title_str, -1, ctypes.byref(title_rc), 0x0000 | 0x0004 | 0x0020 | 0x8000)
+
+                        # Save button label
+                        gdi32.SetTextColor(hdc, _rgb(255, 255, 255))
+                        user32.DrawTextW(hdc, "✔ Сохранить и закрыть", -1, ctypes.byref(save_rc), 0x0001 | 0x0004 | 0x0020)
+
+                        # Close X label
+                        user32.DrawTextW(hdc, "✕", -1, ctypes.byref(close_rc), 0x0001 | 0x0004 | 0x0020)
+
+                        if old_font:
+                            gdi32.SelectObject(hdc, old_font)
+                    user32.EndPaint(hwnd, ctypes.byref(ps))
+                    return 0
+
+                elif msg == 0x0201:  # WM_LBUTTONDOWN
+                    click_x = lparam & 0xFFFF
+                    if click_x >= 0x8000:
+                        click_x -= 0x10000
+                    crc = wintypes.RECT()
+                    user32.GetClientRect(hwnd, ctypes.byref(crc))
+                    bw = crc.right - crc.left
+                    save_left = max(120, bw - SAVE_BTN_W - CLOSE_BTN_W - 14)
+
+                    if click_x >= save_left:
+                        # Clicked "✔ Сохранить и закрыть" or "✕"
+                        _trigger_save_and_close(hwnd)
+                        return 0
+                    else:
+                        # Start dragging both the VST3 window and the header bar
+                        pt = wintypes.POINT()
+                        vrc = wintypes.RECT()
+                        if user32.GetCursorPos(ctypes.byref(pt)) and user32.GetWindowRect(vst_hwnd, ctypes.byref(vrc)):
+                            drag_state["active"] = True
+                            drag_state["start_x"] = pt.x
+                            drag_state["start_y"] = pt.y
+                            drag_state["vst_left"] = vrc.left
+                            drag_state["vst_top"] = vrc.top
+                            user32.SetCapture(hwnd)
+                        return 0
+
+                elif msg == 0x0200:  # WM_MOUSEMOVE
+                    if drag_state["active"] and vst_hwnd and user32.IsWindow(vst_hwnd):
+                        pt = wintypes.POINT()
+                        vrc = wintypes.RECT()
+                        if user32.GetCursorPos(ctypes.byref(pt)) and user32.GetWindowRect(vst_hwnd, ctypes.byref(vrc)):
+                            vw = max(420, vrc.right - vrc.left)
+                            new_x = drag_state["vst_left"] + (pt.x - drag_state["start_x"])
+                            new_y = max(BAR_H, drag_state["vst_top"] + (pt.y - drag_state["start_y"]))
+                            user32.SetWindowPos(vst_hwnd, None, new_x, new_y, 0, 0, 0x0001 | 0x0004 | 0x0010)
+                            user32.SetWindowPos(hwnd, None, new_x, new_y - BAR_H, vw, BAR_H, 0x0004 | 0x0010)
+                    return 0
+
+                elif msg == 0x0202:  # WM_LBUTTONUP
+                    if drag_state["active"]:
+                        drag_state["active"] = False
+                        user32.ReleaseCapture()
+                        if vst_hwnd and user32.IsWindow(vst_hwnd):
+                            user32.SetForegroundWindow(vst_hwnd)
+                    return 0
+
+                elif msg == 0x0113:  # WM_TIMER
+                    if stop_helper_event.is_set() or not vst_hwnd or not user32.IsWindow(vst_hwnd) or not user32.IsWindowVisible(vst_hwnd):
+                        user32.DestroyWindow(hwnd)
+                        return 0
+                    if close_signal_file and os.path.exists(close_signal_file):
+                        try:
+                            os.remove(close_signal_file)
+                        except Exception:
+                            pass
+                        _trigger_save_and_close(hwnd)
+                        return 0
+                    if not drag_state["active"]:
+                        vrc = wintypes.RECT()
+                        brc = wintypes.RECT()
+                        if user32.GetWindowRect(vst_hwnd, ctypes.byref(vrc)) and user32.GetWindowRect(hwnd, ctypes.byref(brc)):
+                            vw = max(420, vrc.right - vrc.left)
+                            target_x = vrc.left
+                            target_y = max(0, vrc.top - BAR_H)
+                            cur_bw = brc.right - brc.left
+                            if brc.left != target_x or brc.top != target_y or cur_bw != vw:
+                                user32.SetWindowPos(hwnd, None, target_x, target_y, vw, BAR_H, 0x0004 | 0x0010)
+                                user32.InvalidateRect(hwnd, None, True) if hasattr(user32, "InvalidateRect") else None
+                    return 0
+
+                elif msg == 0x0002:  # WM_DESTROY
+                    user32.KillTimer(hwnd, 1)
+                    user32.PostQuitMessage(0)
+                    return 0
+
+                return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+            wnd_proc_cb = WNDPROC(_wnd_proc)
+            hinst = kernel32.GetModuleHandleW(None)
+            class_name = f"ADM_VST3_HeaderBar_{current_pid}_{int(time.time() * 1000)}"
+
+            wcx = WNDCLASSEXW()
+            wcx.cbSize = ctypes.sizeof(WNDCLASSEXW)
+            wcx.style = 0x0001 | 0x0002  # CS_VREDRAW | CS_HREDRAW
+            wcx.lpfnWndProc = wnd_proc_cb
+            wcx.cbClsExtra = 0
+            wcx.cbWndExtra = 0
+            wcx.hInstance = hinst
+            wcx.hIcon = None
+            wcx.hCursor = None
+            wcx.hbrBackground = brush_bg
+            wcx.lpszMenuName = None
+            wcx.lpszClassName = class_name
+            wcx.hIconSm = None
+
+            user32.RegisterClassExW(ctypes.byref(wcx))
+
+            init_w = max(420, rc.right - rc.left)
+            init_x = rc.left
+            init_y = max(0, rc.top - BAR_H)
+
+            # WS_POPUP | WS_VISIBLE (0x80000000 | 0x10000000), WS_EX_TOPMOST | WS_EX_TOOLWINDOW (0x00000008 | 0x00000080)
+            bar_hwnd = user32.CreateWindowExW(
+                0x00000008 | 0x00000080,
+                class_name,
+                f"VST3 Control — {resolved_name}",
+                0x80000000 | 0x10000000,
+                init_x,
+                init_y,
+                init_w,
+                BAR_H,
+                None,
+                None,
+                hinst,
+                None
+            )
+            bar_hwnd_ref[0] = bar_hwnd
+
+            if bar_hwnd:
+                user32.ShowWindow(bar_hwnd, 5)  # SW_SHOW
+                user32.UpdateWindow(bar_hwnd)
+                user32.SetTimer(bar_hwnd, 1, 50, None)
+
+                msg_struct = wintypes.MSG()
+                while user32.GetMessageW(ctypes.byref(msg_struct), None, 0, 0) > 0:
+                    user32.TranslateMessage(ctypes.byref(msg_struct))
+                    user32.DispatchMessageW(ctypes.byref(msg_struct))
+
+            for gdi_obj in (brush_bg, brush_accent, brush_save_btn, brush_close_btn, font_bold):
+                if gdi_obj:
+                    try:
+                        gdi32.DeleteObject(gdi_obj)
+                    except Exception:
+                        pass
+        except Exception:
+            # Fallback loop if Win32 bar creation fails for any reason
+            while not stop_helper_event.is_set():
+                if close_signal_file and os.path.exists(close_signal_file):
+                    try:
+                        os.remove(close_signal_file)
+                    except Exception:
+                        pass
+                    term_event.set()
+                    break
+                time.sleep(0.15)
+
+    t = threading.Thread(target=_helper_worker, daemon=True)
+    t.start()
+    return t
+
+
 def process_vst3_open_editor(args):
     """
-    VST3_EDITOR_DPI_V2 | VST3_WAVESHELL_V3
+    VST3_EDITOR_DPI_V2 | VST3_WAVESHELL_V6
     Loads a .vst3 plugin, restores its binary raw_state (if state_file exists),
-    opens the native OS VST3 GUI window (plugin.show_editor()), waits for the user
-    to finish configuring (e.g. inside iZotope Ozone / RX / FabFilter) and close the window,
+    opens the native OS VST3 GUI window (plugin.show_editor()) with an attached Studio Control Bar
+    ("✔ Сохранить и закрыть"), waits for the user to finish configuring and close the window,
     and immediately serializes the updated binary raw_state to disk.
     """
     import time
+    import threading
     vst3_path = getattr(args, "vst3_path", None) or args.input
     sub_plugin = getattr(args, "sub_plugin_name", None) or ""
     state_file = getattr(args, "state_file", None) or args.output
@@ -2731,17 +3223,19 @@ def process_vst3_open_editor(args):
     if not state_file:
         raise ValueError("Не указан путь state_file для сохранения состояния VST3 плагина")
 
+    console_hwnd = 0
     if sys.platform == "win32":
         try:
             import ctypes
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)
-            ctypes.windll.user32.SetProcessDPIAware()
+            console_hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+            if console_hwnd:
+                # Minimize console window (SW_MINIMIZE = 6) instead of SW_HIDE (0) so child modal dialogs from WaveShell remain visible
+                ctypes.windll.user32.ShowWindow(console_hwnd, 6)
         except Exception:
             pass
 
-    sys.stdout.write(f"LOG:Загрузка VST3 плагина: {os.path.basename(vst3_path)}...\n")
+    target_label = f"{os.path.basename(vst3_path)} [{sub_plugin}]" if sub_plugin else os.path.basename(vst3_path)
+    sys.stdout.write(f"LOG:Загрузка VST3 плагина: {target_label}...\n")
     sys.stdout.flush()
 
     plugin, resolved_name, sub_plugins = _load_vst3_plugin_instance(vst3_path, sub_plugin)
@@ -2760,13 +3254,27 @@ def process_vst3_open_editor(args):
             sys.stdout.write(f"LOG:Не удалось применить предыдущий слепок состояния, открываем заводской пресет: {e}\n")
             sys.stdout.flush()
 
-    sys.stdout.write(f"LOG:Открытие нативного интерфейса VST3 «{resolved_name}». Настройте плагин и закройте его окно для сохранения...\n")
+    sys.stdout.write(
+        f"LOG:Открытие нативного интерфейса VST3 «{resolved_name}». "
+        f"Настройте плагин и нажмите зеленую кнопку «✔ Сохранить и закрыть» над окном плагина (или в приложении)...\n"
+    )
     sys.stdout.flush()
 
     if not hasattr(plugin, "show_editor"):
         raise RuntimeError(f"Данная сборка pedalboard не поддерживает вызов нативного окна show_editor() для {resolved_name}")
 
-    plugin.show_editor()
+    term_event = threading.Event()
+    stop_helper_event = threading.Event()
+    _start_vst3_editor_helper_thread(resolved_name, state_file, term_event, stop_helper_event, console_hwnd=console_hwnd)
+
+    # Open native VST3 GUI editor window (blocks until user clicks "✔ Сохранить и закрыть" or closes the plugin window)
+    try:
+        try:
+            plugin.show_editor(term_event)
+        except TypeError:
+            plugin.show_editor()
+    finally:
+        stop_helper_event.set()
 
     raw_bytes = plugin.raw_state
     os.makedirs(os.path.dirname(os.path.abspath(state_file)), exist_ok=True)
@@ -2781,9 +3289,9 @@ def process_vst3_open_editor(args):
     os.rename(temp_state, state_file)
 
     params_snapshot = _extract_vst3_params_snapshot(plugin)
-    if params_snapshot:
-        summary_pairs = [f"{info.get('label') or k}={info.get('value')}" for k, info in list(params_snapshot.items())[:8]]
-        sys.stdout.write(f"LOG:Сохраненные параметры плагина «{resolved_name}»: {', '.join(summary_pairs)}\n")
+    summary_text = _format_vst3_params_summary(params_snapshot, limit=8)
+    if summary_text:
+        sys.stdout.write(f"LOG:Сохраненные параметры плагина «{resolved_name}»: {summary_text}\n")
         sys.stdout.flush()
 
     saved_report = {
@@ -3030,9 +3538,9 @@ def process_vst3_process(args):
         sys.stdout.flush()
 
     active_params = _extract_vst3_params_snapshot(plugin)
-    if active_params:
-        param_items = [f"{info.get('label') or k}={info.get('value')}" for k, info in list(active_params.items())[:8]]
-        sys.stdout.write(f"LOG:Активные параметры VST3 «{resolved_name}»: {', '.join(param_items)}\n")
+    summary_text = _format_vst3_params_summary(active_params, limit=8)
+    if summary_text:
+        sys.stdout.write(f"LOG:Активные параметры VST3 «{resolved_name}»: {summary_text}\n")
         sys.stdout.flush()
 
     emit_progress(15.0, f"Чтение аудиодорожки: {os.path.basename(input_path)}...")
