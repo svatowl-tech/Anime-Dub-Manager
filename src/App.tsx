@@ -21,6 +21,7 @@ import { UnsavedChangesModal } from './components/ui/UnsavedChangesModal';
 import { Project, Episode } from './types';
 import { ipcSafe, isWeb } from './lib/ipcSafe';
 import { appLogger } from './lib/appLogger';
+import { invalidateParticipantsCache } from './services/dbService';
 import { VideoProvider } from './contexts/VideoContext';
 import { useGlobalKeyboard } from './hooks/useGlobalKeyboard';
  
@@ -28,12 +29,21 @@ function AppContent() {
   type TabType = 'dashboard' | 'video-editor' | 'subtitles' | 'qa' | 'timing' | 'mixing' | 'release' | 'telegram' | 'settings' | 'database' | 'cover' | 'stats' | 'archive';
   const [activeTab, setActiveTab] = useState<TabType>('dashboard');
   const [savedAudioUrl, setSavedAudioUrl] = useState<string | null>(null);
-  const [logEventCount, setLogEventCount] = useState<number>(0);
+  const [logEventCount, setLogEventCount] = useState<number>(() => appLogger.getTimeline().length);
 
   useEffect(() => {
-    return appLogger.subscribe('all', () => {
-      setLogEventCount(appLogger.getTimeline().length);
+    let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsub = appLogger.subscribe('all', () => {
+      if (throttleTimer) return;
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null;
+        setLogEventCount(appLogger.getTimeline().length);
+      }, 1000);
     });
+    return () => {
+      unsub();
+      if (throttleTimer) clearTimeout(throttleTimer);
+    };
   }, []);
 
   const handleCopyLogsToClipboard = async () => {
@@ -181,24 +191,33 @@ function AppContent() {
     // Ensure window has focus on startup to avoid unresponsive inputs
     window.focus();
 
-    // Auto-sync locally
-    const doAutoSync = async () => {
+    // Deferred lightweight auto-sync in background so startup I/O is never blocked
+    const autoSyncTimer = setTimeout(async () => {
       try {
         const syncStatus = await ipcSafe.invoke('cloud-sync-status');
         if (syncStatus?.connected && syncStatus?.enabled) {
-          await ipcSafe.invoke('cloud-pull');
-          // Reload projects after cloud pull completes
-          await loadProjects();
+          const pullRes = await ipcSafe.invoke('cloud-pull', { lightweight: true });
+          const hasUpdates =
+            Array.isArray(pullRes) &&
+            pullRes.some(
+              (r: any) =>
+                r &&
+                (r.status === 'pulled_and_merged' ||
+                  r.status === 'pulled_overwritten' ||
+                  r.status === 'pulled')
+            );
+          if (hasUpdates) {
+            invalidateParticipantsCache();
+            await loadProjects();
+          }
         }
       } catch (e) {
         console.error('Auto-sync failed:', e);
       }
-    };
-    doAutoSync();
+    }, 2500);
 
     // Fix Electron focus bug: WebContents often drops caret focus.
     const handlePointerDown = () => {
-      // Calling window.focus() on interaction tells OS to re-focus the window context
       if (!document.hasFocus()) {
         window.focus();
       }
@@ -206,6 +225,7 @@ function AppContent() {
     window.addEventListener('pointerdown', handlePointerDown, true);
     
     return () => {
+      clearTimeout(autoSyncTimer);
       window.removeEventListener('pointerdown', handlePointerDown, true);
     };
   }, [loadProjects]);
@@ -244,8 +264,15 @@ function AppContent() {
       appLogger.info('PROJECT', `Выбор эпизода #${episodeNumber} в проекте "${selectedProjectId}"`);
       const project = projects.find(p => p.id === selectedProjectId);
       if (project) {
-        await ipcSafe.invoke('save-project', { ...project, lastActiveEpisode: episodeNumber });
-        await loadProjects();
+        const updatedProject: Project = { ...project, lastActiveEpisode: episodeNumber };
+        const ep = updatedProject.episodes?.find(e => e.number === episodeNumber) || updatedProject.episodes?.[0];
+        setProjects(prev => prev.map(p => (p.id === selectedProjectId ? updatedProject : p)));
+        setCurrentEpisode(ep ? { ...ep, project: updatedProject } : null);
+
+        if (project.lastActiveEpisode !== episodeNumber) {
+          const { episodes: _eps, soundEngineer: _se, assignedDubbers: _ad, ...cleanProject } = updatedProject;
+          await ipcSafe.invoke('save-project', cleanProject);
+        }
       }
     });
   };

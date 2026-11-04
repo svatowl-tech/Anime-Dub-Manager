@@ -58,3 +58,74 @@ export const sanitizeFilePath = (fullPath: string): string => {
 
   return drivePrefix + sanitizedParts.join(sep);
 };
+
+/**
+ * Normalizes any Windows or mixed path separators into clean POSIX forward slashes
+ * for safe storage in cross-platform JSON manifests and virtual file caches.
+ */
+export const normalizeSlashes = (inputPath: string): string => {
+  if (!inputPath || typeof inputPath !== 'string') return '';
+  return inputPath.replace(/\\/g, '/').replace(/\/+/g, '/');
+};
+
+/**
+ * Extracts the file or folder base name from any Windows, POSIX, or URL path
+ * without relying on OS-specific path separators.
+ */
+export const getFileBaseName = (inputPath: string, stripExtension = false): string => {
+  if (!inputPath || typeof inputPath !== 'string') return '';
+  const clean = normalizeSlashes(inputPath).replace(/\/+$/, '');
+  const parts = clean.split('/');
+  const base = parts[parts.length - 1] || '';
+  if (stripExtension && base.includes('.')) {
+    return base.slice(0, base.lastIndexOf('.'));
+  }
+  return base;
+};
+
+/**
+ * Safely joins relative path segments using POSIX forward slashes so paths work
+ * identically across Windows, macOS, Linux, and Web/Android virtual storage.
+ */
+export const joinRelativePath = (...segments: Array<string | undefined | null>): string => {
+  const cleaned = segments
+    .filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
+    .map((s) => normalizeSlashes(s.trim()).replace(/^\/+|\/+$/g, ''))
+    .filter(Boolean);
+  return cleaned.join('/');
+};
+
+export interface RuntimeCapabilities {
+  platform: 'electron' | 'android' | 'ios' | 'web';
+  supportsNativeVst3: boolean;
+  supportsFileSystemAccessApi: boolean;
+  isSandboxed: boolean;
+}
+
+/**
+ * Detects runtime platform and sandbox capabilities (Electron desktop vs Android/iOS/Web).
+ */
+export const getRuntimeCapabilities = (): RuntimeCapabilities => {
+  const hasWindow = typeof window !== 'undefined';
+  const isElectron = Boolean(hasWindow && window.electronAPI && typeof window.electronAPI.invoke === 'function');
+  const ua = hasWindow && typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+  const isAndroid = /Android/i.test(ua);
+  const isIOS = /iPhone|iPad|iPod/i.test(ua);
+  const supportsFsa = Boolean(hasWindow && 'showDirectoryPicker' in window && 'showOpenFilePicker' in window);
+
+  const platform: RuntimeCapabilities['platform'] = isElectron
+    ? 'electron'
+    : isAndroid
+      ? 'android'
+      : isIOS
+        ? 'ios'
+        : 'web';
+
+  return {
+    platform,
+    supportsNativeVst3: isElectron && !isAndroid && !isIOS,
+    supportsFileSystemAccessApi: supportsFsa,
+    isSandboxed: !isElectron
+  };
+};
+

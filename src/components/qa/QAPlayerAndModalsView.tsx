@@ -2,42 +2,28 @@ import React from "react";
 import {
   Play,
   Pause,
-  CheckCircle,
-  XCircle,
-  AlertCircle,
-  MessageSquare,
-  Volume2,
-  Check,
   X,
-  Activity,
-  User,
   Clock,
-  Trash2,
-  Sparkles,
-  Save,
   SkipForward,
   SkipBack,
-  Scissors,
-  VolumeX,
-  Sliders
+  Sliders,
+  RotateCcw
 } from "lucide-react";
 import { toast } from "sonner";
-import { safeCopyToClipboard } from "../../lib/clipboard";
 import { Episode, Participant, Track, SubtitleLine } from "../../types";
-import { TrackWaveform } from "./TrackWaveform";
-import { MissingLinesModal } from "./MissingLinesModal";
-import { ExportModal } from "../ExportModal";
-import { ConfirmModal } from "../ui/ConfirmModal";
 import { NormalizationMetrics } from "../../lib/qa/audioNormalizer";
 import { MissingLineDetection, GapDetectionOptions, QAScanReport } from "../../lib/qa/missingLinesDetector";
-import { QAScanConfigModal } from "./QAScanConfigModal";
-import { saveQAGapsToTimingProject } from "../../lib/qa/timingSyncService";
+import { RotaryKnob } from "./RotaryKnob";
 import WaveSurfer from "wavesurfer.js";
+import { QAFixIssueBar } from "./player/QAFixIssueBar";
+import { QASingleTrackView } from "./player/QASingleTrackView";
+import { QAPlayerModalsContainer } from "./modals/QAPlayerModalsContainer";
 
 export interface QAPlayerAndModalsViewProps {
   currentEpisode: Episode;
   tracks: Track[];
   selectedTrackId: string | null;
+  setSelectedTrackId?: React.Dispatch<React.SetStateAction<string | null>>;
   selectedTrack: Track | undefined;
   videoRef: React.RefObject<HTMLVideoElement | null>;
   videoUrl: string | undefined;
@@ -71,6 +57,7 @@ export interface QAPlayerAndModalsViewProps {
   currentCharacter: string | null;
   currentDubberNickname: string | null;
   currentSubtitleText: string | null;
+  currentSubId?: string | null;
   handleReassignCharacter: (newCharacterName: string) => Promise<void>;
   newComment: string;
   setNewComment: React.Dispatch<React.SetStateAction<string>>;
@@ -138,6 +125,7 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
   currentEpisode,
   tracks,
   selectedTrackId,
+  setSelectedTrackId,
   selectedTrack,
   videoRef,
   videoUrl,
@@ -171,6 +159,7 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
   currentCharacter,
   currentDubberNickname,
   currentSubtitleText,
+  currentSubId,
   handleReassignCharacter,
   newComment,
   setNewComment,
@@ -221,18 +210,6 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
   confirmState,
   setConfirmState
 }) => {
-  const currentSubIndex = React.useMemo(() => {
-    if (!subLines || subLines.length === 0) return -1;
-    let idx = -1;
-    for (let i = subLines.length - 1; i >= 0; i--) {
-      if (currentTime >= subLines[i].startSec - 0.05) {
-        idx = i;
-        break;
-      }
-    }
-    return idx;
-  }, [subLines, currentTime]);
-
   const availableDubbers = React.useMemo(() => {
     const list: Array<{ id: string; name: string; roles: string; trackId?: string }> = [];
     const seen = new Set<string>();
@@ -275,181 +252,62 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
     return list;
   }, [currentEpisode?.assignments, tracks]);
 
-  React.useEffect(() => {
-    if (!manualDubberId && availableDubbers.length > 0) {
-      setManualDubberId(availableDubbers[0].id);
-    }
-  }, [availableDubbers, manualDubberId, setManualDubberId]);
+  const dubberTracks = React.useMemo(() => {
+    return tracks.filter(t => t.id !== 'original');
+  }, [tracks]);
 
-  const renderFixIssueBar = () => {
-    return (
-      <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-3.5 space-y-3 shrink-0">
-        {/* Top bar: Subtitle speaker, Subtitle Navigation & Manual Dubber checkbox */}
-        <div className="flex flex-wrap items-center justify-between gap-2.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Speaker badge */}
-            <div className={`text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${
-              currentCharacter 
-                ? 'bg-blue-950/40 border-blue-600/50 text-blue-300' 
-                : 'bg-neutral-800 border-neutral-700 text-neutral-400'
-            }`}>
-              <User className="w-3.5 h-3.5" />
-              <span>{currentCharacter ? (currentDubberNickname ? `${currentDubberNickname} (${currentCharacter})` : currentCharacter) : 'Вне сабов'}</span>
-            </div>
-
-            {/* Quick Subtitle Navigation */}
-            <div className="flex items-center gap-1 bg-neutral-950 p-0.5 rounded-lg border border-neutral-800 shadow-inner">
-              <button
-                type="button"
-                onClick={seekToPrev}
-                disabled={subLines.length === 0}
-                className="px-2.5 py-1 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 hover:text-white text-xs font-semibold flex items-center gap-1 transition disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Перейти к предыдущему субтитру (Shift+A / Alt+Left)"
-              >
-                <SkipBack className="w-3.5 h-3.5 text-blue-400" />
-                <span>Пред. саб</span>
-              </button>
-
-              <span className="text-[11px] font-mono text-neutral-400 px-2 select-none">
-                {currentSubIndex >= 0 ? `${currentSubIndex + 1}` : '–'} / {subLines.length}
-              </span>
-
-              <button
-                type="button"
-                onClick={seekToNext}
-                disabled={subLines.length === 0}
-                className="px-2.5 py-1 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 hover:text-white text-xs font-semibold flex items-center gap-1 transition disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Перейти к следующему субтитру (Shift+D / Alt+Right)"
-              >
-                <span>След. саб</span>
-                <SkipForward className="w-3.5 h-3.5 text-blue-400" />
-              </button>
-            </div>
-
-            {/* Reassign role if subtitle is active */}
-            {currentCharacter && currentEpisode && (
-              <div className="flex items-center gap-1.5 text-xs text-neutral-400">
-                <span className="text-[10px]">Роль:</span>
-                <select 
-                  className="bg-neutral-800 border border-neutral-700 text-white text-[10px] rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                  value={currentCharacter}
-                  onChange={(e) => handleReassignCharacter(e.target.value)}
-                >
-                  <option value={currentCharacter}>{currentCharacter}</option>
-                  {currentEpisode.assignments?.map(a => a.characterName)
-                    .filter(name => name !== currentCharacter)
-                    .filter((v, i, a) => a.indexOf(v) === i)
-                    .map(name => (
-                      <option key={name} value={name}>{name}</option>
-                    ))
-                  }
-                </select>
-              </div>
-            )}
-          </div>
-
-          {/* Option: Checkbox for manual dubber selection */}
-          <div className="flex items-center gap-2 bg-neutral-950/80 px-2.5 py-1 rounded-lg border border-neutral-800">
-            <label className="flex items-center gap-1.5 text-xs text-neutral-300 cursor-pointer select-none font-medium">
-              <input
-                type="checkbox"
-                checked={isManualDubberOverride}
-                onChange={(e) => {
-                  setIsManualDubberOverride(e.target.checked);
-                  if (e.target.checked && !manualDubberId && availableDubbers.length > 0) {
-                    setManualDubberId(availableDubbers[0].id);
-                  }
-                }}
-                className="rounded border-neutral-700 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5 accent-blue-600 cursor-pointer"
-              />
-              <span>Указать дабера:</span>
-            </label>
-
-            {isManualDubberOverride ? (
-              <select
-                value={manualDubberId}
-                onChange={(e) => setManualDubberId(e.target.value)}
-                className="bg-neutral-850 border border-blue-500/60 text-blue-200 text-xs font-semibold rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-[200px]"
-              >
-                {availableDubbers.map(d => (
-                  <option key={d.id} value={d.id}>
-                    {d.name} {d.roles ? `(${d.roles})` : ''}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <span className="text-[11px] text-neutral-500 italic">
-                (авто: {currentDubberNickname || selectedTrack?.participant || 'по фразе'})
-              </span>
-            )}
-          </div>
-        </div>
-
-        {/* Subtitle text snippet line (if present) */}
-        {currentSubtitleText && (
-          <div className="text-xs text-amber-200/90 bg-neutral-950/60 px-3 py-1.5 rounded-lg border border-neutral-800/80 flex items-center justify-between gap-2">
-            <span className="italic truncate">"{currentSubtitleText}"</span>
-            <button
-              type="button"
-              onClick={() => setNewComment(prev => prev ? `${prev} [${currentSubtitleText}]` : `[${currentSubtitleText}] `)}
-              className="text-[10px] text-blue-400 hover:text-blue-300 font-medium shrink-0 underline ml-2"
-              title="Вставить текст текущего субтитра в поле правки"
-            >
-              Вставить текст
-            </button>
-          </div>
-        )}
-
-        {/* Input & Send Action */}
-        <div className="flex gap-2">
-          <div className="relative flex-1">
-            <input 
-              type="text" 
-              value={newComment}
-              onChange={(e) => {
-                setNewComment(e.target.value);
-                if (isPlaying && e.target.value.length > 0) {
-                  handlePause(); // Auto-pause when typing
-                }
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleAddComment();
-                if (e.key === ' ') {
-                  e.stopPropagation(); // Prevent space from toggling play when typing
-                }
-              }}
-              placeholder={
-                isManualDubberOverride
-                  ? `Выписать фикс дабберу «${availableDubbers.find(d => d.id === manualDubberId)?.name || 'Выбранному'}» на ${new Date(currentTime * 1000).toISOString().substr(14, 5)}...`
-                  : "Добавить замечание / фикс на этой секунде (Enter)..."
-              }
-              className="w-full bg-neutral-850 border border-neutral-700 text-white rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 placeholder:text-neutral-500"
-            />
-            <div className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-neutral-500 pointer-events-none">
-              [F — быстрый фикс]
-            </div>
-          </div>
-          <button 
-            type="button"
-            onClick={() => handleAddComment()}
-            disabled={!newComment.trim()}
-            className="px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:hover:bg-blue-600 text-white rounded-lg transition-colors font-bold text-sm shrink-0 flex items-center gap-1.5 shadow-md shadow-blue-600/20"
-          >
-            <MessageSquare className="w-4 h-4" />
-            <span>Выписать фикс</span>
-          </button>
-        </div>
-      </div>
-    );
+  const handleResetAllVolumes = () => {
+    setOriginalVolume(0.5);
+    if (videoRef.current) videoRef.current.volume = 0.5;
+    setIsMuted(false);
+    setMutedTracks(new Set());
+    const resetMap: Record<string, number> = {};
+    tracks.forEach(t => {
+      resetMap[t.id] = 0.8;
+    });
+    setVolumes(resetMap);
+    toast.success('Уровни громкости сброшены по умолчанию');
   };
+
+  const renderFixIssueBar = () => (
+    <QAFixIssueBar
+      currentEpisode={currentEpisode}
+      tracks={tracks}
+      selectedTrackId={selectedTrackId}
+      selectedTrack={selectedTrack}
+      currentTime={currentTime}
+      isPlaying={isPlaying}
+      handlePause={handlePause}
+      seekToNext={seekToNext}
+      seekToPrev={seekToPrev}
+      handleSeekToTime={handleSeekToTime}
+      currentCharacter={currentCharacter}
+      currentDubberNickname={currentDubberNickname}
+      currentSubtitleText={currentSubtitleText}
+      currentSubId={currentSubId}
+      handleReassignCharacter={handleReassignCharacter}
+      isManualDubberOverride={isManualDubberOverride}
+      setIsManualDubberOverride={setIsManualDubberOverride}
+      manualDubberId={manualDubberId}
+      setManualDubberId={setManualDubberId}
+      newComment={newComment}
+      setNewComment={setNewComment}
+      handleAddComment={handleAddComment}
+      handleDeleteComment={handleDeleteComment}
+      detectedGaps={detectedGaps}
+      handleApplyGapFixes={handleApplyGapFixes}
+      isApplyingGapFixes={isApplyingGapFixes}
+      subLines={subLines}
+    />
+  );
 
   return (
     <>
       {/* Main Content - Player & Comments */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {selectedTrackId === 'all' ? (
-          <div className="flex-1 flex flex-col overflow-hidden p-6 space-y-6">
-            <div className="aspect-video bg-black rounded-xl overflow-hidden border border-neutral-800 relative group max-h-[50vh] mx-auto w-full">
+          <div className="flex-1 flex flex-col overflow-y-auto p-4 space-y-3">
+            <div className="aspect-video bg-black rounded-xl overflow-hidden border border-neutral-800 relative group max-h-[46vh] mx-auto w-full shrink-0">
               <video 
                 ref={videoRef}
                 src={videoUrl || undefined}
@@ -520,362 +378,168 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
               </div>
             </div>
 
-            <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 flex-1 flex flex-col min-h-0">
-              <div className="flex items-center justify-between mb-4 shrink-0">
-                <div>
-                  <h3 className="text-lg font-bold text-white">Громкость даберов в миксе</h3>
-                  <div className="text-xs text-neutral-400 mt-0.5">
-                    {isAutoNormalize 
-                      ? '✨ Авто-нормализация выравнивает громкость дорожек при прослушивании' 
-                      : 'Оригинальный уровень громкости файлов'}
-                  </div>
+            {/* Miniature Rotary Knob Mixer Strip */}
+            <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl px-3.5 py-2.5 shrink-0">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <div className="flex items-center gap-2">
+                  <Sliders className="w-3.5 h-3.5 text-blue-400" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-neutral-200">
+                    Микшер громкости даберов
+                  </h3>
+                  <span className="text-[10px] text-neutral-500 hidden md:inline">
+                    (крутилки: тяните вверх/вниз или колесиком мыши · 2× клик — сброс)
+                  </span>
                 </div>
-                <button
-                  onClick={toggleAutoNormalize}
-                  className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-                    isAutoNormalize 
-                      ? 'bg-blue-600/20 text-blue-400 border-blue-500/40 hover:bg-blue-600/30' 
-                      : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:bg-neutral-700'
-                  }`}
-                  title="Нормализует громкость всех дорожек до целевого уровня в реальном времени"
-                >
-                  <Sliders className="w-3.5 h-3.5" />
-                  {isAutoNormalize ? 'Авто-нормализация: ВКЛ' : 'Авто-нормализация: ВЫКЛ'}
-                </button>
+
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleResetAllVolumes}
+                    className="flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium bg-neutral-800 hover:bg-neutral-750 text-neutral-300 border border-neutral-700/80 transition-colors"
+                    title="Сбросить все крутилки громкости к стандартным значениям"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Сброс</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={toggleAutoNormalize}
+                    className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium border transition-colors ${
+                      isAutoNormalize 
+                        ? 'bg-blue-600/20 text-blue-300 border-blue-500/40 hover:bg-blue-600/30' 
+                        : 'bg-neutral-800 text-neutral-400 border-neutral-700 hover:bg-neutral-700'
+                    }`}
+                    title="Нормализует громкость всех дорожек до целевого уровня в реальном времени"
+                  >
+                    <Sliders className="w-3 h-3" />
+                    <span>{isAutoNormalize ? 'Авто-норм: ВКЛ' : 'Авто-норм: ВЫКЛ'}</span>
+                  </button>
+                </div>
               </div>
 
-              <div className="space-y-3 overflow-y-auto pr-2 shrink-0 max-h-[40%]">
-                <div className="flex items-center gap-4 p-3 bg-neutral-800/50 rounded-lg">
-                  <Volume2 className="w-5 h-5 text-neutral-400" />
-                  <div className="w-36 text-sm font-medium text-white truncate">Оригинал (РАВ)</div>
-                  <input 
-                    type="range" min="0" max="1" step="0.1" value={originalVolume} 
-                    onChange={(e) => {
-                      const v = parseFloat(e.target.value);
-                      setOriginalVolume(v);
-                      if (videoRef.current) videoRef.current.volume = v;
-                    }}
-                    className="flex-1 accent-neutral-500"
-                  />
-                  <span className="text-xs text-neutral-500 w-12 text-right">{Math.round(originalVolume * 100)}%</span>
-                </div>
+              <div className="flex items-center gap-2 overflow-x-auto pb-1 pt-0.5 scrollbar-thin">
+                {/* Original RAW Video Volume Knob */}
+                <RotaryKnob
+                  value={originalVolume}
+                  defaultValue={0.5}
+                  onChange={(v) => {
+                    setOriginalVolume(v);
+                    if (videoRef.current) videoRef.current.volume = v;
+                    if (v > 0 && isMuted) setIsMuted(false);
+                  }}
+                  label="Оригинал"
+                  sublabel="РАВ (Видео)"
+                  accentColor="neutral"
+                  isMuted={isMuted || originalVolume === 0}
+                  onToggleMute={() => {
+                    const nextMuted = !isMuted;
+                    setIsMuted(nextMuted);
+                    if (videoRef.current) {
+                      videoRef.current.volume = nextMuted ? 0 : originalVolume;
+                    }
+                  }}
+                />
 
-                {tracks.map(track => {
+                <div className="h-14 w-px bg-neutral-800 shrink-0 mx-0.5" />
+
+                {/* Dubber Knobs */}
+                {dubberTracks.map(track => {
                   const norm = normalizationMetrics[track.id];
+                  const isTrackMuted = mutedTracks.has(track.id);
+                  const gainBadge =
+                    isAutoNormalize && norm && norm.status === 'ready'
+                      ? `${norm.gainDb > 0 ? '+' : ''}${norm.gainDb}dB`
+                      : undefined;
+                  const gainTitle =
+                    norm && norm.status === 'ready'
+                      ? `Пик: ${norm.peakDb} dBFS, RMS: ${norm.rmsDb} dBFS. Коррекция: ${norm.gainDb > 0 ? '+' : ''}${norm.gainDb} dB`
+                      : 'Анализ громкости...';
+
                   return (
-                    <div key={track.id} className="flex items-center gap-4 p-3 bg-neutral-800/50 rounded-lg">
-                      <Volume2 className="w-5 h-5 text-blue-400" />
-                      <div className="w-36 flex-shrink-0">
-                        <div className="text-sm font-medium text-white truncate">{track.participant}</div>
-                        <div className="text-xs text-neutral-500 truncate">{track.character}</div>
-                      </div>
-                      
-                      {isAutoNormalize && norm && norm.status === 'ready' && (
-                        <span 
-                          className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shrink-0"
-                          title={`Auto-Gain: ${norm.gainDb > 0 ? '+' : ''}${norm.gainDb} dB (Пик: ${norm.peakDb} dBFS, Речь: ${norm.rmsDb} dBFS)`}
-                        >
-                          {norm.gainDb > 0 ? '+' : ''}{norm.gainDb} dB
-                        </span>
-                      )}
-
-                      <input 
-                        type="range" min="0" max="1" step="0.1" value={volumes[track.id] ?? 0.8} 
-                        onChange={(e) => {
-                          const v = parseFloat(e.target.value);
-                          setVolumes(prev => ({ ...prev, [track.id]: v }));
-                        }}
-                        className="flex-1 accent-blue-500"
-                      />
-                      <span className="text-xs text-neutral-500 w-12 text-right">{Math.round((volumes[track.id] ?? 0.8) * 100)}%</span>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <div className="mt-4 pt-4 border-t border-neutral-800 shrink-0">
-                {renderFixIssueBar()}
-              </div>
-            </div>
-          </div>
-        ) : selectedTrack ? (
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
-              {/* Video & Waveform */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="aspect-video bg-black rounded-xl overflow-hidden border border-neutral-800 relative group">
-                  <video 
-                    ref={videoRef}
-                    src={videoUrl || undefined}
-                    className="w-full h-full object-contain"
-                    onPlay={handleVideoPlay}
-                    onPause={handleVideoPause}
-                    onTimeUpdate={handleVideoTimeUpdate}
-                    onSeeking={handleVideoSeeking}
-                    onSeeked={handleVideoSeeking}
-                    onEnded={handleVideoEnded}
-                    onLoadedMetadata={(e) => {
-                      setDuration(e.currentTarget.duration);
-                      e.currentTarget.currentTime = currentTime;
-                    }}
-                  />
-                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-4">
-                    <div className="flex flex-col gap-2 w-full">
-                      <input 
-                        type="range" 
-                        min={0} 
-                        max={duration || 100} 
-                        value={currentTime}
-                        onChange={(e) => {
-                          const time = parseFloat(e.target.value);
-                          handleSeekToTime(time);
-                        }}
-                        className="w-full accent-blue-500"
-                      />
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4">
-                          <button 
-                            onClick={handleStop} 
-                            className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all"
-                            title="Стоп"
-                          >
-                            <X className="w-5 h-5" />
-                          </button>
-                          <button 
-                            onClick={seekToPrev} 
-                            className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all"
-                            title="К предыдущей реплике (Стрелка влево / Shift+A)"
-                          >
-                            <SkipBack className="w-5 h-5" />
-                          </button>
-                          <button 
-                            onClick={togglePlay} 
-                            className="p-3 bg-blue-600 hover:bg-blue-500 rounded-full text-white transition-all transform hover:scale-110"
-                            title={isPlaying ? "Пауза" : "Играть"}
-                          >
-                            {isPlaying ? <Pause className="w-5 h-5" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-                          </button>
-                          <button 
-                            onClick={seekToNext} 
-                            className="p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all"
-                            title="К следующей реплике (Стрелка вправо / Shift+D)"
-                          >
-                            <SkipForward className="w-5 h-5" />
-                          </button>
-                        </div>
-                        <div className="flex items-center gap-2 bg-black/60 px-3 py-1 rounded-full">
-                          <Clock className="w-3 h-3 text-blue-400" />
-                          <span className="text-xs font-mono text-white">
-                            {new Date(currentTime * 1000).toISOString().substr(14, 5)} / {new Date(duration * 1000).toISOString().substr(14, 5)}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="space-y-4">
-                  <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4">
-                    <div className="flex items-center justify-between mb-4">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold">
-                          {selectedTrack.participant.charAt(0)}
-                        </div>
-                        <div>
-                          <div className="text-white font-bold">{selectedTrack.character}</div>
-                          <div className="text-xs text-neutral-400">{selectedTrack.participant}</div>
-                        </div>
-                      </div>
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={detectSilence}
-                          disabled={isAnalyzingSilence}
-                          className={`p-2 rounded-lg transition-colors ${isAnalyzingSilence ? 'bg-neutral-800 text-neutral-600' : 'bg-neutral-800 text-neutral-400 hover:text-blue-400'}`}
-                          title="Детектор тишины"
-                        >
-                          <Scissors className={`w-5 h-5 ${isAnalyzingSilence ? 'animate-pulse' : ''}`} />
-                        </button>
-                        <button 
-                          onClick={() => handleStatusChange(selectedTrack.id, 'approved')}
-                          className={`p-2 rounded-lg transition-colors ${selectedTrack.status === 'approved' ? 'bg-green-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-green-400'}`}
-                          title="Одобрить"
-                        >
-                          <CheckCircle className="w-5 h-5" />
-                        </button>
-                        <button 
-                          onClick={() => handleStatusChange(selectedTrack.id, 'fixes_needed')}
-                          className={`p-2 rounded-lg transition-colors ${selectedTrack.status === 'fixes_needed' ? 'bg-yellow-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-yellow-400'}`}
-                          title="Требуются исправления"
-                        >
-                          <AlertCircle className="w-5 h-5" />
-                        </button>
-                        <button 
-                          onClick={() => handleStatusChange(selectedTrack.id, 'rejected')}
-                          className={`p-2 rounded-lg transition-colors ${selectedTrack.status === 'rejected' ? 'bg-red-600 text-white' : 'bg-neutral-800 text-neutral-400 hover:text-red-400'}`}
-                          title="Отклонить"
-                        >
-                          <XCircle className="w-5 h-5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Current Phrase Info & Reassignment */}
-                    <div className="mb-4 pb-4 border-b border-neutral-800 space-y-2">
-                       <div className="flex items-center justify-between">
-                        <div className={`text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 ${currentCharacter ? 'text-blue-400' : 'text-neutral-500'}`}>
-                          <User className="w-3.5 h-3.5" />
-                          {currentCharacter ? (
-                            <span>
-                              {currentDubberNickname ? `${currentDubberNickname} (${currentCharacter})` : currentCharacter}
-                            </span>
-                          ) : 'Никто не говорит'}
-                        </div>
-                        
-                        {currentCharacter && currentEpisode && (
-                          <div className="flex items-center gap-2">
-                            <span className="text-[9px] text-neutral-500">Переназначить:</span>
-                            <select 
-                              className="bg-neutral-800 border border-neutral-700 text-white text-[10px] rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                              value={currentCharacter}
-                              onChange={(e) => handleReassignCharacter(e.target.value)}
-                            >
-                              <option value={currentCharacter}>{currentCharacter}</option>
-                              {currentEpisode.assignments?.map(a => a.characterName)
-                                .filter(name => name !== currentCharacter)
-                                .filter((v, i, a) => a.indexOf(v) === i)
-                                .map(name => (
-                                  <option key={name} value={name}>{name}</option>
-                                ))
-                              }
-                            </select>
-                          </div>
-                        )}
-                      </div>
-                      {currentSubtitleText && (
-                        <div className="text-[11px] text-neutral-400 italic line-clamp-1">
-                          "{currentSubtitleText}"
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="space-y-4">
-                      <div className="flex items-center gap-4">
-                        <Volume2 className="w-4 h-4 text-neutral-500" />
-                        <input 
-                          type="range" min="0" max="1" step="0.1" value={volumes[selectedTrack.id] ?? 0.8} 
-                          onChange={(e) => {
-                            const v = parseFloat(e.target.value);
-                            setVolumes(prev => ({ ...prev, [selectedTrack.id]: v }));
-                          }}
-                          className="flex-1 accent-blue-500"
-                        />
-                        {isAutoNormalize && normalizationMetrics[selectedTrack.id]?.status === 'ready' && (
-                          <span 
-                            className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                            title={`Коррекция превью: ${normalizationMetrics[selectedTrack.id].gainDb > 0 ? '+' : ''}${normalizationMetrics[selectedTrack.id].gainDb} dB. Исходный файл не изменен.`}
-                          >
-                            {normalizationMetrics[selectedTrack.id].gainDb > 0 ? '+' : ''}{normalizationMetrics[selectedTrack.id].gainDb} dB
-                          </span>
-                        )}
-                        <button 
-                          onClick={() => setIsMuted(!isMuted)}
-                          className={`p-1 rounded ${isMuted ? 'text-red-500 bg-red-500/10' : 'text-neutral-500 hover:text-white'}`}
-                          title="Приглушить фон"
-                        >
-                          <Activity className="w-4 h-4" />
-                        </button>
-                        <span className="text-[10px] text-neutral-500 w-8">ДАБ</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <Volume2 className="w-4 h-4 text-neutral-500" />
-                        <input 
-                          type="range" min="0" max="1" step="0.1" value={originalVolume} 
-                          onChange={(e) => {
-                            const v = parseFloat(e.target.value);
-                            setOriginalVolume(v);
-                            if (videoRef.current) videoRef.current.volume = v;
-                          }}
-                          className="flex-1 accent-neutral-500"
-                        />
-                        <span className="text-[10px] text-neutral-500 w-8">РАВ</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-4 h-[200px] flex flex-col">
-                    <h3 className="text-sm font-bold text-white mb-3 flex items-center gap-2">
-                      <MessageSquare className="w-4 h-4" />
-                      Правки и комментарии
-                    </h3>
-                    <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-hide">
-                      {[...selectedTrack.comments].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).map(comment => (
-                        <div key={comment.id} className="bg-neutral-800/50 rounded-lg p-3 border border-neutral-700/50 group/comment">
-                          <div className="flex justify-between items-start mb-1">
-                            <div className="flex items-center gap-2">
-                              <span className="text-[10px] font-bold text-blue-400 uppercase">{comment.author}</span>
-                              <span className="text-[10px] text-neutral-500">{new Date(comment.timestamp * 1000).toISOString().substr(14, 5)}</span>
-                            </div>
-                            <button 
-                              onClick={() => handleDeleteComment(selectedTrack.id, comment.id)}
-                              className="opacity-0 group-hover/comment:opacity-100 p-1 hover:text-red-400 transition-all"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
-                          <p className="text-sm text-neutral-200">{comment.text}</p>
-                        </div>
-                      ))}
-                      {selectedTrack.comments.length === 0 && (
-                        <div className="h-full flex items-center justify-center text-neutral-600 text-sm italic">
-                          Комментариев пока нет
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  {renderFixIssueBar()}
-                </div>
-              </div>
-
-              {/* Waveform Section */}
-              <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 space-y-4">
-                {[selectedTrack].map(track => (
-                  <div key={track.id} className="bg-neutral-800/50 p-4 rounded-lg border border-neutral-700/50">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="font-bold text-white">{track.participant} ({track.character})</span>
-                      <div className="flex gap-2">
-                        <button onClick={() => setMutedTracks(prev => {
+                    <RotaryKnob
+                      key={track.id}
+                      value={volumes[track.id] ?? 0.8}
+                      defaultValue={0.8}
+                      onChange={(v) => {
+                        setVolumes(prev => ({ ...prev, [track.id]: v }));
+                        if (v > 0 && isTrackMuted) {
+                          setMutedTracks(prev => {
+                            const next = new Set(prev);
+                            next.delete(track.id);
+                            return next;
+                          });
+                        }
+                      }}
+                      label={track.participant}
+                      sublabel={track.character}
+                      accentColor={track.status === 'approved' ? 'emerald' : track.status === 'fixes_needed' ? 'amber' : 'blue'}
+                      isMuted={isTrackMuted || (volumes[track.id] ?? 0.8) === 0}
+                      onToggleMute={() => {
+                        setMutedTracks(prev => {
                           const next = new Set(prev);
                           if (next.has(track.id)) next.delete(track.id);
                           else next.add(track.id);
                           return next;
-                        })} className={`p-1 rounded ${mutedTracks.has(track.id) ? 'text-red-500' : 'text-neutral-400'}`}>
-                          {mutedTracks.has(track.id) ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-                    <TrackWaveform 
-                      track={track}
-                      currentTime={currentTime}
-                      isPlaying={isPlaying}
-                      subLines={subLines}
-                      onTimeUpdate={setCurrentTime}
-                      onSeek={handleSeekToTime}
-                      onPlayPause={togglePlay}
-                      volume={track.id === 'original' ? 0 : (isMuted || mutedTracks.has(track.id) ? 0 : Math.max(0, (volumes[track.id] ?? 0.8) * ((isAutoNormalize && normalizationMetrics[track.id]?.status === 'ready') ? normalizationMetrics[track.id].gain : 1.0)))}
-                      isMuted={isMuted || mutedTracks.has(track.id)}
-                      onRegionClick={(region) => {
-                        setCommentModal({ isOpen: true, region });
+                        });
                       }}
-                      onWaveSurferReady={(ws) => {
-                        wavesurferRef.current = ws;
-                      }}
+                      gainBadge={gainBadge}
+                      gainTitle={gainTitle}
+                      fixesCount={track.comments.length}
+                      onSelectTrack={() => setSelectedTrackId?.(track.id)}
                     />
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
+
+            {/* Fix Issue Bar with Active Phrase Fix Indicator & History */}
+            {renderFixIssueBar()}
           </div>
+        ) : selectedTrack ? (
+          <QASingleTrackView
+            currentEpisode={currentEpisode}
+            selectedTrack={selectedTrack}
+            videoRef={videoRef}
+            videoUrl={videoUrl}
+            handleVideoPlay={handleVideoPlay}
+            handleVideoPause={handleVideoPause}
+            handleVideoTimeUpdate={handleVideoTimeUpdate}
+            handleVideoSeeking={handleVideoSeeking}
+            handleVideoEnded={handleVideoEnded}
+            duration={duration}
+            setDuration={setDuration}
+            currentTime={currentTime}
+            setCurrentTime={setCurrentTime}
+            handleSeekToTime={handleSeekToTime}
+            isPlaying={isPlaying}
+            togglePlay={togglePlay}
+            seekToNext={seekToNext}
+            seekToPrev={seekToPrev}
+            handleStop={handleStop}
+            detectSilence={detectSilence}
+            isAnalyzingSilence={isAnalyzingSilence}
+            handleStatusChange={handleStatusChange}
+            currentCharacter={currentCharacter}
+            currentDubberNickname={currentDubberNickname}
+            currentSubtitleText={currentSubtitleText}
+            handleReassignCharacter={handleReassignCharacter}
+            volumes={volumes}
+            setVolumes={setVolumes}
+            isAutoNormalize={isAutoNormalize}
+            normalizationMetrics={normalizationMetrics}
+            isMuted={isMuted}
+            setIsMuted={setIsMuted}
+            originalVolume={originalVolume}
+            setOriginalVolume={setOriginalVolume}
+            handleDeleteComment={handleDeleteComment}
+            renderFixIssueBar={renderFixIssueBar}
+            mutedTracks={mutedTracks}
+            setMutedTracks={setMutedTracks}
+            subLines={subLines}
+            setCommentModal={setCommentModal}
+            wavesurferRef={wavesurferRef}
+          />
         ) : (
           <div className="flex-1 flex items-center justify-center text-neutral-600 italic">
             Выберите дорожку для начала проверки
@@ -883,304 +547,61 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
         )}
       </div>
 
-      {/* Comment Modal */}
-      {commentModal?.isOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-neutral-900 p-6 rounded-xl border border-neutral-700 w-full max-w-md space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <h3 className="text-white font-bold text-base flex items-center gap-2">
-                <MessageSquare className="w-4 h-4 text-blue-400" />
-                <span>Добавить правку на {new Date(currentTime * 1000).toISOString().substr(14, 5)}</span>
-              </h3>
-              <button 
-                onClick={() => setCommentModal(null)} 
-                className="text-neutral-500 hover:text-white p-1"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Subtitle navigation row inside modal */}
-            <div className="flex items-center justify-between gap-2 bg-neutral-950 p-2 rounded-lg border border-neutral-800 text-xs">
-              <span className="text-neutral-400 font-medium">Субтитр {currentSubIndex >= 0 ? `${currentSubIndex + 1}` : '–'} / {subLines.length}</span>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={seekToPrev}
-                  disabled={subLines.length === 0}
-                  className="px-2 py-0.5 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 text-xs flex items-center gap-1 disabled:opacity-40"
-                  title="К предыдущему субтитру"
-                >
-                  <SkipBack className="w-3 h-3 text-blue-400" />
-                  <span>Пред</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={seekToNext}
-                  disabled={subLines.length === 0}
-                  className="px-2 py-0.5 rounded bg-neutral-850 hover:bg-neutral-750 text-neutral-200 text-xs flex items-center gap-1 disabled:opacity-40"
-                  title="К следующему субтитру"
-                >
-                  <span>След</span>
-                  <SkipForward className="w-3 h-3 text-blue-400" />
-                </button>
-              </div>
-            </div>
-
-            {/* Manual dubber selection inside modal */}
-            <div className="flex items-center gap-2 bg-neutral-950 p-2.5 rounded-lg border border-neutral-800">
-              <label className="flex items-center gap-1.5 text-xs text-neutral-300 cursor-pointer select-none font-medium">
-                <input
-                  type="checkbox"
-                  checked={isManualDubberOverride}
-                  onChange={(e) => {
-                    setIsManualDubberOverride(e.target.checked);
-                    if (e.target.checked && !manualDubberId && availableDubbers.length > 0) {
-                      setManualDubberId(availableDubbers[0].id);
-                    }
-                  }}
-                  className="rounded border-neutral-700 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5 accent-blue-600 cursor-pointer"
-                />
-                <span>Указать дабера:</span>
-              </label>
-              {isManualDubberOverride ? (
-                <select
-                  value={manualDubberId}
-                  onChange={(e) => setManualDubberId(e.target.value)}
-                  className="flex-1 bg-neutral-850 border border-blue-500/60 text-blue-200 text-xs font-semibold rounded px-2 py-1 focus:outline-none"
-                >
-                  {availableDubbers.map(d => (
-                    <option key={d.id} value={d.id}>
-                      {d.name} {d.roles ? `(${d.roles})` : ''}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <span className="text-[11px] text-neutral-500 italic">
-                  (авто: {currentDubberNickname || selectedTrack?.participant || 'по фразе'})
-                </span>
-              )}
-            </div>
-
-            {currentSubtitleText && (
-              <div className="text-xs text-amber-200/90 bg-neutral-950/60 px-2.5 py-1.5 rounded border border-neutral-800/80 italic line-clamp-2">
-                "{currentSubtitleText}"
-              </div>
-            )}
-
-            <input 
-              type="text" 
-              value={newComment}
-              onChange={(e) => setNewComment(e.target.value)}
-              className="bg-neutral-800 border border-neutral-700 text-white rounded-lg px-4 py-2 w-full text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-              placeholder={
-                isManualDubberOverride
-                  ? `Текст замечания для ${availableDubbers.find(d => d.id === manualDubberId)?.name || 'даббера'}...`
-                  : "Текст замечания / фикса..."
-              }
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  handleAddComment();
-                  setCommentModal(null);
-                }
-              }}
-            />
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-neutral-800">
-              <button 
-                onClick={() => setCommentModal(null)} 
-                className="px-4 py-1.5 rounded-lg text-xs text-neutral-400 hover:text-white bg-neutral-800 hover:bg-neutral-700 transition"
-              >
-                Отмена
-              </button>
-              <button 
-                onClick={() => {
-                  handleAddComment();
-                  setCommentModal(null);
-                }} 
-                disabled={!newComment.trim()}
-                className="px-5 py-1.5 rounded-lg text-xs font-bold bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white transition flex items-center gap-1.5 shadow-md shadow-blue-600/20"
-              >
-                <MessageSquare className="w-3.5 h-3.5" />
-                <span>Выписать фикс</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Pre-scan Configuration Modal */}
-      {isScanConfigModalOpen && (
-        <QAScanConfigModal
-          isOpen={isScanConfigModalOpen}
-          onClose={() => setIsScanConfigModalOpen(false)}
-          onStartScan={(options) => {
-            setGapScanOptions(options);
-            setIsScanConfigModalOpen(false);
-            handleExecuteGapDetection(options);
-          }}
-          initialOptions={gapScanOptions}
-          totalDubbers={tracks.filter(t => t.id !== 'original' && t.files.length > 0).length}
-          totalSubLines={subLines.length}
-        />
-      )}
-
-      {/* Missing Lines / Gaps Review Modal */}
-      {isGapModalOpen && (
-        <MissingLinesModal
-          isOpen={isGapModalOpen}
-          onClose={() => setIsGapModalOpen(false)}
-          gaps={detectedGaps}
-          episode={currentEpisode}
-          participants={participants}
-          tracks={tracks}
-          onOpenTimingPanel={() => {
-            setIsGapModalOpen(false);
-            onNavigate?.('timing');
-          }}
-          onApplyFixes={handleApplyGapFixes}
-          onSeekMainPlayer={(timeSec) => {
-            handleSeekToTime(timeSec);
-          }}
-          isApplying={isApplyingGapFixes}
-          onReAnalyze={handleRunGapDetection}
-          onOpenScanConfig={() => setIsScanConfigModalOpen(true)}
-          isAnalyzing={isAnalyzingGaps}
-          currentThreshold={gapSensitivityThreshold}
-          scanReport={qaScanReport || (detectedGaps as any)?.scanReport}
-          videoUrl={videoUrl}
-          subLines={subLines}
-          onUpdateSubLine={handleUpdateSubLineFromModal}
-          onExportSubtitles={handleExportSubtitlesFromModal}
-          onSaveGaps={handleSaveDetectedGaps}
-        />
-      )}
-
-      {/* Export Modal */}
-      {isExportModalOpen && currentEpisode && (
-        <ExportModal 
-          isOpen={isExportModalOpen}
-          onClose={() => setIsExportModalOpen(false)}
-          episode={currentEpisode}
-          role="SOUND_ENGINEER"
-          onExport={handleExportSoundEngineer}
-          isExporting={isUploading}
-        />
-      )}
-
-      {/* Message Modal */}
-      {isMessageModalOpen && generatedMessage && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
-          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden">
-            <div className="p-6 border-b border-neutral-800 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-amber-400" />
-                <h2 className="text-xl font-semibold text-white">Сформированное сообщение</h2>
-              </div>
-              <button onClick={() => setIsMessageModalOpen(false)} className="text-neutral-400 hover:text-white">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            
-            <div className="p-6">
-              <pre className="bg-black/50 border border-neutral-800 rounded-xl p-6 text-sm text-neutral-300 whitespace-pre-wrap font-mono leading-relaxed max-h-[50vh] overflow-y-auto custom-scrollbar">
-                {generatedMessage}
-              </pre>
-              
-              <div className="mt-6 flex gap-3">
-                <button 
-                  onClick={async () => {
-                    if (!generatedMessage) return;
-                    try {
-                      const ok = await safeCopyToClipboard(generatedMessage);
-                      if (ok) {
-                        setIsMessageCopied(true);
-                        toast.success('Скопировано в буфер обмена!');
-                        setTimeout(() => setIsMessageCopied(false), 2000);
-                      } else {
-                        toast.error('Не удалось скопировать в буфер обмена');
-                      }
-                    } catch (e: any) {
-                      toast.error('Ошибка копирования: ' + (e?.message || String(e)));
-                    }
-                  }}
-                  className={`flex-1 py-3 rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-lg cursor-pointer ${
-                    isMessageCopied ? 'bg-emerald-600 text-white shadow-emerald-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/20'
-                  }`}
-                >
-                  {isMessageCopied ? <Check className="w-5 h-5" /> : <Save className="w-5 h-5" />}
-                  {isMessageCopied ? 'Скопировано!' : 'Скопировать текст'}
-                </button>
-                <button
-                  onClick={async () => {
-                    if (!currentEpisode) return;
-                    try {
-                      const res = await saveQAGapsToTimingProject(currentEpisode, detectedGaps, tracks);
-                      toast.success(
-                        `✓ Записано в файл тайминга! (Наездов: ${res.summary.overlapsCount}, коллизий: ${res.summary.collisionsCount}, рассинхронов: ${res.summary.desyncCount})`
-                      );
-                      setIsMessageModalOpen(false);
-                      onNavigate?.('timing');
-                    } catch (e: any) {
-                      toast.error('Ошибка записи в тайминг: ' + (e?.message || String(e)));
-                    }
-                  }}
-                  className="px-6 py-3 bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-500 hover:to-amber-400 text-white rounded-xl font-bold transition-all flex items-center justify-center gap-2 shadow-lg shadow-amber-600/25"
-                  title="Записать найденные замечания в файл тайминга серии и сразу открыть Тайминг видео (если сводите серию сами)"
-                >
-                  <Clock className="w-5 h-5 text-white" />
-                  <span>Записать в тайминг (свожу сам)</span>
-                </button>
-                <button 
-                  onClick={() => setIsMessageModalOpen(false)}
-                  className="px-8 py-3 bg-neutral-800 hover:bg-neutral-700 text-white rounded-xl font-bold transition-all"
-                >
-                  Закрыть
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Baking Progress Overlay */}
-      {isBaking && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-xl">
-          <div className="w-full max-w-md p-8 text-center space-y-6">
-            <div className="relative w-32 h-32 mx-auto">
-              <div className="absolute inset-0 border-4 border-neutral-800 rounded-full" />
-              <div 
-                className="absolute inset-0 border-4 border-blue-500 rounded-full transition-all duration-500"
-                style={{ 
-                  clipPath: `inset(${100 - bakeProgress}% 0 0 0)`,
-                  filter: 'drop-shadow(0 0 8px rgba(59, 130, 246, 0.5))'
-                }}
-              />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <span className="text-2xl font-bold text-white">{Math.round(bakeProgress)}%</span>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <h3 className="text-xl font-bold text-white">Рендеринг видео</h3>
-              <p className="text-neutral-400 text-sm">{bakeStatus}</p>
-            </div>
-            <div className="w-full bg-neutral-800 h-1.5 rounded-full overflow-hidden">
-              <div 
-                className="h-full bg-blue-500 transition-all duration-500"
-                style={{ width: `${bakeProgress}%` }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
-      <ConfirmModal
-        isOpen={confirmState.isOpen}
-        title={confirmState.title}
-        message={confirmState.message}
-        onConfirm={confirmState.onConfirm}
-        onCancel={() => setConfirmState(prev => ({ ...prev, isOpen: false }))}
-        variant={confirmState.variant}
+      <QAPlayerModalsContainer
+        currentEpisode={currentEpisode}
+        tracks={tracks}
+        selectedTrack={selectedTrack}
+        currentTime={currentTime}
+        handleSeekToTime={handleSeekToTime}
+        seekToNext={seekToNext}
+        seekToPrev={seekToPrev}
+        subLines={subLines}
+        currentSubtitleText={currentSubtitleText}
+        currentDubberNickname={currentDubberNickname}
+        commentModal={commentModal}
+        setCommentModal={setCommentModal}
+        newComment={newComment}
+        setNewComment={setNewComment}
+        handleAddComment={handleAddComment}
+        isManualDubberOverride={isManualDubberOverride}
+        setIsManualDubberOverride={setIsManualDubberOverride}
+        manualDubberId={manualDubberId}
+        setManualDubberId={setManualDubberId}
+        availableDubbers={availableDubbers}
+        isScanConfigModalOpen={isScanConfigModalOpen}
+        setIsScanConfigModalOpen={setIsScanConfigModalOpen}
+        gapScanOptions={gapScanOptions}
+        setGapScanOptions={setGapScanOptions}
+        handleExecuteGapDetection={handleExecuteGapDetection}
+        isGapModalOpen={isGapModalOpen}
+        setIsGapModalOpen={setIsGapModalOpen}
+        detectedGaps={detectedGaps}
+        participants={participants}
+        onNavigate={onNavigate}
+        handleApplyGapFixes={handleApplyGapFixes}
+        isApplyingGapFixes={isApplyingGapFixes}
+        handleRunGapDetection={handleRunGapDetection}
+        isAnalyzingGaps={isAnalyzingGaps}
+        gapSensitivityThreshold={gapSensitivityThreshold}
+        qaScanReport={qaScanReport}
+        videoUrl={videoUrl}
+        handleUpdateSubLineFromModal={handleUpdateSubLineFromModal}
+        handleExportSubtitlesFromModal={handleExportSubtitlesFromModal}
+        handleSaveDetectedGaps={handleSaveDetectedGaps}
+        isExportModalOpen={isExportModalOpen}
+        setIsExportModalOpen={setIsExportModalOpen}
+        handleExportSoundEngineer={handleExportSoundEngineer}
+        isUploading={isUploading}
+        isMessageModalOpen={isMessageModalOpen}
+        setIsMessageModalOpen={setIsMessageModalOpen}
+        generatedMessage={generatedMessage}
+        isMessageCopied={isMessageCopied}
+        setIsMessageCopied={setIsMessageCopied}
+        isBaking={isBaking}
+        bakeProgress={bakeProgress}
+        bakeStatus={bakeStatus}
+        confirmState={confirmState}
+        setConfirmState={setConfirmState}
       />
     </>
   );

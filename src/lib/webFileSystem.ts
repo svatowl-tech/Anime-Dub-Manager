@@ -61,38 +61,76 @@ export async function verifyPermission(fileHandle: any, readWrite = true): Promi
 // Глобальный кэш хэндлов открытых файлов, чтобы получать к ним доступ по имени
 const fileHandlesCache = new Map<string, File>();
 
+function extractCacheFileKey(name: string): string {
+  if (!name) return '';
+  const normalized = name.replace(/\\/g, '/').replace(/\/+$/, '');
+  const parts = normalized.split('/');
+  return parts[parts.length - 1] || name;
+}
+
 export function registerFileInCache(name: string, file: File) {
-  const cleanName = name.replace(/\\/g, '/').split('/').pop() || name;
+  const cleanName = extractCacheFileKey(name);
   fileHandlesCache.set(cleanName, file);
 }
 
 export function getFileFromCache(name: string): File | undefined {
-  const cleanName = name.replace(/\\/g, '/').split('/').pop() || name;
+  const cleanName = extractCacheFileKey(name);
   return fileHandlesCache.get(cleanName);
 }
 
 if (typeof window !== 'undefined') {
-  (window as any).getFileFromCache = getFileFromCache;
-  (window as any).registerFileInCache = registerFileInCache;
+  (window as unknown as Record<string, unknown>).getFileFromCache = getFileFromCache;
+  (window as unknown as Record<string, unknown>).registerFileInCache = registerFileInCache;
 }
 
 export async function selectBrowserDirectory(): Promise<string> {
-  if (!('showDirectoryPicker' in window)) {
-    throw new Error('Ваш браузер не поддерживает File System Access API. Пожалуйста, используйте Chrome, Edge или Opera.');
+  if (typeof window !== 'undefined' && 'showDirectoryPicker' in window) {
+    try {
+      const picker = (window as unknown as { showDirectoryPicker: (opts: { mode: string }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
+      const handle = await picker({
+        mode: 'readwrite'
+      });
+      await saveHandleToDB('projectRootDir', handle);
+      return handle.name;
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new Error('Выбор папки отменен пользователем.');
+      }
+      throw err;
+    }
   }
 
-  try {
-    const handle = await (window as any).showDirectoryPicker({
-      mode: 'readwrite'
-    });
-    await saveHandleToDB('projectRootDir', handle);
-    return handle.name;
-  } catch (err: any) {
-    if (err.name === 'AbortError') {
-      throw new Error('Выбор папки отменен пользователем.');
+  // Fallback for Android WebView, Firefox, and Safari where File System Access API is unavailable
+  return new Promise((resolve, reject) => {
+    if (typeof document === 'undefined') {
+      reject(new Error('Окружение не поддерживает выбор директории.'));
+      return;
     }
-    throw err;
-  }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.setAttribute('webkitdirectory', '');
+    input.setAttribute('directory', '');
+    input.onchange = () => {
+      const files = input.files;
+      if (files && files.length > 0) {
+        let rootName = 'SandboxWorkspace';
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          const relPath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+          if (i === 0 && relPath.includes('/')) {
+            rootName = relPath.split('/')[0] || rootName;
+          }
+          registerFileInCache(relPath, file);
+          registerFileInCache(file.name, file);
+        }
+        resolve(rootName);
+      } else {
+        reject(new Error('Выбор папки отменен пользователем.'));
+      }
+    };
+    input.click();
+  });
 }
 
 export async function selectBrowserFile(acceptTypes?: { [key: string]: string[] }): Promise<{ name: string; path: string; file: File }> {

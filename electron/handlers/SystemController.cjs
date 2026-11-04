@@ -60,6 +60,28 @@ function registerSystemHandlers(getData, saveData, mainWindow, taskQueue) {
     return true;
   }));
 
+  ipcMain.handle('get-release-presets', wrapIpcHandler(async () => {
+    const config = (await getData('config.json')) || {};
+    return config.releasePresets || {};
+  }));
+
+  ipcMain.handle('save-release-preset', wrapIpcHandler(async (event, payload) => {
+    const { releaseType, preset } = payload || {};
+    if (!releaseType || !preset) {
+      throw new Error('Missing releaseType or preset payload');
+    }
+    const currentConfig = (await getData('config.json')) || {};
+    const releasePresets = {
+      ...(currentConfig.releasePresets || {}),
+      [releaseType]: preset
+    };
+    await saveData('config.json', {
+      ...currentConfig,
+      releasePresets
+    });
+    return releasePresets[releaseType];
+  }));
+
   ipcMain.handle('export-data-zip', wrapIpcHandler(async () => {
     if (!mainWindow) throw new Error('No main window');
     

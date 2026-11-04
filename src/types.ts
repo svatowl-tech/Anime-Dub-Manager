@@ -1,7 +1,9 @@
+export type ReleaseTemplateType = 'TG' | 'TG_ARTICLE' | 'VK' | 'FINAL_TG';
+
 export interface QuickUploadLink {
   id?: string;
+  name: string;
   title?: string;
-  name?: string;
   url: string;
 }
 
@@ -76,6 +78,26 @@ export interface ProjectLinks {
   [key: string]: any;
 }
 
+export interface ReleaseTypePreset {
+  releaseType: ReleaseType;
+  name: string;
+  defaultTemplateType: ReleaseTemplateType;
+  tgPostTemplate: string;
+  tgArticleTemplate: string;
+  vkPostTemplate: string;
+  finalTgPostTemplate: string;
+  linksTemplate: string;
+  quickUploadLinks: QuickUploadLink[];
+  defaultPlatformLinks: {
+    tg?: string;
+    vk?: string;
+    anime365?: string;
+    shikimori?: string;
+    kodik?: string;
+    [key: string]: string | undefined;
+  };
+}
+
 export interface Participant {
   id: string;
   nickname: string;
@@ -88,8 +110,8 @@ export interface Participant {
 declare global {
   interface Window {
     electronAPI: {
-      invoke: (channel: string, ...args: any[]) => Promise<any>;
-      send: (channel: string, ...args: any[]) => void;
+      invoke: (channel: string, ...args: unknown[]) => Promise<unknown>;
+      send: (channel: string, ...args: unknown[]) => void;
       on: (channel: string, callback: (...args: any[]) => void) => () => void;
     };
   }
@@ -156,6 +178,9 @@ export interface UploadedFile {
   size?: number;
   uploadedById: string;
   uploadedBy?: Participant;
+  dubberId?: string;
+  isFix?: boolean;
+  targetTrackId?: string;
   role?: string; // e.g. "SOUND_ENGINEER"
   createdAt: string;
 }
@@ -170,6 +195,7 @@ export interface Project {
   assignedDubberIds: string[];
   soundEngineerId?: string;
   releaseType?: ReleaseType;
+  defaultTemplateType?: ReleaseTemplateType;
   emoji?: string;
   isOngoing?: boolean;
   synopsis?: string;
@@ -211,10 +237,19 @@ export interface Project {
   updatedAt: string;
 }
 
+export interface TaskMetadata {
+  title?: string;
+  episodeId?: string;
+  projectId?: string;
+  fileName?: string;
+  targetDir?: string;
+  [key: string]: any;
+}
+
 export interface Task {
   id: string;
   type: string;
-  metadata: any;
+  metadata: TaskMetadata;
   status: 'pending' | 'running' | 'completed' | 'failed' | 'aborted';
   progress: number;
   eta: number | null;
@@ -251,34 +286,41 @@ export interface SubtitleData {
   actors: string[];
 }
 
+export interface FixSnippetEntry {
+  id: string;
+  name: string;
+  path: string;
+  size?: number;
+  trackIndex?: number | null;
+}
+
+export interface TrackFileEntry {
+  id: string;
+  name?: string;
+  path: string;
+  createdAt: string;
+  type?: 'DUBBER_FILE' | 'FIXES' | 'SOUND_ENGINEER_FILE';
+  size?: number;
+}
+
 export interface Track {
   id: string;
   participant: string;
   character: string;
   dubberName?: string;
   characterName?: string;
+  subTrackIndex?: number;
   filePath?: string;
   fileSize?: number;
   projectId?: string;
   episodeId?: string;
   role?: string;
   status: 'pending' | 'approved' | 'rejected' | 'fixes_needed' | 'recorded';
-  files?: { id: string; name?: string; path: string; createdAt: string; type?: 'DUBBER_FILE' | 'FIXES' | 'SOUND_ENGINEER_FILE'; size?: number }[];
+  files?: TrackFileEntry[];
   selectedFileId?: string;
   comments?: Comment[];
-  patchSnippet?: {
-    id: string;
-    name: string;
-    path: string;
-    size?: number;
-  };
-  patchSnippets?: {
-    id: string;
-    name: string;
-    path: string;
-    size?: number;
-    trackIndex?: number | null;
-  }[];
+  patchSnippet?: FixSnippetEntry;
+  patchSnippets?: FixSnippetEntry[];
 }
 
 export interface MixingFileItem {

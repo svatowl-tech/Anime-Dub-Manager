@@ -128,64 +128,112 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
     }));
   }
 
-  // Optimized get-projects handler with O(1) indexing
+  const uploadSizeCache = new Map();
+  const UPLOAD_SIZE_TTL_MS = 5 * 60 * 1000;
+
+  function resolveUploadSizeCached(upload) {
+    if (typeof upload.size === 'number' && upload.size > 0) {
+      return upload.size;
+    }
+    if (!upload.path) return undefined;
+
+    const now = Date.now();
+    const cached = uploadSizeCache.get(upload.path);
+    if (cached && now - cached.ts < UPLOAD_SIZE_TTL_MS) {
+      return cached.size ?? undefined;
+    }
+
+    let resolvedSize = null;
+    try {
+      const stat = fs.statSync(upload.path);
+      if (stat && typeof stat.size === 'number') {
+        resolvedSize = stat.size;
+      }
+    } catch (_) {
+      resolvedSize = null;
+    }
+
+    uploadSizeCache.set(upload.path, { size: resolvedSize, ts: now });
+    return resolvedSize ?? undefined;
+  }
+
+  let getProjectsInFlight = null;
+
+  // Optimized get-projects handler with O(1) indexing and upload size caching
   ipcMain.handle('get-projects', wrapIpcHandler(async () => {
-    const [projects, episodes, participants] = await Promise.all([
-      getData('projects.json'),
-      getData('episodes.json'),
-      getData('participants.json')
-    ]);
-
-    const participantMap = new Map();
-    if (Array.isArray(participants)) {
-      for (const p of participants) {
-        if (p && p.id) participantMap.set(p.id, p);
-      }
+    if (getProjectsInFlight) {
+      return await getProjectsInFlight;
     }
 
-    const episodesByProject = new Map();
-    if (Array.isArray(episodes)) {
-      for (const ep of episodes) {
-        if (!ep || !ep.projectId) continue;
-        let list = episodesByProject.get(ep.projectId);
-        if (!list) {
-          list = [];
-          episodesByProject.set(ep.projectId, list);
+    getProjectsInFlight = (async () => {
+      const [projects, episodes, participants] = await Promise.all([
+        getData('projects.json'),
+        getData('episodes.json'),
+        getData('participants.json')
+      ]);
+
+      const participantMap = new Map();
+      if (Array.isArray(participants)) {
+        for (const p of participants) {
+          if (p && p.id) participantMap.set(p.id, p);
         }
-        list.push(ep);
       }
-    }
 
-    return (projects || []).map(project => {
-      const rawEpisodes = episodesByProject.get(project.id) || [];
-      const projectEpisodes = rawEpisodes.map(ep => {
-        const assignments = (ep.assignments || []).map(assignment => {
-          const dubber = assignment.dubberId ? participantMap.get(assignment.dubberId) : undefined;
-          const substitute = assignment.substituteId ? participantMap.get(assignment.substituteId) : undefined;
-          return { ...assignment, dubber, substitute };
-        });
-        const uploads = (ep.uploads || []).map(upload => {
-          const uploadedBy = upload.uploadedById ? participantMap.get(upload.uploadedById) : undefined;
-          let size = upload.size;
-          if (!size && upload.path) {
-            try {
-              if (fs.existsSync(upload.path)) {
-                size = fs.statSync(upload.path).size;
-              }
-            } catch (_) {}
+      let episodesNeedPersist = false;
+      const episodesByProject = new Map();
+      if (Array.isArray(episodes)) {
+        for (const ep of episodes) {
+          if (!ep || !ep.projectId) continue;
+          let list = episodesByProject.get(ep.projectId);
+          if (!list) {
+            list = [];
+            episodesByProject.set(ep.projectId, list);
           }
-          return { ...upload, uploadedBy, ...(size !== undefined ? { size } : {}) };
+          list.push(ep);
+        }
+      }
+
+      const hydratedProjects = (projects || []).map(project => {
+        const rawEpisodes = episodesByProject.get(project.id) || [];
+        const projectEpisodes = rawEpisodes.map(ep => {
+          const assignments = (ep.assignments || []).map(assignment => {
+            const dubber = assignment.dubberId ? participantMap.get(assignment.dubberId) : undefined;
+            const substitute = assignment.substituteId ? participantMap.get(assignment.substituteId) : undefined;
+            return { ...assignment, dubber, substitute };
+          });
+          const uploads = (ep.uploads || []).map(upload => {
+            const uploadedBy = upload.uploadedById ? participantMap.get(upload.uploadedById) : undefined;
+            let size = upload.size;
+            if (!size && upload.path) {
+              size = resolveUploadSizeCached(upload);
+              if (typeof size === 'number' && size > 0) {
+                upload.size = size;
+                episodesNeedPersist = true;
+              }
+            }
+            return { ...upload, uploadedBy, ...(size !== undefined ? { size } : {}) };
+          });
+          return { ...ep, assignments, uploads };
         });
-        return { ...ep, assignments, uploads };
+
+        const soundEngineer = project.soundEngineerId ? participantMap.get(project.soundEngineerId) : undefined;
+        const assignedDubbers = (project.assignedDubberIds || [])
+          .map(id => participantMap.get(id))
+          .filter(Boolean);
+
+        return { ...project, episodes: projectEpisodes, soundEngineer, assignedDubbers };
       });
 
-      const soundEngineer = project.soundEngineerId ? participantMap.get(project.soundEngineerId) : undefined;
-      const assignedDubbers = (project.assignedDubberIds || [])
-        .map(id => participantMap.get(id))
-        .filter(Boolean);
+      if (episodesNeedPersist && Array.isArray(episodes)) {
+        saveData('episodes.json', episodes).catch(() => {});
+      }
 
-      return { ...project, episodes: projectEpisodes, soundEngineer, assignedDubbers };
+      return hydratedProjects;
+    })().finally(() => {
+      getProjectsInFlight = null;
     });
+
+    return await getProjectsInFlight;
   }));
 
   // Dedicated scan-projects handler
@@ -226,14 +274,7 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
         });
         const uploads = (ep.uploads || []).map(upload => {
           const uploadedBy = upload.uploadedById ? participantMap.get(upload.uploadedById) : undefined;
-          let size = upload.size;
-          if (!size && upload.path) {
-            try {
-              if (fs.existsSync(upload.path)) {
-                size = fs.statSync(upload.path).size;
-              }
-            } catch (_) {}
-          }
+          const size = resolveUploadSizeCached(upload);
           return { ...upload, uploadedBy, ...(size !== undefined ? { size } : {}) };
         });
         return { ...ep, assignments, uploads };

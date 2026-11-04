@@ -18,7 +18,7 @@
     "prebuild": "echo 'ONNX check skipped during build'",
     "build": "node scripts/generate-icons.cjs && node scripts/generate-metadata.js && vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist",
+    "clean": "node -e \"fs.rmSync('dist', { recursive: true, force: true })\"",
     "lint": "tsc --noEmit",
     "test": "vitest run"
   },

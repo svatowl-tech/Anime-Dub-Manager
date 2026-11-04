@@ -3,7 +3,7 @@ import { toast } from "sonner";
 import { getParticipants } from "../services/dbService";
 import { Participant, Project, Episode, EpisodeStatus, ReleaseType } from "../types";
 import { ipcSafe } from "../lib/ipcSafe";
-import { getNextEpisodeDate } from "../services/animeService";
+import { getNextEpisodeDate, checkNewEpisodesForProject, getCachedTrackerNewEpisode } from "../services/animeService";
 import { useEpisodeSync } from "./dashboard/useEpisodeSync";
 import { useProjectAutoUpdate } from "../hooks/useProjectAutoUpdate";
 import { SIGN_KEYWORDS } from "../constants";
@@ -828,7 +828,6 @@ export default function Dashboard({
 
   useEffect(() => {
     getParticipants().then(setParticipants);
-    ipcSafe.invoke('get-config').then(data => {});
     
     // Fetch initial tasks
     ipcSafe.invoke('get-tasks').then((tasks: any[]) => {
@@ -931,21 +930,35 @@ export default function Dashboard({
 
   const [nextEpisodeDate, setNextEpisodeDate] = useState<string | null>(null);
   const [newEpisodeAvailable, setNewEpisodeAvailable] = useState<number | null>(null);
-  const projectTrackerCacheRef = useRef<Map<string, { timestamp: number; ep: number | null }>>(new Map());
 
   useEffect(() => {
+    let active = true;
     const fetchNextDate = async () => {
-      if (selectedProject?.nextEpisodeDate) {
+      if (!selectedProject) {
+        setNextEpisodeDate(null);
+        return;
+      }
+
+      if (selectedProject.nextEpisodeDate) {
         setNextEpisodeDate(selectedProject.nextEpisodeDate);
       } else {
         setNextEpisodeDate(null);
       }
-      
-      const queryTitle = selectedProject?.originalTitle || selectedProject?.title;
+
+      const isFinishedAiring =
+        selectedProject.status === 'COMPLETED' ||
+        selectedProject.isOngoing === false ||
+        (Boolean(selectedProject.totalEpisodes) &&
+          (selectedProject.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0) >=
+            (selectedProject.totalEpisodes || 0));
+
+      if (isFinishedAiring) return;
+
+      const queryTitle = selectedProject.originalTitle || selectedProject.title;
       if (queryTitle) {
         try {
           const date = await getNextEpisodeDate(queryTitle);
-          if (date) {
+          if (active && date) {
             setNextEpisodeDate(date);
           }
         } catch (e) {
@@ -954,72 +967,46 @@ export default function Dashboard({
       }
     };
     fetchNextDate();
+    return () => {
+      active = false;
+    };
   }, [selectedProject?.id]);
 
   useEffect(() => {
-    if (!selectedProject || !selectedProject.originalTitle) {
+    if (!selectedProject) {
       setNewEpisodeAvailable(null);
       return;
     }
 
-    const cacheKey = `${selectedProject.id}_${selectedProject.episodes?.length || 0}`;
-    const cached = projectTrackerCacheRef.current.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < 10 * 60 * 1000) {
-      setNewEpisodeAvailable(cached.ep);
+    const cached = getCachedTrackerNewEpisode(selectedProject);
+    if (cached.hit) {
+      setNewEpisodeAvailable(cached.value);
       return;
     }
 
-    const checkNewOnTracker = async () => {
-      try {
-        // Primary: Check on Anime365
-        const checkRes = await ipcSafe.invoke('anime365-check-new-episodes', { projectId: selectedProject.id });
-        if (checkRes && checkRes.maxEpisode) {
-          const currentMaxEp = selectedProject.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
-          if (checkRes.maxEpisode > currentMaxEp) {
-            setNewEpisodeAvailable(checkRes.maxEpisode);
-            projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: checkRes.maxEpisode });
-            return;
-          } else {
-            setNewEpisodeAvailable(null);
-            projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: null });
-            return;
-          }
-        }
-      } catch (err) {
-        console.warn('Anime365 episode announcement check failed, falling back to Nyaa tracker:', err);
-      }
+    const currentMaxEp = selectedProject.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
+    const isFinishedAiring =
+      selectedProject.status === 'COMPLETED' ||
+      selectedProject.isOngoing === false ||
+      Boolean(selectedProject.totalEpisodes && currentMaxEp >= selectedProject.totalEpisodes);
 
-      try {
-        // Fallback: Quietly search for RAWs on Nyaa
-        const results = await ipcSafe.invoke('search-nyaa-torrents', {
-           query: selectedProject.originalTitle,
-           category: 'anime',
-           subCategory: 'raw'
-        });
-        
-        if (results && Array.isArray(results) && results.length > 0) {
-           let maxEpFound = 0;
-           results.forEach(r => {
-              const match = r.title ? r.title.match(/[ -_]0*([1-9]\d*)[ -_xv]/i) : null;
-              if (match) {
-                 const ep = parseInt(match[1]);
-                 if (ep > maxEpFound && ep < 1000) maxEpFound = ep;
-              }
-           });
-           
-           const currentMaxEp = selectedProject.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
-           const finalEp = maxEpFound > currentMaxEp ? maxEpFound : null;
-           setNewEpisodeAvailable(finalEp);
-           projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: finalEp });
-        } else {
-           setNewEpisodeAvailable(null);
-           projectTrackerCacheRef.current.set(cacheKey, { timestamp: Date.now(), ep: null });
-        }
-      } catch (err) {
-        console.warn('Network error or tracker unavailable during new episode check', err);
-      }
+    if (isFinishedAiring) {
+      setNewEpisodeAvailable(null);
+      return;
+    }
+
+    let active = true;
+    checkNewEpisodesForProject(selectedProject, false)
+      .then((ep) => {
+        if (active) setNewEpisodeAvailable(ep);
+      })
+      .catch(() => {
+        if (active) setNewEpisodeAvailable(null);
+      });
+
+    return () => {
+      active = false;
     };
-    checkNewOnTracker();
   }, [selectedProject?.id, selectedProject?.originalTitle, selectedProject?.episodes?.length]);
 
   const stats = useMemo(() => ({

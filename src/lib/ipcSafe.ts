@@ -24,11 +24,19 @@ const HEAVY_CHANNELS: Record<string, number> = {
   'ollama-generate': 45000,
   'ollama-chat': 45000,
   
-  // Media / Video / Transcoding
+  // Media / Video / Transcoding / VST3 & Mixing
   'video-editor-render': 180000,
   'video-editor-restore-original': 30000,
   'timing-export-to-mixing': 120000,
+  'timing-auto-align': 120000,
   'mixing-export-to-sound-engineer': 180000,
+  'mixing-import-sound-engineer-files': 120000,
+  'mixing-run-module': 180000,
+  'mixing-scan-vst3-plugins': 30000,
+  'mixing-inspect-vst3-plugin': 20000,
+  'mixing-open-vst3-editor': 600000,
+  'mixing-close-vst3-editor': 15000,
+  'mixing-preview-vst3-snippet': 45000,
   'transcode-video': 180000,
   'render-final-video': 240000,
   'export-mix-audio': 120000,
@@ -56,6 +64,13 @@ const HEAVY_CHANNELS: Record<string, number> = {
   'cloud-pull': 60000,
 };
 
+// Неинтерактивные каналы с жестким таймаутом отмены промиса, чтобы зависший плагин не блокировал UI навсегда
+const HARD_TIMEOUT_CHANNELS: Record<string, number> = {
+  'mixing-inspect-vst3-plugin': 20000,
+  'mixing-scan-vst3-plugins': 30000,
+  'mixing-close-vst3-editor': 15000
+};
+
 // Каналы циклического фонового мониторинга / телеметрии
 // Их успешные рутинные вызовы не спамят консоль и буфер логов
 const POLLING_CHANNELS = new Set([
@@ -79,6 +94,7 @@ export const ipcSafe = {
   invoke: async (channel: string, ...args: any[]) => {
     const isPolling = POLLING_CHANNELS.has(channel);
     const expectedDurationMs = HEAVY_CHANNELS[channel];
+    const hardTimeoutMs = HARD_TIMEOUT_CHANNELS[channel];
 
     // Start tracking process with smart adaptive hang detection
     const proc = appLogger.startProcess(
@@ -92,7 +108,18 @@ export const ipcSafe = {
     );
 
     try {
-      const response = await ipcRenderer.invoke(channel, ...args);
+      const invokePromise = ipcRenderer.invoke(channel, ...args);
+      const response = hardTimeoutMs
+        ? await Promise.race([
+            invokePromise,
+            new Promise((_, reject) =>
+              setTimeout(
+                () => reject(new Error(`Превышен лимит ожидания ответа от модуля (${channel}, ${hardTimeoutMs / 1000}с)`)),
+                hardTimeoutMs
+              )
+            )
+          ])
+        : await invokePromise;
       
       // If the response is the standardized format { success: boolean, data?: any, error?: string }
       if (response && typeof response === 'object' && 'success' in response) {

@@ -6,6 +6,12 @@ import {
 } from 'lucide-react';
 import { Project, Episode, Participant, EpisodeStatus } from '../../types';
 import { ipcSafe } from '../../lib/ipcSafe';
+import { getParticipants } from '../../services/dbService';
+import {
+  checkNewEpisodesForProject,
+  getCachedTrackerNewEpisode,
+  checkServicesStatusCached
+} from '../../services/animeService';
 import { toast } from 'sonner';
 import { formatDeadline, formatFullDeadline } from '../../lib/templates';
 import { safeCopyToClipboard } from '../../lib/clipboard';
@@ -45,7 +51,7 @@ const hubTrackerCache: { timestamp: number; data: Record<string, number | null> 
   timestamp: 0,
   data: {}
 };
-const TRACKER_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const TRACKER_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 export default function GeneralHub({
   projects,
@@ -78,26 +84,31 @@ export default function GeneralHub({
   // Filter only active projects for the main hub
   const activeProjects = useMemo(() => projects.filter(p => p.status !== 'COMPLETED'), [projects]);
 
-  // Load participants on mount
+  // Load participants on mount using shared cache
   useEffect(() => {
+    let active = true;
     const loadParticipants = async () => {
       try {
-        const parts = await ipcSafe.invoke('get-participants');
-        if (parts) setParticipants(parts);
+        const parts = await getParticipants();
+        if (active && parts) setParticipants(parts);
       } catch (e) {
         console.error('Failed to load participants for hub:', e);
       }
     };
     loadParticipants();
-    checkServices();
+    checkServices(false);
+    return () => {
+      active = false;
+    };
   }, []);
 
   // Check services connection status
-  const checkServices = async () => {
+  const checkServices = async (forceRefreshOrEvent: boolean | React.MouseEvent = true) => {
     if (isCheckingServices) return;
+    const forceRefresh = typeof forceRefreshOrEvent === 'boolean' ? forceRefreshOrEvent : true;
     setIsCheckingServices(true);
     try {
-      const res = await ipcSafe.invoke('check-services-status');
+      const res = await checkServicesStatusCached(forceRefresh);
       if (res) {
         setServicesStatus(res);
       }
@@ -118,64 +129,52 @@ export default function GeneralHub({
       return;
     }
 
+    const resultsMap: Record<string, number | null> = { ...hubTrackerCache.data };
+    const projectsToCheck: Project[] = [];
+
+    for (const p of activeProjects) {
+      if (!isManual) {
+        const cached = getCachedTrackerNewEpisode(p);
+        if (cached.hit) {
+          resultsMap[p.id] = cached.value;
+          continue;
+        }
+        const currentMaxEp = p.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
+        const isFullyAired = Boolean(p.totalEpisodes && currentMaxEp >= p.totalEpisodes);
+        if (p.isOngoing === false || isFullyAired) {
+          resultsMap[p.id] = null;
+          continue;
+        }
+      }
+      projectsToCheck.push(p);
+    }
+
+    if (projectsToCheck.length === 0) {
+      hubTrackerCache.timestamp = Date.now();
+      hubTrackerCache.data = resultsMap;
+      setNewEpisodesMap(resultsMap);
+      return;
+    }
+
     isCheckingTrackerRef.current = true;
     setIsCheckingNewEpisodes(true);
     if (isManual) {
       toast.info('Проверяем новые серии на трекерах...');
     }
-    
-    const resultsMap: Record<string, number | null> = { ...hubTrackerCache.data };
-    
-    // Check concurrently up to 3 projects at a time to be fast and safe
-    const checkProject = async (p: Project) => {
-      try {
-        const checkRes = await ipcSafe.invoke('anime365-check-new-episodes', { projectId: p.id });
-        if (checkRes && checkRes.maxEpisode) {
-          const currentMaxEp = p.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
-          if (checkRes.maxEpisode > currentMaxEp) {
-            resultsMap[p.id] = checkRes.maxEpisode;
-            return;
-          }
-        }
-      } catch (err) {
-        // Fallback to Nyaa
-        if (p.originalTitle) {
-          try {
-            const results = await ipcSafe.invoke('search-nyaa-torrents', {
-              query: p.originalTitle,
-              category: 'anime',
-              subCategory: 'raw'
-            });
-            if (results && Array.isArray(results) && results.length > 0) {
-              let maxEpFound = 0;
-              results.forEach(r => {
-                const match = r.title ? r.title.match(/[ -_]0*([1-9]\d*)[ -_xv]/i) : null;
-                if (match) {
-                  const ep = parseInt(match[1]);
-                  if (ep > maxEpFound && ep < 1000) maxEpFound = ep;
-                }
-              });
-              const currentMaxEp = p.episodes?.reduce((max, ep) => Math.max(max, ep.number), 0) || 0;
-              if (maxEpFound > currentMaxEp) {
-                resultsMap[p.id] = maxEpFound;
-                return;
-              }
-            }
-          } catch (e) {}
-        }
-      }
-      resultsMap[p.id] = null;
-    };
 
     try {
-      // Process in batches of 3
-      for (let i = 0; i < activeProjects.length; i += 3) {
-        const batch = activeProjects.slice(i, i + 3);
-        await Promise.all(batch.map(p => checkProject(p)));
+      // Process in controlled batches of 2 to avoid saturating IPC/network
+      for (let i = 0; i < projectsToCheck.length; i += 2) {
+        const batch = projectsToCheck.slice(i, i + 2);
+        await Promise.all(
+          batch.map(async (p) => {
+            resultsMap[p.id] = await checkNewEpisodesForProject(p, isManual);
+          })
+        );
       }
       hubTrackerCache.timestamp = Date.now();
       hubTrackerCache.data = resultsMap;
-      setNewEpisodesMap(resultsMap);
+      setNewEpisodesMap({ ...resultsMap });
       if (isManual) {
         toast.success('Проверка серий завершена!');
       }
@@ -187,12 +186,16 @@ export default function GeneralHub({
     }
   };
 
-  // Trigger tracker check smoothly without loops
+  // Trigger tracker check smoothly after initial render
   useEffect(() => {
     if (activeProjects.length > 0 && Object.keys(newEpisodesMap).length === 0) {
-      checkNewEpisodesOnTracker(false);
+      const timer = setTimeout(() => {
+        checkNewEpisodesOnTracker(false);
+      }, 1200);
+      return () => clearTimeout(timer);
     }
   }, [activeProjects.length]);
+
 
   // Handle archiving a project
   const handleArchiveProject = async (p: Project, e: React.MouseEvent) => {

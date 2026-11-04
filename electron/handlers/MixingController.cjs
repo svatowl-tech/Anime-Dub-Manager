@@ -53,8 +53,12 @@ function registerMixingHandlers(getData, mainWindow) {
     const { createVideoProxy } = require('../services/ffmpegService.cjs');
     const onProgress = (percent) => {
       try {
-        event.sender.send('video-proxy-progress', { videoPath, percent });
-      } catch (e) {}
+        if (!event.sender.isDestroyed()) {
+          event.sender.send('video-proxy-progress', { videoPath, percent });
+        }
+      } catch (e) {
+        log.debug('[MixingController] Skipped video-proxy-progress event:', e.message);
+      }
     };
     const proxyPath = await createVideoProxy(videoPath, outputPath, onProgress);
     return { success: true, proxyPath };
@@ -511,12 +515,32 @@ function registerMixingHandlers(getData, mainWindow) {
   // ============================================================================
   // VST3 NATIVE PLUGIN Rack & Editor IPC Handlers (iZotope Ozone, FabFilter, etc.)
   // ============================================================================
+  const isDesktopHostSupported = () =>
+    ['win32', 'darwin', 'linux'].includes(process.platform) &&
+    ['x64', 'arm64'].includes(process.arch);
+
   ipcMain.handle('mixing-scan-vst3-plugins', wrapIpcHandler(async (event, params) => {
+    if (!isDesktopHostSupported()) {
+      return {
+        supported: false,
+        platform: process.platform,
+        arch: process.arch,
+        reason: 'Нативные VST3 плагины поддерживаются только на десктопных ОС (Windows, macOS, Linux x64/arm64).',
+        plugins: []
+      };
+    }
     const { customDirs } = params || {};
     return await MixingPipelineService.scanSystemVst3Plugins({ customDirs });
   }));
 
   ipcMain.handle('mixing-select-vst3-file', wrapIpcHandler(async () => {
+    if (!isDesktopHostSupported()) {
+      return {
+        canceled: true,
+        vst3Path: '',
+        reason: 'Выбор VST3 недоступен в текущей песочнице ОС.'
+      };
+    }
     const isMac = process.platform === 'darwin';
     const result = await dialog.showOpenDialog({
       title: 'Выбрать 64-bit VST3 плагин (.vst3)',
@@ -543,12 +567,36 @@ function registerMixingHandlers(getData, mainWindow) {
   ipcMain.handle('mixing-inspect-vst3-plugin', wrapIpcHandler(async (event, params) => {
     const { vst3Path, subPluginName, stateFile } = params || {};
     const onLog = createLogSender('vst3_inspect');
-    return await AudioNeuralService.inspectVst3Plugin({
-      vst3Path,
-      subPluginName,
-      stateFile,
-      onLog
-    });
+
+    if (!isDesktopHostSupported()) {
+      return {
+        status: 'unsupported_platform',
+        supported: false,
+        message: 'Инспекция нативных VST3 плагинов не поддерживается в данной среде.',
+        parameters: []
+      };
+    }
+
+    const INSPECT_WATCHDOG_MS = 15000;
+    let timeoutId = null;
+    try {
+      return await Promise.race([
+        AudioNeuralService.inspectVst3Plugin({
+          vst3Path,
+          subPluginName,
+          stateFile,
+          onLog
+        }),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            onLog(`Превышен лимит времени инспекции VST3 (${INSPECT_WATCHDOG_MS / 1000}с): ${path.basename(vst3Path || '')}`, 'warn');
+            reject(new Error(`Таймаут инспекции VST3 плагина (${INSPECT_WATCHDOG_MS / 1000}с). Проверьте, не ожидает ли плагин активации лицензии.`));
+          }, INSPECT_WATCHDOG_MS);
+        })
+      ]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
   }));
 
   ipcMain.handle('mixing-open-vst3-editor', wrapIpcHandler(async (event, params) => {

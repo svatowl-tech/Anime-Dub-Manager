@@ -1,4 +1,6 @@
-import { Episode, RoleAssignment, UploadedFile, Track } from '../types';
+import { Episode, RoleAssignment, UploadedFile, Track, Comment, FixSnippetEntry, TrackFileEntry } from '../types';
+import { getFileBaseName } from './pathUtils';
+import { safeJsonParse, CommentArraySchema } from './validationSchemas';
 
 export interface DeduplicatedActorTrack {
   actorKey: string;
@@ -15,11 +17,8 @@ export interface DeduplicatedActorTrack {
     createdAt?: string;
     size?: number;
   };
-  patchSnippet?: {
-    id: string;
-    name: string;
-    path: string;
-  } | null;
+  patchSnippet?: FixSnippetEntry | null;
+  patchSnippets?: FixSnippetEntry[];
   status: 'recorded' | 'approved' | 'fixes_needed' | 'pending';
 }
 
@@ -42,6 +41,20 @@ export function normalizeKey(str: string): string {
   return cleanDubberNick(str).toLowerCase().replace(/[\s._-]+/g, '');
 }
 
+function normalizeTrackStatus(rawStatus: string | undefined, hasFixes: boolean): Track['status'] {
+  const lower = (rawStatus || '').toLowerCase();
+  if (
+    lower === 'pending' ||
+    lower === 'approved' ||
+    lower === 'rejected' ||
+    lower === 'fixes_needed' ||
+    lower === 'recorded'
+  ) {
+    return lower;
+  }
+  return hasFixes ? 'fixes_needed' : 'recorded';
+}
+
 /**
  * Prepares and deduplicates QA tracks for Timing module.
  * 
@@ -53,7 +66,7 @@ export function normalizeKey(str: string): string {
  *      only the latest clean fix file is used as the single actor track.
  *    - Local Snippet (length/size < 70%): Original track remains main track,
  *      short fix is attached as patchSnippet with target QA timecodes.
- * 4. Result: EXACTLY ONE master track per unique actor/role.
+ * 4. Result: EXACTLY ONE master track per unique actor/role (or per sub-track when splitMultiTracks is enabled).
  */
 export function prepareQATracksForTiming(
   episode: Episode,
@@ -72,11 +85,18 @@ export function prepareQATracksForTiming(
     dubberId?: string;
     assignmentIds: Set<string>;
     characters: Set<string>;
-    comments: any[];
+    comments: Comment[];
     assignmentStatus?: string;
   }>();
 
-  const registerActor = (rawNick: string, dubberId?: string, charName?: string, assignmentId?: string, comments?: any[], status?: string) => {
+  const registerActor = (
+    rawNick: string,
+    dubberId?: string,
+    charName?: string,
+    assignmentId?: string,
+    comments?: Comment[],
+    status?: string
+  ) => {
     let nick = cleanDubberNick(rawNick) || (rawNick ? rawNick.trim() : '');
     if (!nick) {
       if (charName) {
@@ -120,12 +140,9 @@ export function prepareQATracksForTiming(
   assignments.forEach(as => {
     const dId = as.substituteId || as.dubberId;
     const rawNick = as.substitute?.nickname || as.dubber?.nickname || '';
-    let parsedComments: any[] = [];
-    if (as.comments) {
-      try {
-        parsedComments = JSON.parse(as.comments);
-      } catch (e) {}
-    }
+    const parsedComments = as.comments
+      ? safeJsonParse<Comment[]>(as.comments, [], `prepareQATracksForTiming:assignment(${as.id})`, CommentArraySchema)
+      : [];
     registerActor(rawNick, dId, as.characterName, as.id, parsedComments, as.status);
   });
 
@@ -151,19 +168,19 @@ export function prepareQATracksForTiming(
       const lowerP = u.path.toLowerCase();
       if (lowerP.includes('slice') || lowerP.includes('temp_')) return false;
       if (u.assignmentId && assignmentIds.has(u.assignmentId)) return true;
-      if (dubberId && (u.uploadedById === dubberId || (u as any).dubberId === dubberId)) return true;
+      if (dubberId && (u.uploadedById === dubberId || u.dubberId === dubberId)) return true;
       const uNick = normalizeKey(cleanDubberNick(u.uploadedBy?.nickname || ''));
-      return uNick && uNick === normKey;
+      return Boolean(uNick && uNick === normKey);
     }).sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
 
     // Filter manifest files for this actor
     const actorManifestFiles = manifestTracks.filter(mt => {
       const p = mt.path || '';
-      const base = p.split(/[/\\]/).pop() || '';
+      const base = getFileBaseName(p);
       const lowerB = base.toLowerCase();
       if (lowerB.includes('slice') || lowerB.includes('temp_')) return false;
       const mtNick = normalizeKey(cleanDubberNick(mt.dubberNick || base));
-      return mtNick && (mtNick === normKey || mtNick.includes(normKey) || normKey.includes(mtNick));
+      return Boolean(mtNick && (mtNick === normKey || mtNick.includes(normKey) || normKey.includes(mtNick)));
     });
 
     // Helper to extract explicit track index (e.g. дорожка1, дорожка2, track1, layer2, фикс1, fix2)
@@ -189,19 +206,19 @@ export function prepareQATracksForTiming(
 
     // 1. Primary source of truth: files explicitly uploaded in QA (DUBBER_FILE = дорожка, FIXES = фикс)
     actorUploads.filter(u => u.path).forEach(u => {
-      const name = u.path.split(/[/\\]/).pop() || 'Дорожка';
-      const fixFlag = u.type === 'FIXES' || Boolean((u as any).isFix);
+      const name = getFileBaseName(u.path) || 'Дорожка';
+      const fixFlag = u.type === 'FIXES' || Boolean(u.isFix);
       // Optionally enrich file size from manifest if upload size was 0, NEVER overwriting u.path or u.type
       const matchedManifest = actorManifestFiles.find(m => m.path === u.path || m.name === name);
       const entry: FileEntry = {
         id: u.id || u.path,
         name,
         path: u.path,
-        size: (u as any).size || matchedManifest?.size || 0,
+        size: u.size || matchedManifest?.size || 0,
         createdAt: u.createdAt || '',
         type: fixFlag ? 'FIXES' : 'DUBBER_FILE',
         isFix: fixFlag,
-        targetTrackId: (u as any).targetTrackId,
+        targetTrackId: u.targetTrackId,
         trackIndex: getExplicitTrackIndex(name)
       };
       if (fixFlag) rawUploadFixes.push(entry);
@@ -211,7 +228,7 @@ export function prepareQATracksForTiming(
     // 2. Fallback and enrichment for any external files placed in folder
     if (actorManifestFiles.length > 0) {
       actorManifestFiles.filter(m => m.path).forEach(m => {
-        const name = m.name || m.path.split(/[/\\]/).pop() || 'Дорожка';
+        const name = m.name || getFileBaseName(m.path) || 'Дорожка';
         const fixFlag = /(?:^|[_[\s-])(fix|фикс)(?:\d*|[_\]\s.-]|$)/i.test(name);
         const alreadyExists = [...rawUploadOriginals, ...rawUploadFixes].some(f => f.path === m.path || f.name === name);
         if (!alreadyExists) {
@@ -233,7 +250,7 @@ export function prepareQATracksForTiming(
 
     if (rawUploadOriginals.length === 0 && rawUploadFixes.length === 0) {
       const trackId = dubberId ? `${dubberId}__${normKey}` : `track_${normKey}`;
-      finalTracks.push({
+      const emptyTrack: Track = {
         id: trackId,
         projectId: episode.projectId,
         episodeId: episode.id,
@@ -243,10 +260,11 @@ export function prepareQATracksForTiming(
         characterName: charStr,
         filePath: '',
         role: 'dubber',
-        status: (actor.assignmentStatus?.toLowerCase() || 'pending') as Track['status'],
+        status: normalizeTrackStatus(actor.assignmentStatus || 'pending', false),
         files: [],
         comments: actor.comments || []
-      } as any);
+      };
+      finalTracks.push(emptyTrack);
       return;
     }
 
@@ -274,7 +292,7 @@ export function prepareQATracksForTiming(
         });
 
         const latestFix = matchingFixes.length > 0 ? matchingFixes[matchingFixes.length - 1] : null;
-        const allTrackFiles = [mainFile, ...matchingFixes].map(f => ({
+        const allTrackFiles: TrackFileEntry[] = [mainFile, ...matchingFixes].map(f => ({
           id: f.id,
           name: f.name,
           path: f.path,
@@ -283,7 +301,7 @@ export function prepareQATracksForTiming(
           type: f.type
         }));
 
-        finalTracks.push({
+        const trackItem: Track = {
           id: trackId,
           projectId: episode.projectId,
           episodeId: episode.id,
@@ -294,8 +312,8 @@ export function prepareQATracksForTiming(
           subTrackIndex: trackNum,
           filePath: mainFile.path,
           role: 'dubber',
-          status: (actor.assignmentStatus?.toLowerCase() || (latestFix ? 'fixes_needed' : 'recorded')) as Track['status'],
-          files: allTrackFiles as any,
+          status: normalizeTrackStatus(actor.assignmentStatus, Boolean(latestFix)),
+          files: allTrackFiles,
           selectedFileId: mainFile.id,
           fileSize: mainFile.size,
           comments: actor.comments || [],
@@ -312,7 +330,8 @@ export function prepareQATracksForTiming(
             size: f.size,
             trackIndex: f.trackIndex
           }))
-        } as any);
+        };
+        finalTracks.push(trackItem);
       });
     } else {
       // Single track (or grouped dropdown mode in QA)
@@ -320,7 +339,7 @@ export function prepareQATracksForTiming(
       const latestFix = availableFixes.length > 0 ? availableFixes[availableFixes.length - 1] : null;
       const trackId = dubberId ? `${dubberId}__${normKey}` : `track_${normKey}`;
 
-      const allTrackFiles = [...baseMainFiles, ...availableFixes].map(f => ({
+      const allTrackFiles: TrackFileEntry[] = [...baseMainFiles, ...availableFixes].map(f => ({
         id: f.id,
         name: f.name,
         path: f.path,
@@ -329,7 +348,7 @@ export function prepareQATracksForTiming(
         type: f.type
       }));
 
-      finalTracks.push({
+      const singleTrack: Track = {
         id: trackId,
         projectId: episode.projectId,
         episodeId: episode.id,
@@ -339,8 +358,8 @@ export function prepareQATracksForTiming(
         characterName: charStr,
         filePath: selectedFile.path,
         role: 'dubber',
-        status: (actor.assignmentStatus?.toLowerCase() || (latestFix ? 'fixes_needed' : 'recorded')) as Track['status'],
-        files: allTrackFiles as any,
+        status: normalizeTrackStatus(actor.assignmentStatus, Boolean(latestFix)),
+        files: allTrackFiles,
         selectedFileId: selectedFile.id,
         fileSize: selectedFile.size,
         comments: actor.comments || [],
@@ -357,7 +376,8 @@ export function prepareQATracksForTiming(
           size: f.size,
           trackIndex: f.trackIndex
         }))
-      } as any);
+      };
+      finalTracks.push(singleTrack);
     }
   });
 

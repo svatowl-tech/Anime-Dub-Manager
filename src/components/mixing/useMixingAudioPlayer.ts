@@ -96,9 +96,7 @@ export function useMixingAudioPlayer({
   const releasePlayerAudioLocks = useCallback(() => {
     try {
       setIsPlaying(false);
-      if (videoRef.current) {
-        videoRef.current.pause();
-      }
+      if (videoRef.current) videoRef.current.pause();
       if (trackAudioRef.current) {
         trackAudioRef.current.pause();
         trackAudioRef.current.removeAttribute('src');
@@ -108,7 +106,6 @@ export function useMixingAudioPlayer({
     } catch (e) {}
   }, [stopAndClearModuleMix]);
 
-  // Sanitize any leftover temporary .tmp_ prefix from paths
   const sanitizeTempPath = useCallback((rawPath: string) => {
     if (!rawPath) return '';
     return rawPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
@@ -117,24 +114,11 @@ export function useMixingAudioPlayer({
   // Format media file URL (video or audio) for HTML5 elements safely across Windows/macOS/Linux
   const formatMediaUrl = useCallback((filePath: string) => {
     if (!filePath) return '';
-    if (
-      filePath.startsWith('http://') ||
-      filePath.startsWith('https://') ||
-      filePath.startsWith('blob:') ||
-      filePath.startsWith('/api/media-file')
-    ) {
+    if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('/api/media-file') || filePath.startsWith('custom-media://local/media?path=')) {
       return filePath;
     }
-    if (filePath.startsWith('custom-media://local/media?path=')) {
-      return filePath;
-    }
-    const cleanP = sanitizeTempPath(
-      filePath
-        .replace(/^file:\/\//, '')
-        .replace(/^custom-media:\/\//, '')
-    );
+    const cleanP = sanitizeTempPath(filePath.replace(/^file:\/\//, '').replace(/^custom-media:\/\//, ''));
     if (window.electronAPI) {
-      // Use query-parameter encoding on valid host 'local' so Windows drive letters (I:\), Cyrillic, brackets [СВЕДЕНО], and spaces never break URL parsing
       return `custom-media://local/media?path=${encodeURIComponent(cleanP)}`;
     }
     return cleanP;
@@ -143,14 +127,10 @@ export function useMixingAudioPlayer({
   const resolveMediaUrlAsync = useCallback(async (filePath: string): Promise<string> => {
     if (!filePath) return '';
     const cleaned = sanitizeTempPath(filePath);
-    if (window.electronAPI) {
-      return formatMediaUrl(cleaned);
-    }
+    if (window.electronAPI) return formatMediaUrl(cleaned);
     const cleanName = cleaned.replace(/\\/g, '/').split('/').pop() || cleaned;
     const cachedFile = (window as any).getFileFromCache?.(cleanName);
-    if (cachedFile) {
-      return URL.createObjectURL(cachedFile);
-    }
+    if (cachedFile) return URL.createObjectURL(cachedFile);
     try {
       const resolved = await resolveLocalPath(cleaned);
       if (resolved) return resolved;

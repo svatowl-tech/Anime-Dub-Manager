@@ -13,7 +13,20 @@ export const ipcRenderer: {
       return await (window as any).electronAPI.invoke(channel, ...args);
     }
     
-    // Browser fallback for AI Studio preview - Try calling the server API
+    // Browser fallback for AI Studio preview - Try calling the server API with AbortController timeout
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const isLongRunning =
+      channel.includes('vst3') ||
+      channel.includes('render') ||
+      channel.includes('export') ||
+      channel.includes('timing') ||
+      channel.includes('whisper') ||
+      channel.includes('diarization') ||
+      channel.includes('download') ||
+      channel.includes('ai-');
+    const timeoutMs = isLongRunning ? 120000 : 25000;
+    const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+
     try {
       const origin = typeof window !== 'undefined' ? window.location.origin : '';
       const url = origin && !origin.startsWith('file') ? `${origin}/api/ipc/${channel}` : `/api/ipc/${channel}`;
@@ -21,13 +34,14 @@ export const ipcRenderer: {
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ args })
+        body: JSON.stringify({ args }),
+        ...(controller ? { signal: controller.signal } : {})
       });
       
       if (response.ok) {
         const result = await response.json();
         if (result.success) return result.data;
-        const err = new Error(result.error);
+        const err = new Error(result.error || `IPC error on ${channel}`);
         if (result.stack) (err as any).stack = result.stack;
         if (result.stderr) (err as any).stderr = result.stderr;
         if (result.stdout) (err as any).stdout = result.stdout;
@@ -43,20 +57,24 @@ export const ipcRenderer: {
         throw err;
       }
     } catch (e: any) {
-      console.warn(`Server IPC fallback failed for "${channel}":`, e);
+      if (e && e.name === 'AbortError') {
+        console.warn(`Server IPC fallback timed out after ${timeoutMs}ms for "${channel}"`);
+      } else {
+        console.warn(`Server IPC fallback failed for "${channel}":`, e);
+      }
       
       // If we are on the web and the server call failed, check if we have a mock in this file
       const mockedResult = handleIpcMock(channel, args);
       if (mockedResult !== undefined) return mockedResult;
       
       throw e;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
   },
   send: (channel: string, ...args: any[]) => {
     if (window.electronAPI && window.electronAPI.send) {
       window.electronAPI.send(channel, ...args);
-    } else {
-      // console.warn(`IPC channel "${channel}" send called in browser environment. Using fallback.`);
     }
   },
   on: (channel: string, callback: (...args: any[]) => void): (() => void) => {
@@ -120,11 +138,11 @@ if (typeof window !== 'undefined' && !(window as any).electronAPI && typeof Even
           window.dispatchEvent(new CustomEvent(payload.channel, { detail: payload.data }));
         }
       } catch (err) {
-        // ignore
+        console.debug('[IPC SSE] Malformed event payload:', err);
       }
     };
   } catch (err) {
-    // ignore
+    console.debug('[IPC SSE] EventSource initialization skipped:', err);
   }
 }
 

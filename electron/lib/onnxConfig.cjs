@@ -3,60 +3,10 @@ const path = require('path');
 const log = require('electron-log');
 const { pathToFileURL } = require('url');
 
-log.info('[ONNX Config] Hooking Module.require to ensure unified onnxruntime instance...');
-
-// 1. Инициализируем и кэшируем единственный экземпляр onnxruntime-web на уровне всего приложения
 let globalOrt = null;
-try {
-  // Заставляем Node загрузить root-level onnxruntime-web
-  globalOrt = Module.prototype.require.call(module, 'onnxruntime-web');
-  log.info('[ONNX Config] Successfully preloaded root onnxruntime-web');
-  
-  if (globalOrt && globalOrt.env) {
-    if (!globalOrt.env.wasm) {
-      globalOrt.env.wasm = {};
-    }
-    // Сразу настраиваем локальные пути, чтобы предотвратить установку CDN-адресов сторонними библиотеками
-    try {
-      let localWasmPath;
-      try {
-        const ortPath = require.resolve('onnxruntime-web');
-        localWasmPath = path.dirname(ortPath);
-      } catch (resolveErr) {
-        log.warn(`[ONNX Config] Could not resolve onnxruntime-web entry point, falling back to static path: ${resolveErr.message}`);
-        localWasmPath = path.join(__dirname, '..', '..', 'node_modules', 'onnxruntime-web', 'dist');
-      }
-      const wasmPathStr = pathToFileURL(localWasmPath).href + '/';
-      globalOrt.env.wasm.wasmPaths = wasmPathStr;
-      globalOrt.env.wasm.numThreads = 1;
-      globalOrt.env.wasm.proxy = false;
-      log.info(`[ONNX Config] Configured globalOrt.env.wasm.wasmPaths immediately to local path: ${wasmPathStr}`);
-    } catch (e) {
-      log.error(`[ONNX Config] Failed to configure early globalOrt wasm settings: ${e.message}`);
-    }
-  }
-} catch (err) {
-  log.error('[ONNX Config] Critical: Failed to preload top-level onnxruntime-web!', err);
-}
+let isOrtPreloaded = false;
 
-// 2. Безопасный перехватщик вызова registerBackend, предотвращающий падение с ошибкой priority 10
-if (globalOrt && typeof globalOrt.registerBackend === 'function') {
-  const originalRegisterBackend = globalOrt.registerBackend;
-  globalOrt.registerBackend = function (name, backend, priority) {
-    try {
-      return originalRegisterBackend.call(this, name, backend, priority);
-    } catch (e) {
-      if (e.message && e.message.includes('cannot register backend')) {
-        log.warn(`[ONNX Config] Suppressed duplicate backend registration error for "${name}" (priority ${priority}): ${e.message}`);
-        return;
-      }
-      throw e;
-    }
-  };
-  log.debug('[ONNX Config] Unified onnx runtime registerBackend is active');
-}
-
-// 3. Переопределяем require для перенаправления всех запросов onnxruntime-node и onnxruntime-web на наш единственный экземпляр
+// Переопределяем require для перенаправления всех запросов onnxruntime-node и onnxruntime-web на наш единственный экземпляр
 const originalRequire = Module.prototype.require;
 Module.prototype.require = function (id) {
   if (id === 'onnxruntime-node' || id === 'onnxruntime-web') {
@@ -67,11 +17,69 @@ Module.prototype.require = function (id) {
   return originalRequire.apply(this, arguments);
 };
 
+function ensureOrtPreloaded() {
+  if (isOrtPreloaded) return;
+  isOrtPreloaded = true;
+
+  log.info('[ONNX Config] Hooking Module.require to ensure unified onnxruntime instance...');
+
+  // 1. Инициализируем и кэшируем единственный экземпляр onnxruntime-web на уровне всего приложения
+  try {
+    // Заставляем Node загрузить root-level onnxruntime-web
+    globalOrt = originalRequire.call(module, 'onnxruntime-web');
+    log.info('[ONNX Config] Successfully preloaded root onnxruntime-web');
+    
+    if (globalOrt && globalOrt.env) {
+      if (!globalOrt.env.wasm) {
+        globalOrt.env.wasm = {};
+      }
+      // Сразу настраиваем локальные пути, чтобы предотвратить установку CDN-адресов сторонними библиотеками
+      try {
+        let localWasmPath;
+        try {
+          const ortPath = require.resolve('onnxruntime-web');
+          localWasmPath = path.dirname(ortPath);
+        } catch (resolveErr) {
+          log.warn(`[ONNX Config] Could not resolve onnxruntime-web entry point, falling back to static path: ${resolveErr.message}`);
+          localWasmPath = path.join(__dirname, '..', '..', 'node_modules', 'onnxruntime-web', 'dist');
+        }
+        const wasmPathStr = pathToFileURL(localWasmPath).href + '/';
+        globalOrt.env.wasm.wasmPaths = wasmPathStr;
+        globalOrt.env.wasm.numThreads = 1;
+        globalOrt.env.wasm.proxy = false;
+        log.info(`[ONNX Config] Configured globalOrt.env.wasm.wasmPaths immediately to local path: ${wasmPathStr}`);
+      } catch (e) {
+        log.error(`[ONNX Config] Failed to configure early globalOrt wasm settings: ${e.message}`);
+      }
+    }
+  } catch (err) {
+    log.error('[ONNX Config] Critical: Failed to preload top-level onnxruntime-web!', err);
+  }
+
+  // 2. Безопасный перехватщик вызова registerBackend, предотвращающий падение с ошибкой priority 10
+  if (globalOrt && typeof globalOrt.registerBackend === 'function') {
+    const originalRegisterBackend = globalOrt.registerBackend;
+    globalOrt.registerBackend = function (name, backend, priority) {
+      try {
+        return originalRegisterBackend.call(this, name, backend, priority);
+      } catch (e) {
+        if (e.message && e.message.includes('cannot register backend')) {
+          log.warn(`[ONNX Config] Suppressed duplicate backend registration error for "${name}" (priority ${priority}): ${e.message}`);
+          return;
+        }
+        throw e;
+      }
+    };
+    log.debug('[ONNX Config] Unified onnx runtime registerBackend is active');
+  }
+}
+
 let isInitialized = false;
 
 function initSharedOnnx() {
   if (isInitialized) return;
   
+  ensureOrtPreloaded();
   log.info('[ONNX Config] Initializing shared ONNX Runtime environment...');
   
   try {
@@ -170,8 +178,5 @@ function initSharedOnnx() {
     log.error('[ONNX Config] Error during environment check/configuration:', error.message);
   }
 }
-
-// Автоматически инициализируем при первой загрузке модуля
-initSharedOnnx();
 
 module.exports = { initSharedOnnx };

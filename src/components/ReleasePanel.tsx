@@ -5,9 +5,11 @@ import {
   Table, ExternalLink, Columns, Eye, Code, Sliders
 } from 'lucide-react';
 import { getParticipants } from '../services/dbService';
-import { Participant, Episode, Project } from '../types';
+import { Participant, Episode, Project, QuickUploadLink, ProjectLinks, ReleaseTemplateType } from '../types';
 import { ipcSafe, isWeb } from '../lib/ipcSafe';
 import { safeCopyToClipboard } from '../lib/clipboard';
+import { safeJsonParse, ProjectLinksSchema } from '../lib/validationSchemas';
+import { toast } from 'sonner';
 import { DesktopRequiredMessage } from './DesktopRequiredMessage';
 import { TelegramClientPanel } from './TelegramClientPanel';
 import AnimeSourcesModal from './AnimeSourcesModal';
@@ -37,27 +39,7 @@ interface ReleasePanelProps {
   onRefresh: () => void;
 }
 
-interface QuickUploadLink {
-  name: string;
-  url: string;
-}
-
-interface ProjectLinks {
-  anime365?: string;
-  tg?: string;
-  kodik?: string;
-  vk?: string;
-  shikimori?: string;
-  quickUploadLinks?: QuickUploadLink[];
-}
-
-const DEFAULT_QUICK_LINKS: QuickUploadLink[] = [
-  { name: 'TG Загрузка', url: 'https://t.me/akaneproject' },
-  { name: 'Kodik Конвертер', url: 'https://converter.kodikres.com/' },
-  { name: 'VK Кабинет', url: 'https://cabinet.vkvideo.ru/dashboard/@club216521493?filterPreset=published&section=video_my_content&subsection=video_my_content_videos' },
-  { name: 'Anime365', url: 'https://smotret-anime.com/translations/create' },
-  { name: 'VK Паблик', url: 'https://vk.com/okaneproject' }
-];
+const DEFAULT_QUICK_LINKS: QuickUploadLink[] = DEFAULT_QUICK_UPLOAD_LINKS;
 
 export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanelProps) {
   const [participants, setParticipants] = useState<Participant[]>([]);
@@ -320,10 +302,11 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
           title: `Сборка: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`
         }
       });
-    } catch (error: any) {
+    } catch (error: unknown) {
       setIsBuilding(false);
-      if (error && error.message !== 'Selection canceled') {
-        alert(`Ошибка при постановке в очередь: ${error.message}`);
+      const errMsg = error instanceof Error ? error.message : String(error);
+      if (errMsg && errMsg !== 'Selection canceled') {
+        toast.error(`Ошибка при постановке в очередь: ${errMsg}`);
       }
     }
   };
@@ -344,7 +327,11 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
     if (!currentEpisode) return;
     const relType = currentEpisode.project?.releaseType || 'VOICEOVER';
     const preset = getReleasePresetSync(relType);
-    const targetType = activeTemplate || preset.defaultTemplateType || 'TG';
+    const targetType: ReleaseTemplateType =
+      activeTemplate ||
+      currentEpisode.project?.defaultTemplateType ||
+      preset.defaultTemplateType ||
+      'TG';
 
     if (!activeTemplate) {
       setActiveTemplate(targetType);
@@ -359,26 +346,25 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
     } else if (targetType === 'FINAL_TG') {
       setPostContent(generateFinalTGMessage(currentEpisode, participants));
     }
-  }, [currentEpisode?.id, currentEpisode?.project?.releaseType, participants.length, activeTemplate]);
+  }, [currentEpisode?.id, currentEpisode?.project?.releaseType, currentEpisode?.project?.defaultTemplateType, participants.length, activeTemplate]);
 
   useEffect(() => {
-    const defaultRequiredLinks = { tg: '', vk: '', anime365: '', shikimori: '', kodik: '' };
+    const defaultRequiredLinks: ProjectLinks = { tg: '', vk: '', anime365: '', shikimori: '', kodik: '' };
     const relType = currentEpisode?.project?.releaseType || 'VOICEOVER';
     const preset = getReleasePresetSync(relType);
 
     if (currentEpisode?.project?.links) {
-      try {
-        const parsed = JSON.parse(currentEpisode.project.links) as ProjectLinks;
-        const mergedLinks = { ...defaultRequiredLinks, ...preset.defaultPlatformLinks, ...parsed };
-        setLinks(mergedLinks);
-        if (parsed.quickUploadLinks && Array.isArray(parsed.quickUploadLinks) && parsed.quickUploadLinks.length > 0) {
-          setQuickLinks(parsed.quickUploadLinks);
-        } else {
-          setQuickLinks(preset.quickUploadLinks || DEFAULT_QUICK_LINKS);
-        }
-      } catch (e) {
-        console.error('Failed to parse project links', e);
-        setLinks({ ...defaultRequiredLinks, ...preset.defaultPlatformLinks });
+      const parsed = safeJsonParse<ProjectLinks>(
+        currentEpisode.project.links,
+        {},
+        `ReleasePanel:links(${currentEpisode.project.id})`,
+        ProjectLinksSchema
+      );
+      const mergedLinks: ProjectLinks = { ...defaultRequiredLinks, ...preset.defaultPlatformLinks, ...parsed };
+      setLinks(mergedLinks);
+      if (parsed.quickUploadLinks && Array.isArray(parsed.quickUploadLinks) && parsed.quickUploadLinks.length > 0) {
+        setQuickLinks(parsed.quickUploadLinks);
+      } else {
         setQuickLinks(preset.quickUploadLinks || DEFAULT_QUICK_LINKS);
       }
     } else {
@@ -603,8 +589,9 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
     if (!propName) return;
 
     try {
-      const updatedProject = {
+      const updatedProject: Project = {
         ...currentEpisode.project,
+        defaultTemplateType: activeTemplate,
         [propName]: editingTemplateStr
       };
       await ipcSafe.invoke('save-project', updatedProject);

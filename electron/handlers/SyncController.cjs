@@ -123,17 +123,19 @@ function registerSyncHandlers(getData, saveData, dataPath) {
   app.doCloudPush = doCloudPush;
   ipcMain.handle('cloud-push', wrapIpcHandler(doCloudPush));
 
-  ipcMain.handle('cloud-pull', wrapIpcHandler(async () => {
+  ipcMain.handle('cloud-pull', wrapIpcHandler(async (event, options = {}) => {
     const config = await getData('config.json');
     if (!config?.yandexToken) throw new Error('Yandex Disk not connected');
 
     const yandexService = await getYandexService();
     const results = [];
-    const pullDeadline = Date.now() + 45000;
+    const isLightweight = Boolean(options && options.lightweight && !config.isFirstSync);
+    const pullDeadline = Date.now() + (isLightweight ? 15000 : 45000);
 
     // 1. Pull JSONs
     const jsonFiles = ['participants.json', 'projects.json', 'episodes.json', 'config.json'];
     for (const file of jsonFiles) {
+      if (Date.now() > pullDeadline) break;
       const localPath = path.join(dataPath, file);
       const remotePath = `disk:/AnimeDubManagerData/${file}`;
       const tempPath = localPath + '.tmp';
@@ -147,8 +149,9 @@ function registerSyncHandlers(getData, saveData, dataPath) {
             const remoteData = JSON.parse(remoteDataStr);
             
             let localData;
+            let localDataStr = '';
             try {
-              const localDataStr = await fs.readFile(localPath, 'utf8');
+              localDataStr = await fs.readFile(localPath, 'utf8');
               localData = JSON.parse(localDataStr);
             } catch(e) {
               localData = (file === 'config.json') ? {} : [];
@@ -156,10 +159,15 @@ function registerSyncHandlers(getData, saveData, dataPath) {
             
             if (file === 'config.json') {
               const mergedConfig = { ...localData, ...remoteData };
-              await saveData(file, mergedConfig);
+              const changed = JSON.stringify(localData) !== JSON.stringify(mergedConfig);
+              if (changed) {
+                await saveData(file, mergedConfig);
+              }
+              results.push({ file, status: changed ? 'pulled_and_merged' : 'up_to_date' });
             } else {
               const mergedList = Array.isArray(localData) ? [...localData] : [];
               const folderList = Array.isArray(remoteData) ? remoteData : [];
+              let listChanged = false;
               
               const getTimestamp = (item) => {
                 if (!item) return 0;
@@ -179,6 +187,7 @@ function registerSyncHandlers(getData, saveData, dataPath) {
                 const existingIndex = mergedList.findIndex((item) => item && item.id === folderItem.id);
                 if (existingIndex === -1) {
                   mergedList.push(folderItem);
+                  listChanged = true;
                 } else {
                   const localItem = mergedList[existingIndex];
                   const localUpdate = getTimestamp(localItem);
@@ -199,16 +208,19 @@ function registerSyncHandlers(getData, saveData, dataPath) {
                       }
                     }
                   }
-                  mergedList[existingIndex] = mergedItem;
+                  if (JSON.stringify(localItem) !== JSON.stringify(mergedItem)) {
+                    mergedList[existingIndex] = mergedItem;
+                    listChanged = true;
+                  }
                 }
               }
-              await saveData(file, mergedList);
+              if (listChanged) {
+                await saveData(file, mergedList);
+              }
+              results.push({ file, status: listChanged ? 'pulled_and_merged' : 'up_to_date' });
             }
-            
-            results.push({ file, status: 'pulled_and_merged' });
           } catch(mergeErr) {
             log.error(`Merge error for ${file}:`, mergeErr);
-            // Fallback: save remoteData safely
             try {
               const remoteData = JSON.parse(await fs.readFile(tempPath, 'utf8'));
               await saveData(file, remoteData);
@@ -225,10 +237,11 @@ function registerSyncHandlers(getData, saveData, dataPath) {
       }
     }
 
-    // 2. Pull Projects (only non-media metadata/subtitles, skipping existing unchanged files and respecting time budget)
-    if (config.baseDir && Date.now() < pullDeadline) {
+    // 2. Pull Projects (skip deep recursive walk during lightweight auto-sync unless first sync)
+    if (!isLightweight && config.baseDir && Date.now() < pullDeadline) {
       try {
         await fs.mkdir(config.baseDir, { recursive: true });
+        let downloadedFilesCount = 0;
         
         async function pullDirRecursive(remotePath, localPath) {
           if (Date.now() > pullDeadline) return;
@@ -252,6 +265,7 @@ function registerSyncHandlers(getData, saveData, dataPath) {
                     continue;
                   }
                   await yandexService.downloadFile(config.yandexToken, itemRemotePath, itemLocalPath);
+                  downloadedFilesCount++;
                 } catch(e) {
                   log.error(`Failed to download ${item.name}:`, e.message);
                 }
@@ -261,7 +275,7 @@ function registerSyncHandlers(getData, saveData, dataPath) {
         }
 
         await pullDirRecursive('disk:/AnimeDubManagerProjects', config.baseDir);
-        results.push({ folder: 'projects', status: 'pulled' });
+        results.push({ folder: 'projects', status: downloadedFilesCount > 0 ? 'pulled' : 'up_to_date', count: downloadedFilesCount });
       } catch (e) {
         log.error('Failed to pull projects:', e);
         results.push({ folder: 'projects', status: 'failed: ' + e.message });

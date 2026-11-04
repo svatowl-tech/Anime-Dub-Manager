@@ -24,6 +24,12 @@ process.on('SIGTERM', () => {
 process.on('exit', () => {
   killAllTrackedProcesses();
 });
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Server] Unhandled Rejection:', reason);
+});
 
 // Mock Electron Environment State
 const mockIpcHandlers = new Map<string, Function>();
@@ -680,7 +686,7 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.use((req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

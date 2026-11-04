@@ -1,13 +1,5 @@
-export interface MixingLogEntry {
-  id: string;
-  timestamp: string; // HH:mm:ss.ms
-  fullTime: string;  // ISO
-  level: 'info' | 'warn' | 'error' | 'debug' | 'success';
-  tag: string;
-  message: string;
-  stepId?: string;
-  meta?: any;
-}
+import { MixingLogEntry } from './mixing.types';
+export type { MixingLogEntry };
 
 export const PARAM_SPECS: Record<string, { min: number; max: number; step: number }> = {
   matchIntensity: { min: 0, max: 100, step: 1 },
@@ -111,7 +103,11 @@ export const PARAM_SPECS: Record<string, { min: number; max: number; step: numbe
   deessIntensity: { min: 0.0, max: 1.0, step: 0.05 },
   popIntensity: { min: 0.0, max: 1.0, step: 0.05 },
   slewIntensity: { min: 0.0, max: 1.0, step: 0.05 },
-  densityDrive: { min: 0.0, max: 1.0, step: 0.05 }
+  densityDrive: { min: 0.0, max: 1.0, step: 0.05 },
+  // Native VST3 Plugin Rack Specs
+  wetMixPercent: { min: 0, max: 100, step: 1 },
+  outputGainDb: { min: -12.0, max: 12.0, step: 0.5 },
+  snippetDurationSec: { min: 5, max: 25, step: 1 }
 };
 
 export const PARAM_LABELS: Record<string, { label: string; unit?: string }> = {
