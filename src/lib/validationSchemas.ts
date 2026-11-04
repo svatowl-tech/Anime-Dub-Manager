@@ -79,10 +79,17 @@ export const ReleaseTypePresetSchema = z.object({
 
 export const CommentSchema = z.object({
   id: z.union([z.string(), z.number()]).transform((v) => String(v)),
-  text: z.string().default(''),
-  timestamp: z.number().default(0),
-  author: z.string().default('QA'),
-  subId: z.string().optional()
+  text: z.union([z.string(), z.number(), z.null(), z.undefined()]).transform((v) => v === null || v === undefined ? '' : String(v)).default(''),
+  timestamp: z.union([z.number(), z.string(), z.null(), z.undefined()]).transform((v) => {
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string') {
+      const parsed = parseFloat(v);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    return 0;
+  }).default(0),
+  author: z.union([z.string(), z.number(), z.null(), z.undefined()]).transform((v) => v === null || v === undefined ? 'QA' : String(v)).default('QA'),
+  subId: z.union([z.string(), z.number(), z.null(), z.undefined()]).transform((v) => (v === null || v === undefined ? undefined : String(v))).optional()
 }) as unknown as z.ZodType<Comment, z.ZodTypeDef, unknown>;
 
 export const CommentArraySchema = z.array(CommentSchema) as unknown as z.ZodType<

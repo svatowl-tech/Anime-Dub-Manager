@@ -1,0 +1,591 @@
+index-BP5hGmK3.js:64 [00:22:08.554] [SYSTEM] ℹ️ 🚀 Инициализация React интерфейса Anime Dub Manager завершена. 
+index-BP5hGmK3.js:64 [00:22:08.631] [IPC] ▶ ▶ Запуск: «get-participants» 
+index-BP5hGmK3.js:64 [00:22:08.634] [IPC] ▶ ▶ Запуск: «get-projects» 
+index-BP5hGmK3.js:64 [00:22:08.822] [IPC] ✓ ✓ Завершен: «get-participants» (191ms) [Array: 33 items]
+index-BP5hGmK3.js:64 [00:22:08.944] [IPC] ✓ ✓ Завершен: «get-projects» (310ms) [Array: 35 items]
+index-BP5hGmK3.js:64 [00:22:08.963] [IPC] ▶ ▶ Запуск: «check-services-status» 
+index-BP5hGmK3.js:59 ╔══════════════════════════════════════════════════════════════════════════════════════════╗║ 🎬 ANIME DUB MANAGER — ДИАГНОСТИЧЕСКОЕ ЛОГИРОВАНИЕ ВСЕХ ПРОЦЕССОВ АКТИВИРОВАНО          ║║ • Скопировать весь лог в буфер:  copyAppLogs() или кнопка "📋 Логи" в меню               ║║ • Получить статус зависаний:     getAppDiagnostics()                                     ║║ • Вывести таймлайн процессов:    dumpAppLogs()                                           ║╚══════════════════════════════════════════════════════════════════════════════════════════╝
+index-BP5hGmK3.js:64 [00:22:09.418] [IPC] ✓ ✓ Завершен: «check-services-status» (456ms) [Object: 5 keys]
+index-BP5hGmK3.js:64 [00:22:10.164] [IPC] ▶ ▶ Запуск: «anime365-check-new-episodes»  Object
+index-BP5hGmK3.js:64 [00:22:10.165] [IPC] ▶ ▶ Запуск: «anime365-check-new-episodes»  Object
+index-BP5hGmK3.js:64 [00:22:10.891] [IPC] ✓ ✓ Завершен: «anime365-check-new-episodes» (726ms) [Object: 2 keys]
+index-BP5hGmK3.js:64 [00:22:10.915] [IPC] ✓ ✓ Завершен: «anime365-check-new-episodes» (751ms) [Object: 2 keys]
+index-BP5hGmK3.js:64 [00:22:10.915] [IPC] ▶ ▶ Запуск: «anime365-check-new-episodes»  Object
+index-BP5hGmK3.js:64 [00:22:11.136] [IPC] ▶ ▶ Запуск: «cloud-pull» (расчетное время ~60с)  Object
+index-BP5hGmK3.js:64 [00:22:11.142] [IPC] ✓ ✓ Завершен: «anime365-check-new-episodes» (226ms) [Object: 2 keys]
+index-BP5hGmK3.js:64 [00:22:17.109] [IPC] ✓ ✓ Завершен: «cloud-pull» (5973ms) [Array: 4 items]
+index-BP5hGmK3.js:64 [00:26:16.410] [PROJECT] ℹ️ Выбор проекта: "1780163767550" 
+index-BP5hGmK3.js:64 [00:26:23.589] [PROJECT] ℹ️ Выбор проекта: "none" 
+index-BP5hGmK3.js:64 [00:26:25.510] [PROJECT] ℹ️ Выбор проекта: "1780163767550" 
+index-BP5hGmK3.js:64 [00:26:27.273] [PROJECT] ℹ️ Выбор эпизода #8 в проекте "1780163767550" 
+index-BP5hGmK3.js:64 [00:26:27.274] [IPC] ▶ ▶ Запуск: «save-project»  Object
+index-BP5hGmK3.js:64 [00:26:27.517] [IPC] ✓ ✓ Завершен: «save-project» (244ms) [Array: 35 items]
+index-BP5hGmK3.js:64 [00:26:29.853] [NAV] ℹ️ Переключение вкладки: "dashboard" ➔ "video-editor" 
+index-BP5hGmK3.js:64 [00:26:29.859] [VIDEO-EDITOR] ℹ️ Загрузка медиаданных серии #8  Object
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\raw_video.mp4. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async $e (index-BP5hGmK3.js:323:5873)
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:64 [00:26:29.888] [IPC] ▶ ▶ Запуск: «video-editor-probe»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\raw_video.mp4
+index-BP5hGmK3.js:64 [00:26:30.041] [IPC] ✓ ✓ Завершен: «video-editor-probe» (153ms) [Object: 15 keys]
+index-BP5hGmK3.js:64 [00:26:30.041] [VIDEO-EDITOR] ℹ️ Метаданные видео получены: 1920x1080, h264, 24000/1001 fps, длительность 1420.07с 
+index-BP5hGmK3.js:64 [00:26:30.233] [IPC] ▶ ▶ Запуск: «video-editor-preview-plan»  Object
+index-BP5hGmK3.js:64 [00:26:30.269] [IPC] ✓ ✓ Завершен: «video-editor-preview-plan» (36ms) [Object: 2 keys]
+index-BP5hGmK3.js:64 [00:26:31.953] [NAV] ℹ️ Переключение вкладки: "video-editor" ➔ "subtitles" 
+index-BP5hGmK3.js:64 [00:26:31.959] [IPC] ▶ ▶ Запуск: «get-raw-subtitles»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+index-BP5hGmK3.js:64 [00:26:32.007] [IPC] ✓ ✓ Завершен: «get-raw-subtitles» (49ms) [Object: 2 keys]
+index-BP5hGmK3.js:64 [00:26:37.034] [IPC] ▶ ▶ Запуск: «extract-audio-peaks»  Object
+index-BP5hGmK3.js:64 [00:26:37.035] [IPC] ▶ ▶ Запуск: «get-raw-subtitles»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+index-BP5hGmK3.js:64 [00:26:37.036] [IPC] ▶ ▶ Запуск: «get-raw-subtitles»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+index-BP5hGmK3.js:64 [00:26:37.054] [IPC] ✓ ✓ Завершен: «get-raw-subtitles» (19ms) [Object: 2 keys]
+index-BP5hGmK3.js:64 [00:26:37.289] [IPC] ✓ ✓ Завершен: «get-raw-subtitles» (254ms) [Object: 2 keys]
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\raw_video.mp4. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:64 [00:26:42.161] [IPC] ✓ ✓ Завершен: «extract-audio-peaks» (5127ms) [Array: 14200 items]
+index-BP5hGmK3.js:64 [00:26:54.808] [NAV] ℹ️ Переключение вкладки: "subtitles" ➔ "qa" 
+index-BP5hGmK3.js:64 [00:26:54.843] [VALIDATION] ⚠️ Schema validation failed in prepareQATracksForTiming:assignment(0.620849139601179): Expected string, received number; Expected string, received number; Expected string, received number 
+printToDevTools @ index-BP5hGmK3.js:64
+index-BP5hGmK3.js:64 [00:26:54.844] [IPC] ▶ ▶ Запуск: «get-raw-subtitles»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+index-BP5hGmK3.js:64 [00:26:54.877] [VALIDATION] ⚠️ Schema validation failed in prepareQATracksForTiming:assignment(0.620849139601179): Expected string, received number; Expected string, received number; Expected string, received number 
+printToDevTools @ index-BP5hGmK3.js:64
+index-BP5hGmK3.js:64 [00:26:54.878] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:54.878] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:54.889] [IPC] ✓ ✓ Завершен: «get-raw-subtitles» (46ms) [Object: 2 keys]
+index-BP5hGmK3.js:64 [00:26:55.014] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (136ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:55.014] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:55.027] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (149ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:55.028] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:55.098] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (71ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:55.098] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:55.107] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (93ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:55.107] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:55.116] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (17ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:55.116] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:55.125] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (17ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:55.125] [IPC] ▶ ▶ Запуск: «audio-get-track-analysis»  Object
+index-BP5hGmK3.js:64 [00:26:55.161] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (45ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:55.163] [IPC] ✓ ✓ Завершен: «audio-get-track-analysis» (38ms) [Object: 6 keys]
+index-BP5hGmK3.js:64 [00:26:59.102] [VALIDATION] ⚠️ Schema validation failed in prepareQATracksForTiming:assignment(0.620849139601179): Expected string, received number; Expected string, received number; Expected string, received number 
+printToDevTools @ index-BP5hGmK3.js:64
+index-BP5hGmK3.js:64 [00:27:06.441] [NAV] ℹ️ Переключение вкладки: "qa" ➔ "timing" 
+index-BP5hGmK3.js:327 [TimingLog] === Начало загрузки тайминга серии #8 (Кайдзю номер восемь 2) ===
+index-BP5hGmK3.js:64 [00:27:06.455] [IPC] ▶ ▶ Запуск: «get-raw-subtitles»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+index-BP5hGmK3.js:64 [00:27:06.479] [IPC] ✓ ✓ Завершен: «get-raw-subtitles» (24ms) [Object: 2 keys]
+index-BP5hGmK3.js:327 [TimingLog] ✓ Успешно распарсено 387 строк субтитров.
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\raw_video.mp4. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:77620
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:327 [TimingLog] 🎬 Подключено оригинальное видео и аудио серии: raw_video.mp4
+index-BP5hGmK3.js:64 [00:27:06.492] [IPC] ▶ ▶ Запуск: «extract-audio-peaks»  Object
+index-BP5hGmK3.js:64 [00:27:07.781] [IPC] ✓ ✓ Завершен: «extract-audio-peaks» (1289ms) [Array: 35501 items]
+index-BP5hGmK3.js:64 [00:27:07.781] [IPC] ▶ ▶ Запуск: «timing-load-state»  Object
+index-BP5hGmK3.js:64 [00:27:07.909] [IPC] ✓ ✓ Завершен: «timing-load-state» (128ms) [Object: 5 keys]
+index-BP5hGmK3.js:327 [TimingLog] 💾 Загружено сохраненное состояние тайминга из «I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Тайминг» (30.10.2026, 19:53:20). Восстановление...
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.1055546779714962_1791492020836.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Fixes\fix_0.620849139601179_1792598212454.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Fixes\fix_0.620849139601179_1792598212454.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.294880424740143_1792192825905.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.6049283030100298_1791586792324.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.11251077652272234_1791492006375.FLAC. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.33022698056765254_1791666092800.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.6117587279652487_1792358235486.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.26426891427743304_1791666099303.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+index-BP5hGmK3.js:327 [TimingLog] ✓ Состояние вкладки «Тайминг» успешно восстановлено из файла! Загружено 8 дорожек, клипов: 316. Повторный автотайминг/нарезка не требуются.
+index-BP5hGmK3.js:64 [00:27:55.736] [NAV] ℹ️ Переключение вкладки: "timing" ➔ "settings" 
+index-BP5hGmK3.js:64 [00:27:55.763] [IPC] ▶ ▶ Запуск: «get-config» 
+index-BP5hGmK3.js:64 [00:27:55.763] [IPC] ▶ ▶ Запуск: «get-gpus» 
+index-BP5hGmK3.js:64 [00:27:55.764] [IPC] ▶ ▶ Запуск: «get-projects» 
+index-BP5hGmK3.js:64 [00:27:55.782] [IPC] ✓ ✓ Завершен: «get-config» (20ms) [Object: 19 keys]
+index-BP5hGmK3.js:64 [00:27:55.875] [IPC] ✓ ✓ Завершен: «get-projects» (111ms) [Array: 35 items]
+index-BP5hGmK3.js:64 [00:27:55.886] [IPC] ✓ ✓ Завершен: «get-gpus» (123ms) [Array: 1 items]
+index-BP5hGmK3.js:64 [00:28:01.224] [NAV] ℹ️ Переключение вкладки: "settings" ➔ "timing" 
+index-BP5hGmK3.js:327 [TimingLog] === Начало загрузки тайминга серии #8 (Кайдзю номер восемь 2) ===
+index-BP5hGmK3.js:64 [00:28:01.229] [IPC] ▶ ▶ Запуск: «get-raw-subtitles»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\subtitles.ass
+index-BP5hGmK3.js:64 [00:28:01.249] [IPC] ✓ ✓ Завершен: «get-raw-subtitles» (20ms) [Object: 2 keys]
+index-BP5hGmK3.js:327 [TimingLog] ✓ Успешно распарсено 387 строк субтитров.
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\raw_video.mp4. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:77620
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:327 [TimingLog] 🎬 Подключено оригинальное видео и аудио серии: raw_video.mp4
+index-BP5hGmK3.js:64 [00:28:01.256] [IPC] ▶ ▶ Запуск: «extract-audio-peaks»  {videoPath: 'I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4', filePath: 'I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\raw_video.mp4', pointsPerSecond: 25}
+index-BP5hGmK3.js:64 [00:28:02.488] [IPC] ✓ ✓ Завершен: «extract-audio-peaks» (1232ms) [Array: 35501 items]
+index-BP5hGmK3.js:64 [00:28:02.488] [IPC] ▶ ▶ Запуск: «timing-load-state»  {episode: {…}}
+index-BP5hGmK3.js:64 [00:28:02.549] [IPC] ✓ ✓ Завершен: «timing-load-state» (61ms) [Object: 5 keys]
+index-BP5hGmK3.js:327 [TimingLog] 💾 Загружено сохраненное состояние тайминга из «I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Тайминг» (05.11.2026, 00:27:19). Восстановление...
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.1055546779714962_1791492020836.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Fixes\fix_0.620849139601179_1792598212454.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Fixes\fix_0.620849139601179_1792598212454.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.294880424740143_1792192825905.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.6049283030100298_1791586792324.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.11251077652272234_1791492006375.FLAC. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.33022698056765254_1791666092800.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.6117587279652487_1792358235486.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:1 Could not read local file natively: I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\QAFixes\dub_0.26426891427743304_1791666099303.flac. Retrying cache. Error: Локальная папка для синхронизации файлов не выбрана в настройках.
+    at ql (index-BP5hGmK3.js:1:5497)
+    at async xa (index-BP5hGmK3.js:1:6622)
+    at async rr (index-BP5hGmK3.js:327:31326)
+    at async index-BP5hGmK3.js:327:81400
+ql @ index-BP5hGmK3.js:1
+await in ql
+xa @ index-BP5hGmK3.js:1
+rr @ index-BP5hGmK3.js:327
+(anonymous) @ index-BP5hGmK3.js:327
+await in (anonymous)
+(anonymous) @ index-BP5hGmK3.js:327
+uy @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+zA @ vendor-Bnd3Y76y.js:48
+lw @ vendor-Bnd3Y76y.js:48
+Dw @ vendor-Bnd3Y76y.js:48
+wv @ vendor-Bnd3Y76y.js:48
+Iw @ vendor-Bnd3Y76y.js:48
+Bw @ vendor-Bnd3Y76y.js:48
+mw @ vendor-Bnd3Y76y.js:48
+gw @ vendor-Bnd3Y76y.js:48
+Mw @ vendor-Bnd3Y76y.js:48
+my @ vendor-Bnd3Y76y.js:48
+Ow @ vendor-Bnd3Y76y.js:48
+(anonymous) @ vendor-Bnd3Y76y.js:48
+index-BP5hGmK3.js:327 [TimingLog] ✓ Состояние вкладки «Тайминг» успешно восстановлено из файла! Загружено 8 дорожек, клипов: 316. Повторный автотайминг/нарезка не требуются.
+index-BP5hGmK3.js:64 [00:28:20.411] [NAV] ℹ️ Переключение вкладки: "timing" ➔ "mixing" 
+index-BP5hGmK3.js:64 [00:28:20.443] [IPC] ▶ ▶ Запуск: «mixing-get-status»  {episode: {…}, targetDir: undefined}
+index-BP5hGmK3.js:64 [00:28:20.450] [IPC] ▶ ▶ Запуск: «mixing-list-vst3-presets»  {}
+index-BP5hGmK3.js:64 [00:28:20.472] [IPC] ✓ ✓ Завершен: «mixing-list-vst3-presets» (22ms) [Array: 0 items]
+index-BP5hGmK3.js:64 [00:28:20.588] [IPC] ✓ ✓ Завершен: «mixing-get-status» (145ms) [Object: 6 keys]
+index-BP5hGmK3.js:335 [Сведение видео] [Статус] 00:28:20.588 Состояние загружено: «I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Сведения». Модулей: 17. Исходных дорожек: 8 {manifest: {…}, workingDir: 'I:\\YandexDisk\\Озвучка\\Кайдзю номер восемь 2\\Episode_8\\Сведения'}
+index-BP5hGmK3.js:64 [00:28:20.685] [IPC] ▶ ▶ Запуск: «file-exists»  I:\YandexDisk\Озвучка\Кайдзю номер восемь 2\Episode_8\Сведения\17_video_mux\17_video_mux_Кайдзю номер восемь 2_Серия_8_[СВЕДЕНО].mp4
+index-BP5hGmK3.js:64 [00:28:20.686] [IPC] ✓ ✓ Завершен: «file-exists» (1ms) true

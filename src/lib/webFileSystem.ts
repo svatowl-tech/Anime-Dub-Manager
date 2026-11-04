@@ -229,16 +229,15 @@ export async function writeToLocalFolder(fileName: string, content: string | Blo
 }
 
 export async function readFromLocalFolder(fileName: string): Promise<string | File> {
-  try {
-    // Сначала проверяем наш кэш открытых в сессии файлов (очень быстро для видео и аудио)
-    const cachedFile = getFileFromCache(fileName);
-    if (cachedFile) {
-      return cachedFile;
-    }
+  const cachedFile = getFileFromCache(fileName);
+  if (cachedFile) {
+    return cachedFile;
+  }
 
+  try {
     const rootHandle = await getHandleFromDB('projectRootDir') as FileSystemDirectoryHandle | null;
     if (!rootHandle) {
-      throw new Error('Локальная папка для синхронизации файлов не выбрана в настройках.');
+      throw new Error('PROJECT_ROOT_NOT_SET');
     }
 
     const hasPermission = await verifyPermission(rootHandle, false);
@@ -262,9 +261,11 @@ export async function readFromLocalFolder(fileName: string): Promise<string | Fi
     registerFileInCache(fileName, file);
     return file;
   } catch (e: any) {
-    console.warn(`Could not read local file natively: ${fileName}. Retrying cache.`, e);
     const cached = getFileFromCache(fileName);
     if (cached) return cached;
+    if (e?.message !== 'PROJECT_ROOT_NOT_SET') {
+      console.warn(`Could not read local file natively: ${fileName}. Retrying cache.`, e);
+    }
     throw new Error(`Файл не найден в локальной папке: ${fileName}`);
   }
 }
@@ -289,14 +290,28 @@ export async function resolveLocalPath(filePath: string): Promise<string> {
   
   const cleanPath = filePath.replace(/^file:\/\//, '');
 
-  // 1. Поиск по имени файла или пути в in-memory кэше сессии
+  const isElectronEnv = typeof window !== 'undefined' && (
+    Boolean((window as any).electronAPI) ||
+    Boolean((window as any).isElectron) ||
+    Boolean(window.navigator?.userAgent?.includes('Electron'))
+  );
+
+  const isAbs = /^[a-zA-Z]:[/\\]/.test(cleanPath) || cleanPath.startsWith('/');
+
+  // 1. В Electron проверяем абсолютный путь СРАЗУ, до запросов к браузерному FS API
+  if (isElectronEnv && isAbs) {
+    const sanitizedPath = cleanPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
+    return `custom-media://local/media?path=${encodeURIComponent(sanitizedPath)}`;
+  }
+
+  // 2. Поиск по имени файла или пути в in-memory кэше сессии
   const nameOnly = cleanPath.replace(/\\/g, '/').split('/').pop() || cleanPath;
   const cached = getFileFromCache(nameOnly) || getFileFromCache(cleanPath);
   if (cached) {
     return URL.createObjectURL(cached);
   }
 
-  // 2. Поиск в File System Access API (если пользователь выбрал папку проекта)
+  // 3. Поиск в File System Access API (если пользователь выбрал папку проекта в веб-интерфейсе)
   try {
     const file = await readFromLocalFolder(cleanPath);
     if (file instanceof File) {
@@ -304,18 +319,6 @@ export async function resolveLocalPath(filePath: string): Promise<string> {
     }
   } catch (e) {
     // Не найдено в локальной папке
-  }
-
-  const isElectronEnv = typeof window !== 'undefined' && (
-    Boolean((window as any).electronAPI) ||
-    Boolean((window as any).isElectron) ||
-    Boolean(window.navigator?.userAgent?.includes('Electron'))
-  );
-
-  // 3. Если мы находимся в Electron и путь локальный — сразу возвращаем защищенный custom-media:// URL
-  if (isElectronEnv && (/^[a-zA-Z]:[/\\]/.test(cleanPath) || cleanPath.startsWith('/'))) {
-    const sanitizedPath = cleanPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
-    return `custom-media://local/media?path=${encodeURIComponent(sanitizedPath)}`;
   }
 
   // 4. Проверка доступности файла на сервере через медиа-эндпоинт (для веб-режима)
@@ -331,11 +334,7 @@ export async function resolveLocalPath(filePath: string): Promise<string> {
     }
   }
 
-  if (/^[a-zA-Z]:[/\\]/.test(cleanPath) || cleanPath.startsWith('/')) {
-    if (isElectronEnv) {
-      const sanitizedPath = cleanPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
-      return `custom-media://local/media?path=${encodeURIComponent(sanitizedPath)}`;
-    }
+  if (isAbs) {
     return '';
   }
 
