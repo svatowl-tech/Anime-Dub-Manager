@@ -42,6 +42,7 @@ export interface TelegramMTProtoStatus {
     username: string;
     firstName: string;
   } | null;
+  passwordHint?: string;
   settings: TelegramMTProtoSettings;
 }
 
@@ -52,6 +53,7 @@ export interface TelegramMTProtoDialog {
   isChannel: boolean;
   isGroup: boolean;
   isUser: boolean;
+  isForum?: boolean;
   unreadCount: number;
   type: 'channel' | 'group' | 'user' | 'chat';
   lastMessage?: string;
@@ -60,6 +62,7 @@ export interface TelegramMTProtoDialog {
 
 export interface TelegramMTProtoPostParams {
   targetPeer: string;
+  topicId?: number;
   text: string;
   parseMode?: 'html' | 'md';
   silent?: boolean;

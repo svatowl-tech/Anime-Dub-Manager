@@ -260,7 +260,27 @@ export const TelegramSettingsTab: React.FC<TelegramSettingsTabProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="flex items-center gap-2 flex-wrap w-full sm:w-auto">
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const res = await ipcSafe.invoke('telegram-mtproto-export-session');
+                    if (res && res.sessionString) {
+                      await safeCopyToClipboard(res.sessionString);
+                      toast.success('StringSession скопирована в буфер обмена');
+                    }
+                  } catch (e: any) {
+                    toast.error(e.message || 'Не удалось экспортировать StringSession');
+                  }
+                }}
+                className="px-3 py-2 bg-neutral-800 hover:bg-neutral-700 text-emerald-300 rounded-xl text-xs font-semibold border border-neutral-700 transition flex items-center gap-1.5 cursor-pointer"
+                title="Скопировать строку StringSession для резервной копии или быстрого входа"
+              >
+                <Key className="w-3.5 h-3.5 text-emerald-400" />
+                StringSession
+              </button>
+
               <button
                 type="button"
                 onClick={handleTestConnection}

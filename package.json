@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
+    "start": "tsx server.ts",
     "electron:dev": "concurrently \"vite\" \"electron .\"",
     "generate:icons": "node scripts/generate-icons.cjs",
     "prepare:sidecars": "node scripts/prepare-sidecars.js",

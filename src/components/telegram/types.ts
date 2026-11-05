@@ -1,5 +1,15 @@
 import { Episode, Project, TelegramMTProtoDialog, TelegramMTProtoSettings, TelegramMTProtoStatus } from '../../types';
 
+export interface TelegramForumTopic {
+  id: number;
+  title: string;
+  iconColor?: number;
+  iconEmojiId?: string;
+  unreadCount?: number;
+  isClosed?: boolean;
+  isPinned?: boolean;
+}
+
 export interface TelegramChatMessage {
   id: string;
   senderName: string;
@@ -8,6 +18,7 @@ export interface TelegramChatMessage {
   isMe: boolean;
   mediaPath?: string;
   isPinned?: boolean;
+  topicId?: number;
 }
 
 export type TelegramTabType = 'tracks' | 'verify' | 'composer' | 'automations' | 'messenger' | 'dialogs' | 'settings';
@@ -28,6 +39,7 @@ export interface TelegramAudioFileItem {
   duration?: number;
   durationFormatted?: string;
   isVoice?: boolean;
+  topicId?: number;
   caption?: string;
   downloadedPath?: string;
 }

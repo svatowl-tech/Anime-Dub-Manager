@@ -1,716 +1,129 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
-import { 
-  PlaySquare, Send, Copy, MessageSquare, Sparkles, CheckCircle2, Globe, Link2, Save, 
-  Package, Loader2, Download, Upload, Plus, Trash2, Edit3, Check, X,
-  Table, ExternalLink, Columns, Eye, Code, Sliders
+import React from 'react';
+import {
+  PlaySquare,
+  Send,
+  Globe,
+  Sparkles,
+  Copy,
+  CheckCircle2,
+  MessageSquare,
+  Save,
+  Package,
+  Loader2,
+  Edit3,
+  Download,
+  Upload,
+  Table,
+  Eye,
+  Code,
+  Columns,
+  ExternalLink,
+  Sliders
 } from 'lucide-react';
-import { getParticipants } from '../services/dbService';
-import { Participant, Episode, Project, QuickUploadLink, ProjectLinks, ReleaseTemplateType } from '../types';
 import { ipcSafe, isWeb } from '../lib/ipcSafe';
 import { safeCopyToClipboard } from '../lib/clipboard';
-import { safeJsonParse, ProjectLinksSchema } from '../lib/validationSchemas';
-import { toast } from 'sonner';
 import { DesktopRequiredMessage } from './DesktopRequiredMessage';
 import { TelegramClientPanel } from './TelegramClientPanel';
 import AnimeSourcesModal from './AnimeSourcesModal';
+import ReleasePresetsModal from './release/ReleasePresetsModal';
 import TemplateVariablesBar from './TemplateVariablesBar';
 import TemplateBlockConfiguratorModal from './TemplateBlockConfiguratorModal';
-import ReleasePresetsModal from './release/ReleasePresetsModal';
-import { 
-  getReleasePreset, 
-  saveReleasePreset, 
-  getReleasePresetSync, 
-  DEFAULT_QUICK_UPLOAD_LINKS 
-} from '../lib/releasePresetsService';
-import { 
-  generateTGPostMessage, 
-  generateVKPostMessage, 
+import { getReleasePresetSync } from '../lib/releasePresetsService';
+import {
+  generateTGPostMessage,
+  generateVKPostMessage,
   generateFinalTGMessage,
   generateTGArticleMessage,
-  getTemplateString,
-  applyTemplate,
-  getTemplateVariables,
-  convertToHTMLForTelegram,
   markdownTableToUnicodeBox
 } from '../lib/templates';
+import {
+  useReleasePanelController,
+  ReleasePanelProps,
+  DEFAULT_QUICK_LINKS
+} from './release/useReleasePanelController';
+import {
+  ReleaseLinksAndPlatformsSection,
+  ReleaseTemplateCardItem
+} from './release/ReleaseLinksAndPlatformsSection';
 
-interface ReleasePanelProps {
-  currentEpisode: Episode | null;
-  onRefresh: () => void;
-}
+export { DEFAULT_QUICK_LINKS };
+export type { ReleasePanelProps };
 
-const DEFAULT_QUICK_LINKS: QuickUploadLink[] = DEFAULT_QUICK_UPLOAD_LINKS;
+export function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanelProps) {
+  const {
+    participants,
+    postContent,
+    setPostContent,
+    isCopied,
+    isCopiedMarkdown,
+    setIsCopiedMarkdown,
+    isCopiedUnicode,
+    setIsCopiedUnicode,
+    activeTemplate,
+    setActiveTemplate,
+    articleViewMode,
+    setArticleViewMode,
+    links,
+    setLinks,
+    isSavingLinks,
+    isBuilding,
+    buildProgress,
+    customAudioPath,
+    setCustomAudioPath,
+    customRawPath,
+    setCustomRawPath,
+    isEditingTemplate,
+    setIsEditingTemplate,
+    editingTemplateStr,
+    setEditingTemplateStr,
+    linksTemplateStr,
+    setLinksTemplateStr,
+    isEditingLinksTemplate,
+    setIsEditingLinksTemplate,
+    quickLinks,
+    setQuickLinks,
+    isEditingQuickLinks,
+    setIsEditingQuickLinks,
+    tgPostLink,
+    setTgPostLink,
+    vkPostLink,
+    setVkPostLink,
+    isTelegramModalOpen,
+    setIsTelegramModalOpen,
+    allProjects,
+    loadProjects,
+    isAnimeSourcesModalOpen,
+    setIsAnimeSourcesModalOpen,
+    isAutoFillingLinks,
+    autoFillFeedback,
+    setAutoFillFeedback,
+    isPresetsModalOpen,
+    setIsPresetsModalOpen,
+    isTemplateBlockConfiguratorOpen,
+    setIsTemplateBlockConfiguratorOpen,
+    renderedHtmlArticle,
+    renderedUnicodeArticle,
+    updateLinksAndSync,
+    handleApplyConfiguratorTemplate,
+    handleQuickAutoFill,
+    handleApplySourcesModalLinks,
+    handleSelectVideoSource,
+    handleSelectSubtitleSource,
+    handleBuildRelease,
+    handleSaveLinks,
+    handleSaveEpisodePostLinks,
+    handleCopy,
+    handleTextareaKeyDown,
+    handleOpenExternal,
+    handleSaveTemplateLocal,
+    handleSaveLinksTemplate,
+    handleSaveTemplateGlobal,
+    handleExportConfig,
+    handleImportConfig,
+    getTemplateString
+  } = useReleasePanelController({ currentEpisode, onRefresh });
 
-export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanelProps) {
-  const [participants, setParticipants] = useState<Participant[]>([]);
-  const [postContent, setPostContent] = useState('');
-  const [isCopied, setIsCopied] = useState(false);
-  const [isCopiedMarkdown, setIsCopiedMarkdown] = useState(false);
-  const [isCopiedUnicode, setIsCopiedUnicode] = useState(false);
-  const [activeTemplate, setActiveTemplate] = useState<'TG' | 'VK' | 'FINAL_TG' | 'TG_ARTICLE' | null>(null);
-  const [articleViewMode, setArticleViewMode] = useState<'visual' | 'markdown' | 'unicode'>('visual');
-  const [links, setLinks] = useState<ProjectLinks>({});
-  const [isSavingLinks, setIsSavingLinks] = useState(false);
-  const [isBuilding, setIsBuilding] = useState(false);
-  const [buildProgress, setBuildProgress] = useState(0);
-  const [customAudioPath, setCustomAudioPath] = useState<string>('');
-  const [customRawPath, setCustomRawPath] = useState<string>('');
-  const [isEditingTemplate, setIsEditingTemplate] = useState(false);
-  const [editingTemplateStr, setEditingTemplateStr] = useState('');
-  const [linksTemplateStr, setLinksTemplateStr] = useState('');
-  const [isEditingLinksTemplate, setIsEditingLinksTemplate] = useState(false);
-  const [quickLinks, setQuickLinks] = useState<QuickUploadLink[]>([]);
-  const [isEditingQuickLinks, setIsEditingQuickLinks] = useState(false);
-  const [tgPostLink, setTgPostLink] = useState('');
-  const [vkPostLink, setVkPostLink] = useState('');
-  const [isTelegramModalOpen, setIsTelegramModalOpen] = useState(false);
-  const [allProjects, setAllProjects] = useState<Project[]>([]);
-
-  // AnimeParsers State
-  const [isAnimeSourcesModalOpen, setIsAnimeSourcesModalOpen] = useState(false);
-  const [isAutoFillingLinks, setIsAutoFillingLinks] = useState(false);
-  const [autoFillFeedback, setAutoFillFeedback] = useState<string | null>(null);
-
-  // Global Release Presets Modal State
-  const [isPresetsModalOpen, setIsPresetsModalOpen] = useState(false);
-
-  // Template Block Configurator State
-  const [isTemplateBlockConfiguratorOpen, setIsTemplateBlockConfiguratorOpen] = useState(false);
-
-  const handleApplyConfiguratorTemplate = async (generatedTplStr: string, saveForProject: boolean) => {
-    setEditingTemplateStr(generatedTplStr);
-    setPostContent(applyTemplate(generatedTplStr, getTemplateVariables(currentEpisode!, participants)));
-    
-    if (currentEpisode) {
-      if (saveForProject && currentEpisode.project) {
-        try {
-          const tplKey = activeTemplate === 'TG' ? 'tgPostTemplate' :
-                         activeTemplate === 'VK' ? 'vkPostTemplate' :
-                         activeTemplate === 'TG_ARTICLE' ? 'tgArticleTemplate' :
-                         activeTemplate === 'FINAL_TG' ? 'finalTgPostTemplate' : 'linksTemplate';
-          const updatedProject = {
-            ...currentEpisode.project,
-            [tplKey]: generatedTplStr
-          };
-          await ipcSafe.invoke('save-project', updatedProject);
-          onRefresh();
-        } catch (e) {
-          console.error('Failed to save project template', e);
-        }
-      } else {
-        try {
-          const tplKey = activeTemplate === 'TG' ? 'tgPostTemplate' :
-                         activeTemplate === 'VK' ? 'vkPostTemplate' :
-                         activeTemplate === 'TG_ARTICLE' ? 'tgArticleTemplate' :
-                         activeTemplate === 'FINAL_TG' ? 'finalTgPostTemplate' : 'linksTemplate';
-          const updatedEp = {
-            ...currentEpisode,
-            [tplKey]: generatedTplStr
-          };
-          await ipcSafe.invoke('save-episode', updatedEp);
-          onRefresh();
-        } catch (e) {
-          console.error('Failed to save episode template', e);
-        }
-      }
-    }
-    setIsTemplateBlockConfiguratorOpen(false);
-  };
-
-  const handleQuickAutoFill = async () => {
-    if (!currentEpisode?.project) return;
-    setIsAutoFillingLinks(true);
-    setAutoFillFeedback(null);
-    try {
-      const res = await ipcSafe.invoke('anime-parsers:auto-fill-release-links', {
-        projectId: currentEpisode.project.id,
-        episodeId: currentEpisode.id,
-        title: currentEpisode.project.title,
-        originalTitle: currentEpisode.project.originalTitle,
-        episodeNumber: currentEpisode.number,
-        saveToProject: true
-      });
-
-      if (res && res.releaseLinks) {
-        const merged = { ...links, ...res.releaseLinks };
-        setLinks(merged);
-        updateLinksAndSync(merged);
-        const count = Object.keys(res.releaseLinks).length;
-        setAutoFillFeedback(`Автоматически найдено ${count} ссылок: Kodik, Shikimori, AniLibria, Jut.su!`);
-        setTimeout(() => setAutoFillFeedback(null), 4000);
-        onRefresh();
-      }
-    } catch (e: any) {
-      console.error('Quick autofill error:', e);
-      setAutoFillFeedback('Не удалось автозаполнить ссылки: ' + (e.message || 'Ошибка'));
-    } finally {
-      setIsAutoFillingLinks(false);
-    }
-  };
-
-  const handleApplySourcesModalLinks = async (newFoundLinks: Record<string, string>) => {
-    const merged = { ...links, ...newFoundLinks };
-    setLinks(merged);
-    updateLinksAndSync(merged);
-    if (currentEpisode?.project) {
-      try {
-        const updatedProject = {
-          ...currentEpisode.project,
-          links: JSON.stringify({ ...merged, quickUploadLinks: quickLinks })
-        };
-        await ipcSafe.invoke('save-project', updatedProject);
-        onRefresh();
-      } catch (err) {
-        console.error('Failed to auto-save project links from modal', err);
-      }
-    }
-  };
-
-  const handleSelectVideoSource = async (streamUrl: string, label: string) => {
-    if (!currentEpisode) return;
-    try {
-      const updatedEpisode = {
-        ...currentEpisode,
-        rawPath: streamUrl
-      };
-      await ipcSafe.invoke('save-episode', updatedEpisode);
-      onRefresh();
-    } catch (err) {
-      console.error('Failed to set episode stream source', err);
-    }
-  };
-
-  const handleSelectSubtitleSource = async (subUrl: string, label: string) => {
-    if (!currentEpisode) return;
-    try {
-      const updatedEpisode = {
-        ...currentEpisode,
-        subPath: subUrl
-      };
-      await ipcSafe.invoke('save-episode', updatedEpisode);
-      onRefresh();
-    } catch (err) {
-      console.error('Failed to set episode subtitle source', err);
-    }
-  };
-
-  const loadProjects = useCallback(async () => {
-    try {
-      const prjs = await ipcSafe.invoke('get-projects');
-      if (Array.isArray(prjs)) {
-        setAllProjects(prjs);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (isTelegramModalOpen) {
-      loadProjects();
-    }
-  }, [isTelegramModalOpen, loadProjects]);
-
-  const renderedHtmlArticle = useMemo(() => {
-    if (activeTemplate === 'TG_ARTICLE' && articleViewMode === 'visual' && postContent) {
-      return convertToHTMLForTelegram(postContent);
-    }
-    return '';
-  }, [activeTemplate, articleViewMode, postContent]);
-
-  const renderedUnicodeArticle = useMemo(() => {
-    if (activeTemplate === 'TG_ARTICLE' && articleViewMode === 'unicode' && postContent) {
-      return markdownTableToUnicodeBox(postContent);
-    }
-    return '';
-  }, [activeTemplate, articleViewMode, postContent]);
-
-  useEffect(() => {
-    // Check initial running tasks in queue
-    ipcSafe.invoke('get-tasks').then((tasks: any[]) => {
-      if (Array.isArray(tasks) && currentEpisode) {
-        const buildTask = tasks.find(t => 
-          t.type === 'mux-release' && 
-          (t.status === 'running' || t.status === 'pending') &&
-          (t.payload?.episode?.id === currentEpisode.id || t.metadata?.episodeId === currentEpisode.id)
-        );
-        if (buildTask) {
-          setIsBuilding(true);
-          setBuildProgress(buildTask.progress || 0);
-        }
-      }
-    }).catch(() => {});
-
-    const removeQueueListener = ipcSafe.on('task-queue-updated', (tasks: any[]) => {
-      if (Array.isArray(tasks) && currentEpisode) {
-        const buildTask = tasks.find(t => 
-          t.type === 'mux-release' && 
-          (t.status === 'running' || t.status === 'pending') &&
-          (t.payload?.episode?.id === currentEpisode.id || t.metadata?.episodeId === currentEpisode.id)
-        );
-        if (buildTask) {
-          setIsBuilding(true);
-          if (typeof buildTask.progress === 'number') {
-            setBuildProgress(buildTask.progress);
-          }
-        } else {
-          setIsBuilding(false);
-        }
-      }
-    });
-
-    const removeProgressListener = ipcSafe.on('task-progress', (data: { id: string; progress: number }) => {
-      if (data && typeof data.progress === 'number') {
-        setBuildProgress(data.progress);
-      }
-    });
-
-    const removeFfmpegListener = ipcSafe.on('ffmpeg-progress', (percent: number) => {
-      if (typeof percent === 'number') {
-        setBuildProgress(percent);
-      }
-    });
-
-    return () => {
-      removeQueueListener();
-      removeProgressListener();
-      removeFfmpegListener();
-    };
-  }, [currentEpisode?.id]);
-
-  const handleBuildRelease = async () => {
-    if (!currentEpisode || isBuilding) return;
-    
-    try {
-      const result = await ipcSafe.invoke('select-directory');
-      if (!result || !result.filePaths || result.filePaths.length === 0) return;
-      
-      const targetDir = result.filePaths[0];
-      
-      setIsBuilding(true);
-      setBuildProgress(0);
-      await ipcSafe.invoke('enqueue-ffmpeg-task', {
-        type: 'mux-release',
-        payload: { 
-          episode: currentEpisode, 
-          targetDir,
-          customAudioPath: customAudioPath || undefined,
-          customRawPath: customRawPath || undefined
-        },
-        metadata: {
-          episodeId: currentEpisode.id,
-          title: `Сборка: ${currentEpisode.project?.title} - Серия ${currentEpisode.number}`
-        }
-      });
-    } catch (error: unknown) {
-      setIsBuilding(false);
-      const errMsg = error instanceof Error ? error.message : String(error);
-      if (errMsg && errMsg !== 'Selection canceled') {
-        toast.error(`Ошибка при постановке в очередь: ${errMsg}`);
-      }
-    }
-  };
-
-  useEffect(() => {
-    getParticipants().then(setParticipants);
-  }, []);
-
-  useEffect(() => {
-    if (currentEpisode) {
-      setTgPostLink(currentEpisode.tgPostLink || '');
-      setVkPostLink(currentEpisode.vkPostLink || '');
-    }
-  }, [currentEpisode?.id]);
-
-  // Auto-activate default template and generate content immediately on load
-  useEffect(() => {
-    if (!currentEpisode) return;
-    const relType = currentEpisode.project?.releaseType || 'VOICEOVER';
-    const preset = getReleasePresetSync(relType);
-    const targetType: ReleaseTemplateType =
-      activeTemplate ||
-      currentEpisode.project?.defaultTemplateType ||
-      preset.defaultTemplateType ||
-      'TG';
-
-    if (!activeTemplate) {
-      setActiveTemplate(targetType);
-    }
-
-    if (targetType === 'TG') {
-      setPostContent(generateTGPostMessage(currentEpisode, participants));
-    } else if (targetType === 'TG_ARTICLE') {
-      setPostContent(generateTGArticleMessage(currentEpisode, participants));
-    } else if (targetType === 'VK') {
-      setPostContent(generateVKPostMessage(currentEpisode, participants));
-    } else if (targetType === 'FINAL_TG') {
-      setPostContent(generateFinalTGMessage(currentEpisode, participants));
-    }
-  }, [currentEpisode?.id, currentEpisode?.project?.releaseType, currentEpisode?.project?.defaultTemplateType, participants.length, activeTemplate]);
-
-  useEffect(() => {
-    const defaultRequiredLinks: ProjectLinks = { tg: '', vk: '', anime365: '', shikimori: '', kodik: '' };
-    const relType = currentEpisode?.project?.releaseType || 'VOICEOVER';
-    const preset = getReleasePresetSync(relType);
-
-    if (currentEpisode?.project?.links) {
-      const parsed = safeJsonParse<ProjectLinks>(
-        currentEpisode.project.links,
-        {},
-        `ReleasePanel:links(${currentEpisode.project.id})`,
-        ProjectLinksSchema
-      );
-      const mergedLinks: ProjectLinks = { ...defaultRequiredLinks, ...preset.defaultPlatformLinks, ...parsed };
-      setLinks(mergedLinks);
-      if (parsed.quickUploadLinks && Array.isArray(parsed.quickUploadLinks) && parsed.quickUploadLinks.length > 0) {
-        setQuickLinks(parsed.quickUploadLinks);
-      } else {
-        setQuickLinks(preset.quickUploadLinks || DEFAULT_QUICK_LINKS);
-      }
-    } else {
-      setLinks({ ...defaultRequiredLinks, ...preset.defaultPlatformLinks });
-      setQuickLinks(preset.quickUploadLinks || DEFAULT_QUICK_LINKS);
-    }
-  }, [currentEpisode?.project?.id, currentEpisode?.project?.links, currentEpisode?.project?.releaseType]);
-
-  const updateLinksAndSync = (newLinks: ProjectLinks) => {
-    setLinks(newLinks);
-    Object.entries(newLinks).forEach(([k, val]) => {
-      if (k === 'quickUploadLinks' || typeof val !== 'string') return;
-      const lowerKey = k.toLowerCase();
-      const isTelegram = lowerKey === 'tg' || lowerKey === 'telegram' || val.includes('t.me/');
-      const isVk = lowerKey === 'vk' || lowerKey === 'vkontakte' || val.includes('vk.com/') || val.includes('vk.ru/');
-      if (isTelegram && val) {
-        setTgPostLink(val);
-      } else if (isVk && val) {
-        setVkPostLink(val);
-      }
-    });
-  };
-
-  const handleSaveLinks = async () => {
-    if (!currentEpisode?.project) return;
-    setIsSavingLinks(true);
-    try {
-      const updatedLinksObj: ProjectLinks = {
-        ...links,
-        quickUploadLinks: quickLinks
-      };
-      const updatedProject = {
-        ...currentEpisode.project,
-        links: JSON.stringify(updatedLinksObj)
-      };
-      await ipcSafe.invoke('save-project', updatedProject);
-      
-      const shouldFinish = !!(tgPostLink?.trim() || vkPostLink?.trim());
-      // Also save the episode with the synced TG/VK links and autocompletes status to FINISHED if links are filled
-      const updatedEpisode = {
-        ...currentEpisode,
-        tgPostLink,
-        vkPostLink,
-        ...(shouldFinish ? { status: 'FINISHED' as const } : {})
-      };
-      await ipcSafe.invoke('save-episode', updatedEpisode);
-
-      setLinks(updatedLinksObj);
-      onRefresh();
-    } catch (err) {
-      console.error('Failed to save links', err);
-    } finally {
-      setIsSavingLinks(false);
-    }
-  };
-
-  const handleSaveEpisodePostLinks = async () => {
-    if (!currentEpisode) return;
-    setIsSavingLinks(true);
-    try {
-      const shouldFinish = !!(tgPostLink?.trim() || vkPostLink?.trim());
-      const updatedEpisode = {
-        ...currentEpisode,
-        tgPostLink,
-        vkPostLink,
-        ...(shouldFinish ? { status: 'FINISHED' as const } : {})
-      };
-      await ipcSafe.invoke('save-episode', updatedEpisode);
-      onRefresh();
-    } catch (err) {
-      console.error('Failed to save episode post links', err);
-    } finally {
-      setIsSavingLinks(false);
-    }
-  };
-
-  const handleCopy = async () => {
-    if (!postContent) return;
-    try {
-      const plainText = postContent;
-      const htmlText = convertToHTMLForTelegram(postContent);
-
-      const blobPlain = new Blob([plainText], { type: 'text/plain' });
-      const blobHtml = new Blob([htmlText], { type: 'text/html' });
-
-      // Write styled html as well as plain text so Telegram will parse bold/italic formatting on paste
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'text/plain': blobPlain,
-          'text/html': blobHtml
-        })
-      ]);
-
-      setIsCopied(true);
-      setTimeout(() => setIsCopied(false), 2000);
-    } catch (err) {
-      console.error('Failed to copy rich text: ', err);
-      // Fallback to safe non-blocking plain text copying
-      try {
-        await safeCopyToClipboard(postContent);
-        setIsCopied(true);
-        setTimeout(() => setIsCopied(false), 2000);
-      } catch (fallbackErr) {
-        console.error('Fallback plain text copy also failed: ', fallbackErr);
-      }
-    }
-  };
-
-  const handleTextareaKeyDown = (
-    e: React.KeyboardEvent<HTMLTextAreaElement>,
-    setValue: React.Dispatch<React.SetStateAction<string>>
-  ) => {
-    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
-    const isCmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
-
-    if (isCmdOrCtrl && (e.key === 'b' || e.key === 'B' || e.key === 'i' || e.key === 'I')) {
-      e.preventDefault();
-      const textarea = e.currentTarget;
-      const start = textarea.selectionStart;
-      const end = textarea.selectionEnd;
-      const value = textarea.value;
-
-      const prefix = e.key.toLowerCase() === 'b' ? '**' : '__';
-      const tagLength = prefix.length;
-
-      const selectedText = value.substring(start, end);
-      const beforeText = value.substring(0, start);
-      const afterText = value.substring(end);
-
-      let newValue = '';
-      let newStart = start;
-      let newEnd = end;
-
-      if (beforeText.endsWith(prefix) && afterText.startsWith(prefix)) {
-        newValue = beforeText.substring(0, beforeText.length - tagLength) + selectedText + afterText.substring(tagLength);
-        newStart = start - tagLength;
-        newEnd = end - tagLength;
-      } else if (selectedText.startsWith(prefix) && selectedText.endsWith(prefix)) {
-        newValue = beforeText + selectedText.substring(tagLength, selectedText.length - tagLength) + afterText;
-        newStart = start;
-        newEnd = end - (tagLength * 2);
-      } else {
-        newValue = beforeText + prefix + selectedText + prefix + afterText;
-        newStart = start + tagLength;
-        newEnd = end + tagLength;
-      }
-
-      setValue(newValue);
-
-      setTimeout(() => {
-        textarea.focus();
-        textarea.setSelectionRange(newStart, newEnd);
-      }, 0);
-    }
-  };
-
-  const handleOpenExternal = async (url: string, e: React.MouseEvent) => {
-    e.preventDefault();
-    try {
-      await ipcSafe.invoke('open-external', url);
-    } catch (err) {
-      console.error('Failed to open external link', err);
-      // Fallback for browser environment
-      window.open(url, '_blank');
-    }
-  };
-
-  const handleSaveTemplateLocal = async () => {
-    if (!currentEpisode || !activeTemplate) return;
-    const propMap = { 
-      'TG': 'tgPostTemplate', 
-      'VK': 'vkPostTemplate', 
-      'FINAL_TG': 'finalTgPostTemplate',
-      'TG_ARTICLE': 'tgArticleTemplate'
-    };
-    const propName = propMap[activeTemplate] as 'tgPostTemplate' | 'vkPostTemplate' | 'finalTgPostTemplate' | 'tgArticleTemplate';
-    if (!propName) return; 
-
-    try {
-      const updatedEpisode = {
-        ...currentEpisode,
-        [propName]: editingTemplateStr
-      };
-      await ipcSafe.invoke('save-episode', updatedEpisode);
-      setIsEditingTemplate(false);
-      setPostContent(applyTemplate(editingTemplateStr, getTemplateVariables(currentEpisode, participants)));
-      onRefresh();
-    } catch(e) {
-      console.error(e);
-    }
-  };
-
-  const handleSaveLinksTemplate = async (isGlobal: boolean) => {
-    if (!currentEpisode) return;
-    try {
-      if (isGlobal && currentEpisode.project) {
-        await ipcSafe.invoke('save-project', { ...currentEpisode.project, linksTemplate: linksTemplateStr });
-        const epUpdate = { ...currentEpisode };
-        if (epUpdate.linksTemplate !== undefined) {
-          delete epUpdate.linksTemplate;
-          await ipcSafe.invoke('save-episode', epUpdate);
-        }
-      } else {
-        await ipcSafe.invoke('save-episode', { ...currentEpisode, linksTemplate: linksTemplateStr });
-      }
-      setIsEditingLinksTemplate(false);
-      onRefresh();
-    } catch(e) {
-      console.error(e);
-    }
-  };
-
-  const handleSaveTemplateGlobal = async () => {
-    if (!currentEpisode?.project || !activeTemplate) return;
-    const propMap = { 
-      'TG': 'tgPostTemplate', 
-      'VK': 'vkPostTemplate', 
-      'FINAL_TG': 'finalTgPostTemplate',
-      'TG_ARTICLE': 'tgArticleTemplate'
-    };
-    const propName = propMap[activeTemplate] as 'tgPostTemplate' | 'vkPostTemplate' | 'finalTgPostTemplate' | 'tgArticleTemplate';
-    if (!propName) return;
-
-    try {
-      const updatedProject: Project = {
-        ...currentEpisode.project,
-        defaultTemplateType: activeTemplate,
-        [propName]: editingTemplateStr
-      };
-      await ipcSafe.invoke('save-project', updatedProject);
-
-      // Save to global release preset for all future projects of this releaseType
-      const relType = currentEpisode.project.releaseType || 'VOICEOVER';
-      const preset = await getReleasePreset(relType);
-      preset[propName] = editingTemplateStr;
-      preset.defaultTemplateType = activeTemplate;
-      await saveReleasePreset(preset);
-
-      setIsEditingTemplate(false);
-      
-      const epUpdate = { ...currentEpisode };
-      // Delete local override if we save global
-      if (epUpdate[propName] !== undefined) {
-        delete epUpdate[propName];
-        await ipcSafe.invoke('save-episode', epUpdate);
-      }
-      
-      setPostContent(applyTemplate(editingTemplateStr, getTemplateVariables(currentEpisode, participants)));
-      onRefresh();
-    } catch(e) {
-      console.error(e);
-    }
-  };
-
-  const handleExportConfig = () => {
-    if (!currentEpisode?.project) return;
-    const project = currentEpisode.project;
-    
-    // Пакет конфигурации релиза
-    const configData = {
-      studioName: project.title,
-      emoji: project.emoji || '📢',
-      releaseType: project.releaseType || 'VOICEOVER',
-      totalEpisodes: project.totalEpisodes || 0,
-      airedEpisodes: project.airedEpisodes || 0,
-      links: {
-        ...links,
-        quickUploadLinks: quickLinks
-      },
-      tgPostTemplate: project.tgPostTemplate || '',
-      vkPostTemplate: project.vkPostTemplate || '',
-      finalTgPostTemplate: project.finalTgPostTemplate || '',
-      tgArticleTemplate: project.tgArticleTemplate || '',
-      linksTemplate: project.linksTemplate || '',
-      typeAndSeason: project.typeAndSeason || ''
-    };
-    
-    const token = JSON.stringify(configData, null, 2);
-    const blob = new Blob([token], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${project.title.replace(/[^a-zA-Z0-9а-яА-ЯёЁ_]/g, '_')}_release_config.json`;
-    document.body.appendChild(a);
-    a.click();
-    
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleImportConfig = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!currentEpisode?.project || !e.target.files || e.target.files.length === 0) return;
-    
-    const file = e.target.files[0];
-    const reader = new FileReader();
-    
-    reader.onload = async (event) => {
-      try {
-        const text = event.target?.result as string;
-        const configData = JSON.parse(text);
-        
-        if (!configData || typeof configData !== 'object') {
-          alert('Неверный формат файла конфигурации.');
-          return;
-        }
-        
-        const project = currentEpisode.project!;
-        
-        // Разбираем ссылки и быстрые ссылки для загрузки
-        let finalLinksStr = project.links;
-        if (configData.links) {
-          finalLinksStr = JSON.stringify(configData.links);
-        }
-        
-        const updatedProject = {
-          ...project,
-          title: configData.studioName || project.title,
-          emoji: configData.emoji || project.emoji || '📢',
-          releaseType: configData.releaseType || project.releaseType || 'VOICEOVER',
-          totalEpisodes: configData.totalEpisodes !== undefined ? configData.totalEpisodes : project.totalEpisodes,
-          airedEpisodes: configData.airedEpisodes !== undefined ? configData.airedEpisodes : project.airedEpisodes,
-          links: finalLinksStr,
-          tgPostTemplate: configData.tgPostTemplate !== undefined ? configData.tgPostTemplate : project.tgPostTemplate,
-          vkPostTemplate: configData.vkPostTemplate !== undefined ? configData.vkPostTemplate : project.vkPostTemplate,
-          finalTgPostTemplate: configData.finalTgPostTemplate !== undefined ? configData.finalTgPostTemplate : project.finalTgPostTemplate,
-          tgArticleTemplate: configData.tgArticleTemplate !== undefined ? configData.tgArticleTemplate : project.tgArticleTemplate,
-          linksTemplate: configData.linksTemplate !== undefined ? configData.linksTemplate : project.linksTemplate,
-          typeAndSeason: configData.typeAndSeason || project.typeAndSeason || ''
-        };
-        
-        await ipcSafe.invoke('save-project', updatedProject);
-        
-        alert('Конфигурация релиза успешно импортирована!');
-        onRefresh();
-      } catch (err: any) {
-        console.error('Failed to import config', err);
-        alert('Ошибка при импорте конфигурации: ' + err.message);
-      }
-    };
-    
-    reader.readAsText(file);
-    e.target.value = '';
-  };
-
-  const templates = [
+  const templates: ReleaseTemplateCardItem[] = [
     { 
       name: 'Пост в Telegram', 
       icon: <Send className="w-4 h-4" />, 
@@ -863,412 +276,63 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
             ) : (
              <button
               onClick={handleBuildRelease}
-            disabled={isBuilding}
-            className="flex items-center justify-center gap-3 px-8 py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white rounded-2xl font-bold shadow-xl shadow-purple-500/20 transition-all group relative overflow-hidden"
-          >
-            {isBuilding ? (
-              <>
-                <Loader2 className="w-5 h-5 animate-spin" />
-                <span>Сборка... {buildProgress}%</span>
-                <div 
-                  className="absolute bottom-0 left-0 h-1 bg-white/30 transition-all duration-300" 
-                  style={{ width: `${buildProgress}%` }}
-                />
-              </>
-            ) : (
-              <>
-                <Package className="w-5 h-5 group-hover:scale-110 transition-transform" />
-                <span>Собрать релиз</span>
-              </>
-            )}
-           </button>
-           )}
-         </div>
-       </div>
-     </div>
-
-      {/* Episode Post Links section */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl mb-6">
-        <div className="p-4 border-b border-neutral-800 bg-neutral-900/50 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Send className="w-4 h-4 text-purple-400" />
-            <span className="text-sm font-bold text-white uppercase tracking-wider">Ссылки на посты этой серии</span>
-          </div>
-          <button
-            onClick={handleSaveEpisodePostLinks}
-            disabled={isSavingLinks}
-            className="flex items-center gap-2 px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all"
-          >
-            <Save className="w-3.5 h-3.5" />
-            {isSavingLinks ? 'Сохранение...' : 'Сохранить ссылки поста'}
-          </button>
-        </div>
-        <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="space-y-2">
-            <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest flex items-center gap-2">
-              Ссылка на пост TG
-              <span className="text-neutral-700 normal-case font-mono italic">({'{prevLinkTg}'} для след. серии)</span>
-            </label>
-            <input
-              type="text"
-              value={tgPostLink}
-              onChange={(e) => setTgPostLink(e.target.value)}
-              className="w-full bg-black/50 border border-neutral-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all font-mono"
-              placeholder="https://t.me/your_channel/123"
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest flex items-center gap-2">
-              Ссылка на пост VK
-              <span className="text-neutral-700 normal-case font-mono italic">({'{prevLinkVk}'} для след. серии)</span>
-            </label>
-            <input
-              type="text"
-              value={vkPostLink}
-              onChange={(e) => setVkPostLink(e.target.value)}
-              className="w-full bg-black/50 border border-neutral-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all font-mono"
-              placeholder="https://vk.com/wall-123_456"
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Platform Links Section */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl">
-        <div className="p-4 border-b border-neutral-800 bg-neutral-900/50 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Globe className="w-4 h-4 text-purple-400" />
-            <span className="text-sm font-bold text-white uppercase tracking-wider">Быстрые ссылки для загрузки</span>
-          </div>
-          {!isEditingQuickLinks && (
-            <button
-              onClick={() => setIsEditingQuickLinks(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-bold transition-all border border-neutral-700/50"
-              title="Настроить быстрые ссылки для загрузки"
+              disabled={isBuilding}
+              className="flex items-center justify-center gap-3 px-8 py-4 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 text-white rounded-2xl font-bold shadow-xl shadow-purple-500/20 transition-all group relative overflow-hidden"
             >
-              <Edit3 className="w-3.5 h-3.5 text-purple-400" />
-              <span>Настроить кнопки</span>
-            </button>
-          )}
-        </div>
-        
-        {isEditingQuickLinks ? (
-          <div className="p-6 space-y-4 bg-neutral-900/40">
-            <div className="space-y-3">
-              {quickLinks.map((item, index) => (
-                <div key={index} className="flex flex-col sm:flex-row gap-3 items-start sm:items-center bg-black/20 p-3 rounded-xl border border-neutral-800/80">
-                  <span className="text-xs font-mono text-neutral-500 w-5 text-center">{index + 1}</span>
-                  <div className="flex-1 w-full space-y-1">
-                    <label className="text-[9px] font-bold text-neutral-500 uppercase tracking-wider">Название</label>
-                    <input
-                      type="text"
-                      value={item.name}
-                      onChange={(e) => {
-                        const next = [...quickLinks];
-                        next[index] = { ...next[index], name: e.target.value };
-                        setQuickLinks(next);
-                      }}
-                      placeholder="Напр., TG Загрузка"
-                      className="w-full bg-black/40 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
-                    />
-                  </div>
-                  <div className="flex-[2] w-full space-y-1">
-                    <label className="text-[9px] font-bold text-neutral-500 uppercase tracking-wider">Ссылка для перехода</label>
-                    <input
-                      type="text"
-                      value={item.url}
-                      onChange={(e) => {
-                        const next = [...quickLinks];
-                        next[index] = { ...next[index], url: e.target.value };
-                        setQuickLinks(next);
-                      }}
-                      placeholder="https://..."
-                      className="w-full bg-black/40 border border-neutral-800 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-purple-500"
-                    />
-                  </div>
-                  <button
-                    onClick={() => {
-                      setQuickLinks(quickLinks.filter((_, i) => i !== index));
-                    }}
-                    className="p-2 text-neutral-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors mt-4 sm:mt-0"
-                    title="Удалить ссылку"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
-            </div>
-            
-            <div className="flex items-center justify-between pt-2 border-t border-neutral-800/60">
-              <button
-                onClick={() => {
-                  setQuickLinks([...quickLinks, { name: 'Новая ссылка', url: 'https://' }]);
-                }}
-                className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-850 hover:bg-neutral-800 text-purple-400 hover:text-purple-300 rounded-lg text-xs font-bold transition-all border border-neutral-800"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Добавить кнопку
-              </button>
-              
-              <div className="flex gap-2">
-                <button
-                  onClick={() => {
-                    setIsEditingQuickLinks(false);
-                    if (currentEpisode?.project?.links) {
-                      try {
-                        const parsed = JSON.parse(currentEpisode.project.links);
-                        setQuickLinks(parsed.quickUploadLinks || DEFAULT_QUICK_LINKS);
-                      } catch {
-                        setQuickLinks(DEFAULT_QUICK_LINKS);
-                      }
-                    } else {
-                      setQuickLinks(DEFAULT_QUICK_LINKS);
-                    }
-                  }}
-                  className="px-4 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-bold transition-all"
-                >
-                  Отмена
-                </button>
-                <button
-                  onClick={async () => {
-                    await handleSaveLinks();
-                    setIsEditingQuickLinks(false);
-                  }}
-                  className="flex items-center gap-1.5 px-4 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-xs font-bold transition-all"
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  Сохранить
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="p-6 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-            {quickLinks.map((linkItem, idx) => (
-              <a 
-                key={idx}
-                href={linkItem.url} 
-                onClick={(e) => handleOpenExternal(linkItem.url, e)}
-                className="flex flex-col items-center gap-2 p-4 bg-black/30 border border-neutral-800 rounded-xl hover:bg-purple-600/10 hover:border-purple-500/50 transition-all group text-center"
-              >
-                <Globe className="w-6 h-6 text-purple-400 group-hover:scale-110 transition-transform" />
-                <span className="text-xs font-bold text-white truncate max-w-full text-ellipsis overflow-hidden">{linkItem.name}</span>
-              </a>
-            ))}
-            {quickLinks.length === 0 && (
-              <div className="col-span-full py-6 text-center text-neutral-500 italic text-xs">
-                Быстрые ссылки не настроены. Нажмите на "Настроить кнопки" в правом верхнем углу, чтобы настроить их.
-              </div>
+              {isBuilding ? (
+                <>
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <span>Сборка... {buildProgress}%</span>
+                  <div 
+                    className="absolute bottom-0 left-0 h-1 bg-white/30 transition-all duration-300" 
+                    style={{ width: `${buildProgress}%` }}
+                  />
+                </>
+              ) : (
+                <>
+                  <Package className="w-5 h-5 group-hover:scale-110 transition-transform" />
+                  <span>Собрать релиз</span>
+                </>
+              )}
+             </button>
             )}
           </div>
-        )}
-      </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {templates.map((tpl) => (
-          <button
-            key={tpl.type}
-            onClick={() => {
-              setPostContent(tpl.generate());
-              setActiveTemplate(tpl.type);
-            }}
-            className={`p-6 rounded-2xl border transition-all flex flex-col items-center gap-4 text-center ${
-              activeTemplate === tpl.type 
-                ? 'bg-neutral-900 border-purple-500/50 shadow-lg shadow-purple-500/10' 
-                : 'bg-neutral-900/50 border-neutral-800 hover:border-neutral-700'
-            }`}
-          >
-            <div className={`p-4 rounded-full ${tpl.color}/20 text-white`}>
-              {tpl.icon}
-            </div>
-            <div>
-              <h3 className="font-bold text-white">{tpl.name}</h3>
-              <p className="text-xs text-neutral-500 mt-1">Сгенерировать по шаблону</p>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      {/* Platform Links Section */}
-      <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-xl">
-        <div className="p-4 border-b border-neutral-800 bg-neutral-900/50 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Link2 className="w-4 h-4 text-purple-400" />
-            <span className="text-sm font-bold text-white uppercase tracking-wider">Ссылки на платформы</span>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              onClick={handleQuickAutoFill}
-              disabled={isAutoFillingLinks}
-              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white rounded-lg text-xs font-bold transition-all shadow-md shadow-purple-500/20 disabled:opacity-50"
-              title="Автоматически найти Kodik, Shikimori, AniLibria, Jut.su ссылки"
-            >
-              <Sparkles className={`w-3.5 h-3.5 ${isAutoFillingLinks ? 'animate-spin' : ''}`} />
-              <span>{isAutoFillingLinks ? 'Ищем ссылки...' : 'Магический автопоиск'}</span>
-            </button>
-
-            <button
-              onClick={() => setIsAnimeSourcesModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 border border-purple-500/30 rounded-lg text-xs font-bold transition-all"
-              title="Открыть хаб видео, субтитров и аниме-источников"
-            >
-              <Globe className="w-3.5 h-3.5" />
-              <span>Хаб источников</span>
-            </button>
-
-            <button
-              onClick={() => {
-                setLinksTemplateStr(currentEpisode?.linksTemplate || currentEpisode?.project?.linksTemplate || '');
-                setIsEditingLinksTemplate(true);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-neutral-300 rounded-lg text-xs font-bold transition-all border border-neutral-700/50"
-              title="Настроить шаблон для блока ссылок"
-            >
-              <Edit3 className="w-3.5 h-3.5 text-purple-400" />
-              <span>Шаблон ссылок</span>
-            </button>
-            <button
-              onClick={handleSaveLinks}
-              disabled={isSavingLinks}
-              className="flex items-center gap-2 px-4 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-xs font-bold transition-all"
-            >
-              <Save className="w-3.5 h-3.5" />
-              {isSavingLinks ? 'Сохранение...' : 'Сохранить ссылки'}
-            </button>
-          </div>
-        </div>
-
-        {autoFillFeedback && (
-          <div className="p-3 bg-purple-500/10 border-b border-purple-500/20 text-xs font-semibold text-purple-300 flex items-center justify-between animate-in fade-in">
-            <span className="flex items-center gap-2">
-              <Sparkles className="w-4 h-4 text-purple-400" />
-              {autoFillFeedback}
-            </span>
-            <button onClick={() => setAutoFillFeedback(null)} className="text-neutral-400 hover:text-white">
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-        
-        {isEditingLinksTemplate && (
-          <div className="p-6 bg-neutral-900 border-b border-neutral-800 space-y-4">
-             <div className="flex items-center justify-between">
-                <label className="text-[10px] font-bold text-neutral-500 uppercase tracking-widest">Шаблон блока ссылок</label>
-                <div className="flex gap-2">
-                   <button 
-                    onClick={() => setIsEditingLinksTemplate(false)}
-                    className="px-3 py-1 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-xs"
-                   >
-                     Отмена
-                   </button>
-                   <button 
-                    onClick={() => handleSaveLinksTemplate(false)}
-                    className="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-xs"
-                   >
-                     Для этой серии
-                   </button>
-                   <button 
-                    onClick={() => handleSaveLinksTemplate(true)}
-                    className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-xs"
-                   >
-                     Для всего проекта
-                   </button>
-                </div>
-             </div>
-             <textarea
-                value={linksTemplateStr}
-                onChange={e => setLinksTemplateStr(e.target.value)}
-                onKeyDown={e => handleTextareaKeyDown(e, setLinksTemplateStr)}
-                className="w-full bg-black/50 border border-neutral-800 rounded-xl p-4 text-xs text-neutral-300 font-mono leading-relaxed min-h-[120px] focus:outline-none focus:ring-1 focus:ring-purple-500/50"
-                placeholder="Шаблон ссылок, напр.: {linkAnime365}\n{linkTg}..."
-             />
-             <div className="flex flex-wrap gap-2">
-               {Object.keys(links).filter(k => k !== 'quickUploadLinks').map(key => (
-                 <button
-                   key={key}
-                   onClick={() => setLinksTemplateStr(prev => prev + `{link${key.charAt(0).toUpperCase() + key.slice(1)}}`)}
-                   className="px-2 py-1 bg-neutral-800 hover:bg-neutral-700 text-[9px] text-neutral-400 rounded border border-neutral-700 font-mono"
-                 >
-                   {'{link'}{key.charAt(0).toUpperCase() + key.slice(1)}{'}'}
-                 </button>
-               ))}
-             </div>
-          </div>
-        )}
-        
-        <div className="p-6 space-y-4">
-          <div className="flex flex-wrap gap-4 items-end">
-            {Object.keys(links).filter(k => k !== 'quickUploadLinks').map((key, index) => (
-              <div key={`link-card-${key}-${index}`} className="flex-1 min-w-[280px] space-y-2 bg-neutral-900/40 p-4 rounded-xl border border-neutral-800/60 relative group">
-                <div className="flex items-center justify-between gap-2 mb-1">
-                  <div className="flex flex-col">
-                    <input 
-                      type="text" 
-                      defaultValue={key} 
-                      key={`key-input-${key}`}
-                      onBlur={(e) => {
-                        const newKey = e.target.value.replace(/[^a-zA-Z0-9]/g, '');
-                        if (!newKey || newKey === key) {
-                          e.target.value = key;
-                          return;
-                        }
-                        const newLinks = { ...links };
-                        newLinks[newKey] = newLinks[key];
-                        delete newLinks[key];
-                        updateLinksAndSync(newLinks);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          (e.target as HTMLInputElement).blur();
-                        }
-                      }}
-                      className="bg-transparent border-none text-[10px] font-bold text-neutral-500 uppercase tracking-widest focus:outline-none focus:text-purple-400 w-full"
-                      placeholder="Ключ (лат.)"
-                    />
-                    <span className="text-[8px] text-neutral-700 font-mono italic">Переменная: {'{link'}{key.charAt(0).toUpperCase() + key.slice(1)}{'}'}</span>
-                  </div>
-                  <button 
-                    onClick={() => {
-                      const newLinks = { ...links };
-                      delete newLinks[key];
-                      updateLinksAndSync(newLinks);
-                    }}
-                    className="opacity-0 group-hover:opacity-100 p-1 text-neutral-600 hover:text-red-400 transition-all"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-                <input
-                  type="text"
-                  value={links[key] || ''}
-                  onChange={(e) => {
-                    const newValue = e.target.value;
-                    const nextLinks = { ...links, [key]: newValue };
-                    updateLinksAndSync(nextLinks);
-                  }}
-                  className="w-full bg-black/50 border border-neutral-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-purple-500/50 transition-all"
-                  placeholder="Ссылка или текст"
-                />
-              </div>
-            ))}
-            
-            <button
-              onClick={() => {
-                let newKey = 'newPlatform';
-                let i = 1;
-                while (links[newKey]) {
-                  newKey = `platform${i++}`;
-                }
-                setLinks({ ...links, [newKey]: '' });
-              }}
-              className="flex items-center gap-2 px-6 py-6 bg-neutral-950/40 border border-dashed border-neutral-800 rounded-xl text-neutral-600 hover:text-purple-400 hover:border-purple-500/50 hover:bg-purple-500/5 transition-all text-sm font-bold flex-1 min-w-[280px] h-[88px] justify-center"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Добавить платформу</span>
-            </button>
-          </div>
         </div>
       </div>
+
+      <ReleaseLinksAndPlatformsSection
+        currentEpisode={currentEpisode}
+        tgPostLink={tgPostLink}
+        setTgPostLink={setTgPostLink}
+        vkPostLink={vkPostLink}
+        setVkPostLink={setVkPostLink}
+        isSavingLinks={isSavingLinks}
+        handleSaveEpisodePostLinks={handleSaveEpisodePostLinks}
+        isEditingQuickLinks={isEditingQuickLinks}
+        setIsEditingQuickLinks={setIsEditingQuickLinks}
+        quickLinks={quickLinks}
+        setQuickLinks={setQuickLinks}
+        handleSaveLinks={handleSaveLinks}
+        handleOpenExternal={handleOpenExternal}
+        templates={templates}
+        activeTemplate={activeTemplate}
+        setActiveTemplate={setActiveTemplate}
+        setPostContent={setPostContent}
+        handleQuickAutoFill={handleQuickAutoFill}
+        isAutoFillingLinks={isAutoFillingLinks}
+        setIsAnimeSourcesModalOpen={setIsAnimeSourcesModalOpen}
+        linksTemplateStr={linksTemplateStr}
+        setLinksTemplateStr={setLinksTemplateStr}
+        isEditingLinksTemplate={isEditingLinksTemplate}
+        setIsEditingLinksTemplate={setIsEditingLinksTemplate}
+        handleSaveLinksTemplate={handleSaveLinksTemplate}
+        handleTextareaKeyDown={handleTextareaKeyDown}
+        autoFillFeedback={autoFillFeedback}
+        setAutoFillFeedback={setAutoFillFeedback}
+        links={links}
+        setLinks={setLinks}
+        updateLinksAndSync={updateLinksAndSync}
+      />
 
       {postContent && (
         <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden shadow-2xl animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -1637,3 +701,4 @@ export default function ReleasePanel({ currentEpisode, onRefresh }: ReleasePanel
     </div>
   );
 }
+export default ReleasePanel;

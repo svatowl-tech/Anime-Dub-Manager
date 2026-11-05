@@ -1,6 +1,6 @@
 {
-  "summary": "Комплексный архитектурный план неразрушающей декомпозиции всех файлов модуля «QA Проверка» более 800 строк (missingLinesDetector.ts, QAPanel.tsx, QAPlayerAndModalsView.tsx, MissingLinesModal.tsx, MissingLinesDefectCard.tsx, MissingLinesPlayerAndModals.tsx) под стандарт 300–600 строк (макс. 800) с сохранением 100% логики и типов.",
-  "updatedAt": "2026-11-04T15:16:11.772330931Z",
+  "summary": "План полной переработки Telegram-клиента (MTProto GramJS + Bot API + Forum Topics) с нуля с модульной архитектурой и исправлением корневых проблем авторизации и работы с чатами.",
+  "updatedAt": "2026-11-05T18:32:16.887878415Z",
   "requestFeedback": true,
   "userFacing": true
 }

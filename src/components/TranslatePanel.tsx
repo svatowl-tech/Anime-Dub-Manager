@@ -1,37 +1,28 @@
-import React, { useState, useEffect, useRef } from "react";
-import { Languages, FileText, Loader2, RefreshCw, Save, Edit3, Check, X, AlertCircle, ChevronDown, BrainCircuit, Eye, EyeOff, Trash2, Plus, Copy, Scissors, Sparkles } from "lucide-react";
-import { ipcSafe } from "../lib/ipcSafe";
-import { Episode } from "../types";
-import { BATCH_SIZE, SIGN_KEYWORDS } from "../constants";
+import React, { useEffect, useRef } from "react";
+import { Languages, FileText, Loader2, RefreshCw, Save, Edit3, Check, X, AlertCircle, ChevronDown, BrainCircuit, Eye, EyeOff, Trash2, Plus, Copy, Sparkles } from "lucide-react";
+import { SIGN_KEYWORDS } from "../constants";
 import { bulkFilterHonorifics, DEFAULT_HONORIFICS_OPTIONS } from "../lib/honorificsFilter";
+import {
+  TranslatePanelProps,
+  GENRES,
+  LANGUAGES,
+  TRANSLATION_MODELS,
+  parseAssTimeToSeconds,
+  secondsToAssTime,
+  useTranslateController
+} from "./translate/useTranslateController";
 
-interface TranslatePanelProps {
-  currentEpisode: Episode | null;
-}
+export {
+  type TranslatePanelProps,
+  GENRES,
+  LANGUAGES,
+  TRANSLATION_MODELS,
+  parseAssTimeToSeconds,
+  secondsToAssTime,
+  useTranslateController
+};
 
-const GENRES = [
-  { id: 'shonen', name: 'Сёнен (Экшен, Энергично)', prompt: 'Тон: энергичный, молодежный, много восклицаний, боевой дух.' },
-  { id: 'shojo', name: 'Сёдзе (Романтика, Эмоции)', prompt: 'Тон: эмоциональный, нежный, вежливый, акцент на чувствах.' },
-  { id: 'seinen', name: 'Сейнен (Серьезно, Мрачно)', prompt: 'Тон: взрослый, реалистичный, иногда грубый или философский.' },
-  { id: 'comedy', name: 'Комедия (Юмор, Сленг)', prompt: 'Тон: забавный, ироничный, использование современного сленга.' },
-  { id: 'drama', name: 'Драма (Трагедия, Официоз)', prompt: 'Тон: тяжелый, официальный, глубокий, без лишнего сленга.' },
-];
-
-const LANGUAGES = [
-  { code: 'ja', name: 'Японский' },
-  { code: 'en', name: 'Английский' },
-  { code: 'ru', name: 'Русский' },
-  { code: 'zh', name: 'Китайский' },
-  { code: 'ko', name: 'Корейский' },
-];
-
-const TRANSLATION_MODELS = [
-  { id: 'Xenova/m2m100_418M', name: 'M2M-100 (418M)', size: '~400 MB', description: 'Самая легкая и быстрая модель.' },
-  { id: 'Xenova/nllb-200-distilled-600M', name: 'NLLB-200 (600M) - Рекомендуется', size: '~600 MB', description: 'Оптимальный баланс скорости и качества.' },
-  { id: 'Xenova/m2m100_1.2b', name: 'M2M-100 (1.2B)', size: '~1.2 GB', description: 'Высокое качество перевода, требует больше памяти.' },
-];
-
-interface TranslatedLineRowProps {
+export interface TranslatedLineRowProps {
   line: any;
   idx: number;
   editingId: string | number | null;
@@ -51,7 +42,7 @@ interface TranslatedLineRowProps {
   handleDeleteLine: (id: string | number) => void;
 }
 
-const TranslatedLineRow = React.memo(({
+export const TranslatedLineRow = React.memo(({
   line,
   idx,
   editingId,
@@ -75,7 +66,6 @@ const TranslatedLineRow = React.memo(({
   useEffect(() => {
     if (isEditing && textareaRef.current) {
       textareaRef.current.focus();
-      // Adjust height
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = textareaRef.current.scrollHeight + 'px';
     }
@@ -186,405 +176,47 @@ const TranslatedLineRow = React.memo(({
 });
 
 export default function TranslatePanel({ currentEpisode }: TranslatePanelProps) {
-  const [sourceLang, setSourceLang] = useState("ja");
-  const [destLang, setDestLang] = useState("ru");
-  const [selectedGenre, setSelectedGenre] = useState(GENRES[0].id);
-  const [status, setStatus] = useState("");
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [translatedLines, setTranslatedLines] = useState<any[]>([]);
-  const [editingId, setEditingId] = useState<string | number | null>(null);
-  const [editText, setEditText] = useState("");
-  const [editStart, setEditStart] = useState("");
-  const [editEnd, setEditEnd] = useState("");
-  const [aiProvider, setAiProvider] = useState<string>("google");
-  const [allowProfanity, setAllowProfanity] = useState(true);
-  const [filterHonorifics, setFilterHonorifics] = useState(true);
-  const [showSigns, setShowSigns] = useState(false);
-  const [ollamaStatus, setOllamaStatus] = useState<'unchecked' | 'running' | 'error'>('unchecked');
-  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
-  const [selectedOllamaModel, setSelectedOllamaModel] = useState("");
-
-  useEffect(() => {
-    // Force set provider to google by default initially
-    ipcSafe.invoke('get-config').then(config => {
-      setAiProvider('google');
-    });
-
-    // Check Ollama status
-    const checkOllama = async () => {
-      try {
-        const res = await ipcSafe.invoke('check-ollama-status');
-        if (res.success) {
-          setOllamaStatus('running');
-          const modelsRes = await ipcSafe.invoke('get-ollama-models');
-          if (modelsRes.success && modelsRes.models.length > 0) {
-            setOllamaModels(modelsRes.models);
-            setSelectedOllamaModel(modelsRes.models[0]);
-          }
-        } else {
-          setOllamaStatus('error');
-        }
-      } catch (err) {
-        setOllamaStatus('error');
-      }
-    };
-    checkOllama();
-  }, []);
-
-  useEffect(() => {
-    if (currentEpisode?.subPath) {
-      loadLines();
-    } else {
-      setTranslatedLines([]);
-      setStatus("");
-      setEditingId(null);
-    }
-  }, [currentEpisode]);
-
-  const loadLines = async () => {
-    if (!currentEpisode?.subPath) return;
-    setIsProcessing(true);
-    setStatus("Загрузка реплик...");
-    try {
-      const data = await ipcSafe.invoke('get-raw-subtitles', currentEpisode.subPath);
-      const lines = data.lines || data;
-      setTranslatedLines(lines.map((l: any) => ({
-        ...l,
-        originalText: l.text,
-        // We keep text as is initially, or we could clear it if we want to show it's not translated
-        // But usually it's better to show the current state
-      })));
-      setStatus(`Загружено ${lines.length} реплик.`);
-    } catch (error: any) {
-      console.error("Load error:", error);
-      setStatus(`Ошибка загрузки: ${error.message}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const translateSingleLine = async (index: number) => {
-    if (!currentEpisode?.subPath) return;
-
-    const line = translatedLines[index];
-    if (!line.originalText || !line.originalText.trim()) return;
-
-    setStatus(`Перевод реплики ${index + 1}...`);
-    
-    try {
-      const result = await ipcSafe.invoke('translate-text', {
-        text: line.originalText,
-        sourceLang,
-        destLang
-      });
-      const translatedText = result['destination-text'];
-
-      const newLines = [...translatedLines];
-      newLines[index] = { ...line, text: translatedText };
-      setTranslatedLines(newLines);
-      setStatus("Готово!");
-    } catch (error: any) {
-      console.error("Single line translation error:", error);
-      setStatus(`Ошибка: ${error.message}`);
-    }
-  };
-  const handleTranslate = async () => {
-    if (!currentEpisode?.subPath) {
-      setStatus("Файл субтитров не найден.");
-      return;
-    }
-
-    setIsProcessing(true);
-    setStatus("Загрузка субтитров...");
-
-    try {
-      // 1. Get raw subtitles
-      const data = await ipcSafe.invoke('get-raw-subtitles', currentEpisode.subPath);
-      const lines = data.lines || data;
-      
-      const genreInfo = GENRES.find(g => g.id === selectedGenre);
-      const sourceLangName = LANGUAGES.find(l => l.code === sourceLang)?.name || sourceLang;
-      const destLangName = LANGUAGES.find(l => l.code === destLang)?.name || destLang;
-
-      const newTranslatedLines = [...lines];
-      const glossary: Record<string, string> = {};
-      
-      // Parse glossary from project if available
-      if (currentEpisode.project?.globalMapping) {
-        try {
-          const mapping = JSON.parse(currentEpisode.project.globalMapping);
-          Object.assign(glossary, mapping);
-        } catch (e) {}
-      }
-      if (currentEpisode.project?.characterAliases) {
-        try {
-          const aliases = JSON.parse(currentEpisode.project.characterAliases);
-          Object.assign(glossary, aliases);
-        } catch (e) {}
-      }
-
-      if (aiProvider === 'ollama' && selectedOllamaModel) {
-        setStatus("Формирование батчей для перевода Ollama (сохранение контекста)...");
-        
-        // Group lines by context (up to 5 if no characters, or up to 10 if there are characters, or separate by big gaps)
-        const batches: any[][] = [];
-        let currentBatch: any[] = [];
-        
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          if (currentBatch.length === 0) {
-            currentBatch.push(line);
-            continue;
-          }
-          
-          const prevLine = currentBatch[currentBatch.length - 1];
-          const prevEnd = parseAssTimeToSeconds(prevLine.end || '0:00:00.00');
-          const currStart = parseAssTimeToSeconds(line.start || '0:00:00.00');
-          const gap = currStart - prevEnd;
-          
-          const hasCharacters = currentBatch.some(l => l.name) || line.name;
-          
-          if (hasCharacters) {
-            if (gap > 2.0 || currentBatch.length >= 10) {
-              batches.push(currentBatch);
-              currentBatch = [line];
-            } else {
-              currentBatch.push(line);
-            }
-          } else {
-            if (currentBatch.length >= 5) {
-              batches.push(currentBatch);
-              currentBatch = [line];
-            } else {
-              currentBatch.push(line);
-            }
-          }
-        }
-        if (currentBatch.length > 0) batches.push(currentBatch);
-        
-        let translatedCount = 0;
-        for (let bIdx = 0; bIdx < batches.length; bIdx++) {
-          const batch = batches[bIdx];
-          setStatus(`Оллама: Перевод батча ${bIdx + 1} из ${batches.length} (реплики ${translatedCount + 1}-${translatedCount + batch.length})...`);
-          
-          const res = await ipcSafe.invoke('translate-ollama-batch', {
-            modelName: selectedOllamaModel,
-            linesBatch: batch,
-            sourceLang: sourceLangName,
-            destLang: destLangName
-          });
-          
-          if (res.success && res.batch && Array.isArray(res.batch)) {
-            // Merge translated batch back
-            const translatedBatch = res.batch;
-            for (let i = 0; i < batch.length; i++) {
-              const origLine = batch[i];
-              const origIndex = lines.findIndex((l: any) => l.id === origLine.id);
-              if (origIndex !== -1) {
-                const translatedObj = translatedBatch.find((t: any) => t.id === origLine.id) || translatedBatch[i];
-                newTranslatedLines[origIndex] = {
-                  ...origLine,
-                  originalText: origLine.text,
-                  text: translatedObj?.translatedText || origLine.text,
-                  name: translatedObj?.name || origLine.name
-                };
-              }
-            }
-          } else {
-            console.error(`Ollama batch ${bIdx} failed:`, res.error);
-            // Fallback for this batch if failed
-            for (const line of batch) {
-              const origIndex = lines.findIndex((l: any) => l.id === line.id);
-              if (origIndex !== -1) {
-                newTranslatedLines[origIndex] = { ...line, originalText: line.text };
-              }
-            }
-          }
-          translatedCount += batch.length;
-        }
-
-      } else {
-        setStatus("Использую стандартный (внешний) перевод...");
-        
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-          if (line.text && line.text.trim()) {
-            setStatus(`Перевод реплики ${i + 1} / ${lines.length}...`);
-            const result = await ipcSafe.invoke('translate-text', {
-              text: line.text,
-              sourceLang,
-              destLang
-            });
-            newTranslatedLines[i] = {
-              ...line,
-              originalText: line.text,
-              text: result['destination-text']
-            };
-            // Небольшая задержка, чтобы не получить 429 Too Many Requests от публичного API Google
-            await new Promise(r => setTimeout(r, 300));
-          } else {
-            newTranslatedLines[i] = { ...line, originalText: line.text };
-          }
-        }
-      }
-
-      if (filterHonorifics) {
-        const { updatedLines, changedCount } = bulkFilterHonorifics(newTranslatedLines, DEFAULT_HONORIFICS_OPTIONS);
-        setTranslatedLines(updatedLines);
-        setStatus(`Перевод завершен! Авто-удалено обращений в ${changedCount} репликах.`);
-      } else {
-        setTranslatedLines(newTranslatedLines);
-        setStatus("Перевод завершен!");
-      }
-    } catch (error: any) {
-      console.error("Translation error:", error);
-      setStatus(`Ошибка: ${error.message}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const handleSave = async () => {
-    if (!currentEpisode?.subPath || translatedLines.length === 0) return;
-    
-    setIsProcessing(true);
-    setStatus("Сохранение перевода...");
-    
-    try {
-      await ipcSafe.invoke('save-translated-subtitles', {
-        assFilePath: currentEpisode.subPath,
-        translatedLines
-      });
-      setStatus("Перевод успешно сохранен в файл!");
-    } catch (error) {
-      console.error("Save error:", error);
-      setStatus("Ошибка при сохранении.");
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  const startEditing = (id: string | number, text: string, start: string = "", end: string = "") => {
-    setEditingId(id);
-    setEditText(text);
-    setEditStart(start);
-    setEditEnd(end);
-  };
-
-  const saveEdit = (id: string | number) => {
-    const newLines = [...translatedLines];
-    const index = newLines.findIndex(l => l.id === id);
-    if (index !== -1) {
-      newLines[index].text = editText;
-      newLines[index].start = editStart || newLines[index].start;
-      newLines[index].end = editEnd || newLines[index].end;
-      setTranslatedLines(newLines);
-    }
-    setEditingId(null);
-  };
-
-  const handleDeleteLine = (id: string | number) => {
-    if (!confirm('Вы уверены, что хотите удалить эту реплику?')) return;
-    const newLines = translatedLines.filter(l => l.id !== id);
-    setTranslatedLines(newLines);
-  };
-
-  const handleDuplicateLine = (id: string | number) => {
-    const index = translatedLines.findIndex(l => l.id === id);
-    if (index === -1) return;
-    
-    const newLines = [...translatedLines];
-    const line = newLines[index];
-    const start = parseAssTimeToSeconds(line.start);
-    const end = parseAssTimeToSeconds(line.end);
-    const duration = end - start;
-    
-    if (duration < 0.05) return; // Prevent creating too small lines
-
-    const mid = start + duration / 2;
-    const midTime = secondsToAssTime(mid);
-
-    // Update current line
-    newLines[index] = { ...line, end: midTime };
-
-    const newId = `dup-${Date.now()}-${Math.random()}`;
-    const newLine = { 
-      ...line, 
-      start: midTime,
-      id: newId, 
-      originalIndex: undefined, 
-      rawLineIndex: undefined 
-    };
-    newLines.splice(index + 1, 0, newLine);
-    setTranslatedLines(newLines);
-  };
-
-  const parseAssTimeToSeconds = (timeStr: string) => {
-    if (!timeStr) return 0;
-    const parts = timeStr.split(':');
-    if (parts.length === 3) {
-      const hours = parseInt(parts[0], 10);
-      const minutes = parseInt(parts[1], 10);
-      const seconds = parseFloat(parts[2]);
-      return (hours * 3600) + (minutes * 60) + seconds;
-    }
-    return 0;
-  };
-
-  const secondsToAssTime = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = seconds % 60;
-    return `${h}:${m.toString().padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
-  };
-
-  const handleAddLine = (id: string | number) => {
-    const index = translatedLines.findIndex(l => l.id === id);
-    if (index === -1) return;
-    
-    const newLines = [...translatedLines];
-    const prevLine = { ...newLines[index] };
-    const nextLine = index + 1 < newLines.length ? { ...newLines[index + 1] } : undefined;
-    
-    const startA = parseAssTimeToSeconds(prevLine.start);
-    const endA = parseAssTimeToSeconds(prevLine.end);
-    const durationA = endA - startA;
-    const takeA = durationA / 2;
-    const newEndA = endA - takeA;
-
-    prevLine.end = secondsToAssTime(newEndA);
-    newLines[index] = prevLine;
-
-    let newStart = newEndA;
-    let newEnd = endA; // Default if no next line
-
-    if (nextLine) {
-      const startB = parseAssTimeToSeconds(nextLine.start);
-      const endB = parseAssTimeToSeconds(nextLine.end);
-      const durationB = endB - startB;
-      const takeB = durationB / 2;
-      const newStartB = startB + takeB;
-      
-      const updatedNext = { ...nextLine, start: secondsToAssTime(newStartB) };
-      newLines[index + 1] = updatedNext;
-      newEnd = newStartB;
-    }
-
-    const newId = `add-${Date.now()}-${Math.random()}`;
-    const newLine = {
-      ...prevLine,
-      text: '',
-      originalText: '',
-      start: secondsToAssTime(newStart),
-      end: secondsToAssTime(newEnd),
-      originalIndex: undefined,
-      id: newId,
-      rawLineIndex: undefined
-    };
-    
-    newLines.splice(index + 1, 0, newLine);
-    setTranslatedLines(newLines);
-  };
+  const {
+    sourceLang,
+    setSourceLang,
+    destLang,
+    setDestLang,
+    selectedGenre,
+    setSelectedGenre,
+    status,
+    setStatus,
+    isProcessing,
+    translatedLines,
+    setTranslatedLines,
+    editingId,
+    setEditingId,
+    editText,
+    setEditText,
+    editStart,
+    setEditStart,
+    editEnd,
+    setEditEnd,
+    aiProvider,
+    setAiProvider,
+    allowProfanity,
+    setAllowProfanity,
+    filterHonorifics,
+    setFilterHonorifics,
+    showSigns,
+    setShowSigns,
+    ollamaStatus,
+    ollamaModels,
+    selectedOllamaModel,
+    setSelectedOllamaModel,
+    translateSingleLine,
+    handleTranslate,
+    handleSave,
+    startEditing,
+    saveEdit,
+    handleDeleteLine,
+    handleDuplicateLine,
+    handleAddLine
+  } = useTranslateController(currentEpisode);
 
   return (
     <div className="space-y-6 w-full h-full flex flex-col overflow-hidden">
@@ -655,7 +287,6 @@ export default function TranslatePanel({ currentEpisode }: TranslatePanelProps) 
                   </div>
                 </div>
               )}
-
 
               <div>
                 <label className="block text-[10px] font-bold text-neutral-500 uppercase tracking-widest mb-2">Исходный язык</label>
@@ -804,52 +435,52 @@ export default function TranslatePanel({ currentEpisode }: TranslatePanelProps) 
                       <th className="p-4 text-[10px] font-bold text-neutral-500 uppercase tracking-widest w-1/2">Перевод ({destLang})</th>
                     </tr>
                   </thead>
-                      <tbody>
-                        {translatedLines
-                          .filter(line => {
-                            if (showSigns) return true;
-                            const name = (line.name || "").toLowerCase();
-                            const style = (line.style || "").toLowerCase();
-                            
-                            const signs = ["sign", "signs", "title", "op", "ed", "song", "note", "music", "logo", "staff", "credit", "credits", "надпись", "титры", "инфо", "info"];
-                            
-                            const isSign = signs.some(s => {
-                              if (s === 'op' || s === 'ed') {
-                                const regex = new RegExp(`(^|[^a-z])${s}([^a-z]|$)`, 'i');
-                                return regex.test(name) || regex.test(style);
-                              }
-                              return name.includes(s) || style.includes(s);
-                            }) || SIGN_KEYWORDS.some(k => name.includes(k.toLowerCase()) || style.includes(k.toLowerCase()));
+                  <tbody>
+                    {translatedLines
+                      .filter(line => {
+                        if (showSigns) return true;
+                        const name = (line.name || "").toLowerCase();
+                        const style = (line.style || "").toLowerCase();
+                        
+                        const signs = ["sign", "signs", "title", "op", "ed", "song", "note", "music", "logo", "staff", "credit", "credits", "надпись", "титры", "инфо", "info"];
+                        
+                        const isSign = signs.some(s => {
+                          if (s === 'op' || s === 'ed') {
+                            const regex = new RegExp(`(^|[^a-z])${s}([^a-z]|$)`, 'i');
+                            return regex.test(name) || regex.test(style);
+                          }
+                          return name.includes(s) || style.includes(s);
+                        }) || SIGN_KEYWORDS.some(k => name.includes(k.toLowerCase()) || style.includes(k.toLowerCase()));
 
-                            if (!name && style && isSign) return false;
-                            return !isSign;
-                          })
-                          .map((line) => {
-                            const idx = translatedLines.indexOf(line);
-                            return (
-                              <TranslatedLineRow
-                                key={line.id}
-                                line={line}
-                                idx={idx}
-                                editingId={editingId}
-                                editText={editText}
-                                editStart={editStart}
-                                editEnd={editEnd}
-                                sourceLang={sourceLang}
-                                setEditText={setEditText}
-                                setEditStart={setEditStart}
-                                setEditEnd={setEditEnd}
-                                saveEdit={saveEdit}
-                                setEditingId={setEditingId}
-                                handleAddLine={handleAddLine}
-                                handleDuplicateLine={handleDuplicateLine}
-                                translateSingleLine={translateSingleLine}
-                                startEditing={startEditing}
-                                handleDeleteLine={handleDeleteLine}
-                              />
-                            );
-                          })}
-                      </tbody>
+                        if (!name && style && isSign) return false;
+                        return !isSign;
+                      })
+                      .map((line) => {
+                        const idx = translatedLines.indexOf(line);
+                        return (
+                          <TranslatedLineRow
+                            key={line.id}
+                            line={line}
+                            idx={idx}
+                            editingId={editingId}
+                            editText={editText}
+                            editStart={editStart}
+                            editEnd={editEnd}
+                            sourceLang={sourceLang}
+                            setEditText={setEditText}
+                            setEditStart={setEditStart}
+                            setEditEnd={setEditEnd}
+                            saveEdit={saveEdit}
+                            setEditingId={setEditingId}
+                            handleAddLine={handleAddLine}
+                            handleDuplicateLine={handleDuplicateLine}
+                            translateSingleLine={translateSingleLine}
+                            startEditing={startEditing}
+                            handleDeleteLine={handleDeleteLine}
+                          />
+                        );
+                      })}
+                  </tbody>
                 </table>
               ) : (
                 <div className="h-full flex flex-col items-center justify-center text-neutral-600 space-y-4">

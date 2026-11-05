@@ -13,7 +13,7 @@ import {
 import { toast } from 'sonner';
 import { ipcSafe } from '../../lib/ipcSafe';
 import { TelegramMTProtoDialog } from '../../types';
-import { TelegramChatMessage } from './types';
+import { TelegramChatMessage, TelegramForumTopic } from './types';
 
 interface TelegramMessengerTabProps {
   dialogs: TelegramMTProtoDialog[];
@@ -42,6 +42,10 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
   const [chatSearch, setChatSearch] = useState<string>('');
   const [customPeerInput, setCustomPeerInput] = useState<string>('');
 
+  // Forum Topics state
+  const [topics, setTopics] = useState<TelegramForumTopic[]>([]);
+  const [selectedTopicId, setSelectedTopicId] = useState<string>('');
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const currentDialog =
@@ -59,41 +63,72 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
         }
       : dialogs[0] || null);
 
-  const currentChatKey = currentDialog?.id || 'default';
+  const currentChatKey = `${currentDialog?.id || 'default'}_${selectedTopicId || 'all'}`;
   const chatMessages = messages[currentChatKey] || [
     {
       id: 'welcome-1',
       senderName: 'Telegram Studio Center',
       text: isConnected
-        ? '👋 Выберите диалог слева для чтения и отправки сообщений напрямую в Telegram.'
+        ? 'Выберите диалог слева (и при необходимости тему форума сверху) для чтения и отправки сообщений напрямую в Telegram.'
         : hasBot
-        ? '🤖 Подключен Bot API. Вы можете отправлять сообщения в каналы и чаты, указав @username или ID.'
-        : '⚠️ Подключение к Telegram отсутствует. Войдите через QR-код, чтобы загрузить ваши чаты и сообщения.',
+        ? 'Подключен Bot API. Вы можете отправлять сообщения в каналы и чаты, указав @username или ID.'
+        : 'Подключение к Telegram отсутствует. Войдите через QR-код, телефон или StringSession, чтобы загрузить ваши чаты и сообщения.',
       time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
       isMe: false,
       isPinned: true
     }
   ];
 
+  // Load Forum Topics when dialog changes
+  useEffect(() => {
+    if (!currentDialog || !isConnected) {
+      setTopics([]);
+      setSelectedTopicId('');
+      return;
+    }
+
+    let cancelled = false;
+    const peer = currentDialog.id || (currentDialog.username ? `@${currentDialog.username}` : '');
+    if (!peer) return;
+
+    ipcSafe
+      .invoke('telegram-mtproto-get-forum-topics', { chatId: peer, limit: 100 })
+      .then((res) => {
+        if (!cancelled && res && Array.isArray(res.topics)) {
+          setTopics(res.topics);
+          setSelectedTopicId('');
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setTopics([]);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentDialog?.id, isConnected]);
+
   useEffect(() => {
     if (currentDialog && isConnected) {
-      loadMessagesForChat(currentDialog);
+      loadMessagesForChat(currentDialog, selectedTopicId);
     }
-  }, [currentDialog?.id, isConnected]);
+  }, [currentDialog?.id, selectedTopicId, isConnected]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages.length, currentChatKey]);
 
-  const loadMessagesForChat = async (dialog: TelegramMTProtoDialog) => {
+  const loadMessagesForChat = async (dialog: TelegramMTProtoDialog, topicIdStr = '') => {
     if (!isConnected) return;
     const peer = dialog.id || (dialog.username ? `@${dialog.username}` : '');
     if (!peer) return;
 
+    const key = `${dialog.id}_${topicIdStr || 'all'}`;
     setIsLoadingMessages(true);
     try {
       const res = await ipcSafe.invoke('telegram-mtproto-get-messages', {
         chatId: peer,
+        topicId: topicIdStr ? Number(topicIdStr) : undefined,
         limit: 50
       });
 
@@ -101,7 +136,7 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
       if (list) {
         setMessages((prev) => ({
           ...prev,
-          [dialog.id]: list
+          [key]: list
         }));
       }
     } catch (e: any) {
@@ -143,6 +178,7 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
     try {
       await ipcSafe.invoke('telegram-mtproto-send-post', {
         targetPeer,
+        topicId: selectedTopicId ? Number(selectedTopicId) : undefined,
         text: textToSend,
         mediaPath: mediaPath || undefined,
         silent: isSilent,
@@ -157,7 +193,8 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
         time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         isMe: true,
         mediaPath: mediaPath || undefined,
-        isPinned: isPin
+        isPinned: isPin,
+        topicId: selectedTopicId ? Number(selectedTopicId) : undefined
       };
 
       setMessages((prev) => ({
@@ -182,7 +219,20 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
         filters: [
           {
             name: 'Файлы',
-            extensions: ['jpg', 'jpeg', 'png', 'webp', 'mp4', 'mp3', 'wav', 'flac', 'ogg', 'txt', 'zip', 'rar']
+            extensions: [
+              'jpg',
+              'jpeg',
+              'png',
+              'webp',
+              'mp4',
+              'mp3',
+              'wav',
+              'flac',
+              'ogg',
+              'txt',
+              'zip',
+              'rar'
+            ]
           }
         ]
       });
@@ -268,7 +318,7 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
                     onSelectChat(d.id);
                   }}
                   className={`w-full p-3 text-left flex items-center gap-2.5 transition cursor-pointer ${
-                    isSelected ? 'bg-sky-600/15 border-l-2 border-sky-500' : 'hover:bg-neutral-850'
+                    isSelected ? 'bg-sky-600/15' : 'hover:bg-neutral-850'
                   }`}
                 >
                   <div
@@ -286,8 +336,8 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
                     <div className="flex items-center justify-between gap-1">
                       <span className="text-xs font-semibold text-white truncate">{d.title}</span>
                       {d.unreadCount > 0 && (
-                        <span className="px-1.5 py-0.2 bg-sky-600 text-[10px] text-white rounded-full font-bold">
-                          {d.unreadCount}
+                        <span className="text-[10px] text-sky-400 font-mono tabular-nums font-bold">
+                          +{d.unreadCount}
                         </span>
                       )}
                     </div>
@@ -305,7 +355,7 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col h-full overflow-hidden bg-neutral-950">
         {/* Chat Header */}
-        <div className="bg-neutral-900 border-b border-neutral-800 px-4 py-3 flex items-center justify-between flex-shrink-0">
+        <div className="bg-neutral-900 border-b border-neutral-800 px-4 py-3 flex items-center justify-between gap-3 flex-wrap flex-shrink-0">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-full bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 font-bold text-xs">
               {currentDialog ? (currentDialog.title || 'T').charAt(0) : 'TG'}
@@ -316,23 +366,40 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
               </h3>
               <p className="text-[11px] text-neutral-400">
                 {currentDialog?.username
-                  ? `@${currentDialog.username} • ID: ${currentDialog.id}`
+                  ? `@${currentDialog.username} · ID: ${currentDialog.id}`
                   : currentDialog?.id || 'Telegram MTProto'}
               </p>
             </div>
           </div>
 
-          {currentDialog && isConnected && (
-            <button
-              onClick={() => loadMessagesForChat(currentDialog)}
-              disabled={isLoadingMessages}
-              className="p-1.5 px-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white text-xs flex items-center gap-1.5 cursor-pointer"
-              title="Обновить историю сообщений"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMessages ? 'animate-spin' : ''}`} />
-              <span className="text-[11px]">Обновить</span>
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {topics.length > 0 && (
+              <select
+                value={selectedTopicId}
+                onChange={(e) => setSelectedTopicId(e.target.value)}
+                className="bg-neutral-950 border border-neutral-800 rounded-lg px-2.5 py-1.5 text-xs text-amber-300 outline-none focus:border-amber-500"
+              >
+                <option value="">Все темы ({topics.length})</option>
+                {topics.map((t) => (
+                  <option key={t.id} value={String(t.id)}>
+                    # {t.title}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {currentDialog && isConnected && (
+              <button
+                onClick={() => loadMessagesForChat(currentDialog, selectedTopicId)}
+                disabled={isLoadingMessages}
+                className="p-1.5 px-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 hover:text-white text-xs flex items-center gap-1.5 cursor-pointer"
+                title="Обновить историю сообщений"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMessages ? 'animate-spin' : ''}`} />
+                <span className="text-[11px]">Обновить</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Messages List */}
@@ -371,7 +438,7 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
                     </div>
                   )}
                   <div
-                    className={`text-[10px] text-right mt-1 ${
+                    className={`text-[10px] text-right mt-1 font-mono tabular-nums ${
                       m.isMe ? 'text-sky-200' : 'text-neutral-500'
                     }`}
                   >
@@ -442,7 +509,11 @@ export const TelegramMessengerTab: React.FC<TelegramMessengerTabProps> = ({
               type="text"
               value={inputMessage}
               onChange={(e) => setInputMessage(e.target.value)}
-              placeholder="Напишите сообщение в Telegram..."
+              placeholder={
+                selectedTopicId
+                  ? `Написать в тему #${selectedTopicId}...`
+                  : 'Напишите сообщение в Telegram...'
+              }
               className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-3.5 py-2 text-xs text-white focus:border-sky-500 outline-none"
             />
 

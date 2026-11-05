@@ -1,18 +1,28 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { toast } from "sonner";
-import { Episode, MixingManifest, MixingFileItem, PipelineStep, MixingModuleDef } from "../../types";
+import { MixingFileItem, PipelineStep } from "../../types";
 import { ipcSafe } from "../../lib/ipcSafe";
-import { resolveLocalPath } from "../../lib/webFileSystem";
+import {
+  UseMixingAudioPlayerParams,
+  SelectedMixingAudioTrack,
+  sanitizeTempPathHelper,
+  formatMediaUrlHelper,
+  resolveMediaUrlAsyncHelper,
+  loadSingleTrackAudioElement,
+  buildModuleMixAudioElements,
+  buildVideoErrorMessage
+} from "./mixingPlayerTrackLoaders.service";
 
-interface UseMixingAudioPlayerParams {
-  currentEpisode?: Episode | null;
-  workingDir: string;
-  customTargetDir: string;
-  manifest: MixingManifest | null;
-  setManifest: React.Dispatch<React.SetStateAction<MixingManifest | null>>;
-  moduleDatabase: MixingModuleDef[];
-  mixLog: (level: "info" | "warn" | "error" | "debug" | "success", tag: string, message: string, meta?: any, stepId?: string) => void;
-}
+export {
+  type UseMixingAudioPlayerParams,
+  type SelectedMixingAudioTrack,
+  sanitizeTempPathHelper,
+  formatMediaUrlHelper,
+  resolveMediaUrlAsyncHelper,
+  loadSingleTrackAudioElement,
+  buildModuleMixAudioElements,
+  buildVideoErrorMessage
+};
 
 export function useMixingAudioPlayer({
   currentEpisode,
@@ -32,16 +42,7 @@ export function useMixingAudioPlayer({
   const [videoViewMode, setVideoViewMode] = useState<'source' | 'final'>('source');
   const [videoPlaybackError, setVideoPlaybackError] = useState<string | null>(null);
   const [audioPlaybackError, setAudioPlaybackError] = useState<string | null>(null);
-  const [selectedAudioTrack, setSelectedAudioTrack] = useState<{
-    id: string;
-    name: string;
-    path: string;
-    label: string;
-    stepId?: string;
-    isModuleMix?: boolean;
-    isFinalVideo?: boolean;
-    mixFiles?: MixingFileItem[];
-  } | null>(null);
+  const [selectedAudioTrack, setSelectedAudioTrack] = useState<SelectedMixingAudioTrack | null>(null);
 
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
@@ -107,36 +108,16 @@ export function useMixingAudioPlayer({
   }, [stopAndClearModuleMix]);
 
   const sanitizeTempPath = useCallback((rawPath: string) => {
-    if (!rawPath) return '';
-    return rawPath.replace(/\.tmp_[0-9]+_[a-z0-9]+_/i, '');
+    return sanitizeTempPathHelper(rawPath);
   }, []);
 
-  // Format media file URL (video or audio) for HTML5 elements safely across Windows/macOS/Linux
   const formatMediaUrl = useCallback((filePath: string) => {
-    if (!filePath) return '';
-    if (filePath.startsWith('http://') || filePath.startsWith('https://') || filePath.startsWith('blob:') || filePath.startsWith('/api/media-file') || filePath.startsWith('custom-media://local/media?path=')) {
-      return filePath;
-    }
-    const cleanP = sanitizeTempPath(filePath.replace(/^file:\/\//, '').replace(/^custom-media:\/\//, ''));
-    if (window.electronAPI) {
-      return `custom-media://local/media?path=${encodeURIComponent(cleanP)}`;
-    }
-    return cleanP;
-  }, [sanitizeTempPath]);
+    return formatMediaUrlHelper(filePath);
+  }, []);
 
   const resolveMediaUrlAsync = useCallback(async (filePath: string): Promise<string> => {
-    if (!filePath) return '';
-    const cleaned = sanitizeTempPath(filePath);
-    if (window.electronAPI) return formatMediaUrl(cleaned);
-    const cleanName = cleaned.replace(/\\/g, '/').split('/').pop() || cleaned;
-    const cachedFile = (window as any).getFileFromCache?.(cleanName);
-    if (cachedFile) return URL.createObjectURL(cachedFile);
-    try {
-      const resolved = await resolveLocalPath(cleaned);
-      if (resolved) return resolved;
-    } catch (e) {}
-    return formatMediaUrl(cleaned);
-  }, [formatMediaUrl, sanitizeTempPath]);
+    return resolveMediaUrlAsyncHelper(filePath);
+  }, []);
 
   // Reset player state when episode changes
   useEffect(() => {
@@ -245,7 +226,6 @@ export function useMixingAudioPlayer({
     const err = videoEl.error;
     console.warn('[MixingPanel] Video element playback error:', err, 'src:', videoSrc);
 
-    // Fallback: If current mode was 'final' video and it failed, fall back to 'source' video
     const sourcePath = manifest?.sourceFiles?.video?.path || currentEpisode?.rawPath;
     if (videoViewMode === 'final' && sourcePath) {
       mixLog('warn', 'Видео', `Сбой открытия сведенного видео. Автопереключение на исходный видеоряд: ${sourcePath}`);
@@ -254,13 +234,7 @@ export function useMixingAudioPlayer({
       return;
     }
 
-    let errMsg = 'Формат или кодек видео недоступен для прямого воспроизведения в плеере';
-    if (err) {
-      if (err.code === 1) errMsg = 'Воспроизведение видео прервано пользователем';
-      if (err.code === 2) errMsg = 'Сбой сети при получении видеопотока';
-      if (err.code === 3) errMsg = 'Ошибка декодирования (несовместимый видеокодек HEVC или контейнер MKV)';
-      if (err.code === 4) errMsg = 'Контейнер/кодек видео не поддерживается HTML5-плеером (напр. MKV / AC3 / 10-bit H.264). Прослушивание аудиодорожек продолжает работать штатно!';
-    }
+    const errMsg = buildVideoErrorMessage(err);
     setVideoPlaybackError(errMsg);
     mixLog('warn', 'Видео', `Несовместимость видеоконтейнера: ${errMsg}`);
   };
@@ -289,55 +263,19 @@ export function useMixingAudioPlayer({
 
   // Helper: Load a URL into trackAudioRef, seek to targetTime when ready, and optionally start playing
   const loadSingleTrackAudio = useCallback((resolvedSrc: string, targetTime: number, autoPlay: boolean) => {
-    const audioEl = trackAudioRef.current;
-    if (!audioEl) return;
-
-    setAudioPlaybackError(null);
-    audioEl.pause();
-    audioEl.src = resolvedSrc;
-    audioEl.muted = isTrackMuted;
-    audioEl.volume = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
-
-    const onLoaded = () => {
-      audioEl.removeEventListener('loadedmetadata', onLoaded);
-      audioEl.removeEventListener('error', onError);
-      if (audioEl.duration && !isNaN(audioEl.duration) && isFinite(audioEl.duration)) {
-        setDuration(prev => (prev > 0 ? prev : audioEl.duration));
-      }
-      if (targetTime > 0) {
-        try {
-          audioEl.currentTime = Math.min(targetTime, audioEl.duration || targetTime);
-        } catch (_) {}
-      }
-      if (autoPlay) {
-        audioEl.play().catch(err => {
-          console.warn('[MixingPanel] Audio play warning:', err);
-        });
-        if (videoRef.current && !videoPlaybackError) {
-          try {
-            if (Math.abs(videoRef.current.currentTime - targetTime) > 0.3) {
-              videoRef.current.currentTime = targetTime;
-            }
-            videoRef.current.play().catch(() => {});
-          } catch (_) {}
-        }
-        setIsPlaying(true);
-      }
-    };
-
-    const onError = () => {
-      audioEl.removeEventListener('loadedmetadata', onLoaded);
-      audioEl.removeEventListener('error', onError);
-      const errCode = audioEl.error?.code;
-      const msg = `Не удалось загрузить аудиофайл (код ${errCode || 'неизвестен'})`;
-      console.warn('[MixingPanel] Track audio load error:', audioEl.error, 'src:', resolvedSrc);
-      setAudioPlaybackError(msg);
-      toast.error(msg);
-    };
-
-    audioEl.addEventListener('loadedmetadata', onLoaded);
-    audioEl.addEventListener('error', onError);
-    audioEl.load();
+    loadSingleTrackAudioElement({
+      audioEl: trackAudioRef.current,
+      resolvedSrc,
+      targetTime,
+      autoPlay,
+      isTrackMuted,
+      trackVolume,
+      videoRef,
+      videoPlaybackError,
+      setAudioPlaybackError,
+      setDuration,
+      setIsPlaying
+    });
   }, [isTrackMuted, trackVolume, videoPlaybackError]);
 
   // Switch player to Final Mixed Video mode ([СВЕДЕНО].mp4)
@@ -412,7 +350,6 @@ export function useMixingAudioPlayer({
     setVideoViewMode('source');
 
     if (!origPath) {
-      // Fallback: unmute source video audio element directly so user can hear original sound
       if (trackAudioRef.current) {
         trackAudioRef.current.pause();
         trackAudioRef.current.removeAttribute('src');
@@ -433,7 +370,6 @@ export function useMixingAudioPlayer({
       return;
     }
 
-    // Mute video element's own audio so it doesn't double-play with 00_original_audio.wav
     setIsVideoMuted(true);
     const resolvedSrc = await resolveMediaUrlAsync(origPath);
 
@@ -446,7 +382,7 @@ export function useMixingAudioPlayer({
 
     loadSingleTrackAudio(resolvedSrc, currentTimeRef.current, true);
     toast.info('Включена оригинальная звуковая дорожка серии', { duration: 2500 });
-  }, [manifest?.sourceFiles?.originalAudio?.path, currentEpisode, workingDir, customTargetDir, stopAndClearModuleMix, videoVolume, videoPlaybackError, resolveMediaUrlAsync, loadSingleTrackAudio]);
+  }, [manifest?.sourceFiles?.originalAudio?.path, currentEpisode, workingDir, customTargetDir, stopAndClearModuleMix, videoVolume, videoPlaybackError, resolveMediaUrlAsync, loadSingleTrackAudio, setManifest]);
 
   // Select an individual audio or video file for inspection in the player
   const selectTrackForInspection = useCallback(async (item: MixingFileItem, label: string, stepId?: string) => {
@@ -455,13 +391,11 @@ export function useMixingAudioPlayer({
     const cleanName = sanitizeTempPath(item.name || '');
     const cleanPath = sanitizeTempPath(item.path);
 
-    // If the user clicked a video file (e.g. output of 14_video_mux), switch to Final Video playback mode!
     if (/\.(mp4|mkv|mov|avi|webm)$/i.test(cleanName || cleanPath)) {
       await selectFinalVideoForPlayback({ ...item, name: cleanName, path: cleanPath }, label, stepId);
       return;
     }
 
-    // If user clicked the already-selected single track, toggle play/pause for convenience
     if (selectedAudioTrack && !selectedAudioTrack.isModuleMix && !selectedAudioTrack.isFinalVideo && selectedAudioTrack.id === item.path) {
       if (isPlaying) {
         if (videoRef.current) videoRef.current.pause();
@@ -481,12 +415,10 @@ export function useMixingAudioPlayer({
 
     stopAndClearModuleMix();
 
-    // Switch video display to raw source video so we don't play voices over the already-mixed final video
     if (videoViewMode === 'final') {
       setVideoViewMode('source');
     }
 
-    // If inspecting master_audio_mix or ducking output (which already contains background audio), mute raw video audio to prevent doubling
     const lowerName = cleanName.toLowerCase();
     if (lowerName.includes('master_audio_mix') || lowerName.includes('ducking') || lowerName.includes('original_audio')) {
       setIsVideoMuted(true);
@@ -516,7 +448,6 @@ export function useMixingAudioPlayer({
 
     const meta = moduleDatabase.find(m => m.id === step.moduleId);
 
-    // If this is the video_mux step or only outputs video files, play the final video!
     const videoOutputs = step.outputFiles.filter(f => /\.(mp4|mkv|mov|avi|webm)$/i.test(f.name || f.path));
     const audioOutputs = step.outputFiles.filter(f => !/\.(mp4|mkv|mov|avi|webm)$/i.test(f.name || f.path));
 
@@ -530,14 +461,12 @@ export function useMixingAudioPlayer({
       return;
     }
 
-    // Stop single track audio
     if (trackAudioRef.current) {
       trackAudioRef.current.pause();
       trackAudioRef.current.removeAttribute('src');
       try { trackAudioRef.current.load(); } catch (_) {}
     }
 
-    // Clear previous mix elements
     stopAndClearModuleMix();
     setAudioPlaybackError(null);
 
@@ -546,60 +475,18 @@ export function useMixingAudioPlayer({
     }
 
     const targetTime = currentTimeRef.current;
-    const baseVol = isTrackMuted ? 0 : Math.min(1, Math.max(0, trackVolume));
-    const audioElements: HTMLAudioElement[] = [];
-
-    for (let i = 0; i < audioOutputs.length; i++) {
-      const file = audioOutputs[i];
-      const cleanPath = sanitizeTempPath(file.path);
-      const resolvedSrc = await resolveMediaUrlAsync(cleanPath);
-
-      const audio = new Audio();
-      audio.preload = 'auto';
-      audio.src = resolvedSrc;
-
-      // Apply per-dubber role volume if configured
-      let rolePct = 100;
-      if (file.dubberNick && rolesVolumeMap[file.dubberNick] !== undefined) {
-        rolePct = Number(rolesVolumeMap[file.dubberNick]) || 100;
-      }
-      const roleFactor = Math.max(0, Math.min(2, rolePct / 100));
-      (audio as any)._roleVolumeFactor = roleFactor;
-      audio.muted = isTrackMuted;
-      audio.volume = Math.min(1, Math.max(0, baseVol * roleFactor));
-
-      audio.onloadedmetadata = () => {
-        if (i === 0 && audio.duration && !isNaN(audio.duration) && isFinite(audio.duration)) {
-          setDuration(prev => (prev > 0 ? prev : audio.duration));
-        }
-        if (targetTime > 0) {
-          try {
-            audio.currentTime = Math.min(targetTime, audio.duration || targetTime);
-          } catch (_) {}
-        }
-      };
-
-      // First mix track drives clock if video is unavailable or has error
-      if (i === 0) {
-        audio.ontimeupdate = () => {
-          const vid = videoRef.current;
-          const videoDriving = vid && !vid.paused && !videoPlaybackError && vid.readyState >= 2;
-          if (!videoDriving) {
-            setCurrentTime(audio.currentTime);
-          }
-        };
-        audio.onended = () => {
-          const vid = videoRef.current;
-          const videoDriving = vid && !vid.paused && !videoPlaybackError;
-          if (!videoDriving) {
-            setIsPlaying(false);
-          }
-        };
-      }
-
-      audio.load();
-      audioElements.push(audio);
-    }
+    const audioElements = await buildModuleMixAudioElements({
+      audioOutputs,
+      targetTime,
+      isTrackMuted,
+      trackVolume,
+      rolesVolumeMap,
+      videoRef,
+      videoPlaybackError,
+      setDuration,
+      setCurrentTime,
+      setIsPlaying
+    });
 
     mixAudioElementsRef.current = audioElements;
 
@@ -614,7 +501,6 @@ export function useMixingAudioPlayer({
       mixFiles: audioOutputs
     });
 
-    // Start playing all mix tracks + video synchronously
     setTimeout(() => {
       if (videoRef.current && !videoPlaybackError) {
         try {
@@ -634,7 +520,7 @@ export function useMixingAudioPlayer({
     }, 60);
 
     toast.success(`В плеере включен совместный микс всех ${audioOutputs.length} дорожек модуля!`, { duration: 3000 });
-  }, [moduleDatabase, selectFinalVideoForPlayback, selectTrackForInspection, stopAndClearModuleMix, videoViewMode, isTrackMuted, trackVolume, sanitizeTempPath, resolveMediaUrlAsync, rolesVolumeMap, videoPlaybackError]);
+  }, [moduleDatabase, selectFinalVideoForPlayback, selectTrackForInspection, stopAndClearModuleMix, videoViewMode, isTrackMuted, trackVolume, rolesVolumeMap, videoPlaybackError]);
 
   // Handle Play / Pause synchronization
   const togglePlay = useCallback(() => {
@@ -724,7 +610,6 @@ export function useMixingAudioPlayer({
       return;
     }
 
-    // Keep trackAudio in tight sync with video
     if (trackAudioRef.current && !trackAudioRef.current.paused && trackAudioRef.current.readyState >= 2) {
       const diff = Math.abs(trackAudioRef.current.currentTime - vTime);
       if (diff > 0.2) {
@@ -732,7 +617,6 @@ export function useMixingAudioPlayer({
       }
     }
 
-    // Keep module mix audio elements in tight sync with video
     if (mixAudioElementsRef.current.length > 0) {
       mixAudioElementsRef.current.forEach(a => {
         if (!a.paused && a.readyState >= 2) {
