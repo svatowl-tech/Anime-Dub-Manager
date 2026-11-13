@@ -241,7 +241,7 @@ export const MixingPipelineView: React.FC<MixingPipelineViewProps> = ({
           <div className="space-y-3">
             {steps.map((step, idx) => {
               const meta = getModuleMeta(step.moduleId);
-              const isProcessing = activeProcessingStepId === step.stepId || activeProcessingStepId === 'all';
+              const isProcessing = activeProcessingStepId === step.stepId;
               const isExpanded = !!expandedSettings[step.stepId];
               const isTracksExpanded = !!expandedTracks[step.stepId];
               const progress = stepProgress[step.stepId] || 0;

@@ -3733,7 +3733,9 @@ class MixingPipelineService {
    */
   _resolveSourceTracksForSeExport(manifest, sourceStepId = 'latest') {
     const pipeline = Array.isArray(manifest?.pipeline) ? manifest.pipeline : [];
+    const workingDir = manifest?.workingDir || '';
     const audioExtRegex = /\.(wav|flac|mp3|ogg|m4a|aac)$/i;
+    const busFileRegex = /(?:voices_master|glued_voices|ducked_mix|master_mix|final_mix|original_vocals|original_instrumental|00_original_audio|source_original_audio)/i;
 
     let selectedStep = null;
     let sourceTracks = [];
@@ -3745,12 +3747,57 @@ class MixingPipelineService {
       return modDef?.title || s.title || s.moduleId || s.stepId;
     };
 
+    // Helper to get valid audio files for a pipeline step (checking manifest.outputFiles and step folder on disk)
+    const getValidStepAudioFiles = (s, excludeBusFiles = false) => {
+      if (!s) return [];
+      let files = [];
+      if (Array.isArray(s.outputFiles) && s.outputFiles.length > 0) {
+        files = s.outputFiles.filter((f) => {
+          if (!f?.path || !audioExtRegex.test(f.name || f.path)) return false;
+          if (fsSync.existsSync(f.path)) return true;
+          // Try resolving relative to workingDir if moved
+          if (workingDir && f.name) {
+            const altPath = path.join(workingDir, f.name);
+            if (fsSync.existsSync(altPath)) {
+              f.path = altPath;
+              return true;
+            }
+          }
+          return false;
+        });
+      }
+
+      // Fallback: scan step directory on disk if outputFiles was empty or not synced
+      if (files.length === 0 && workingDir && fsSync.existsSync(workingDir) && s.prefix) {
+        try {
+          const entries = fsSync.readdirSync(workingDir, { withFileTypes: true });
+          const stepFolder = entries.find(
+            (e) => e.isDirectory() && (e.name === `${s.prefix}_${s.moduleId}` || e.name.startsWith(`${s.prefix}_`))
+          );
+          if (stepFolder) {
+            const stepDirPath = path.join(workingDir, stepFolder.name);
+            const diskFiles = fsSync.readdirSync(stepDirPath);
+            files = diskFiles
+              .filter((fn) => audioExtRegex.test(fn) && !fn.startsWith('temp_'))
+              .map((fn) => ({
+                name: fn,
+                path: path.join(stepDirPath, fn)
+              }));
+          }
+        } catch (_) {}
+      }
+
+      if (excludeBusFiles) {
+        const nonBus = files.filter((f) => !busFileRegex.test(f.name || path.basename(f.path || '')));
+        return nonBus;
+      }
+      return files;
+    };
+
     if (sourceStepId && sourceStepId !== 'latest' && sourceStepId !== 'source') {
       const found = pipeline.find((s) => s.stepId === sourceStepId || s.id === sourceStepId);
-      if (found && Array.isArray(found.outputFiles) && found.outputFiles.length > 0) {
-        const validOutputs = found.outputFiles.filter(
-          (f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path)
-        );
+      if (found) {
+        const validOutputs = getValidStepAudioFiles(found, false);
         if (validOutputs.length > 0) {
           selectedStep = found;
           sourceTracks = validOutputs;
@@ -3758,43 +3805,93 @@ class MixingPipelineService {
         }
       }
     } else if (sourceStepId !== 'source') {
-      const latestVoiceStep = this._findLatestCompletedVoiceStep(manifest);
-      let latestAudioStep = null;
+      // 1. Prefer the latest completed per-dubber voice processing step (before glue_compress / bus mix)
+      const nonDubberModules = new Set([
+        'video_mux',
+        'stem_separation',
+        'ducking',
+        'master_audio_mix',
+        'glue_compress'
+      ]);
+
+      const glueIdx = pipeline.findIndex((s) => s && s.enabled !== false && s.moduleId === 'glue_compress' && s.status === 'completed');
+
       for (let i = pipeline.length - 1; i >= 0; i--) {
         const s = pipeline[i];
-        if (s.enabled === false) continue;
-        if (s.moduleId === 'video_mux' || s.moduleId === 'stem_separation') continue;
-        if (Array.isArray(s.outputFiles) && s.outputFiles.length > 0) {
-          const validOutputs = s.outputFiles.filter(
-            (f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path)
-          );
-          if (validOutputs.length > 0) {
-            latestAudioStep = { step: s, files: validOutputs };
-            break;
+        if (!s || s.enabled === false) continue;
+        if (nonDubberModules.has(s.moduleId)) continue;
+        // Skip post-glue steps that only processed the single merged voices_master.wav bus
+        if (glueIdx !== -1 && i > glueIdx) {
+          const perDubberCheck = getValidStepAudioFiles(s, true);
+          if (perDubberCheck.length <= 1) continue;
+        }
+        const validOutputs = getValidStepAudioFiles(s, true);
+        if (validOutputs.length > 0) {
+          selectedStep = s;
+          sourceTracks = validOutputs;
+          sourceStepTitle = resolveStepTitle(s);
+          break;
+        }
+      }
+
+      // 2. Fallback: any completed voice/audio step (unwrap .step if using _findLatestCompletedVoiceStep)
+      if (sourceTracks.length === 0) {
+        const latestVoiceWrapper = this._findLatestCompletedVoiceStep(manifest);
+        const unwrappedStep = latestVoiceWrapper?.step || latestVoiceWrapper;
+        const rawVoiceOutputs = latestVoiceWrapper?.outputFiles || unwrappedStep?.outputFiles || [];
+        const validVoiceOutputs = Array.isArray(rawVoiceOutputs)
+          ? rawVoiceOutputs.filter((f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path))
+          : [];
+        if (unwrappedStep && validVoiceOutputs.length > 0) {
+          selectedStep = unwrappedStep;
+          sourceTracks = validVoiceOutputs;
+          sourceStepTitle = resolveStepTitle(unwrappedStep);
+        } else {
+          for (let i = pipeline.length - 1; i >= 0; i--) {
+            const s = pipeline[i];
+            if (!s || s.enabled === false) continue;
+            if (s.moduleId === 'video_mux' || s.moduleId === 'stem_separation') continue;
+            const validOutputs = getValidStepAudioFiles(s, false);
+            if (validOutputs.length > 0) {
+              selectedStep = s;
+              sourceTracks = validOutputs;
+              sourceStepTitle = resolveStepTitle(s);
+              break;
+            }
           }
         }
       }
-
-      if (latestVoiceStep && Array.isArray(latestVoiceStep.outputFiles) && latestVoiceStep.outputFiles.length > 0) {
-        const validVoiceOutputs = latestVoiceStep.outputFiles.filter(
-          (f) => f?.path && fsSync.existsSync(f.path) && audioExtRegex.test(f.name || f.path)
-        );
-        if (validVoiceOutputs.length > 0) {
-          selectedStep = latestVoiceStep;
-          sourceTracks = validVoiceOutputs;
-          sourceStepTitle = resolveStepTitle(latestVoiceStep);
-        }
-      } else if (latestAudioStep) {
-        selectedStep = latestAudioStep.step;
-        sourceTracks = latestAudioStep.files;
-        sourceStepTitle = resolveStepTitle(latestAudioStep.step);
-      }
     }
 
+    // 3. Fallback to source dubber tracks (00_исходные / workingDir)
     if (sourceTracks.length === 0) {
-      const dubberTracks = Array.isArray(manifest?.sourceFiles?.dubberTracks)
+      let dubberTracks = Array.isArray(manifest?.sourceFiles?.dubberTracks)
         ? manifest.sourceFiles.dubberTracks.filter((f) => f?.path && fsSync.existsSync(f.path))
         : [];
+
+      if (dubberTracks.length === 0 && workingDir && fsSync.existsSync(workingDir)) {
+        const rawDir = path.join(workingDir, '00_исходные');
+        const dirsToScan = [rawDir, workingDir].filter((d) => fsSync.existsSync(d));
+        const seenNames = new Set();
+        for (const d of dirsToScan) {
+          try {
+            const files = fsSync.readdirSync(d);
+            for (const fn of files) {
+              if (!audioExtRegex.test(fn)) continue;
+              if (busFileRegex.test(fn) || fn.startsWith('temp_') || fn.includes('slice')) continue;
+              const lower = fn.toLowerCase();
+              if (seenNames.has(lower)) continue;
+              seenNames.add(lower);
+              dubberTracks.push({
+                name: fn,
+                path: path.join(d, fn)
+              });
+            }
+            if (dubberTracks.length > 0) break;
+          } catch (_) {}
+        }
+      }
+
       sourceTracks = dubberTracks;
       selectedStep = null;
       sourceStepTitle = 'Исходные дорожки даберов (без обработки модулями)';
@@ -4016,19 +4113,23 @@ class MixingPipelineService {
       try {
         const { exportFullAssWithRoles } = require('./subtitleService.cjs');
         let characterAliases = {};
-        if (projectsData && Array.isArray(projectsData.projects)) {
-          const parentProj = projectsData.projects.find(
-            (p) => Array.isArray(p.episodes) && p.episodes.some((e) => e.id === episode?.id)
-          );
-          if (parentProj && parentProj.characterAliases) {
-            characterAliases = parentProj.characterAliases;
-          }
+        const projList = Array.isArray(projectsData)
+          ? projectsData
+          : (Array.isArray(projectsData?.projects) ? projectsData.projects : []);
+        const parentProj = projList.find(
+          (p) => p.id === episode?.projectId || (Array.isArray(p.episodes) && p.episodes.some((e) => e.id === episode?.id))
+        ) || episode?.project;
+        if (parentProj && parentProj.characterAliases) {
+          characterAliases = parentProj.characterAliases;
         }
+        const partList = Array.isArray(participantsData)
+          ? participantsData
+          : (Array.isArray(participantsData?.participants) ? participantsData.participants : []);
         await exportFullAssWithRoles(
           subSource,
           exportedSubPath,
-          episode?.assignments || {},
-          participantsData || { participants: [] },
+          Array.isArray(episode?.assignments) ? episode.assignments : [],
+          partList,
           characterAliases
         );
       } catch (subErr) {
@@ -4099,7 +4200,7 @@ class MixingPipelineService {
       exportLogLines.push(`[АУДИО FLAC] ${rawName}  -->  ${outFlacName}`);
     }
 
-    // 3. Export Video (with burned-in general subtitles or direct copy)
+    // 3. Export Video (ONLY with burned-in sign/inscription subtitles, never all dialogue subtitles!)
     if (videoSource && fsSync.existsSync(videoSource)) {
       const vidExt = path.extname(videoSource) || '.mp4';
       if (skipConversion) {
@@ -4112,66 +4213,113 @@ class MixingPipelineService {
         exportedFiles.push({ type: 'video', name: path.basename(outVideoCopy), path: outVideoCopy });
         exportLogLines.push(`[ВИДЕО ОРИГИНАЛ] ${path.basename(outVideoCopy)}`);
       } else {
-        const outHardsubVideo = path.join(exportDir, `${baseVideoName}_[с субтитрами].mp4`);
-        const subForBurn = exportedSubPath && fsSync.existsSync(exportedSubPath)
-          ? exportedSubPath
-          : (subSource && fsSync.existsSync(subSource) ? subSource : null);
-
         const ffmpegService = require('./ffmpegService.cjs');
-        if (subForBurn) {
-          logFn(`Вшивание общих субтитров в видео (хардсаб): ${path.basename(outHardsubVideo)}`);
-          if (onProgress) {
-            onProgress({ percent: 70, message: 'Вшивание субтитров в видео для звукорежиссера...' });
-          }
+        const { extractSignsAss } = require('./subtitleService.cjs');
+
+        let hasSigns = false;
+        let signsAssPath = null;
+        if (subSource && fsSync.existsSync(subSource)) {
+          signsAssPath = path.join(exportDir, `temp_signs_mixing_${Date.now()}.ass`);
+          const projList = Array.isArray(projectsData)
+            ? projectsData
+            : (Array.isArray(projectsData?.projects) ? projectsData.projects : []);
+          const parentProj = projList.find(
+            (p) => p.id === episode?.projectId || (Array.isArray(p.episodes) && p.episodes.some((e) => e.id === episode?.id))
+          ) || episode?.project;
           try {
-            await ffmpegService.bakeSubtitles(
-              videoSource,
-              subForBurn,
-              outHardsubVideo,
-              (p) => {
-                if (onProgress) {
-                  const pct = typeof p === 'number' ? p : (p?.percent || 0);
-                  onProgress({
-                    percent: Math.min(98, 70 + Math.round((pct / 100) * 28)),
-                    message: `Вшивание субтитров в видео: ${Math.round(pct)}%`
-                  });
-                }
-              },
-              (cmdLine) => logFn(`FFmpeg Hardsub: ${cmdLine}`),
-              { additionalProcessing: !!additionalProcessing, config: config || {} }
-            );
-          } catch (vidErr) {
-            logFn(`Предупреждение при вшивании субтитров в видео (${vidErr.message}), копируем исходное видео.`, 'warn');
-            await fs.copyFile(videoSource, outHardsubVideo);
-          }
-        } else {
-          logFn(`Файл субтитров отсутствует, конвертация видео в MP4: ${path.basename(outHardsubVideo)}`);
-          if (onProgress) {
-            onProgress({ percent: 70, message: 'Конвертация видео в MP4...' });
-          }
-          try {
-            await ffmpegService.transcodeToMp4(
-              videoSource,
-              outHardsubVideo,
-              (p) => {
-                if (onProgress) {
-                  const pct = typeof p === 'number' ? p : (p?.percent || 0);
-                  onProgress({
-                    percent: Math.min(98, 70 + Math.round((pct / 100) * 28)),
-                    message: `Конвертация видео: ${Math.round(pct)}%`
-                  });
-                }
-              },
-              (cmdLine) => logFn(`FFmpeg Video: ${cmdLine}`),
-              { additionalProcessing: !!additionalProcessing, config: config || {} }
-            );
-          } catch (vidErr) {
-            logFn(`Предупреждение при конвертации видео (${vidErr.message}), копируем исходное видео.`, 'warn');
-            await fs.copyFile(videoSource, outHardsubVideo);
+            hasSigns = await extractSignsAss(subSource, signsAssPath, {
+              assignments: Array.isArray(episode?.assignments) ? episode.assignments : [],
+              characterAliases: parentProj?.characterAliases || null
+            });
+          } catch (signErr) {
+            logFn(`Предупреждение при извлечении надписей из субтитров: ${signErr.message}`, 'warn');
+            hasSigns = false;
           }
         }
-        exportedFiles.push({ type: 'video', name: path.basename(outHardsubVideo), path: outHardsubVideo });
-        exportLogLines.push(`[ВИДЕО С СУБТИТРАМИ] ${path.basename(outHardsubVideo)}`);
+
+        const suffix = hasSigns ? '_[с надписями]' : (additionalProcessing ? '_[обработка]' : '[копия]');
+        const outTargetExt = (hasSigns || additionalProcessing) ? '.mp4' : vidExt;
+        const outProcessedVideo = path.join(exportDir, `${baseVideoName}${suffix}${outTargetExt}`);
+
+        try {
+          if (hasSigns && signsAssPath) {
+            logFn(`Вшивание надписей в видео: ${path.basename(outProcessedVideo)}`);
+            if (onProgress) {
+              onProgress({ percent: 70, message: 'Вшивание надписей в видео для звукорежиссера...' });
+            }
+            try {
+              await ffmpegService.bakeSubtitles(
+                videoSource,
+                signsAssPath,
+                outProcessedVideo,
+                (p) => {
+                  if (onProgress) {
+                    const pct = typeof p === 'number' ? p : (p?.percent || 0);
+                    onProgress({
+                      percent: Math.min(98, 70 + Math.round((pct / 100) * 28)),
+                      message: `Вшивание надписей в видео: ${Math.round(pct)}%`
+                    });
+                  }
+                },
+                (cmdLine) => logFn(`FFmpeg Signs: ${cmdLine}`),
+                {
+                  useNvenc: config?.useNvenc,
+                  gpuIndex: config?.gpuIndex,
+                  crf: 18,
+                  additionalProcessing: !!additionalProcessing,
+                  config: config || {}
+                }
+              );
+            } catch (vidErr) {
+              logFn(`Предупреждение при вшивании надписей в видео (${vidErr.message}), копируем исходное видео.`, 'warn');
+              await fs.copyFile(videoSource, outProcessedVideo);
+            }
+          } else if (additionalProcessing) {
+            logFn(`Надписей нет, транскодирование видео с доп. обработкой: ${path.basename(outProcessedVideo)}`);
+            if (onProgress) {
+              onProgress({ percent: 70, message: 'Транскодирование видео в MP4...' });
+            }
+            try {
+              await ffmpegService.transcodeToMp4(
+                videoSource,
+                outProcessedVideo,
+                (p) => {
+                  if (onProgress) {
+                    const pct = typeof p === 'number' ? p : (p?.percent || 0);
+                    onProgress({
+                      percent: Math.min(98, 70 + Math.round((pct / 100) * 28)),
+                      message: `Конвертация видео: ${Math.round(pct)}%`
+                    });
+                  }
+                },
+                (cmdLine) => logFn(`FFmpeg Video: ${cmdLine}`),
+                {
+                  useNvenc: config?.useNvenc,
+                  gpuIndex: config?.gpuIndex,
+                  crf: 18,
+                  additionalProcessing: true,
+                  config: config || {}
+                }
+              );
+            } catch (vidErr) {
+              logFn(`Предупреждение при конвертации видео (${vidErr.message}), копируем исходное видео.`, 'warn');
+              await fs.copyFile(videoSource, outProcessedVideo);
+            }
+          } else {
+            logFn(`Надписей в субтитрах не обнаружено, прямое копирование видео: ${path.basename(outProcessedVideo)}`);
+            if (onProgress) {
+              onProgress({ percent: 75, message: 'Копирование видеофайла (надписей нет)...' });
+            }
+            await fs.copyFile(videoSource, outProcessedVideo);
+          }
+        } finally {
+          if (signsAssPath) {
+            await fs.unlink(signsAssPath).catch(() => {});
+          }
+        }
+
+        exportedFiles.push({ type: 'video', name: path.basename(outProcessedVideo), path: outProcessedVideo });
+        exportLogLines.push(`[ВИДЕО] ${path.basename(outProcessedVideo)}`);
       }
     }
 
@@ -8414,10 +8562,18 @@ class MixingPipelineService {
 
       logFn(`--- Запуск этапа ${i + 1}/${enabledSteps.length}: ${step.moduleId} ---`);
       if (onProgress) {
-        onProgress({ percent: stepPctStart, message: `Шаг ${i+1}/${enabledSteps.length}: ${step.moduleId}...` });
+        onProgress({
+          stepId: step.stepId,
+          stepPercent: 5,
+          percent: stepPctStart,
+          stepStatus: 'running',
+          stepIndex: i + 1,
+          totalSteps: enabledSteps.length,
+          message: `Шаг ${i + 1}/${enabledSteps.length}: ${step.moduleId}...`
+        });
       }
 
-      await this.runStep({
+      const stepRes = await this.runStep({
         episode,
         targetDir: workingDir,
         baseDir,
@@ -8426,15 +8582,37 @@ class MixingPipelineService {
         onProgress: (p) => {
           if (onProgress && p && typeof p.percent === 'number') {
             const overall = stepPctStart + Math.round((p.percent / 100) * (stepPctEnd - stepPctStart));
-            onProgress({ percent: overall, message: p.message });
+            const stepPct = Math.max(5, Math.min(99, Math.round(p.percent)));
+            onProgress({
+              stepId: step.stepId,
+              stepPercent: stepPct,
+              percent: overall,
+              stepStatus: 'running',
+              stepIndex: i + 1,
+              totalSteps: enabledSteps.length,
+              message: p.message
+            });
           }
         },
         onLog
       });
+
+      if (onProgress) {
+        onProgress({
+          stepId: step.stepId,
+          stepPercent: 100,
+          percent: stepPctEnd,
+          stepStatus: 'completed',
+          outputFiles: stepRes?.outputFiles,
+          stepIndex: i + 1,
+          totalSteps: enabledSteps.length,
+          message: `Шаг ${i + 1}/${enabledSteps.length}: ${step.moduleId} завершен`
+        });
+      }
     }
 
     const totalSec = ((Date.now() - startTime) / 1000).toFixed(2);
-    if (onProgress) onProgress({ percent: 100, message: 'Все модули конвейера успешно выполнены!' });
+    if (onProgress) onProgress({ percent: 100, stepStatus: 'all_completed', message: 'Все модули конвейера успешно выполнены!' });
     logFn(`🎉 Полный конвейер сведения успешно завершен за ${totalSec}s!`);
     logFn(`=======================================================`);
 

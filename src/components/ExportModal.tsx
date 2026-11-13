@@ -29,6 +29,9 @@ interface ExportModalProps {
   onClose: () => void;
   episode: Episode;
   role: 'DABBER' | 'SOUND_ENGINEER';
+  exportSource?: 'qa' | 'timing';
+  timingTracks?: any[];
+  timingAudioClips?: Record<string, any[]>;
   onExport: (
     targetDir: string, 
     skipConversion: boolean, 
@@ -64,6 +67,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   onClose, 
   episode, 
   role, 
+  exportSource = 'qa',
+  timingTracks,
+  timingAudioClips,
   onExport,
   isExporting = false,
   progress = 0
@@ -124,6 +130,82 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   useEffect(() => {
     if (isOpen && episode && role === 'SOUND_ENGINEER' && !isWeb) {
+      if (exportSource === 'timing' && Array.isArray(timingTracks) && timingTracks.length > 0) {
+        const projectTitle = sanitizeFolderName(episode.project?.title || 'Project');
+        const baseVideoName = `${projectTitle}_${episode.number || 1}`;
+        const getCleanNick = (rawNick: string) => {
+          if (!rawNick) return 'Даббер';
+          const clean = String(rawNick)
+            .replace(/\[.*\]/g, '')
+            .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
+            .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
+            .trim();
+          return clean || 'Даббер';
+        };
+        const isFixTr = (t: any) =>
+          t.role === 'fix' ||
+          t.isFix === true ||
+          t.type === 'FIXES' ||
+          (t.id && (String(t.id).startsWith('fix_') || String(t.id).endsWith('_fix') || String(t.id).includes('_fix_'))) ||
+          String(t.participant || '').toLowerCase().includes('фикс') ||
+          /(?:_fix|фикс|\[fix\]|\[фикс\])/i.test(t.filePath || '');
+
+        const byActor = new Map<string, any[]>();
+        for (const tr of timingTracks) {
+          const rawNick = tr.dubberName || tr.participant || 'Даббер';
+          const cleanNick = getCleanNick(rawNick);
+          if (!byActor.has(cleanNick)) byActor.set(cleanNick, []);
+          byActor.get(cleanNick)!.push(tr);
+        }
+
+        const timedCatalog: SoundEngineerCatalogTrack[] = [];
+        for (const [cleanNick, actorTrs] of byActor.entries()) {
+          const mainTrs = actorTrs.filter(t => !isFixTr(t));
+          const effectiveMainTrs = mainTrs.length > 0 ? mainTrs : (actorTrs.length > 0 ? [actorTrs[0]] : []);
+          const isMultiTrack = effectiveMainTrs.length > 1;
+
+          effectiveMainTrs.forEach((tr, idx) => {
+            const trackNum = idx + 1;
+            const clips = (timingAudioClips && timingAudioClips[tr.id]) ? timingAudioClips[tr.id].filter((c: any) => !c.isDeleted) : [];
+            const maxEndSec = clips.reduce((max: number, c: any) => {
+              const end = (c.clipStartSec || 0) + (c.offsetSec || 0) + (c.durationSec || 0);
+              return end > max ? end : max;
+            }, 0);
+            const exportFileName = isMultiTrack
+              ? `${baseVideoName}_[${cleanNick}]_дорожка${trackNum}.wav`
+              : `${baseVideoName}_[${cleanNick}].wav`;
+
+            timedCatalog.push({
+              id: String(tr.id),
+              dubberId: String(tr.id),
+              dubberNick: cleanNick,
+              roleLabel: isMultiTrack
+                ? `Оттаймленная дорожка ${trackNum} (с вшитыми фиксами)`
+                : 'Чистая оттаймленная дорожка (с вшитыми фиксами)',
+              trackKind: 'original',
+              trackNumber: trackNum,
+              totalOriginalForDubber: effectiveMainTrs.length,
+              totalFixesForDubber: 0,
+              fileName: tr.filePath ? String(tr.filePath).split(/[/\\]/).pop() || exportFileName : exportFileName,
+              exportFileName,
+              path: tr.filePath || exportFileName,
+              sizeBytes: 0,
+              durationSec: maxEndSec,
+              exists: true,
+              recommendedSelected: true
+            });
+          });
+        }
+
+        setCatalogTracks(timedCatalog);
+        setSelectedTrackIds(new Set(timedCatalog.map(t => String(t.id))));
+        setSmartExport(false);
+        setAutoApplyFixes(false);
+        setSnippetFixInfo({ hasSnippetFixes: false, count: 0, loading: false });
+        setIsLoadingTracks(false);
+        return;
+      }
+
       setIsLoadingTracks(true);
       ipcSafe.invoke('inspect-sound-engineer-tracks', { episode })
         .then((res: any) => {
@@ -164,7 +246,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       setCatalogTracks([]);
       setSelectedTrackIds(new Set());
     }
-  }, [isOpen, episode, role]);
+  }, [isOpen, episode, role, exportSource, timingTracks, timingAudioClips]);
 
   useEffect(() => {
     if (isOpen && episode) {
@@ -465,78 +547,86 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
               {role === 'SOUND_ENGINEER' && (
                 <>
-                  <div>
-                    <label className="flex items-center gap-3 cursor-pointer group">
-                      <div className="relative flex items-center">
-                        <input
-                          type="checkbox"
-                          checked={smartExport}
-                          onChange={(e) => handleToggleSmartExport(e.target.checked)}
-                          disabled={isExporting}
-                          className="peer sr-only"
-                        />
-                        <div className="w-5 h-5 border-2 border-neutral-700 rounded bg-neutral-950 peer-checked:bg-purple-600 peer-checked:border-purple-600 transition-all duration-200 group-hover:border-neutral-500" />
-                        <svg
-                          className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth="3"
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                        </svg>
+                  {exportSource === 'timing' ? (
+                    <div className="p-3 bg-emerald-950/25 border border-emerald-800/40 rounded-xl text-xs text-emerald-200 leading-relaxed">
+                      <strong>Экспорт из Тайминга:</strong> будут отрендерены и выгружены <strong>чистые, оттаймленные мастер-дорожки со вшитыми фиксами</strong> (готовые перед сведением), общие субтитры с ролями дабберов и видео только со вшитыми надписями.
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="flex items-center gap-3 cursor-pointer group">
+                          <div className="relative flex items-center">
+                            <input
+                              type="checkbox"
+                              checked={smartExport}
+                              onChange={(e) => handleToggleSmartExport(e.target.checked)}
+                              disabled={isExporting}
+                              className="peer sr-only"
+                            />
+                            <div className="w-5 h-5 border-2 border-neutral-700 rounded bg-neutral-950 peer-checked:bg-purple-600 peer-checked:border-purple-600 transition-all duration-200 group-hover:border-neutral-500" />
+                            <svg
+                              className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                              strokeWidth="3"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                          </div>
+                          <span className="text-sm text-neutral-300 group-hover:text-white transition-colors">
+                            Умная фильтрация полных фиксов (только для одиночных дорожек)
+                          </span>
+                        </label>
+                        <p className="text-[10px] text-neutral-500 mt-1 ml-8">
+                          Автоматически обновляет галочки в списке выше: если у даббера ровно 1 дорожка и полный фикс того же размера, снимает галочку со старого оригинала. Все мульти-дорожки (Дорожка 1, Дорожка 2) всегда остаются включены.
+                        </p>
                       </div>
-                      <span className="text-sm text-neutral-300 group-hover:text-white transition-colors">
-                        Умная фильтрация полных фиксов (только для одиночных дорожек)
-                      </span>
-                    </label>
-                    <p className="text-[10px] text-neutral-500 mt-1 ml-8">
-                      Автоматически обновляет галочки в списке выше: если у даббера ровно 1 дорожка и полный фикс того же размера, снимает галочку со старого оригинала. Все мульти-дорожки (Дорожка 1, Дорожка 2) всегда остаются включены.
-                    </p>
-                  </div>
 
-                  <div>
-                    <label className={`flex items-center gap-3 ${snippetFixInfo.hasSnippetFixes && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
-                      <div className="relative flex items-center">
-                        <input
-                          type="checkbox"
-                          checked={autoApplyFixes}
-                          onChange={(e) => setAutoApplyFixes(e.target.checked)}
-                          disabled={isExporting || !snippetFixInfo.hasSnippetFixes}
-                          className="peer sr-only"
-                        />
-                        <div className={`w-5 h-5 border-2 rounded bg-neutral-950 transition-all duration-200 ${snippetFixInfo.hasSnippetFixes ? 'border-neutral-700 peer-checked:bg-emerald-600 peer-checked:border-emerald-600 group-hover:border-neutral-500' : 'border-neutral-800'}`} />
-                        <svg
-                          className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth="3"
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                        </svg>
+                      <div>
+                        <label className={`flex items-center gap-3 ${snippetFixInfo.hasSnippetFixes && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
+                          <div className="relative flex items-center">
+                            <input
+                              type="checkbox"
+                              checked={autoApplyFixes}
+                              onChange={(e) => setAutoApplyFixes(e.target.checked)}
+                              disabled={isExporting || !snippetFixInfo.hasSnippetFixes}
+                              className="peer sr-only"
+                            />
+                            <div className={`w-5 h-5 border-2 rounded bg-neutral-950 transition-all duration-200 ${snippetFixInfo.hasSnippetFixes ? 'border-neutral-700 peer-checked:bg-emerald-600 peer-checked:border-emerald-600 group-hover:border-neutral-500' : 'border-neutral-800'}`} />
+                            <svg
+                              className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
+                              fill="none"
+                              viewBox="0 0 24 24"
+                              stroke="currentColor"
+                              strokeWidth="3"
+                            >
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-sm transition-colors ${snippetFixInfo.hasSnippetFixes ? 'text-neutral-300 group-hover:text-white' : 'text-neutral-500'}`}>
+                              Автоматически применить фиксы
+                            </span>
+                            {snippetFixInfo.hasSnippetFixes ? (
+                              <span className="text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded">
+                                Доступно ({snippetFixInfo.count})
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-medium bg-neutral-800 text-neutral-500 px-1.5 py-0.5 rounded">
+                                Недоступно
+                              </span>
+                            )}
+                          </div>
+                        </label>
+                        <p className="text-[10px] text-neutral-500 mt-1 ml-8">
+                          {snippetFixInfo.hasSnippetFixes
+                            ? 'Определяет границы фраз в фиксах, обнуляет громкость оригинала на этих интервалах и сводит с фиксом. Оригинальные дорожки и фиксы сохраняются в папку «бэкап».'
+                            : 'Опция активна, только если размер файла фикса меньше оригинала (фрагментарный фикс).'}
+                        </p>
                       </div>
-                      <div className="flex items-center gap-2">
-                        <span className={`text-sm transition-colors ${snippetFixInfo.hasSnippetFixes ? 'text-neutral-300 group-hover:text-white' : 'text-neutral-500'}`}>
-                          Автоматически применить фиксы
-                        </span>
-                        {snippetFixInfo.hasSnippetFixes ? (
-                          <span className="text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded">
-                            Доступно ({snippetFixInfo.count})
-                          </span>
-                        ) : (
-                          <span className="text-[10px] font-medium bg-neutral-800 text-neutral-500 px-1.5 py-0.5 rounded">
-                            Недоступно
-                          </span>
-                        )}
-                      </div>
-                    </label>
-                    <p className="text-[10px] text-neutral-500 mt-1 ml-8">
-                      {snippetFixInfo.hasSnippetFixes
-                        ? 'Определяет границы фраз в фиксах, обнуляет громкость оригинала на этих интервалах и сводит с фиксом. Оригинальные дорожки и фиксы сохраняются в папку «бэкап».'
-                        : 'Опция активна, только если размер файла фикса меньше оригинала (фрагментарный фикс).'}
-                    </p>
-                  </div>
+                    </>
+                  )}
 
                   <div>
                     <label className={`flex items-center gap-3 ${episode.subPath && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
@@ -581,48 +671,50 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     </p>
                   </div>
 
-                  <div className="p-3 bg-violet-950/20 border border-violet-900/30 rounded-xl">
-                    <label className={`flex items-start gap-3 ${episode.subPath && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
-                      <div className="relative flex items-center mt-0.5">
-                        <input
-                          type="checkbox"
-                          checked={autoTiming}
-                          onChange={(e) => setAutoTiming(e.target.checked)}
-                          disabled={isExporting || !episode.subPath}
-                          className="peer sr-only"
-                        />
-                        <div className={`w-5 h-5 border-2 rounded bg-neutral-950 transition-all duration-200 ${episode.subPath ? 'border-violet-700/60 peer-checked:bg-violet-600 peer-checked:border-violet-500 group-hover:border-violet-500' : 'border-neutral-800'}`} />
-                        <svg
-                          className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                          strokeWidth="3"
-                        >
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                        </svg>
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className={`text-sm font-semibold transition-colors ${episode.subPath ? 'text-violet-200 group-hover:text-white' : 'text-neutral-500'}`}>
-                            Автоматический тайминг и разведение фраз
-                          </span>
-                          {episode.subPath ? (
-                            <span className="text-[10px] font-bold bg-violet-500/20 text-violet-300 border border-violet-500/30 px-1.5 py-0.5 rounded">
-                              Закадр
-                            </span>
-                          ) : (
-                            <span className="text-[10px] font-medium bg-neutral-800 text-neutral-500 px-1.5 py-0.5 rounded">
-                              Нет сабов
-                            </span>
-                          )}
+                  {exportSource !== 'timing' && (
+                    <div className="p-3 bg-violet-950/20 border border-violet-900/30 rounded-xl">
+                      <label className={`flex items-start gap-3 ${episode.subPath && !isExporting ? 'cursor-pointer group' : 'cursor-not-allowed opacity-60'}`}>
+                        <div className="relative flex items-center mt-0.5">
+                          <input
+                            type="checkbox"
+                            checked={autoTiming}
+                            onChange={(e) => setAutoTiming(e.target.checked)}
+                            disabled={isExporting || !episode.subPath}
+                            className="peer sr-only"
+                          />
+                          <div className={`w-5 h-5 border-2 rounded bg-neutral-950 transition-all duration-200 ${episode.subPath ? 'border-violet-700/60 peer-checked:bg-violet-600 peer-checked:border-violet-500 group-hover:border-violet-500' : 'border-neutral-800'}`} />
+                          <svg
+                            className="absolute w-3.5 h-3.5 text-white opacity-0 peer-checked:opacity-100 transition-opacity duration-200 left-0.5 pointer-events-none"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth="3"
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                          </svg>
                         </div>
-                        <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
-                          Сопоставляет дорожки дабберов с ролями в субтитрах по никнеймам, подгоняет начала фраз к субтитрам и разводит перекрытия (коллизии), сохраняя только оригинальные наложения из сабов. Исходники сохраняются в «бэкап».
-                        </p>
-                      </div>
-                    </label>
-                  </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className={`text-sm font-semibold transition-colors ${episode.subPath ? 'text-violet-200 group-hover:text-white' : 'text-neutral-500'}`}>
+                              Автоматический тайминг и разведение фраз
+                            </span>
+                            {episode.subPath ? (
+                              <span className="text-[10px] font-bold bg-violet-500/20 text-violet-300 border border-violet-500/30 px-1.5 py-0.5 rounded">
+                                Закадр
+                              </span>
+                            ) : (
+                              <span className="text-[10px] font-medium bg-neutral-800 text-neutral-500 px-1.5 py-0.5 rounded">
+                                Нет сабов
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-neutral-400 mt-1 leading-relaxed">
+                            Сопоставляет дорожки дабберов с ролями в субтитрах по никнеймам, подгоняет начала фраз к субтитрам и разводит перекрытия (коллизии), сохраняя только оригинальные наложения из сабов. Исходники сохраняются в «бэкап».
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+                  )}
                 </>
               )}
               

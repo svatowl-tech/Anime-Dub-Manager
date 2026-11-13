@@ -216,6 +216,58 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   const [selectedSeTrackPaths, setSelectedSeTrackPaths] = useState<Set<string>>(new Set());
   const [isInspectingSeTracks, setIsInspectingSeTracks] = useState(false);
 
+  // Inspect processed dubber tracks when the Sound Engineer export modal opens or source step changes
+  useEffect(() => {
+    if (!isExportSeModalOpen || !currentEpisode) return;
+
+    let cancelled = false;
+    const effectiveWorkDir = customTargetDir.trim() || workingDir || undefined;
+
+    if (!exportSeTargetDir) {
+      ipcSafe
+        .invoke('export-get-default-dir', { episode: currentEpisode, role: 'SOUND_ENGINEER' })
+        .then((res: any) => {
+          if (!cancelled && res && res.defaultDir) {
+            setExportSeTargetDir((prev) => prev || res.defaultDir);
+          }
+        })
+        .catch(() => {});
+    }
+
+    setIsInspectingSeTracks(true);
+    ipcSafe
+      .invoke('mixing-inspect-se-tracks', {
+        episode: currentEpisode,
+        workingDir: effectiveWorkDir,
+        sourceStepId: exportSeSourceStepId
+      })
+      .then((res: any) => {
+        if (cancelled) return;
+        const tracksList = Array.isArray(res?.tracks) ? res.tracks : [];
+        setInspectedSeTracks(tracksList);
+        const autoSelected = new Set<string>();
+        tracksList.forEach((t: any) => {
+          if (t?.path && t.exists !== false) {
+            autoSelected.add(t.path);
+          }
+        });
+        setSelectedSeTrackPaths(autoSelected);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        console.warn('[MixingPanel] Failed to inspect SE tracks:', err);
+        setInspectedSeTracks([]);
+        setSelectedSeTrackPaths(new Set());
+      })
+      .finally(() => {
+        if (!cancelled) setIsInspectingSeTracks(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isExportSeModalOpen, exportSeSourceStepId, currentEpisode?.id, workingDir, customTargetDir]);
+
   const [isPresetsModalOpen, setIsPresetsModalOpen] = useState(false);
   const [isSavePresetModalOpen, setIsSavePresetModalOpen] = useState(false);
   const [newPresetName, setNewPresetName] = useState('');
@@ -302,14 +354,21 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
 
   const handleStartExportSoundEngineer = async () => {
     if (!currentEpisode || selectedSeTrackPaths.size === 0) return;
+    const unsubProgress = ipcSafe.on('mixing-progress', (p: any) => {
+      if (p && p.stepId === 'export_se') {
+        if (typeof p.percent === 'number') setExportSeProgress(p.percent);
+        if (p.message) setExportSeStatusMsg(p.message);
+      }
+    });
     try {
       setIsExportingSe(true);
       setExportSeProgress(5);
-      setExportSeStatusMsg('Экспорт в FLAC...');
+      setExportSeStatusMsg('Экспорт обработанных дорожек дабберов в FLAC...');
+      const effectiveWorkDir = customTargetDir.trim() || workingDir || undefined;
 
       const res = await ipcSafe.invoke('mixing-export-to-sound-engineer', {
         episode: currentEpisode,
-        workingDir: workingDir || undefined,
+        workingDir: effectiveWorkDir,
         targetDir: exportSeTargetDir || undefined,
         sourceStepId: exportSeSourceStepId,
         skipConversion: exportSeSkipConversion,
@@ -326,6 +385,8 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     } catch (e: any) {
       setIsExportingSe(false);
       toast.error(`Ошибка экспорта: ${e.message}`);
+    } finally {
+      if (typeof unsubProgress === 'function') unsubProgress();
     }
   };
 

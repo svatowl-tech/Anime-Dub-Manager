@@ -639,6 +639,9 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
         onClose={() => s.setIsExportModalOpen(false)}
         episode={currentEpisode!}
         role="SOUND_ENGINEER"
+        exportSource="timing"
+        timingTracks={s.tracks}
+        timingAudioClips={s.audioClips}
         onExport={handleExportSoundEngineerFromTiming}
         isExporting={s.isExportingSE}
         progress={s.exportProgress}

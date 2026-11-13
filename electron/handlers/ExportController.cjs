@@ -155,10 +155,14 @@ function registerExportHandlers(getData, mainWindow) {
 
   ipcMain.handle('export-sound-engineer-files', wrapIpcHandler(async (event, payloadOrEpisode, maybeTargetDir, maybeSkipConv, maybeSmartExp, maybeAddProc, maybeAutoFix, maybeIncSubs, maybeAutoTiming, maybeSelectedTrackIds) => {
     let episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds;
+    let fromTiming = false;
+    let tracks = null;
+    let audioClips = null;
+    let timingMetadata = null;
     
     if (payloadOrEpisode && typeof payloadOrEpisode === 'object') {
       if (payloadOrEpisode.episode) {
-        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds } = payloadOrEpisode);
+        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds, fromTiming, tracks, audioClips, timingMetadata } = payloadOrEpisode);
         if (!selectedTrackIds && payloadOrEpisode.options?.selectedTrackIds) {
           selectedTrackIds = payloadOrEpisode.options.selectedTrackIds;
         }
@@ -173,7 +177,7 @@ function registerExportHandlers(getData, mainWindow) {
         autoTiming = maybeAutoTiming;
         selectedTrackIds = maybeSelectedTrackIds;
       } else {
-        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds } = payloadOrEpisode);
+        ({ episode, targetDir, skipConversion, smartExport, additionalProcessing, autoApplyFixes, includeSubtitles, autoTiming, originalStems, selectedTrackIds, fromTiming, tracks, audioClips, timingMetadata } = payloadOrEpisode);
       }
     } else {
       episode = payloadOrEpisode;
@@ -221,6 +225,409 @@ function registerExportHandlers(getData, mainWindow) {
       const win = getWin();
       if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-progress', p.percent);
     };
+
+    // If exporting from Timing with timed tracks & audioClips, render clean timed tracks with stitched fixes!
+    if (fromTiming && Array.isArray(tracks) && tracks.length > 0 && audioClips) {
+      log.info(`[ExportController] Экспорт звукорежиссёру из Тайминга (чистые оттаймленные дорожки с вшитыми фиксами) -> ${exportDir}`);
+      await fs.mkdir(exportDir, { recursive: true });
+
+      const project = (projectsData || []).find(p => p.id === episode.projectId) || episode.project;
+      const rawProjectTitle = project ? project.title : 'Unknown';
+      const projectTitle = sanitizeProjectTitle(rawProjectTitle);
+      const baseVideoName = `${projectTitle}_${episode.number || 1}`;
+      const assignments = episode.assignments || [];
+      const { exportFullAssWithRoles, extractSignsAss } = require('../services/subtitleService.cjs');
+      const { bakeSubtitles, transcodeToMp4 } = require('../services/ffmpegService.cjs');
+
+      onProgress({ percent: 5 });
+
+      // 1. Export general subtitles with dubber roles
+      if (includeSubtitles !== false && episode.subPath && require('fs').existsSync(episode.subPath)) {
+        const subExt = path.extname(episode.subPath) || '.ass';
+        const generalSubName = `${baseVideoName}_[субтитры_общие]${subExt}`;
+        const outSubPath = path.join(exportDir, generalSubName);
+        try {
+          await exportFullAssWithRoles(
+            episode.subPath,
+            outSubPath,
+            assignments,
+            participantsData,
+            project ? project.characterAliases : null
+          );
+        } catch (subErr) {
+          log.warn('[ExportController] Fallback copy for subtitles in Timing SE export:', subErr.message);
+          await fs.copyFile(episode.subPath, outSubPath).catch(() => {});
+        }
+      }
+
+      onProgress({ percent: 12 });
+
+      // 2. Export video (ONLY burning sign/inscription subtitles, never all dialogue lines!)
+      if (episode.rawPath && require('fs').existsSync(episode.rawPath)) {
+        const videoName = path.basename(episode.rawPath);
+        const ext = path.extname(videoName) || '.mp4';
+
+        if (skipConversion) {
+          const outVideoPath = path.join(exportDir, `${baseVideoName}[оригинал]${ext}`);
+          if (path.resolve(outVideoPath) !== path.resolve(episode.rawPath)) {
+            await fs.copyFile(episode.rawPath, outVideoPath);
+          }
+          onProgress({ percent: 35 });
+        } else if (episode.isHardsub) {
+          const markedVideoPath = path.join(exportDir, `${baseVideoName}_[хардсаб]${additionalProcessing ? '.mp4' : ext}`);
+          if (additionalProcessing) {
+            await transcodeToMp4(episode.rawPath, markedVideoPath, (p) => {
+              onProgress({ percent: Math.round(12 + (p / 100) * 23) });
+            }, null, {
+              useNvenc: config.useNvenc,
+              gpuIndex: config.gpuIndex,
+              crf: 18,
+              additionalProcessing: true
+            });
+          } else {
+            await fs.copyFile(episode.rawPath, markedVideoPath);
+          }
+          onProgress({ percent: 35 });
+        } else {
+          let hasSigns = false;
+          let signsAssPath = null;
+          if (episode.subPath && require('fs').existsSync(episode.subPath)) {
+            signsAssPath = path.join(exportDir, `temp_signs_timing_${Date.now()}.ass`);
+            hasSigns = await extractSignsAss(episode.subPath, signsAssPath, {
+              assignments,
+              characterAliases: project ? project.characterAliases : null
+            });
+          }
+
+          const suffix = hasSigns ? '_[с надписями]' : (additionalProcessing ? '_[обработка]' : '[копия]');
+          const targetVideoExt = (hasSigns || additionalProcessing) ? '.mp4' : ext;
+          const bakedVideoPath = path.join(exportDir, `${baseVideoName}${suffix}${targetVideoExt}`);
+
+          try {
+            if (hasSigns && signsAssPath) {
+              await bakeSubtitles(episode.rawPath, signsAssPath, bakedVideoPath, (p) => {
+                onProgress({ percent: Math.round(12 + (p / 100) * 23) });
+              }, null, {
+                useNvenc: config.useNvenc,
+                gpuIndex: config.gpuIndex,
+                crf: 18,
+                additionalProcessing
+              });
+            } else if (additionalProcessing) {
+              await transcodeToMp4(episode.rawPath, bakedVideoPath, (p) => {
+                onProgress({ percent: Math.round(12 + (p / 100) * 23) });
+              }, null, {
+                useNvenc: config.useNvenc,
+                gpuIndex: config.gpuIndex,
+                crf: 18,
+                additionalProcessing: true
+              });
+            } else {
+              await fs.copyFile(episode.rawPath, bakedVideoPath);
+            }
+          } finally {
+            if (signsAssPath) await fs.unlink(signsAssPath).catch(() => {});
+          }
+          onProgress({ percent: 35 });
+        }
+      }
+
+      // 3. Render clean timed tracks with stitched fixes from Timing
+      const selectedSet = Array.isArray(selectedTrackIds) && selectedTrackIds.length > 0
+        ? new Set(selectedTrackIds.map(String))
+        : null;
+
+      const getCleanNick = (rawNick) => {
+        if (!rawNick) return 'dubber';
+        const clean = String(rawNick)
+          .replace(/\[.*\]/g, '')
+          .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
+          .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
+          .trim();
+        return clean || 'dubber';
+      };
+
+      const isFixTr = (t) =>
+        t.role === 'fix' ||
+        t.isFix === true ||
+        t.type === 'FIXES' ||
+        (t.id && (String(t.id).startsWith('fix_') || String(t.id).endsWith('_fix') || String(t.id).includes('_fix_'))) ||
+        String(t.participant || '').toLowerCase().includes('фикс') ||
+        /(?:_fix|фикс|\[fix\]|\[фикс\])/i.test(t.filePath || '');
+
+      const actorTracksMap = new Map();
+      for (const tr of tracks) {
+        const rawNick = tr.dubberName || tr.participant || 'Даббер';
+        const cleanNick = getCleanNick(rawNick);
+        if (!actorTracksMap.has(cleanNick)) {
+          actorTracksMap.set(cleanNick, {
+            nick: cleanNick,
+            characterName: tr.characterName || tr.character || 'Персонаж',
+            tracks: []
+          });
+        }
+        actorTracksMap.get(cleanNick).tracks.push(tr);
+      }
+
+      const clipsMap = audioClips || {};
+      const actorEntries = Array.from(actorTracksMap.values());
+      const renderedTracks = [];
+
+      for (let aIdx = 0; aIdx < actorEntries.length; aIdx++) {
+        const { nick, characterName, tracks: actorTrs } = actorEntries[aIdx];
+        const mainTrs = actorTrs.filter(t => !isFixTr(t));
+        const fixTrs = actorTrs.filter(t => isFixTr(t));
+        const effectiveMainTrs = mainTrs.length > 0 ? mainTrs : (actorTrs.length > 0 ? [actorTrs[0]] : []);
+        const isMultiTrack = effectiveMainTrs.length > 1;
+
+        const alreadyStitchedInMain = effectiveMainTrs.some(mt =>
+          (clipsMap[mt.id] || []).some(c => !c.isDeleted && c.isFix)
+        );
+
+        const snippetFixClips = [];
+        const fullReplacementFixes = new Map();
+
+        if (!alreadyStitchedInMain) {
+          for (const fTr of fixTrs) {
+            let fSize = 0;
+            try { if (fTr.filePath && require('fs').existsSync(fTr.filePath)) fSize = require('fs').statSync(fTr.filePath).size; } catch (e) {}
+
+            let bestMainTr = effectiveMainTrs.find(mt => mt.id === fTr.targetMainTrackId || mt.id === String(fTr.id).replace(/_fix$/, '')) || effectiveMainTrs[0];
+            if (!bestMainTr && effectiveMainTrs.length > 1) {
+              const fName = (fTr.filePath || fTr.participant || '').toLowerCase();
+              const matched = effectiveMainTrs.find((mt, idx) => {
+                const trNum = idx + 1;
+                return fName.includes(`дорожка${trNum}`) || fName.includes(`track${trNum}`) || fName.includes(`take${trNum}`) || fName.includes(`_layer${trNum}`);
+              });
+              if (matched) bestMainTr = matched;
+            }
+
+            let mSize = 0;
+            try { if (bestMainTr?.filePath && require('fs').existsSync(bestMainTr.filePath)) mSize = require('fs').statSync(bestMainTr.filePath).size; } catch (e) {}
+
+            const isFullReplacement = mSize > 0 && fSize > 0 && (fSize >= mSize * 0.75);
+            if (isFullReplacement && bestMainTr) {
+              fullReplacementFixes.set(bestMainTr.id, fTr);
+            } else {
+              const fClips = (clipsMap[fTr.id] || []).filter(c => !c.isDeleted);
+              for (const c of fClips) {
+                snippetFixClips.push({ ...c, trackFilePath: fTr.filePath, targetMainTrackId: bestMainTr?.id });
+              }
+            }
+          }
+        }
+
+        for (let mIdx = 0; mIdx < effectiveMainTrs.length; mIdx++) {
+          const tr = effectiveMainTrs[mIdx];
+          if (selectedSet && !selectedSet.has(String(tr.id)) && !selectedSet.has(String(tr.filePath))) {
+            continue;
+          }
+
+          const trackNum = mIdx + 1;
+          const outFilename = isMultiTrack
+            ? `${baseVideoName}_[${nick}]_дорожка${trackNum}.wav`
+            : `${baseVideoName}_[${nick}].wav`;
+          const outFilePath = path.join(exportDir, outFilename);
+
+          const fullFixTrack = fullReplacementFixes.get(tr.id);
+          let sourceFile = fullFixTrack?.filePath || tr.filePath;
+          if ((!sourceFile || !require('fs').existsSync(sourceFile)) && episode.uploads) {
+            const matchingUpload = episode.uploads.find(u =>
+              (u.type === 'DUBBER_FILE' || u.type === 'FIXES') &&
+              (u.uploadedById === tr.id || u.participantId === tr.id || (u.fileName && u.fileName.includes(nick)))
+            );
+            if (matchingUpload && matchingUpload.path && require('fs').existsSync(matchingUpload.path)) {
+              sourceFile = matchingUpload.path;
+            }
+          }
+
+          let primarySourceFile = sourceFile;
+          const rawClips = (fullFixTrack && clipsMap[fullFixTrack.id]?.length > 0)
+            ? clipsMap[fullFixTrack.id]
+            : (clipsMap[tr.id] || []);
+          const trackClips = rawClips.filter(c => !c.isDeleted);
+          const phrases = [];
+
+          for (const c of trackClips) {
+            const phraseSrc = (c.sourceAudioPath && require('fs').existsSync(c.sourceAudioPath))
+              ? c.sourceAudioPath
+              : (sourceFile || primarySourceFile);
+
+            if (phraseSrc && require('fs').existsSync(phraseSrc) && !primarySourceFile) {
+              primarySourceFile = phraseSrc;
+            }
+
+            const targetStartSec = Number((c.clipStartSec + (c.offsetSec || 0)).toFixed(3));
+            const phraseDuration = Number((c.durationSec || Math.max(0.1, (c.sourceEndSec - c.sourceStartSec))).toFixed(3));
+            const targetEndSec = Number((targetStartSec + phraseDuration).toFixed(3));
+
+            phrases.push({
+              id: c.id,
+              sourceAudioPath: phraseSrc,
+              sourceStartSec: c.sourceStartSec ?? 0,
+              sourceEndSec: c.sourceEndSec ?? phraseDuration,
+              targetStartSec,
+              targetEndSec,
+              durationSec: phraseDuration,
+              volumePercent: 100,
+              isFix: Boolean(fullFixTrack || c.isFix)
+            });
+          }
+
+          if (!fullFixTrack && snippetFixClips.length > 0) {
+            for (const fClip of snippetFixClips) {
+              const fixTargetStart = Number((fClip.clipStartSec + (fClip.offsetSec || 0)).toFixed(3));
+              const fixDur = Number((fClip.durationSec || Math.max(0.1, (fClip.sourceEndSec - fClip.sourceStartSec))).toFixed(3));
+              const fixTargetEnd = Number((fixTargetStart + fixDur).toFixed(3));
+
+              let matchesThisTrack = false;
+              let matchedPhraseIdx = -1;
+
+              for (let pIdx = 0; pIdx < phrases.length; pIdx++) {
+                const p = phrases[pIdx];
+                const overlap = Math.max(0, Math.min(p.targetEndSec, fixTargetEnd) - Math.max(p.targetStartSec, fixTargetStart));
+                if (overlap > 0.2 || Math.abs(p.targetStartSec - fixTargetStart) < 2.5) {
+                  matchesThisTrack = true;
+                  matchedPhraseIdx = pIdx;
+                  break;
+                }
+              }
+
+              if (!isMultiTrack) {
+                matchesThisTrack = true;
+              } else if (!matchesThisTrack && mIdx === 0) {
+                const otherTracksHaveMatch = effectiveMainTrs.some((otherTr, oIdx) => {
+                  if (oIdx === mIdx) return false;
+                  const oClips = (clipsMap[otherTr.id] || []).filter(c => !c.isDeleted);
+                  return oClips.some(oc => {
+                    const oStart = oc.clipStartSec + (oc.offsetSec || 0);
+                    const oEnd = oStart + oc.durationSec;
+                    return Math.max(0, Math.min(oEnd, fixTargetEnd) - Math.max(oStart, fixTargetStart)) > 0.2 || Math.abs(oStart - fixTargetStart) < 2.5;
+                  });
+                });
+                if (!otherTracksHaveMatch) {
+                  matchesThisTrack = true;
+                }
+              }
+
+              if (matchesThisTrack) {
+                const fixSrc = (fClip.sourceAudioPath && require('fs').existsSync(fClip.sourceAudioPath))
+                  ? fClip.sourceAudioPath
+                  : (fClip.trackFilePath || primarySourceFile);
+
+                const fixPhraseObj = {
+                  id: fClip.id,
+                  sourceAudioPath: fixSrc,
+                  sourceStartSec: fClip.sourceStartSec ?? 0,
+                  sourceEndSec: fClip.sourceEndSec ?? fixDur,
+                  targetStartSec: fixTargetStart,
+                  targetEndSec: fixTargetEnd,
+                  durationSec: fixDur,
+                  volumePercent: 100,
+                  isFix: true
+                };
+
+                if (matchedPhraseIdx >= 0) {
+                  phrases[matchedPhraseIdx] = fixPhraseObj;
+                } else {
+                  phrases.push(fixPhraseObj);
+                }
+              }
+            }
+          }
+
+          if (!primarySourceFile || !require('fs').existsSync(primarySourceFile)) {
+            const foundFromClip = phrases.find(p => p.sourceAudioPath && require('fs').existsSync(p.sourceAudioPath));
+            if (foundFromClip) {
+              primarySourceFile = foundFromClip.sourceAudioPath;
+            }
+          }
+
+          phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
+
+          const cleanPhrases = [];
+          for (const p of phrases) {
+            if (cleanPhrases.length === 0) {
+              cleanPhrases.push(p);
+              continue;
+            }
+            const last = cleanPhrases[cleanPhrases.length - 1];
+            const overlapStart = Math.max(last.targetStartSec, p.targetStartSec);
+            const overlapEnd = Math.min(last.targetEndSec, p.targetEndSec);
+            const overlapSec = Math.max(0, overlapEnd - overlapStart);
+
+            if (overlapSec > 0.35 && overlapSec > Math.min(last.durationSec, p.durationSec) * 0.4) {
+              if (p.isFix && !last.isFix) {
+                cleanPhrases[cleanPhrases.length - 1] = p;
+              } else if (!last.isFix && p.durationSec > last.durationSec) {
+                cleanPhrases[cleanPhrases.length - 1] = p;
+              }
+              continue;
+            }
+            cleanPhrases.push(p);
+          }
+
+          if (cleanPhrases.length > 0 && primarySourceFile && require('fs').existsSync(primarySourceFile)) {
+            log.info(`[ExportController] Рендеринг чистой оттаймленной дорожки для ЗР: ${outFilename} (${cleanPhrases.length} фраз)...`);
+            await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, cleanPhrases, outFilePath, {
+              targetDir: exportDir,
+              timingMetadata,
+              renderFromClips: true,
+              exactTimelineRender: true,
+              timingExport: true
+            });
+          } else if (primarySourceFile && require('fs').existsSync(primarySourceFile)) {
+            await fs.copyFile(primarySourceFile, outFilePath);
+          }
+
+          renderedTracks.push({
+            dubberNick: isMultiTrack ? `${nick} (Дорожка ${trackNum})` : nick,
+            baseNick: nick,
+            trackIndex: trackNum,
+            characterName,
+            outputPath: outFilePath,
+            phrasesCount: cleanPhrases.length
+          });
+        }
+
+        const audioProgress = 35 + Math.round(((aIdx + 1) / Math.max(1, actorEntries.length)) * 55);
+        onProgress({ percent: audioProgress });
+      }
+
+      // Clean up any temporary slice artifacts in exportDir
+      try {
+        const filesInDir = await fs.readdir(exportDir).catch(() => []);
+        for (const f of filesInDir) {
+          const lower = f.toLowerCase();
+          if (lower.includes('slice') || lower.startsWith('temp_') || lower.endsWith('.raw')) {
+            await fs.unlink(path.join(exportDir, f)).catch(() => {});
+          }
+        }
+      } catch (_) {}
+
+      // 4. Copy separated original stems if available
+      if (originalStems && originalStems.hasStems) {
+        if (originalStems.vocalsPath && require('fs').existsSync(originalStems.vocalsPath)) {
+          await fs.copyFile(
+            originalStems.vocalsPath,
+            path.join(exportDir, `${baseVideoName}_[Оригинал_Голоса].wav`)
+          ).catch(() => {});
+        }
+        if (originalStems.instrumentalPath && require('fs').existsSync(originalStems.instrumentalPath)) {
+          await fs.copyFile(
+            originalStems.instrumentalPath,
+            path.join(exportDir, `${baseVideoName}_[Оригинал_Фон_M&E].wav`)
+          ).catch(() => {});
+        }
+      }
+
+      onProgress({ percent: 100 });
+      return {
+        success: true,
+        targetDir: exportDir,
+        exportedTracksCount: renderedTracks.length
+      };
+    }
 
     return await ExportService.exportSoundEngineerFiles({
       episode,

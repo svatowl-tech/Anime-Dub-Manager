@@ -87,6 +87,16 @@ class ExportService {
       const videoName = path.basename(episode.rawPath);
       const ext = path.extname(videoName);
 
+      let hasSigns = false;
+      let signsAssPath = null;
+      if (!skipConversion && !episode.isHardsub && episode.subPath) {
+        signsAssPath = path.join(targetDir, `temp_signs_dabber_${Date.now()}.ass`);
+        hasSigns = await extractSignsAss(episode.subPath, signsAssPath, {
+          assignments: episode.assignments,
+          characterAliases: project ? project.characterAliases : null
+        });
+      }
+
       let outVideoPath;
       if (skipConversion) {
         outVideoPath = path.join(targetDir, `${baseVideoName}[оригинал]${ext}`);
@@ -97,10 +107,11 @@ class ExportService {
           outVideoPath = path.join(targetDir, `${baseVideoName}_[хардсаб][обработка]${ext}`);
         }
       } else {
-        const suffix = episode.subPath ? '_[с надписями]' : (additionalProcessing ? '_[обработка]' : '_[копия]');
-        outVideoPath = path.join(targetDir, `${baseVideoName}${suffix}${ext}`);
+        const suffix = hasSigns ? '_[с надписями]' : (additionalProcessing ? '_[обработка]' : '_[копия]');
+        const targetExt = (hasSigns || additionalProcessing) ? '.mp4' : ext;
+        outVideoPath = path.join(targetDir, `${baseVideoName}${suffix}${targetExt}`);
         if (path.resolve(outVideoPath) === path.resolve(episode.rawPath)) {
-          outVideoPath = path.join(targetDir, `${baseVideoName}${suffix}[копия]${ext}`);
+          outVideoPath = path.join(targetDir, `${baseVideoName}${suffix}[копия]${targetExt}`);
         }
       }
 
@@ -129,40 +140,46 @@ class ExportService {
         } catch (dirErr) {}
       }
 
-      if (videoAlreadyExists) {
-        log.info(`[exportDabberFiles] Video file already exists at ${outVideoPath}. Skipping re-encode/copy to preserve existing video.`);
-        onProgress({ percent: videoProgressEnd });
-      } else {
-        if (skipConversion) {
-          if (path.resolve(outVideoPath) !== path.resolve(episode.rawPath)) {
-            onProgress({ percent: 0 });
-            await copyLargeFile(episode.rawPath, outVideoPath, onProgress, 0, videoProgressEnd);
-          } else {
-            onProgress({ percent: videoProgressEnd });
-          }
-        } else if (episode.isHardsub) {
-          await transcodeToMp4(episode.rawPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
-            useNvenc: config.useNvenc, 
-            gpuIndex: config.gpuIndex,
-            crf: 28,
-            additionalProcessing
-          });
+      try {
+        if (videoAlreadyExists) {
+          log.info(`[exportDabberFiles] Video file already exists at ${outVideoPath}. Skipping re-encode/copy to preserve existing video.`);
+          onProgress({ percent: videoProgressEnd });
         } else {
-          if (episode.subPath) {
-            await bakeSubtitles(episode.rawPath, episode.subPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
-              useNvenc: config.useNvenc, 
-              gpuIndex: config.gpuIndex,
-              crf: 28,
-              additionalProcessing
-            });
-          } else {
+          if (skipConversion) {
+            if (path.resolve(outVideoPath) !== path.resolve(episode.rawPath)) {
+              onProgress({ percent: 0 });
+              await copyLargeFile(episode.rawPath, outVideoPath, onProgress, 0, videoProgressEnd);
+            } else {
+              onProgress({ percent: videoProgressEnd });
+            }
+          } else if (episode.isHardsub) {
             await transcodeToMp4(episode.rawPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
               useNvenc: config.useNvenc, 
               gpuIndex: config.gpuIndex,
               crf: 28,
               additionalProcessing
             });
+          } else {
+            if (hasSigns && signsAssPath) {
+              await bakeSubtitles(episode.rawPath, signsAssPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
+                useNvenc: config.useNvenc, 
+                gpuIndex: config.gpuIndex,
+                crf: 28,
+                additionalProcessing
+              });
+            } else {
+              await transcodeToMp4(episode.rawPath, outVideoPath, (p) => onProgress({ percent: (p / 100) * videoProgressEnd }), onCommand, { 
+                useNvenc: config.useNvenc, 
+                gpuIndex: config.gpuIndex,
+                crf: 28,
+                additionalProcessing
+              });
+            }
           }
+        }
+      } finally {
+        if (signsAssPath) {
+          await fs.unlink(signsAssPath).catch(() => {});
         }
       }
     }
@@ -615,12 +632,16 @@ class ExportService {
           let signsAssPath = null;
           if (episode.subPath) {
             signsAssPath = path.join(targetDir, `temp_signs_${Date.now()}.ass`);
-            hasSigns = await extractSignsAss(episode.subPath, signsAssPath);
+            hasSigns = await extractSignsAss(episode.subPath, signsAssPath, {
+              assignments,
+              characterAliases: project ? project.characterAliases : null
+            });
             await logStep(`[Видео] Проверка надписей в ASS: обнаружено = ${hasSigns ? 'Да' : 'Нет'}`, 'info', 15);
           }
           
           const suffix = hasSigns ? '_[с надписями]' : (additionalProcessing ? '_[обработка]' : '[копия]');
-          const bakedVideoPath = path.join(targetDir, `${baseVideoName}${suffix}${ext}`);
+          const targetVideoExt = (hasSigns || additionalProcessing) ? '.mp4' : ext;
+          const bakedVideoPath = path.join(targetDir, `${baseVideoName}${suffix}${targetVideoExt}`);
 
           if (hasSigns) {
             await logStep('[Видео] Вшитие надписей (знаков) в видео...', 'info', 16);
@@ -1007,7 +1028,10 @@ class ExportService {
     let signsPath = null;
     if (subPath) {
       const tempSignsPath = path.join(path.dirname(subPath), `temp_signs_${Date.now()}.ass`);
-      const hasSigns = await extractSignsAss(subPath, tempSignsPath);
+      const hasSigns = await extractSignsAss(subPath, tempSignsPath, {
+        assignments: episode.assignments,
+        characterAliases: project?.characterAliases
+      });
       if (hasSigns) {
         signsPath = tempSignsPath;
       }

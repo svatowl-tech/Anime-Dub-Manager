@@ -198,8 +198,34 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
 
     const onMixingProgress = (data: any) => {
       if (unmounted || !data) return;
-      if (data.stepId && typeof data.percent === 'number') {
-        setStepProgress(prev => ({ ...prev, [data.stepId]: data.percent }));
+      if (data.stepId && data.stepId !== 'export_se') {
+        const pct = typeof data.stepPercent === 'number'
+          ? data.stepPercent
+          : (typeof data.percent === 'number' ? data.percent : undefined);
+
+        if (data.stepStatus === 'completed') {
+          setStepProgress(prev => ({ ...prev, [data.stepId]: 100 }));
+          setManifest(prev => {
+            if (!prev || !Array.isArray(prev.pipeline)) return prev;
+            return {
+              ...prev,
+              pipeline: prev.pipeline.map(s =>
+                s.stepId === data.stepId
+                  ? {
+                      ...s,
+                      status: 'completed',
+                      outputFiles: Array.isArray(data.outputFiles) ? data.outputFiles : s.outputFiles
+                    }
+                  : s
+              )
+            };
+          });
+        } else {
+          setActiveProcessingStepId(data.stepId);
+          if (typeof pct === 'number') {
+            setStepProgress(prev => ({ ...prev, [data.stepId]: pct }));
+          }
+        }
       }
       if (data.message) {
         mixLog('debug', 'Прогресс', data.message, data, data.stepId);
@@ -431,9 +457,14 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
 
   const handleRunAllSteps = useCallback(async () => {
     if (!currentEpisode) return;
-    const enabledCount = manifest?.pipeline?.filter(s => s.enabled)?.length || 0;
+    const enabledSteps = manifest?.pipeline?.filter(s => s.enabled) || [];
+    const enabledCount = enabledSteps.length;
+    const firstEnabledStepId = enabledSteps[0]?.stepId || null;
     try {
-      setActiveProcessingStepId('all');
+      setActiveProcessingStepId(firstEnabledStepId || 'all');
+      if (firstEnabledStepId) {
+        setStepProgress({ [firstEnabledStepId]: 5 });
+      }
       mixLog('info', 'Конвейер', `🎬 Запуск полной цепочки сведения (${enabledCount} активных модулей)...`);
       toast.info('Запуск конвейера сведения по цепочке модулей...');
 
@@ -455,6 +486,7 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
       toast.error(`Ошибка при сведении: ${e.message || String(e)}`);
     } finally {
       setActiveProcessingStepId(null);
+      setStepProgress({});
       await loadStatus();
     }
   }, [currentEpisode, manifest, workingDir, customTargetDir, mixLog, loadStatus]);

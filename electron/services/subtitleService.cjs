@@ -4,7 +4,17 @@ const log = require('electron-log');
 const iconv = require('iconv-lite');
 const jschardet = require('jschardet');
 
-const SIGN_KEYWORDS = ["НАДПИСЬ", "Надпись", "надпись", "НАДПИСИ", "Надписи", "надписи", "SIGNS", "Signs", "signs", "SIGN", "Sign", "sign", "TEXT", "Text", "text", "ТЕКСТ", "Текст", "текст", '"текст"'];
+const SIGN_KEYWORDS = [
+  "НАДПИСЬ", "Надпись", "надпись",
+  "НАДПИСИ", "Надписи", "надписи",
+  "SIGNS", "Signs", "signs",
+  "SIGN", "Sign", "sign",
+  "CAPTION", "Caption", "caption",
+  "CAPTIONS", "Captions", "captions",
+  "ТИТР", "Титр", "титр",
+  "ТИТРЫ", "Титры", "титры",
+  "TYPESET", "Typeset", "typeset"
+];
 
 // Cache for parsed subtitles to avoid memory spikes when multiple components request the same file concurrently
 const subtitleCache = new Map();
@@ -1257,12 +1267,128 @@ async function saveTranslatedSubtitles(assFilePath, translatedLines) {
   await cleanAssFile(assFilePath);
 }
 
-async function extractSignsAss(assFilePath, outputPath) {
+async function extractSignsAss(assFilePath, outputPath, options = {}) {
   log.info(`[SubtitleService] Extracting signs from ${assFilePath} to ${outputPath}`);
   const startTime = Date.now();
+  if (!assFilePath || typeof assFilePath !== 'string') {
+    return false;
+  }
+
+  // Plain SRT files do not have Actor/Style columns; burning an entire SRT would burn all dialogue
+  if (assFilePath.toLowerCase().endsWith('.srt')) {
+    log.info(`[SubtitleService] Skipping sign extraction for SRT file (no Actor/Style metadata): ${assFilePath}`);
+    return false;
+  }
+
   const content = await readTextFileWithAutoEncoding(assFilePath);
-  const lines = content.split('\n');
-  
+  const lines = content.split(/\r?\n/);
+
+  const rawAliases = options?.characterAliases;
+  const aliases = typeof rawAliases === 'string'
+    ? (() => { try { return JSON.parse(rawAliases || '{}'); } catch { return {}; } })()
+    : (rawAliases || {});
+
+  const getMainName = (name) => {
+    const trimmed = String(name || '').trim();
+    return aliases[trimmed] || trimmed;
+  };
+
+  // Build set of character names assigned to dubbers so voiced characters are never burned as signs
+  const assignedCharactersLower = new Set();
+  if (Array.isArray(options?.assignments)) {
+    for (const a of options.assignments) {
+      const hasDubber = Boolean(a?.dubberId || a?.substituteId || a?.dubber?.id || a?.substitute?.id);
+      if (hasDubber && a?.characterName) {
+        const cName = String(a.characterName).trim().toLowerCase();
+        if (cName) assignedCharactersLower.add(cName);
+      }
+    }
+  }
+
+  const EXPLICIT_SIGN_NAMES = new Set([
+    'надпись', 'надписи', 'sign', 'signs', 'caption', 'captions',
+    'титр', 'титры', 'title', 'titles', 'заставка', 'экран',
+    'вывеска', 'табличка', 'screen', 'board', 'logo', 'лого',
+    'typeset', 'ts', 'инфо', 'info', 'note', 'notes'
+  ]);
+
+  const EXPLICIT_SIGN_STYLES = new Set([
+    'надпись', 'надписи', 'sign', 'signs', 'caption', 'captions',
+    'титр', 'титры', 'title', 'titles', 'typeset', 'ts',
+    'screen', 'board', 'note', 'notes'
+  ]);
+
+  const DIALOGUE_STYLES = new Set([
+    'default', 'main', 'dialogue', 'dialog', 'основной', 'диалог', 'речь', 'озв', 'озвучка', 'sub', 'subs'
+  ]);
+
+  // First pass: inspect dialogue lines to see if "текст"/"text" is used as a generic default speaker name
+  let tempInEvents = false;
+  let tempFormatParts = [];
+  let totalDialogueCount = 0;
+  let textNamedCount = 0;
+  const distinctSpeakerNames = new Set();
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (/^\[events\]$/i.test(trimmed)) {
+      tempInEvents = true;
+      continue;
+    }
+    if (tempInEvents && /^\[.*\]$/.test(trimmed) && !/^\[events\]$/i.test(trimmed)) {
+      tempInEvents = false;
+      continue;
+    }
+    if (tempInEvents && /^format:/i.test(trimmed)) {
+      tempFormatParts = trimmed.substring(7).split(',').map(s => s.trim());
+      continue;
+    }
+    if (tempInEvents && /^dialogue:/i.test(trimmed)) {
+      const parsed = parseDialogueLine(lines[i].trimEnd(), tempFormatParts);
+      if (!parsed || parsed.name === 'ШУМЫ') continue;
+      totalDialogueCount++;
+      const currentNames = String(parsed.name || '').split(/[,;]/).map(n => n.trim()).filter(Boolean);
+      for (const n of currentNames) {
+        const lower = n.toLowerCase().replace(/^["']+|["']+$/g, '');
+        distinctSpeakerNames.add(lower);
+        if (lower === 'текст' || lower === 'text') {
+          textNamedCount++;
+        }
+      }
+    }
+  }
+
+  // Only allow "текст"/"text" as a sign keyword if it is NOT the generic default speaker name across the file
+  const allowTextKeywordAsSign =
+    totalDialogueCount > 0 &&
+    textNamedCount > 0 &&
+    distinctSpeakerNames.size >= 2 &&
+    (textNamedCount / totalDialogueCount) <= 0.2;
+
+  const isSignToken = (rawToken) => {
+    const clean = String(rawToken || '').trim().toLowerCase().replace(/^["']+|["']+$/g, '');
+    if (!clean) return false;
+    if (assignedCharactersLower.has(clean)) return false;
+    const aliased = String(getMainName(rawToken) || '').trim().toLowerCase().replace(/^["']+|["']+$/g, '');
+    if (assignedCharactersLower.has(aliased)) return false;
+    if (EXPLICIT_SIGN_NAMES.has(clean) || EXPLICIT_SIGN_NAMES.has(aliased)) return true;
+    if (SIGN_KEYWORDS.some(k => k.toLowerCase() === clean || k.toLowerCase() === aliased)) return true;
+    if (allowTextKeywordAsSign && (clean === 'текст' || clean === 'text' || aliased === 'текст' || aliased === 'text')) {
+      return true;
+    }
+    return false;
+  };
+
+  const isSignStyle = (rawStyle) => {
+    const clean = String(rawStyle || '').trim().toLowerCase();
+    if (!clean || DIALOGUE_STYLES.has(clean)) return false;
+    if (EXPLICIT_SIGN_STYLES.has(clean)) return true;
+    for (const st of EXPLICIT_SIGN_STYLES) {
+      if (st.length >= 4 && clean.includes(st)) return true;
+    }
+    return false;
+  };
+
   let inEvents = false;
   let formatParts = [];
   const newLines = [];
@@ -1272,34 +1398,58 @@ async function extractSignsAss(assFilePath, outputPath) {
     const line = lines[i].trimEnd();
     const trimmedLine = line.trim();
 
-    if (trimmedLine.startsWith('[Events]')) {
+    if (/^\[events\]$/i.test(trimmedLine)) {
       inEvents = true;
       newLines.push(line);
       continue;
     }
 
-    if (inEvents && trimmedLine.startsWith('Format:')) {
+    if (inEvents && /^\[.*\]$/.test(trimmedLine) && !/^\[events\]$/i.test(trimmedLine)) {
+      inEvents = false;
+      newLines.push(line);
+      continue;
+    }
+
+    if (inEvents && /^format:/i.test(trimmedLine)) {
       formatParts = trimmedLine.substring(7).split(',').map(s => s.trim());
       newLines.push(line);
       continue;
     }
 
-    if (inEvents && trimmedLine.startsWith('Dialogue:')) {
-      const parsed = parseDialogueLine(line, formatParts);
-      if (parsed) {
-        // Explicitly ignore technical "ШУМЫ" line
-        if (parsed.name === 'ШУМЫ') {
-          continue;
+    if (inEvents) {
+      if (/^dialogue:/i.test(trimmedLine)) {
+        const parsed = parseDialogueLine(line, formatParts);
+        if (parsed) {
+          if (parsed.name === 'ШУМЫ') {
+            continue;
+          }
+
+          const currentNames = String(parsed.name || '')
+            .split(/[,;]/)
+            .map(n => n.trim())
+            .filter(n => n !== '');
+
+          const hasAssignedDubber = currentNames.some(n => {
+            const lower = n.toLowerCase();
+            const mainLower = String(getMainName(n) || '').trim().toLowerCase();
+            return assignedCharactersLower.has(lower) || assignedCharactersLower.has(mainLower);
+          });
+
+          if (hasAssignedDubber) {
+            continue;
+          }
+
+          const matchedByName = currentNames.length > 0 && currentNames.some(n => isSignToken(n));
+          const matchedByStyle = currentNames.length === 0 && isSignStyle(parsed.style);
+
+          if (matchedByName || matchedByStyle) {
+            newLines.push(line);
+            signCount++;
+          }
         }
-        
-        const currentNames = parsed.name.split(/[,;]/).map(n => n.trim()).filter(n => n !== '');
-        if (currentNames.some(n => SIGN_KEYWORDS.includes(n))) {
-          newLines.push(line);
-          signCount++;
-        }
-      } else {
-        newLines.push(line);
       }
+      // Skip Comment: or other non-Dialogue lines inside [Events]
+      continue;
     } else {
       newLines.push(line);
     }
@@ -1308,10 +1458,10 @@ async function extractSignsAss(assFilePath, outputPath) {
   if (signCount > 0) {
     await fs.writeFile(outputPath, newLines.join('\n'), 'utf-8');
     await cleanAssFile(outputPath);
-    log.info(`[SubtitleService] Extracted ${signCount} signs to ${outputPath} in ${Date.now() - startTime}ms`);
+    log.info(`[SubtitleService] Extracted ${signCount} signs (out of ${totalDialogueCount} total lines) to ${outputPath} in ${Date.now() - startTime}ms`);
     return true;
   }
-  log.info(`[SubtitleService] No signs found in ${assFilePath} (checked in ${Date.now() - startTime}ms)`);
+  log.info(`[SubtitleService] No signs found in ${assFilePath} (checked ${totalDialogueCount} lines in ${Date.now() - startTime}ms)`);
   return false;
 }
 

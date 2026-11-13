@@ -1,6 +1,0 @@
-{
-  "summary": "План полной переработки Telegram-клиента (MTProto GramJS + Bot API + Forum Topics) с нуля с модульной архитектурой и исправлением корневых проблем авторизации и работы с чатами.",
-  "updatedAt": "2026-11-05T18:32:16.887878415Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

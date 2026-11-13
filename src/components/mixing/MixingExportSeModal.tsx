@@ -73,9 +73,18 @@ export const MixingExportSeModal: React.FC<MixingExportSeModalProps> = ({
     return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
   };
 
+  const nonDubberModules = new Set(['video_mux', 'stem_separation', 'ducking', 'master_audio_mix', 'glue_compress']);
   const processedSteps = (manifest?.pipeline || []).filter(
-    (s) => s.status === 'completed' && Array.isArray(s.outputFiles) && s.outputFiles.length > 0
+    (s) =>
+      s.status === 'completed' &&
+      Array.isArray(s.outputFiles) &&
+      s.outputFiles.length > 0 &&
+      s.moduleId !== 'video_mux' &&
+      s.moduleId !== 'stem_separation'
   );
+  const latestDubberStep =
+    [...processedSteps].reverse().find((s) => !nonDubberModules.has(s.moduleId)) ||
+    (processedSteps.length > 0 ? processedSteps[processedSteps.length - 1] : null);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
@@ -89,7 +98,7 @@ export const MixingExportSeModal: React.FC<MixingExportSeModalProps> = ({
             <div>
               <h3 className="text-sm font-bold text-white">Экспорт звукорежиссеру (WAV → FLAC + Видео)</h3>
               <p className="text-[11px] text-neutral-400">
-                Выгрузка дорожек сжатыми без потерь FLAC (48 кГц) + видео со вшитыми субтитрами
+                Выгрузка последних обработанных дорожек дабберов в FLAC (48 кГц) + видео со вшитыми надписями
               </p>
             </div>
           </div>
@@ -105,7 +114,7 @@ export const MixingExportSeModal: React.FC<MixingExportSeModalProps> = ({
         {/* Content */}
         <div className="p-6 space-y-4 overflow-y-auto flex-1">
           <div className="bg-indigo-950/30 border border-indigo-500/30 rounded-xl p-3.5 text-xs text-indigo-200 leading-relaxed">
-            Этот экспорт берет аудиодорожки из <strong>выбранного или последнего обработанного модуля</strong> конвейера сведения, автоматически конвертирует их из рабочего формата <strong>WAV в сжатый без потерь FLAC (48 кГц)</strong> и сохраняет в отдельную папку вместе со сформированным видеорядом и файлом субтитров.
+            Этот экспорт берет <strong>последние обработанные дорожки дабберов</strong> из конвейера сведения (или выбранного модуля), автоматически конвертирует их из <strong>WAV в сжатый без потерь FLAC (48 кГц)</strong> и сохраняет в отдельную папку вместе с видео (со вшитыми надписями) и общими субтитрами.
           </div>
 
           {/* 1. Source module selector */}
@@ -120,7 +129,7 @@ export const MixingExportSeModal: React.FC<MixingExportSeModalProps> = ({
               className="w-full bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-2 text-xs text-neutral-200 focus:outline-none focus:border-indigo-500"
             >
               <option value="latest">
-                Автоматически: последний обработанный модуль конвейера ({processedSteps.length > 0 ? processedSteps[processedSteps.length - 1].moduleId : 'исходники'})
+                Автоматически: последние обработанные дорожки дабберов ({latestDubberStep ? `[${latestDubberStep.prefix}] ${latestDubberStep.moduleId}` : 'исходники'})
               </option>
               {processedSteps.map((step) => (
                 <option key={step.stepId} value={step.stepId}>
@@ -280,10 +289,10 @@ export const MixingExportSeModal: React.FC<MixingExportSeModalProps> = ({
               />
               <div>
                 <div className="text-xs font-medium text-neutral-200">
-                  Вшить общие субтитры в видео (хардсаб MP4 для звукорежиссера)
+                  Вшить надписи в видео (MP4 со вшитыми надписями для звукорежиссера)
                 </div>
                 <div className="text-[11px] text-neutral-500">
-                  Если отключено — видео будет скопировано в папку без перекодирования как оригинал
+                  Вшивает только перевод надписей (без реплик персонажей). Если отключено — копирует исходное видео как есть
                 </div>
               </div>
             </label>

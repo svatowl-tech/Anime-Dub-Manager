@@ -220,13 +220,35 @@ export function useTimingExportController({
   ) => {
     if (!currentEpisode || !targetDir) return;
 
+    const unsubProgress = ipcSafe.on('ffmpeg-progress', (pct: number) => {
+      if (typeof pct === 'number') {
+        const clamped = Math.max(5, Math.min(99, Math.round(pct)));
+        setExportProgress(clamped);
+        updateProcess('Экспорт звукорежиссёру', `Рендеринг чистых оттаймленных дорожек и видео... (${clamped}%)`, clamped);
+      }
+    });
+
     try {
       setIsExportingSE(true);
       setExportProgress(5);
-      updateProcess('Экспорт звукорежиссёру', `Экспорт комплекта файлов в «${targetDir}»...`, 10);
-      addLog(`Старт экспорта для звукорежиссёра в директорию: ${targetDir}`, 'info');
+      updateProcess('Экспорт звукорежиссёру', `Экспорт оттаймленного комплекта файлов в «${targetDir}»...`, 10);
+      addLog(`Старт экспорта оттаймленных дорожек для звукорежиссёра в директорию: ${targetDir}`, 'info');
 
-      const exportIntentionalOverlaps = buildExportIntentionalOverlapsAndSyncUnison(audioClips);
+      const activeTrackIds = new Set(tracks.map(t => t.id));
+      const enrichedAudioClips: Record<string, AudioClip[]> = {};
+      for (const trId of Object.keys(audioClips)) {
+        if (!activeTrackIds.has(trId)) continue;
+        const tr = tracks.find(t => t.id === trId);
+        const clips = audioClips[trId] || [];
+        enrichedAudioClips[trId] = clips.map(c => ({
+          ...c,
+          volumePercent: c.volumePercent ?? 100,
+          volumeGainDb: c.volumeGainDb ?? 0,
+          sourceAudioPath: c.sourceAudioPath || tr?.filePath
+        }));
+      }
+
+      const exportIntentionalOverlaps = buildExportIntentionalOverlapsAndSyncUnison(enrichedAudioClips);
 
       const timingMetadata = {
         version: '1.0',
@@ -241,8 +263,8 @@ export function useTimingExportController({
           acc[dubberNick] = 100;
           return acc;
         }, {} as Record<string, number>),
-        phrases: Object.keys(audioClips).flatMap(trId => {
-          const clips = audioClips[trId] || [];
+        phrases: Object.keys(enrichedAudioClips).flatMap(trId => {
+          const clips = enrichedAudioClips[trId] || [];
           return clips.map(b => {
             return {
               id: b.id,
@@ -254,8 +276,9 @@ export function useTimingExportController({
               text: b.text,
               isUnisonPhrase: Boolean(b.isUnisonPhrase),
               isIntentionalOverlap: Boolean(b.isIntentionalOverlap),
-              volumePercent: 100,
-              volumeGainDb: 0,
+              isPhysics: Boolean(b.isPhysics),
+              volumePercent: b.volumePercent ?? 100,
+              volumeGainDb: b.volumeGainDb ?? 0,
               pan: 0,
               timeStretch: 1.0,
               headTrimSec: 0,
@@ -283,6 +306,11 @@ export function useTimingExportController({
         autoApplyFixes,
         includeSubtitles,
         autoTiming: autoTiming ?? false,
+        fromTiming: true,
+        tracks,
+        audioClips: enrichedAudioClips,
+        volumes,
+        timingMetadata,
         selectedTrackIds: Array.isArray(selectedTrackIds) ? selectedTrackIds : undefined,
         originalStems: originalStems.hasStems ? {
           hasStems: true,
@@ -293,7 +321,7 @@ export function useTimingExportController({
       });
 
       if (res && res.success) {
-        addLog(`✓ Оттаймленный пакет экспортирован звукорежиссёру: ${targetDir}`, 'success');
+        addLog(`✓ Оттаймленный пакет (чистые дорожки со вшитыми фиксами) экспортирован звукорежиссёру: ${targetDir}`, 'success');
         toast.success(`Оттаймленный пакет материалов экспортирован звукорежиссёру: ${targetDir} 🎬`);
         setIsExportModalOpen(false);
       } else {
@@ -305,6 +333,7 @@ export function useTimingExportController({
       addLog(`❌ Исключение при экспорте звукорежиссёру: ${err.message || String(err)}`, 'error');
       toast.error(`Не удалось экспортировать файлы звукорежиссёру: ${err.message || String(err)}`);
     } finally {
+      if (typeof unsubProgress === 'function') unsubProgress();
       setIsExportingSE(false);
       setExportProgress(0);
       clearProcess();

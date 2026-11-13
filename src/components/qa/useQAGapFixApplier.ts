@@ -703,7 +703,8 @@ export function useQAGapFixApplier({
       await ipcSafe.invoke('bake-subtitles', {
         videoPath: currentEpisode.rawPath, 
         finalAssPath: currentEpisode.subPath, 
-        outputPath: `${subDir}/final_release.mp4`
+        outputPath: `${subDir}/final_release.mp4`,
+        episode: currentEpisode
       });
       
       setBakeStatus('Видео успешно отрендерено!');

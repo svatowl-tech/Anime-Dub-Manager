@@ -65,7 +65,7 @@ export const MixingStepCard: React.FC<MixingStepCardProps> = ({
     <div 
       className={`bg-neutral-900/90 border rounded-xl p-3.5 space-y-3 shadow-sm transition ${
         step.enabled 
-          ? (isComplete ? 'border-emerald-800/40 hover:border-emerald-700/60' : 'border-neutral-800 hover:border-neutral-700')
+          ? (isProcessing ? 'border-purple-500/70 ring-1 ring-purple-500/20' : isComplete ? 'border-emerald-800/40 hover:border-emerald-700/60' : 'border-neutral-800 hover:border-neutral-700')
           : 'border-neutral-800/50 opacity-50 bg-neutral-950/40'
       }`}
     >
@@ -229,7 +229,7 @@ export const MixingStepCard: React.FC<MixingStepCardProps> = ({
           ) : (
             <button
               onClick={onRun}
-              disabled={!step.enabled}
+              disabled={!step.enabled || activeProcessingStepId !== null}
               className="px-2.5 py-1 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-40 text-neutral-200 rounded text-xs font-medium flex items-center gap-1.5 transition"
               title="Выполнить только этот шаг"
             >

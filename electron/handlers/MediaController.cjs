@@ -34,10 +34,28 @@ function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
 
     switch (type) {
       case 'bake-subtitles': {
-        const { videoPath, assPath, outputPath, options } = payload;
-        taskFn = (id, v, a, o, opts, onProgress, onCommand) => 
-          MediaWorker.execute(bakeSubtitles, [v, a, o, onProgress, onCommand, opts]); 
-        args = [videoPath, assPath, outputPath, options || {}];
+        const { videoPath, assPath, outputPath, options, episode } = payload;
+        taskFn = async (id, v, a, o, opts, ep, onProgress, onCommand) => {
+          if (a && !opts?.burnAllSubtitles) {
+            const tempSignsPath = path.join(path.dirname(o || a), `temp_signs_bake_${Date.now()}.ass`);
+            const proj = ep?.projectId ? (projectsData || []).find(p => p.id === ep.projectId) : ep?.project;
+            try {
+              const hasSigns = await extractSignsAss(a, tempSignsPath, {
+                assignments: ep?.assignments,
+                characterAliases: proj?.characterAliases
+              });
+              if (hasSigns) {
+                return await MediaWorker.execute(bakeSubtitles, [v, tempSignsPath, o, onProgress, onCommand, opts]);
+              } else {
+                return await MediaWorker.execute(transcodeToMp4, [v, o, onProgress, onCommand, opts]);
+              }
+            } finally {
+              await fs.unlink(tempSignsPath).catch(() => {});
+            }
+          }
+          return await MediaWorker.execute(bakeSubtitles, [v, a, o, onProgress, onCommand, opts]);
+        };
+        args = [videoPath, assPath, outputPath, options || {}, episode || null];
         break;
       }
       case 'transcode-video': {
@@ -81,7 +99,11 @@ function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
         let signsPath = null;
         if (subPath) {
           const tempSignsPath = path.join(path.dirname(subPath), `temp_signs_${Date.now()}.ass`);
-          const hasSigns = await extractSignsAss(subPath, tempSignsPath);
+          const fullProj = episode.projectId ? (projectsData || []).find(p => p.id === episode.projectId) : project;
+          const hasSigns = await extractSignsAss(subPath, tempSignsPath, {
+            assignments: episode.assignments,
+            characterAliases: fullProj?.characterAliases || project?.characterAliases
+          });
           if (hasSigns) {
             signsPath = tempSignsPath;
           }
@@ -163,10 +185,11 @@ function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
     return taskQueue.enqueue(type, taskFn, args, metadata);
   }));
 
-  ipcMain.handle('bake-subtitles', wrapIpcHandler(async (event, { videoPath, finalAssPath, outputPath }) => {
+  ipcMain.handle('bake-subtitles', wrapIpcHandler(async (event, { videoPath, finalAssPath, outputPath, episode, burnAllSubtitles }) => {
     if (!videoPath || !finalAssPath || !outputPath) throw new Error('Missing required paths');
-    log.info(`Starting interactive subtitle baking: ${videoPath} + ${finalAssPath} -> ${outputPath}`);
+    log.info(`Starting interactive subtitle baking (signs only=${!burnAllSubtitles}): ${videoPath} + ${finalAssPath} -> ${outputPath}`);
     const config = await getData('config.json');
+    const projectsData = await getData('projects.json').catch(() => []);
     const baseDir = config.baseDir || app.getPath('userData');
     
     const absVideoPath = path.isAbsolute(videoPath) ? videoPath : path.join(baseDir, videoPath);
@@ -180,10 +203,31 @@ function registerMediaHandlers(getData, mainWindow, taskQueue, saveData) {
       gpuIndex: config.gpuIndex
     };
 
-    return await bakeSubtitles(absVideoPath, absAssPath, absOutputPath, (percent) => {
+    const onProgress = (percent) => {
       const win = getWin();
       if (win && !win.isDestroyed()) win.webContents.send('ffmpeg-progress', percent);
-    }, null, options);
+    };
+
+    if (!burnAllSubtitles) {
+      const tempSignsPath = path.join(path.dirname(absOutputPath), `temp_signs_qa_${Date.now()}.ass`);
+      const proj = episode?.projectId ? (projectsData || []).find(p => p.id === episode.projectId) : episode?.project;
+      try {
+        const hasSigns = await extractSignsAss(absAssPath, tempSignsPath, {
+          assignments: episode?.assignments,
+          characterAliases: proj?.characterAliases
+        });
+        if (hasSigns) {
+          return await bakeSubtitles(absVideoPath, tempSignsPath, absOutputPath, onProgress, null, options);
+        } else {
+          log.info('[bake-subtitles] No signs found in subtitle file; transcoding video without burning dialogue subtitles.');
+          return await transcodeToMp4(absVideoPath, absOutputPath, onProgress, null, options);
+        }
+      } finally {
+        await fs.unlink(tempSignsPath).catch(() => {});
+      }
+    }
+
+    return await bakeSubtitles(absVideoPath, absAssPath, absOutputPath, onProgress, null, options);
   }));
 
   ipcMain.handle('transcode-video', wrapIpcHandler(async (event, { videoPath, outputPath, audioStreamIndex }) => {
