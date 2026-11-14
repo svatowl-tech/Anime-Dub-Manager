@@ -29,7 +29,7 @@ import {
   rescueCrossRoleMissingSubtitles,
 } from './timing.edgeRules.service';
 import { SelfHealingVerificationReport } from './useTimingSelfHealingAndOverlaps';
-import { TIMING_RULES, getMaxSafeShiftSec } from './timing.rules';
+import { TIMING_RULES, getMaxSafeShiftSec, computeTargetClipStartSec } from './timing.rules';
 
 export interface UseTimingStage2AndClipsParams {
   tracks: Track[];
@@ -290,14 +290,15 @@ export function useTimingStage2AndClips({
           clip.hasRefVocalAnchor = anchor.hasRefVocal;
           clip.targetSubEndSec = anchor.anchorEndSec;
 
-          // Strict Rule: exempt ONLY if vocal attack <= ±140ms AND vocal end overhang <= min(25%, 0.35s)
+          // Strict Rule: exempt ONLY if vocal attack is within anti-rush window AND vocal end overhang <= min(25%, 0.35s)
           const exemptCheck = isPhraseTimingNotRequired(
             curStart,
             clip.durationSec,
             anchor.anchorStartSec,
             anchor.anchorEndSec,
             onsetOffset,
-            clip.speechOffsetSec
+            clip.speechOffsetSec,
+            anchor.hasRefVocal
           );
           if (exemptCheck.notRequired) {
             clips[idx] = {
@@ -315,7 +316,12 @@ export function useTimingStage2AndClips({
 
           if (shouldFixDesync || shouldFixOrphan) {
             const origStart = clip.rawSourceStartSec ?? clip.sourceStartSec ?? curStart;
-            const idealTargetStart = Math.max(0, anchor.anchorStartSec - onsetOffset);
+            const idealTargetStart = computeTargetClipStartSec({
+              anchorStartSec: anchor.anchorStartSec,
+              anchorEndSec: anchor.anchorEndSec,
+              speechOnsetOffsetSec: onsetOffset,
+              hasRefVocal: anchor.hasRefVocal,
+            });
 
             const prevIntraEnd = idx > 0
               ? (clips[idx - 1].clipStartSec + (clips[idx - 1].offsetSec || 0) + clips[idx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)

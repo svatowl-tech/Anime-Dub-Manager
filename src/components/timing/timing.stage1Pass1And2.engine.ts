@@ -5,7 +5,7 @@ import { getSharedAudioContext } from '../../lib/qa/sharedAudioContext';
 import { normalizeSpeechText } from '../../lib/qa/whisperTextChecker';
 import { TimingSettings } from '../TimingSettingsModal';
 import { isPhraseTimingNotRequired } from './timingAudioUtils';
-import { TIMING_RULES, getMaxSafeShiftSec } from './timing.rules';
+import { TIMING_RULES, getMaxSafeShiftSec, computeTargetClipStartSec } from './timing.rules';
 import {
   AudioClip,
   MissingSubtitleMarker,
@@ -312,15 +312,19 @@ export async function runStage1Pass1And2Engine({
         const signedDiff = cStart - sub.startSec;
         const absDiff = Math.abs(signedDiff);
 
-        // Prevent a clip that sits inside the previous subtitle from being matched as an early start of `sub`
+        // Prevent a clip that sits inside the previous subtitle from being matched as an early start of `sub`,
+        // or a clip sitting near `sub[sIdx + 1]` from being yanked back to an unvoiced earlier `sub[sIdx]`
         if (sIdx > 0) {
           const prevSub = trSubs[sIdx - 1];
           if (cStart >= prevSub.startSec - 0.15 && cStart <= prevSub.endSec + 0.25 && sub.startSec - cStart > 0.55) {
             continue;
           }
         }
+        if (sIdx + 1 < trSubs.length && cStart >= trSubs[sIdx + 1].startSec - 0.15 && Math.abs(cStart - trSubs[sIdx + 1].startSec) < absDiff) {
+          continue;
+        }
 
-        if (signedDiff >= -0.70 && signedDiff <= 1.35 && isWithinTrackCorridor(cIdx, sub.startSec)) {
+        if (signedDiff >= -0.70 && signedDiff <= 1.35 && cStart <= sub.endSec + 0.25 && isWithinTrackCorridor(cIdx, sub.startSec)) {
           const subDur = Math.max(0.25, sub.endSec - sub.startSec);
           const durRatio = Math.min(clip.durationSec, subDur) / Math.max(clip.durationSec, subDur);
           const shortBreathPenalty = (clip.durationSec < 0.24 && speechStats.activeWindows < 8 && subDur > 0.9) ? 1.4 : 0;
@@ -397,8 +401,8 @@ export async function runStage1Pass1And2Engine({
         const signedDiff = cStart - sub.startSec;
         const timeDist = Math.abs(signedDiff);
 
-        // Never pull a clip that starts > 0.75s before `sub.startSec` or sits inside `prevSub`
-        if (signedDiff < -0.75 || signedDiff > 1.45 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
+        // Never pull a clip that starts > 0.75s before `sub.startSec`, starts after `sub.endSec + 0.20s`, or sits inside `prevSub`
+        if (signedDiff < -0.75 || signedDiff > 1.35 || cStart > sub.endSec + 0.20 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
         if (prevSub && cStart <= prevSub.endSec + 0.25 && sub.startSec - cStart > 0.55) continue;
 
         const subDur = Math.max(0.25, sub.endSec - sub.startSec);
@@ -487,15 +491,21 @@ export async function runStage1Pass1And2Engine({
             ? firstAnchor
             : findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, lastSub.startSec, lastSub.endSec, vocalsNoiseDb);
 
-          // Target start places pre-roll/breath LEFT of original speech attack so dubber voice aligns synchronously
-          const desiredClipStart = Math.max(0, firstAnchor.anchorStartSec - onsetOffset);
+          // Target start places pre-roll/breath LEFT of original speech attack with anti-rush protection
+          const desiredClipStart = computeTargetClipStartSec({
+            anchorStartSec: firstAnchor.anchorStartSec,
+            anchorEndSec: lastAnchor.anchorEndSec,
+            speechOnsetOffsetSec: onsetOffset,
+            hasRefVocal: firstAnchor.hasRefVocal,
+          });
           const maxAutoShift = getMaxSafeShiftSec(Boolean(firstAnchor.hasRefVocal || matchedByWhisper));
           let surgicalTarget = Math.max(origStart - maxAutoShift, Math.min(origStart + maxAutoShift, desiredClipStart));
           surgicalTarget = Math.max(prevClipEnd, Math.min(surgicalTarget, Math.max(prevClipEnd, nextClipStart - clip.durationSec)));
           surgicalTarget = Number(Math.max(0, surgicalTarget).toFixed(3));
 
           // Deviation measured at actual vocal attack point vs original vocal/subtitle anchor
-          const actualVocalStart = cStart + onsetOffset;
+          const effectivePreRoll = Math.min(TIMING_RULES.MAX_ONSET_PREROLL_SEC, Math.max(0, onsetOffset));
+          const actualVocalStart = cStart + effectivePreRoll;
           const rawTimeDiff = actualVocalStart - firstAnchor.anchorStartSec;
           const absRawDiff = Math.abs(rawTimeDiff);
           const effectiveShift = Math.abs(surgicalTarget - cStart);
@@ -517,14 +527,15 @@ export async function runStage1Pass1And2Engine({
             clip.whisperMatchedScore = clipWhisperScore[cIdx];
           }
 
-          // Strict Rule: phrase is exempt ONLY if vocal attack <= ±120ms AND vocal end overhang <= min(25%, 0.35s)
+          // Strict Rule: phrase is exempt ONLY if vocal attack is within anti-rush window AND vocal end overhang <= min(25%, 0.35s)
           const timingExempt = isPhraseTimingNotRequired(
             cStart,
             clip.durationSec,
             firstAnchor.anchorStartSec,
             lastAnchor.anchorEndSec,
             onsetOffset,
-            clip.speechOffsetSec
+            clip.speechOffsetSec,
+            firstAnchor.hasRefVocal
           );
 
           if (timingExempt.notRequired) {

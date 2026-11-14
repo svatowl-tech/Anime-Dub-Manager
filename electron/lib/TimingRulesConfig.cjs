@@ -8,6 +8,24 @@ const TIMING_RULES = Object.freeze({
   /** Целевая точность попадания реальной атаки голоса в оригинал (±120 мс) */
   TARGET_ATTACK_ACCURACY_SEC: 0.12,
 
+  /** Максимально допустимое опережение эталона атакой голоса (50 мс): фраза не должна идти впереди японской речи */
+  MAX_EARLY_ATTACK_TOLERANCE_SEC: 0.05,
+
+  /** Допуск естественного старта речи после начала .ass субтитра (300 мс) при отсутствии original_vocals.wav (учёт визуального lead-in Aegisub 100–250 мс) */
+  ASS_LEAD_IN_GRACE_SEC: 0.30,
+
+  /** Естественная задержка голоса сейю относительно старта .ass субтитра (100 мс) при подтяжке опоздавших фраз без original_vocals.wav */
+  ASS_NATURAL_VOICE_LAG_SEC: 0.10,
+
+  /** Максимальная величина pre-roll (speechOnsetOffsetSec), вычитаемая из точки якоря (180 мс), чтобы тихие начальные согласные не утягивали фразу влево */
+  MAX_ONSET_PREROLL_SEC: 0.18,
+
+  /** Максимальное окно сканирования original_vocals.wav ДО старта субтитра (60 мс — защита от захвата хвостов предыдущих реплик и вдохов) */
+  VOCALS_ANCHOR_PRE_SUB_MAX_SEC: 0.06,
+
+  /** Максимальное окно сканирования original_vocals.wav ПОСЛЕ конца субтитра (350 мс) */
+  VOCALS_ANCHOR_POST_SUB_MAX_SEC: 0.35,
+
   /** Максимальный безопасный сдвиг от исходной записи при подтверждении по original_vocals.wav или Whisper (±1.25 с) */
   MAX_SAFE_SHIFT_WITH_VOCALS_SEC: 1.25,
 
@@ -76,10 +94,62 @@ function getMaxSafeShiftSec(hasVocalOrWhisperConfirmation) {
 }
 
 /**
- * Строгая проверка, синхронна ли уже фраза с эталоном:
+ * Вычисляет безопасную целевую точку старта клипа (targetClipStartSec) с защитой от опережения японской речи (Anti-Rush):
+ * 1) Ограничивает вычитаемый pre-roll (speechOnsetOffsetSec) пределом MAX_ONSET_PREROLL_SEC (0.18 с),
+ *    чтобы тихие начальные согласные/слоги русского языка не вычитались как тишина и не утягивали фразу влево.
+ * 2) При отсутствии выделенного вокала оригинала (hasRefVocal === false, опора только на .ass субтитр)
+ *    учитывает стандартный визуальный lead-in сабов Aegisub (ASS_NATURAL_VOICE_LAG_SEC = 100 мс),
+ *    чтобы подтягиваемая фраза не вставала раньше японского сейю.
+ */
+function computeTargetClipStartSec(params) {
+  const {
+    anchorStartSec = 0,
+    anchorEndSec,
+    speechOnsetOffsetSec,
+    onsetOffsetSec,
+    hasRefVocal = true,
+    currentStartSec,
+  } = params || {};
+
+  const rawPreRoll =
+    typeof speechOnsetOffsetSec === 'number'
+      ? speechOnsetOffsetSec
+      : typeof onsetOffsetSec === 'number'
+      ? onsetOffsetSec
+      : 0;
+
+  const effectivePreRollSec = Math.min(
+    TIMING_RULES.MAX_ONSET_PREROLL_SEC,
+    Math.max(0, rawPreRoll)
+  );
+
+  let targetVocalAttackSec = Math.max(0, anchorStartSec);
+  if (!hasRefVocal) {
+    if (typeof currentStartSec === 'number' && Number.isFinite(currentStartSec)) {
+      const currentVocalAttackSec = currentStartSec + effectivePreRollSec;
+      const diffFromSubStart = currentVocalAttackSec - anchorStartSec;
+      if (diffFromSubStart >= -0.03 && diffFromSubStart <= TIMING_RULES.ASS_LEAD_IN_GRACE_SEC) {
+        return Number(Math.max(0, currentStartSec).toFixed(3));
+      }
+    }
+    const subDur = typeof anchorEndSec === 'number' && anchorEndSec > anchorStartSec
+      ? anchorEndSec - anchorStartSec
+      : 1.0;
+    const assLeadInSec = subDur >= 0.55
+      ? Math.min(TIMING_RULES.ASS_NATURAL_VOICE_LAG_SEC, subDur * 0.20)
+      : 0.03;
+    targetVocalAttackSec = anchorStartSec + assLeadInSec;
+  }
+
+  return Number(Math.max(0, targetVocalAttackSec - effectivePreRollSec).toFixed(3));
+}
+
+/**
+ * Строгая асимметричная проверка, синхронна ли уже фраза с эталоном (с защитой от спешки впереди оригинала):
  * освобождается ТОЛЬКО если:
- *   a) Атака речи отклоняется <= 0.12 с (120 мс) от anchorStartSec, И
- *   b) Конец речи вылезает за anchorEndSec не более min(25% длительности речи, 0.35 с).
+ *   a) Фраза НЕ спешит относительно эталона более чем на 50 мс (40 мс без вокала оригинала),
+ *   b) Атака речи не опаздывает более чем на 120 мс по вокалу оригинала (или 300 мс по .ass сабу с учётом визуального lead-in), И
+ *   c) Конец речи вылезает за anchorEndSec не более min(25% длительности речи, 0.35 с).
  */
 function isPhraseTimingNotRequired(
   clipStartSec,
@@ -87,38 +157,54 @@ function isPhraseTimingNotRequired(
   anchorStartSec,
   anchorEndSec,
   speechOnsetOffsetSec = 0,
-  speechOffsetSec
+  speechOffsetSec,
+  hasRefVocal = true
 ) {
-  const actualSpeechStartSec = clipStartSec + (speechOnsetOffsetSec || 0);
-  const onsetDiffSec = Math.abs(actualSpeechStartSec - anchorStartSec);
+  const effectivePreRollSec = Math.min(
+    TIMING_RULES.MAX_ONSET_PREROLL_SEC,
+    Math.max(0, speechOnsetOffsetSec || 0)
+  );
+  const actualSpeechStartSec = clipStartSec + effectivePreRollSec;
+  const signedOnsetDiffSec = actualSpeechStartSec - anchorStartSec;
+  const onsetDiffSec = Math.abs(signedOnsetDiffSec);
 
   const effectiveSpeechEndOffset =
     typeof speechOffsetSec === 'number' && speechOffsetSec > 0
       ? Math.min(clipDurationSec, speechOffsetSec)
       : clipDurationSec;
   const actualSpeechEndSec = clipStartSec + effectiveSpeechEndOffset;
-  const phraseSpeechDurSec = Math.max(0.15, effectiveSpeechEndOffset - (speechOnsetOffsetSec || 0));
+  const phraseSpeechDurSec = Math.max(0.15, effectiveSpeechEndOffset - effectivePreRollSec);
   const maxAllowedTailExcess = Math.min(
     phraseSpeechDurSec * TIMING_RULES.EXEMPT_TAIL_OVERHANG_RATIO,
     TIMING_RULES.EXEMPT_TAIL_MAX_SEC
   );
   const tailExcessSec = actualSpeechEndSec - anchorEndSec;
 
+  const maxEarlyToleranceSec = hasRefVocal === false
+    ? 0.04
+    : TIMING_RULES.MAX_EARLY_ATTACK_TOLERANCE_SEC;
+  const maxLateToleranceSec = hasRefVocal === false
+    ? TIMING_RULES.ASS_LEAD_IN_GRACE_SEC
+    : TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC;
+
   if (
-    onsetDiffSec <= TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC &&
+    signedOnsetDiffSec >= -maxEarlyToleranceSec &&
+    signedOnsetDiffSec <= maxLateToleranceSec &&
     tailExcessSec <= maxAllowedTailExcess
   ) {
     return {
       notRequired: true,
       onsetDiffSec,
+      signedOnsetDiffSec,
       tailExcessSec,
-      reason: `Атака голоса синхронна (${Math.round(onsetDiffSec * 1000)} мс ≤ ${Math.round(TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC * 1000)} мс) и хвост в допуске — тайминг не требуется`,
+      reason: `Атака голоса синхронна (${signedOnsetDiffSec >= 0 ? '+' : ''}${Math.round(signedOnsetDiffSec * 1000)} мс) и хвост в допуске — сдвиг не требуется`,
     };
   }
 
   return {
     notRequired: false,
     onsetDiffSec,
+    signedOnsetDiffSec,
     tailExcessSec,
   };
 }
@@ -217,6 +303,7 @@ function evaluateSoftTimeFit(params) {
 module.exports = {
   TIMING_RULES,
   getMaxSafeShiftSec,
+  computeTargetClipStartSec,
   isPhraseTimingNotRequired,
   isIntentionalOverlapDecision,
   evaluateSoftTimeFit,

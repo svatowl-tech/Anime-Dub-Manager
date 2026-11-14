@@ -32,7 +32,7 @@ import {
   applySoftTimeFitToTrackClips,
   rescueCrossRoleMissingSubtitles,
 } from './timing.edgeRules.service';
-import { TIMING_RULES, getMaxSafeShiftSec } from './timing.rules';
+import { TIMING_RULES, getMaxSafeShiftSec, computeTargetClipStartSec } from './timing.rules';
 
 export interface SelfHealingVerificationReport {
   totalSubs: number;
@@ -416,14 +416,15 @@ export function useTimingSelfHealingAndOverlaps({
             covClip.hasRefVocalAnchor = anchor.hasRefVocal;
             covClip.targetSubEndSec = anchor.anchorEndSec;
 
-            // Strict Rule: exempt ONLY if vocal attack <= ±140ms AND vocal end overhang <= min(25%, 0.35s)
+            // Strict Rule: exempt ONLY if vocal attack is within anti-rush window AND vocal end overhang <= min(25%, 0.35s)
             const exemptCheck = isPhraseTimingNotRequired(
               covStart,
               covClip.durationSec,
               anchor.anchorStartSec,
               anchor.anchorEndSec,
               onsetOffset,
-              covClip.speechOffsetSec
+              covClip.speechOffsetSec,
+              anchor.hasRefVocal
             );
             if (exemptCheck.notRequired) {
               covClip.timingNotRequired = true;
@@ -435,7 +436,12 @@ export function useTimingSelfHealingAndOverlaps({
             const prevIntraLim = coveringClipIdx > 0
               ? (trClips[coveringClipIdx - 1].clipStartSec + (trClips[coveringClipIdx - 1].offsetSec || 0) + trClips[coveringClipIdx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
               : 0;
-            const idealStart = Math.max(0, anchor.anchorStartSec - onsetOffset);
+            const idealStart = computeTargetClipStartSec({
+              anchorStartSec: anchor.anchorStartSec,
+              anchorEndSec: anchor.anchorEndSec,
+              speechOnsetOffsetSec: onsetOffset,
+              hasRefVocal: anchor.hasRefVocal,
+            });
             const prevInterLim = idealStart < covStart
               ? getPrevInterTrackTurnEnd(track.id, covStart, idealStart)
               : 0;
@@ -569,7 +575,12 @@ export function useTimingSelfHealingAndOverlaps({
                 text: sub.text,
                 matchedSubId: subIdStr,
                 coveredSubIds: [subIdStr],
-                targetSubStartSec: Number(Math.max(0, recAnchor.anchorStartSec - fixRecBounds.onsetOffsetSec).toFixed(3)),
+                targetSubStartSec: computeTargetClipStartSec({
+                  anchorStartSec: recAnchor.anchorStartSec,
+                  anchorEndSec: recAnchor.anchorEndSec,
+                  speechOnsetOffsetSec: fixRecBounds.onsetOffsetSec,
+                  hasRefVocal: recAnchor.hasRefVocal,
+                }),
                 targetSubEndSec: recAnchor.anchorEndSec,
                 volumePercent: 100,
                 isFix: true,
@@ -640,7 +651,12 @@ export function useTimingSelfHealingAndOverlaps({
                   text: sub.text,
                   matchedSubId: subIdStr,
                   coveredSubIds: [subIdStr],
-                  targetSubStartSec: Number(Math.max(0, recAnchor.anchorStartSec - origRecBounds.onsetOffsetSec).toFixed(3)),
+                  targetSubStartSec: computeTargetClipStartSec({
+                    anchorStartSec: recAnchor.anchorStartSec,
+                    anchorEndSec: recAnchor.anchorEndSec,
+                    speechOnsetOffsetSec: origRecBounds.onsetOffsetSec,
+                    hasRefVocal: recAnchor.hasRefVocal,
+                  }),
                   targetSubEndSec: recAnchor.anchorEndSec,
                   volumePercent: 100,
                   isFix: false,

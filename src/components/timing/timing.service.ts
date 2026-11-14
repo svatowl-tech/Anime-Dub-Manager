@@ -28,7 +28,7 @@ import {
   extractFallbackWebAudioPeaks,
   bindTrackClipsToSubtitlesMonotonicallyService
 } from './timing.waveform';
-import { TIMING_RULES, isIntentionalOverlapDecision } from './timing.rules';
+import { TIMING_RULES, computeTargetClipStartSec, isIntentionalOverlapDecision } from './timing.rules';
 
 /**
  * Surgical Overlap & Collision Resolver (Intra-Track & Inter-Track):
@@ -201,8 +201,25 @@ export function separateOverlappingClipPairService(params: {
     }
   }
 
-  const subEarlyFloor = subEarly ? subEarly.startSec - 0.12 : origEarlyStart - 0.18;
-  const earlyMinAllowed = Math.max(earlyPrevEnd, origEarlyStart - 0.18, subEarlyFloor);
+  // Never pull earlyClip earlier than its reference anchor (prevents phrases from rushing ahead of Japanese speech!)
+  const earlyAnchorFloor = typeof earlyClip.refVocalStartSec === 'number'
+    ? computeTargetClipStartSec({
+        anchorStartSec: earlyClip.refVocalStartSec,
+        anchorEndSec: earlyClip.refVocalEndSec,
+        speechOnsetOffsetSec: earlyClip.speechOnsetOffsetSec,
+        hasRefVocal: true,
+      })
+    : typeof earlyClip.targetSubStartSec === 'number'
+    ? earlyClip.targetSubStartSec
+    : subEarly
+    ? computeTargetClipStartSec({
+        anchorStartSec: subEarly.startSec,
+        anchorEndSec: subEarly.endSec,
+        speechOnsetOffsetSec: earlyClip.speechOnsetOffsetSec,
+        hasRefVocal: Boolean(earlyClip.hasRefVocalAnchor),
+      })
+    : earlyStart;
+  const earlyMinAllowed = Math.max(earlyPrevEnd, origEarlyStart - 0.18, earlyAnchorFloor);
   const maxPullEarlyBack = Math.max(0, earlyStart - earlyMinAllowed);
 
   if (remaining > 0.008 && maxPullEarlyBack >= 0.015) {
@@ -533,13 +550,24 @@ export function enforceSameTrackMinGapService(
       remaining -= trim;
     }
 
-    // 2. Micro-pull c1 slightly earlier (<= 0.18s) if space exists behind c0
+    // 2. Micro-pull c1 slightly earlier ONLY if c1 is currently sitting later than its anchor (never ahead of Japanese voice!)
     if (remaining > 0.005 && !c1.isUnisonPhrase && !c1.isSplitContinuation) {
       const prevEnd = i > 0
         ? (clips[i - 1].clipStartSec + (clips[i - 1].offsetSec || 0) + clips[i - 1].durationSec + minGapSec)
         : 0;
       const curS1 = c1.clipStartSec + (c1.offsetSec || 0);
-      const canPullLeft = Math.min(0.18, Math.max(0, curS1 - prevEnd));
+      const c1AnchorFloor = typeof c1.refVocalStartSec === 'number'
+        ? computeTargetClipStartSec({
+            anchorStartSec: c1.refVocalStartSec,
+            anchorEndSec: c1.refVocalEndSec,
+            speechOnsetOffsetSec: c1.speechOnsetOffsetSec,
+            hasRefVocal: true,
+          })
+        : typeof c1.targetSubStartSec === 'number'
+        ? c1.targetSubStartSec
+        : curS1;
+      const minAllowedS1 = Math.max(prevEnd, c1AnchorFloor);
+      const canPullLeft = Math.min(0.18, Math.max(0, curS1 - minAllowedS1));
       if (canPullLeft > 0.005) {
         const pull = Math.min(remaining, canPullLeft);
         c1.clipStartSec = Number(Math.max(0, curS1 - pull).toFixed(3));

@@ -8,6 +8,7 @@ const ffmpeg = require('fluent-ffmpeg');
 const {
   TIMING_RULES,
   getMaxSafeShiftSec,
+  computeTargetClipStartSec,
   isPhraseTimingNotRequired: sharedIsPhraseTimingNotRequired,
   isIntentionalOverlapDecision,
   evaluateSoftTimeFit,
@@ -830,7 +831,8 @@ class AutoTimingService {
   /**
    * Вычисляет точное смещение атаки голоса (speechOnsetOffsetSec) и конца речи (speechOffsetSec)
    * внутри клипа [sourceStartSec .. sourceEndSec] по 10-мс кадрам RMS:
-   * первое 10-мс окно, где RMS > room_noise + 12 дБ ИЛИ RMS > 20% от пика фразы.
+   * после нахождения вокального ядра шагает назад к реальной границе начальной согласной/слога
+   * и ограничивает pre-roll величиной MAX_ONSET_PREROLL_SEC (0.18 с), чтобы фразы не сдвигались раньше оригинала.
    */
   static detectClipSpeechBoundsFromFrames(framesData, sourceStartSec, sourceEndSec) {
     const clipDur = Math.max(0.05, (sourceEndSec || 0) - (sourceStartSec || 0));
@@ -851,8 +853,8 @@ class AutoTimingService {
     }
 
     const noiseFloorAmp = Math.pow(10, roomNoiseDb / 20);
-    const noisePlus12Amp = Math.pow(10, (roomNoiseDb + 12) / 20);
-    const peak20Amp = peakRms * 0.20;
+    const noisePlus10Amp = Math.pow(10, (roomNoiseDb + 10) / 20);
+    const peak15Amp = peakRms * 0.15;
 
     if (peakRms < Math.max(1e-5, noiseFloorAmp * 1.35)) {
       return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms, roomNoiseDb };
@@ -860,7 +862,7 @@ class AutoTimingService {
 
     const isSpeechFrame = (idx) => {
       const r = rmsFrames[idx];
-      return r > noiseFloorAmp * 1.4 && (r > noisePlus12Amp || r > peak20Amp);
+      return r > noiseFloorAmp * 1.4 && (r > noisePlus10Amp || r > peak15Amp);
     };
 
     let onsetFrame = -1;
@@ -881,14 +883,52 @@ class AutoTimingService {
       return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms, roomNoiseDb };
     }
 
-    const onsetOffsetSec = Number(Math.max(0, Math.min(clipDur - 0.04, (onsetFrame - fStart) * frameDurSec)).toFixed(3));
-    const offsetSec = Number(Math.max(Math.min(clipDur, onsetOffsetSec + 0.02), Math.min(clipDur, (offsetFrame - fStart) * frameDurSec)).toFixed(3));
+    // Обратный проход к начальной согласной/безударному слогу (до 280 мс назад)
+    const wordEdgeAmp = Math.max(
+      noiseFloorAmp * 1.75,
+      Math.pow(10, Math.max(-58, roomNoiseDb + 4.5) / 20),
+      peakRms * 0.04
+    );
+    let trueOnsetFrame = onsetFrame;
+    let backSilentRun = 0;
+    const minBackFrame = Math.max(fStart, onsetFrame - 28);
+    for (let b = onsetFrame - 1; b >= minBackFrame; b--) {
+      if (rmsFrames[b] >= wordEdgeAmp) {
+        trueOnsetFrame = b;
+        backSilentRun = 0;
+      } else {
+        backSilentRun++;
+        if (backSilentRun > 3) break;
+      }
+    }
+
+    // Прямой проход к мягкому окончанию слова (до 180 мс вперёд)
+    let trueOffsetFrame = offsetFrame;
+    let fwdSilentRun = 0;
+    const maxFwdFrame = Math.min(fEnd - 1, offsetFrame + 18);
+    for (let f = offsetFrame; f <= maxFwdFrame; f++) {
+      if (rmsFrames[f] >= wordEdgeAmp) {
+        trueOffsetFrame = f + 1;
+        fwdSilentRun = 0;
+      } else {
+        fwdSilentRun++;
+        if (fwdSilentRun > 3) break;
+      }
+    }
+
+    const onsetSecRaw = (trueOnsetFrame - fStart) * frameDurSec;
+    const offsetSecRaw = (trueOffsetFrame - fStart) * frameDurSec;
+    const maxAllowedPreRollSec = Math.min(clipDur - 0.04, TIMING_RULES.MAX_ONSET_PREROLL_SEC);
+
+    const onsetOffsetSec = Number(Math.max(0, Math.min(maxAllowedPreRollSec, onsetSecRaw)).toFixed(3));
+    const offsetSec = Number(Math.max(Math.min(clipDur, onsetOffsetSec + 0.02), Math.min(clipDur, offsetSecRaw)).toFixed(3));
     return { onsetOffsetSec, offsetSec, peakRms, roomNoiseDb };
   }
 
   /**
-   * Сканирует окно [subStartSec - 0.45s .. subEndSec + 0.45s] на original_vocals.wav
-   * для нахождения реального начала (refVocalStartSec) и конца (refVocalEndSec) речи сейю.
+   * Сканирует окно [subStartSec - 0.06s .. subEndSec + 0.35s] на original_vocals.wav
+   * для нахождения реального начала (refVocalStartSec) и конца (refVocalEndSec) речи сейю,
+   * игнорируя хвосты предыдущих реплик и короткие вдохи перед фразой.
    */
   static findOriginalVocalsAnchor(vocalsFramesData, subStartSec, subEndSec) {
     if (!vocalsFramesData || !vocalsFramesData.rmsFrames || vocalsFramesData.rmsFrames.length === 0) {
@@ -896,8 +936,10 @@ class AutoTimingService {
     }
 
     const { rmsFrames, frameDurSec, roomNoiseDb, durationSec } = vocalsFramesData;
-    const scanStartSec = Math.max(0, subStartSec - 0.45);
-    const scanEndSec = Math.min(durationSec, subEndSec + 0.45);
+    const preSubMaxSec = TIMING_RULES.VOCALS_ANCHOR_PRE_SUB_MAX_SEC ?? 0.06;
+    const postSubMaxSec = TIMING_RULES.VOCALS_ANCHOR_POST_SUB_MAX_SEC ?? 0.35;
+    const scanStartSec = Math.max(0, subStartSec - preSubMaxSec);
+    const scanEndSec = Math.min(durationSec, subEndSec + postSubMaxSec);
     const fStart = Math.max(0, Math.floor(scanStartSec / frameDurSec));
     const fEnd = Math.min(rmsFrames.length, Math.ceil(scanEndSec / frameDurSec));
     if (fEnd <= fStart + 4) {
@@ -915,26 +957,98 @@ class AutoTimingService {
     const noisePlus12Amp = Math.pow(10, (roomNoiseDb + 12) / 20);
     const threshold = Math.max(noisePlus12Amp, peakRms * 0.16, Math.pow(10, -44 / 20));
 
-    let onsetFrame = -1;
-    let offsetFrame = -1;
+    const numFrames = fEnd - fStart;
+    const activeMask = new Uint8Array(numFrames);
     let activeFrames = 0;
-    for (let f = fStart; f < fEnd; f++) {
+    for (let i = 0; i < numFrames; i++) {
+      const f = fStart + i;
       if (rmsFrames[f] <= threshold) continue;
       const confirmedAdj =
         (f + 1 < fEnd && rmsFrames[f + 1] > threshold) ||
         (f - 1 >= fStart && rmsFrames[f - 1] > threshold) ||
         rmsFrames[f] > peakRms * 0.35;
-      if (!confirmedAdj) continue;
-      activeFrames++;
-      if (onsetFrame === -1) onsetFrame = f;
-      offsetFrame = f + 1;
+      if (confirmedAdj) {
+        activeMask[i] = 1;
+        activeFrames++;
+      }
     }
 
-    if (onsetFrame === -1 || offsetFrame === -1 || activeFrames < 3) {
+    if (activeFrames < 3) {
       return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
     }
 
-    const refVocalStartSec = Number((onsetFrame * frameDurSec).toFixed(3));
+    // Сглаживаем внутрислоговые микро-провалы <= 3 кадров (30 мс)
+    let gapRun = 0;
+    for (let i = 0; i < numFrames; i++) {
+      if (activeMask[i] === 0) {
+        gapRun++;
+      } else {
+        if (gapRun > 0 && gapRun <= 3 && i - gapRun > 0) {
+          for (let k = i - gapRun; k < i; k++) activeMask[k] = 1;
+        }
+        gapRun = 0;
+      }
+    }
+
+    const clusters = [];
+    let idx = 0;
+    while (idx < numFrames) {
+      if (activeMask[idx] === 1) {
+        const cStart = idx;
+        let cPeak = 0;
+        while (idx < numFrames && activeMask[idx] === 1) {
+          if (rmsFrames[fStart + idx] > cPeak) cPeak = rmsFrames[fStart + idx];
+          idx++;
+        }
+        const cEnd = idx;
+        if (cEnd - cStart >= 2) {
+          clusters.push({
+            startFrame: fStart + cStart,
+            endFrame: fStart + cEnd,
+            durFrames: cEnd - cStart,
+            clusterPeak: cPeak,
+          });
+        }
+      } else {
+        idx++;
+      }
+    }
+
+    if (clusters.length === 0) {
+      return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+    }
+
+    let chosenClusterIdx = 0;
+    if (clusters.length >= 2) {
+      const first = clusters[0];
+      const second = clusters[1];
+      const firstStartSec = first.startFrame * frameDurSec;
+      const valleyFrames = second.startFrame - first.endFrame;
+      const isFirstPreBreathOrTail =
+        firstStartSec <= subStartSec + 0.06 &&
+        valleyFrames >= 4 &&
+        (first.durFrames <= 15 || first.clusterPeak < peakRms * 0.45) &&
+        (second.durFrames >= 10 || second.clusterPeak >= first.clusterPeak * 1.25);
+      if (isFirstPreBreathOrTail) {
+        chosenClusterIdx = 1;
+      }
+    }
+
+    let onsetFrame = clusters[chosenClusterIdx].startFrame;
+    const offsetFrame = clusters[clusters.length - 1].endFrame;
+
+    const edgeThreshold = Math.max(Math.pow(10, (roomNoiseDb + 8) / 20), peakRms * 0.08);
+    const minEdgeFrame = chosenClusterIdx > 0 ? clusters[chosenClusterIdx - 1].endFrame + 2 : fStart;
+    for (let b = onsetFrame - 1; b >= Math.max(minEdgeFrame, onsetFrame - 3); b--) {
+      if (rmsFrames[b] >= edgeThreshold) {
+        onsetFrame = b;
+      } else {
+        break;
+      }
+    }
+
+    const minAllowedVocalStartSec = Math.max(0, subStartSec - preSubMaxSec);
+    const refVocalStartSec = Number(Math.max(minAllowedVocalStartSec, onsetFrame * frameDurSec).toFixed(3));
     const refVocalEndSec = Number(Math.max(refVocalStartSec + 0.08, offsetFrame * frameDurSec).toFixed(3));
     return {
       refVocalStartSec,
@@ -946,8 +1060,7 @@ class AutoTimingService {
   }
 
   /**
-   * Строгое правило освобождения от автотайминга (единый модуль TimingRulesConfig):
-   * фраза НЕ двигается ТОЛЬКО если атака речи отклоняется <= 0.12 с (120 мс) И конец речи вылезает <= min(25%, 0.35 с).
+   * Строгое правило освобождения от автотайминга (единый модуль TimingRulesConfig).
    */
   static isPhraseTimingNotRequired(
     clipStartSec,
@@ -955,7 +1068,8 @@ class AutoTimingService {
     anchorStartSec,
     anchorEndSec,
     speechOnsetOffsetSec = 0,
-    speechOffsetSec
+    speechOffsetSec,
+    hasRefVocal = true
   ) {
     return sharedIsPhraseTimingNotRequired(
       clipStartSec,
@@ -963,13 +1077,15 @@ class AutoTimingService {
       anchorStartSec,
       anchorEndSec,
       speechOnsetOffsetSec,
-      speechOffsetSec
+      speechOffsetSec,
+      hasRefVocal
     );
   }
 
   /**
    * Пост-проверка коллизий после сдвигов внутри одной дорожки:
-   * гарантирует зазор >= minGapSec (по умолчанию 60 мс из TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) между соседними фразами.
+   * гарантирует зазор >= minGapSec (по умолчанию 60 мс из TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) между соседними фразами,
+   * НЕ утягивая предыдущую фразу раньше её эталонного якоря (Anti-Rush).
    */
   static enforceSameTrackMinGap(phrases, minGapSec = TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) {
     if (!Array.isArray(phrases) || phrases.length < 2) return phrases;
@@ -996,10 +1112,17 @@ class AutoTimingService {
         remaining -= trim;
       }
 
-      // 2. Микро-сдвиг p1 влево (<= 0.18с) при наличии места за p0
+      // 2. Микро-сдвиг p1 влево разрешён ТОЛЬКО если p1 стоит правее своего эталонного якоря (не раньше оригинала!)
       if (remaining > 0.005 && !p1.isUnisonPhrase) {
         const prevEnd = i > 0 ? (phrases[i - 1].targetEndSec + minGapSec) : 0;
-        const canPull = Math.min(0.18, Math.max(0, p1.targetStartSec - prevEnd));
+        const p1AnchorFloor = computeTargetClipStartSec({
+          anchorStartSec: p1.refVocalStartSec ?? p1.subStartSec ?? p1.targetStartSec,
+          anchorEndSec: p1.refVocalEndSec ?? p1.subEndSec,
+          speechOnsetOffsetSec: p1.speechOnsetOffsetSec,
+          hasRefVocal: Boolean(p1.hasRefVocalAnchor),
+        });
+        const minAllowedStart = Math.max(prevEnd, p1AnchorFloor);
+        const canPull = Math.min(0.18, Math.max(0, p1.targetStartSec - minAllowedStart));
         if (canPull > 0.005) {
           const pull = Math.min(remaining, canPull);
           p1.targetStartSec = Number(Math.max(0, p1.targetStartSec - pull).toFixed(3));
@@ -1868,19 +1991,50 @@ class AutoTimingService {
         intervals = this.refineAndAdaptIntervalsWithVocals(intervals, charLines, trackFramesData, vocalsFramesData, edgeStats);
       }
 
-      // Two-pass surgical subtitle matching for timeline tracks so no phrase ever steals a neighbor's subtitle
+      // Monotonic corridor-guarded surgical subtitle matching for timeline tracks so no phrase ever steals an earlier unvoiced subtitle
       const matchedSubByInterval = new Array(intervals.length).fill(null);
+      const matchedSubIdxByInterval = new Array(intervals.length).fill(-1);
       if (isTrackInTimeline && charLines.length > 0) {
         const usedSubIdx = new Set();
+        const isMonotonicCompatible = (kIdx, sIdx) => {
+          for (let i = 0; i < kIdx; i++) {
+            if (matchedSubIdxByInterval[i] !== -1 && matchedSubIdxByInterval[i] >= sIdx) return false;
+          }
+          for (let i = kIdx + 1; i < intervals.length; i++) {
+            if (matchedSubIdxByInterval[i] !== -1 && matchedSubIdxByInterval[i] <= sIdx) return false;
+          }
+          return true;
+        };
+        const isWithinCorridor = (kIdx, targetStartSec) => {
+          const prevEnd = kIdx > 0 ? (intervals[kIdx - 1].endSec + 0.02) : 0;
+          const nextStart = kIdx + 1 < intervals.length ? (intervals[kIdx + 1].startSec - 0.02) : Infinity;
+          return targetStartSec >= prevEnd - 0.25 && (targetStartSec + Math.min(intervals[kIdx].durationSec, 1.0)) <= nextStart + 0.25;
+        };
+
         const candidatePairs = [];
         for (let k = 0; k < intervals.length; k++) {
           if (intervals[k]._overrideSub) {
             matchedSubByInterval[k] = intervals[k]._overrideSub;
+            const ovIdx = charLines.findIndex(cl => cl === intervals[k]._overrideSub || String(cl.id) === String(intervals[k]._overrideSub.id));
+            if (ovIdx !== -1) {
+              matchedSubIdxByInterval[k] = ovIdx;
+              usedSubIdx.add(ovIdx);
+            }
             continue;
           }
+          const ivStart = intervals[k].startSec;
           for (let sIdx = 0; sIdx < charLines.length; sIdx++) {
-            const diff = Math.abs(charLines[sIdx].startSec - intervals[k].startSec);
-            if (diff <= 2.2) {
+            const sub = charLines[sIdx];
+            const signedDiff = ivStart - sub.startSec;
+            const diff = Math.abs(signedDiff);
+            // Prevent a clip inside prevSub from matching next sub, or a clip after sub.endSec from being yanked back to an unvoiced earlier sub
+            if (sIdx > 0 && ivStart <= charLines[sIdx - 1].endSec + 0.20 && sub.startSec - ivStart > 0.50) {
+              continue;
+            }
+            if (sIdx + 1 < charLines.length && ivStart >= charLines[sIdx + 1].startSec - 0.15 && Math.abs(ivStart - charLines[sIdx + 1].startSec) < diff) {
+              continue;
+            }
+            if (signedDiff >= -0.70 && signedDiff <= 1.35 && ivStart <= sub.endSec + 0.25 && isWithinCorridor(k, sub.startSec)) {
               candidatePairs.push({ k, sIdx, diff });
             }
           }
@@ -1888,7 +2042,9 @@ class AutoTimingService {
         candidatePairs.sort((a, b) => a.diff - b.diff);
         for (const pair of candidatePairs) {
           if (matchedSubByInterval[pair.k] !== null || usedSubIdx.has(pair.sIdx)) continue;
+          if (!isMonotonicCompatible(pair.k, pair.sIdx)) continue;
           matchedSubByInterval[pair.k] = charLines[pair.sIdx];
+          matchedSubIdxByInterval[pair.k] = pair.sIdx;
           usedSubIdx.add(pair.sIdx);
         }
       }
@@ -1940,7 +2096,12 @@ class AutoTimingService {
 
         let initialStart = interval.startSec;
         if (!isTrackInTimeline && track.isFix) {
-          initialStart = Number(Math.max(0, anchor.anchorStartSec - onsetOffsetSec).toFixed(3));
+          initialStart = computeTargetClipStartSec({
+            anchorStartSec: anchor.anchorStartSec,
+            anchorEndSec: anchor.anchorEndSec,
+            speechOnsetOffsetSec: onsetOffsetSec,
+            hasRefVocal: anchor.hasRefVocal,
+          });
         } else if (subLine) {
           const timingExempt = this.isPhraseTimingNotRequired(
             interval.startSec,
@@ -1948,10 +2109,16 @@ class AutoTimingService {
             anchor.anchorStartSec,
             anchor.anchorEndSec,
             onsetOffsetSec,
-            speechOffsetSec
+            speechOffsetSec,
+            anchor.hasRefVocal
           );
           if (!timingExempt.notRequired) {
-            const desiredClipStart = Math.max(0, anchor.anchorStartSec - onsetOffsetSec);
+            const desiredClipStart = computeTargetClipStartSec({
+              anchorStartSec: anchor.anchorStartSec,
+              anchorEndSec: anchor.anchorEndSec,
+              speechOnsetOffsetSec: onsetOffsetSec,
+              hasRefVocal: anchor.hasRefVocal,
+            });
             const rawDelta = desiredClipStart - interval.startSec;
             const maxAutoShift = getMaxSafeShiftSec(anchor.hasRefVocal);
             const prevEnd = k > 0 ? (phrases[k - 1].targetEndSec + intraTrackMinGapSec) : 0;
@@ -2200,25 +2367,46 @@ class AutoTimingService {
         }
 
         totalCollisionsFound++;
-        const shiftAmount = collisionOverlapSec;
+        let remainingCollisionSec = collisionOverlapSec;
 
-        let earlyShiftSec = 0;
-        if (i > 0) {
+        // 1. Сначала подрезаем тихий post-roll хвост первой реплики (current), не затрагивая речь
+        const currentSpeechEndFloor = typeof current.speechOffsetSec === 'number' && current.speechOffsetSec > 0
+          ? Math.max(0.18, current.speechOffsetSec + 0.025)
+          : Math.max(0.22, current.durationSec - 0.10);
+        const maxCurrentTrim = Math.max(0, current.durationSec - currentSpeechEndFloor);
+        if (maxCurrentTrim > 0.005) {
+          const trim = Math.min(remainingCollisionSec, maxCurrentTrim);
+          current.durationSec = Number((current.durationSec - trim).toFixed(3));
+          current.sourceEndSec = Number((current.sourceStartSec + current.durationSec).toFixed(3));
+          current.targetEndSec = Number((current.targetStartSec + current.durationSec).toFixed(3));
+          remainingCollisionSec -= trim;
+        }
+
+        // 2. Сдвиг current влево разрешён ТОЛЬКО если current стоит правее своего эталонного якоря (не раньше оригинала!)
+        if (remainingCollisionSec > 0.005 && i > 0) {
           const prev = allProjectPhrases[i - 1];
-          const availableRoomBefore = current.targetStartSec - (prev.targetEndSec + minGapSec);
-          if (availableRoomBefore > 0.05) {
-            earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, shiftAmount * 0.45);
-            current.targetStartSec = Math.max(0, current.targetStartSec - earlyShiftSec);
-            current.targetEndSec = current.targetStartSec + current.durationSec;
+          const currentAnchorFloor = computeTargetClipStartSec({
+            anchorStartSec: current.refVocalStartSec ?? current.subStartSec ?? current.targetStartSec,
+            anchorEndSec: current.refVocalEndSec ?? current.subEndSec,
+            speechOnsetOffsetSec: current.speechOnsetOffsetSec,
+            hasRefVocal: Boolean(current.hasRefVocalAnchor),
+          });
+          const minAllowedCurrentStart = Math.max(prev.targetEndSec + minGapSec, currentAnchorFloor);
+          const availableRoomBefore = Math.max(0, current.targetStartSec - minAllowedCurrentStart);
+          if (availableRoomBefore > 0.02) {
+            const earlyShiftSec = Math.min(availableRoomBefore, maxShiftEarlySec, remainingCollisionSec * 0.45);
+            current.targetStartSec = Number(Math.max(0, current.targetStartSec - earlyShiftSec).toFixed(3));
+            current.targetEndSec = Number((current.targetStartSec + current.durationSec).toFixed(3));
+            remainingCollisionSec -= earlyShiftSec;
           }
         }
 
         const finalNextStart = current.targetEndSec + minGapSec;
         const delta = finalNextStart - next.targetStartSec;
         if (delta > 0 && delta <= TIMING_RULES.MAX_SAFE_SHIFT_WITH_VOCALS_SEC) {
-          next.targetStartSec = finalNextStart;
-          next.targetEndSec = next.targetStartSec + next.durationSec;
-          next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
+          next.targetStartSec = Number(finalNextStart.toFixed(3));
+          next.targetEndSec = Number((next.targetStartSec + next.durationSec).toFixed(3));
+          next.shiftDeltaSec = Number((next.targetStartSec - next.sourceStartSec).toFixed(3));
           next.collisionResolved = true;
           totalCollisionsResolved++;
 

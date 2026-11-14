@@ -12,6 +12,10 @@ import {
 } from './timing.dsp';
 import { getPlayableAudioUrl } from './timing.utils';
 import { getSharedAudioContext } from '../../lib/qa/sharedAudioContext';
+import {
+  computeTargetClipStartSec,
+  isPhraseTimingNotRequired,
+} from './timing.rules';
 
 /**
  * Targeted local window speech scanner for the Iterative Self-Healing Final Audit.
@@ -374,7 +378,13 @@ export function bindTrackClipsToSubtitlesMonotonicallyService(
       const sub = trSubs[sIdx];
       const signedDiff = cStart - sub.startSec;
       const diff = Math.abs(signedDiff);
-      if (signedDiff >= -0.70 && signedDiff <= 1.35 && isWithinTrackCorridor(cIdx, sub.startSec)) {
+      if (sIdx > 0 && cStart >= trSubs[sIdx - 1].startSec - 0.15 && cStart <= trSubs[sIdx - 1].endSec + 0.25 && sub.startSec - cStart > 0.55) {
+        continue;
+      }
+      if (sIdx + 1 < trSubs.length && cStart >= trSubs[sIdx + 1].startSec - 0.15 && Math.abs(cStart - trSubs[sIdx + 1].startSec) < diff) {
+        continue;
+      }
+      if (signedDiff >= -0.70 && signedDiff <= 1.35 && cStart <= sub.endSec + 0.25 && isWithinTrackCorridor(cIdx, sub.startSec)) {
         const subDur = Math.max(0.25, sub.endSec - sub.startSec);
         const durRatio = Math.min(clip.durationSec, subDur) / Math.max(clip.durationSec, subDur);
         const shortBreathPenalty = (clip.durationSec < 0.22 && speechStats.activeWindows < 7 && subDur > 0.85) ? 1.5 : 0;
@@ -439,7 +449,8 @@ export function bindTrackClipsToSubtitlesMonotonicallyService(
       const cStart = clip.clipStartSec + (clip.offsetSec || 0);
       const signedDiff = cStart - sub.startSec;
       const timeDist = Math.abs(signedDiff);
-      if (signedDiff < -0.75 || signedDiff > 1.40 || timeDist > 1.35 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
+      // Never allow an unvoiced earlier subtitle to grab a clip that starts after the subtitle has ended!
+      if (signedDiff < -0.75 || signedDiff > 1.35 || cStart > sub.endSec + 0.20 || timeDist > 1.35 || !isWithinTrackCorridor(cIdx, sub.startSec)) continue;
 
       const subDur = Math.max(0.25, sub.endSec - sub.startSec);
       const durFit = Math.min(clip.durationSec, subDur) / Math.max(clip.durationSec, subDur);
@@ -474,6 +485,21 @@ export function bindTrackClipsToSubtitlesMonotonicallyService(
         ? firstAnchor
         : findOriginalVocalsAnchorForSub(vocalsBuffer, lastSub.startSec, lastSub.endSec, vocalsNoiseDbHint);
       const onsetOffset = clip.speechOnsetOffsetSec || 0;
+      const exemptCheck = isPhraseTimingNotRequired(
+        cStart,
+        clip.durationSec,
+        firstAnchor.anchorStartSec,
+        lastAnchor.anchorEndSec,
+        onsetOffset,
+        clip.speechOffsetSec,
+        firstAnchor.hasRefVocal
+      );
+      const idealTargetStart = computeTargetClipStartSec({
+        anchorStartSec: firstAnchor.anchorStartSec,
+        anchorEndSec: lastAnchor.anchorEndSec,
+        speechOnsetOffsetSec: onsetOffset,
+        hasRefVocal: firstAnchor.hasRefVocal,
+      });
 
       clip.isPhysics = false;
       clip.isSplitContinuation = isSplitPart;
@@ -487,9 +513,9 @@ export function bindTrackClipsToSubtitlesMonotonicallyService(
         : firstSub.text;
       clip.matchedSubId = String(firstSub.id ?? bestSubIdx);
       clip.coveredSubIds = coveredSubs.map((s, idx) => String(s.id ?? coveredIdxs[idx]));
-      clip.targetSubStartSec = (isSplitPart || clip.overlapResolvedLock)
+      clip.targetSubStartSec = (isSplitPart || clip.overlapResolvedLock || exemptCheck.notRequired)
         ? Number(cStart.toFixed(3))
-        : Number(Math.max(0, firstAnchor.anchorStartSec - onsetOffset).toFixed(3));
+        : idealTargetStart;
       clip.targetSubEndSec = lastAnchor.anchorEndSec;
     } else {
       clip.isPhysics = true;

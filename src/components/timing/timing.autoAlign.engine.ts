@@ -24,6 +24,7 @@ import {
   normalizeName,
   TIMING_RULES,
   getMaxSafeShiftSec,
+  computeTargetClipStartSec,
   isIntentionalOverlapDecision
 } from "./timingAudioUtils";
 
@@ -211,13 +212,30 @@ export async function runStage1TimingAnalysisEngine(params: {
       return targetStartSec >= prevEnd - 0.15 && (targetStartSec + Math.min(clip.durationSec, 1.2)) <= nextStart + 0.15;
     };
 
+    const isMonotonicCompatible = (cIdx: number, sIdx: number): boolean => {
+      for (let i = 0; i < cIdx; i++) {
+        if (clipMatchedSubIdx[i] !== -1 && clipMatchedSubIdx[i] >= sIdx) return false;
+      }
+      for (let i = cIdx + 1; i < clips.length; i++) {
+        if (clipMatchedSubIdx[i] !== -1 && clipMatchedSubIdx[i] <= sIdx) return false;
+      }
+      return true;
+    };
+
     const candidatePairs: Array<{ cIdx: number; sIdx: number; diff: number }> = [];
     for (let cIdx = 0; cIdx < clips.length; cIdx++) {
       const cStart = clips[cIdx].clipStartSec + (clips[cIdx].offsetSec || 0);
       for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
         const sub = trSubs[sIdx];
-        const diff = Math.abs(cStart - sub.startSec);
-        if (diff <= 2.0 && isWithinTrackCorridor(cIdx, sub.startSec)) {
+        const signedDiff = cStart - sub.startSec;
+        const diff = Math.abs(signedDiff);
+        if (sIdx > 0 && cStart <= trSubs[sIdx - 1].endSec + 0.20 && sub.startSec - cStart > 0.50) {
+          continue;
+        }
+        if (sIdx + 1 < trSubs.length && cStart >= trSubs[sIdx + 1].startSec - 0.15 && Math.abs(cStart - trSubs[sIdx + 1].startSec) < diff) {
+          continue;
+        }
+        if (signedDiff >= -0.70 && signedDiff <= 1.35 && cStart <= sub.endSec + 0.25 && isWithinTrackCorridor(cIdx, sub.startSec)) {
           candidatePairs.push({ cIdx, sIdx, diff });
         }
       }
@@ -225,6 +243,7 @@ export async function runStage1TimingAnalysisEngine(params: {
     candidatePairs.sort((a, b) => a.diff - b.diff);
     for (const pair of candidatePairs) {
       if (clipMatchedSubIdx[pair.cIdx] !== -1 || assignedSubIndices.has(pair.sIdx)) continue;
+      if (!isMonotonicCompatible(pair.cIdx, pair.sIdx)) continue;
       clipMatchedSubIdx[pair.cIdx] = pair.sIdx;
       assignedSubIndices.add(pair.sIdx);
     }
@@ -282,13 +301,19 @@ export async function runStage1TimingAnalysisEngine(params: {
 
       if (bestSub && bestSubIdx !== -1) {
         const anchor = findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, bestSub.startSec, bestSub.endSec, vocalsNoiseDb);
-        const desiredClipStart = Math.max(0, anchor.anchorStartSec - onsetOffset);
+        const desiredClipStart = computeTargetClipStartSec({
+          anchorStartSec: anchor.anchorStartSec,
+          anchorEndSec: anchor.anchorEndSec,
+          speechOnsetOffsetSec: onsetOffset,
+          hasRefVocal: anchor.hasRefVocal,
+        });
         const maxAutoShift = getMaxSafeShiftSec(Boolean(anchor.hasRefVocal || matchedByWhisper));
         let surgicalTarget = Math.max(origStart - maxAutoShift, Math.min(origStart + maxAutoShift, desiredClipStart));
         surgicalTarget = Math.max(prevClipEnd, Math.min(surgicalTarget, Math.max(prevClipEnd, nextClipStart - clip.durationSec)));
         surgicalTarget = Number(Math.max(0, surgicalTarget).toFixed(3));
 
-        const rawTimeDiff = (cStart + onsetOffset) - anchor.anchorStartSec;
+        const effectivePreRoll = Math.min(TIMING_RULES.MAX_ONSET_PREROLL_SEC, Math.max(0, onsetOffset));
+        const rawTimeDiff = (cStart + effectivePreRoll) - anchor.anchorStartSec;
         const absRawDiff = Math.abs(rawTimeDiff);
         const effectiveShift = Math.abs(surgicalTarget - cStart);
 
@@ -309,7 +334,8 @@ export async function runStage1TimingAnalysisEngine(params: {
           anchor.anchorStartSec,
           anchor.anchorEndSec,
           onsetOffset,
-          clip.speechOffsetSec
+          clip.speechOffsetSec,
+          anchor.hasRefVocal
         );
 
         if (timingExempt.notRequired) {

@@ -2,6 +2,7 @@ import { AudioClip } from './timing.types';
 import {
   TIMING_RULES,
   getMaxSafeShiftSec,
+  computeTargetClipStartSec,
   isPhraseTimingNotRequired,
   isIntentionalOverlapDecision,
   evaluateSoftTimeFit,
@@ -10,6 +11,7 @@ import {
 export {
   TIMING_RULES,
   getMaxSafeShiftSec,
+  computeTargetClipStartSec,
   isPhraseTimingNotRequired,
   isIntentionalOverlapDecision,
   evaluateSoftTimeFit,
@@ -41,7 +43,7 @@ export interface TimingSyncQualitySummary {
 /**
  * Подсчёт единого индикатора качества автотайминга для панели «Тайминг»:
  * - Количество и % диалоговых фраз, попавших атакой в оригинал точнее ±120 мс.
- * - Список спорных реплик (требующих быстрой проверки: Soft Time-Fit, сдвиг > 0.5 с от исходника или незакрытая проблема).
+ * - Список спорных реплик (требующих быстрой проверки: Soft Time-Fit, сдвиг > 0.5 с от исходника, спешка впереди оригинала или незакрытая проблема).
  */
 export function computeTimingSyncQualitySummary(
   audioClips: Record<string, AudioClip[]>
@@ -59,7 +61,7 @@ export function computeTimingSyncQualitySummary(
       totalDialogueClips++;
 
       const curStart = clip.clipStartSec + (clip.offsetSec || 0);
-      const onsetOffset = clip.speechOnsetOffsetSec || 0;
+      const onsetOffset = Math.min(TIMING_RULES.MAX_ONSET_PREROLL_SEC, Math.max(0, clip.speechOnsetOffsetSec || 0));
       const origSourceStart = clip.rawSourceStartSec ?? clip.sourceStartSec ?? curStart;
       const shiftFromOrigSec = Number((curStart - origSourceStart).toFixed(3));
       const absShift = Math.abs(shiftFromOrigSec);
@@ -69,17 +71,28 @@ export function computeTimingSyncQualitySummary(
 
       // Вычисляем реальное отклонение атаки голоса от эталона (вокал оригинала или саб)
       let onsetDiffSec: number | null = null;
+      let signedDiffSec: number | null = null;
       if (typeof clip.refVocalStartSec === 'number') {
-        onsetDiffSec = Math.abs((curStart + onsetOffset) - clip.refVocalStartSec);
+        signedDiffSec = (curStart + onsetOffset) - clip.refVocalStartSec;
+        onsetDiffSec = Math.abs(signedDiffSec);
       } else if (typeof clip.timeDiffSec === 'number') {
+        signedDiffSec = clip.timeDiffSec;
         onsetDiffSec = Math.abs(clip.timeDiffSec);
       } else if (clip.timingNotRequired) {
+        signedDiffSec = 0;
         onsetDiffSec = 0;
       }
 
+      const isRushingAhead =
+        signedDiffSec !== null &&
+        signedDiffSec < -(TIMING_RULES.MAX_EARLY_ATTACK_TOLERANCE_SEC + 0.01);
+
       if (onsetDiffSec !== null) {
         anchoredDialogueClips++;
-        if (onsetDiffSec <= TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC + 0.0005 && !clip.timingIssue) {
+        const maxAllowedAccuracy = clip.hasRefVocalAnchor === false
+          ? TIMING_RULES.ASS_LEAD_IN_GRACE_SEC
+          : TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC;
+        if (!isRushingAhead && onsetDiffSec <= maxAllowedAccuracy + 0.0005 && !clip.timingIssue) {
           accurateCount++;
         }
       }
@@ -88,6 +101,9 @@ export function computeTimingSyncQualitySummary(
       if (hasLargeShift) largeShiftCount++;
 
       const reasons: string[] = [];
+      if (isRushingAhead && signedDiffSec !== null) {
+        reasons.push(`Спешит ${Math.round(signedDiffSec * 1000)}мс`);
+      }
       if (hasTimeFit) {
         reasons.push(`Time-Fit ${playbackRate.toFixed(2)}x`);
       }

@@ -1,4 +1,5 @@
 import { NoiseCalibration } from './timing.types';
+import { TIMING_RULES } from './timing.rules';
 
 /**
  * Statistical Noise Floor & Speech Energy Analyzer.
@@ -534,8 +535,8 @@ export interface ClipSpeechBounds {
 /**
  * Analyzes 10-ms RMS windows across [sourceStartSec, sourceEndSec] (all channels)
  * to determine:
- * - `onsetOffsetSec`: first 10ms frame with RMS > room_noise + 12 dB OR RMS > 20% of phrase peak
- * - `offsetSec`: end of last active speech 10ms frame
+ * - `onsetOffsetSec`: true word onset (walking backwards from the vocal nucleus to capture quiet initial consonants/syllables, capped by MAX_ONSET_PREROLL_SEC)
+ * - `offsetSec`: end of last active speech 10ms frame (walking forwards to include soft trailing consonants)
  */
 export function detectClipSpeechBounds(
   audioBuffer: AudioBuffer | undefined,
@@ -589,8 +590,8 @@ export function detectClipSpeechBounds(
 
   const roomNoiseDb = roomNoiseDbHint ?? getAudioBufferRoomNoiseDb(audioBuffer);
   const noiseFloorAmp = Math.pow(10, roomNoiseDb / 20);
-  const noisePlus12Amp = Math.pow(10, (roomNoiseDb + 12) / 20);
-  const peak20Amp = peakRms * 0.20;
+  const noisePlus10Amp = Math.pow(10, (roomNoiseDb + 10) / 20);
+  const peak15Amp = peakRms * 0.15;
 
   // Guard against scanning pure room-noise / silence clips
   if (peakRms < Math.max(1e-5, noiseFloorAmp * 1.35)) {
@@ -599,7 +600,7 @@ export function detectClipSpeechBounds(
 
   const isSpeechFrame = (idx: number): boolean => {
     const r = rmsFrames[idx];
-    return r > noiseFloorAmp * 1.4 && (r > noisePlus12Amp || r > peak20Amp);
+    return r > noiseFloorAmp * 1.4 && (r > noisePlus10Amp || r > peak15Amp);
   };
 
   let onsetFrame = -1;
@@ -621,10 +622,46 @@ export function detectClipSpeechBounds(
     return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms, roomNoiseDb };
   }
 
-  const onsetSecRaw = (onsetFrame * winSamples) / sampleRate;
-  const offsetSecRaw = (offsetFrame * winSamples) / sampleRate;
+  // Backward Word-Edge Walk: capture quiet Russian initial consonants (с, ш, п, т, к, ф, х, ч) and unstressed first syllables
+  // so they are NEVER treated as silent pre-roll and subtracted from anchorStartSec!
+  const wordEdgeAmp = Math.max(
+    noiseFloorAmp * 1.75,
+    Math.pow(10, Math.max(-58, roomNoiseDb + 4.5) / 20),
+    peakRms * 0.04
+  );
+  let trueOnsetFrame = onsetFrame;
+  let backSilentRun = 0;
+  const minBackFrame = Math.max(0, onsetFrame - 28); // up to 280ms backward consonant/syllable recovery
+  for (let b = onsetFrame - 1; b >= minBackFrame; b--) {
+    if (rmsFrames[b] >= wordEdgeAmp) {
+      trueOnsetFrame = b;
+      backSilentRun = 0;
+    } else {
+      backSilentRun++;
+      if (backSilentRun > 3) break; // >30ms of pure room noise ends the word edge walk
+    }
+  }
 
-  const onsetOffsetSec = Number(Math.max(0, Math.min(clipDur - 0.04, onsetSecRaw)).toFixed(3));
+  // Forward Word-Edge Walk: preserve soft trailing consonants/endings
+  let trueOffsetFrame = offsetFrame;
+  let fwdSilentRun = 0;
+  const maxFwdFrame = Math.min(numFrames - 1, offsetFrame + 18); // up to 180ms forward
+  for (let f = offsetFrame; f <= maxFwdFrame; f++) {
+    if (rmsFrames[f] >= wordEdgeAmp) {
+      trueOffsetFrame = f + 1;
+      fwdSilentRun = 0;
+    } else {
+      fwdSilentRun++;
+      if (fwdSilentRun > 3) break;
+    }
+  }
+
+  const onsetSecRaw = (trueOnsetFrame * winSamples) / sampleRate;
+  const offsetSecRaw = (trueOffsetFrame * winSamples) / sampleRate;
+
+  // Cap pre-roll compensation at MAX_ONSET_PREROLL_SEC (0.18s) so soft/whispered beginnings never pull clips early
+  const maxAllowedPreRollSec = Math.min(clipDur - 0.04, TIMING_RULES.MAX_ONSET_PREROLL_SEC);
+  const onsetOffsetSec = Number(Math.max(0, Math.min(maxAllowedPreRollSec, onsetSecRaw)).toFixed(3));
   const offsetSec = Number(Math.max(Math.min(clipDur, onsetOffsetSec + 0.02), Math.min(clipDur, offsetSecRaw)).toFixed(3));
 
   return { onsetOffsetSec, offsetSec, peakRms, roomNoiseDb };
@@ -651,9 +688,9 @@ export interface OriginalVocalsAnchorResult {
 }
 
 /**
- * Scans separated `original_vocals.wav` in window [subStartSec - 0.45s .. subEndSec + 0.45s]
+ * Scans separated `original_vocals.wav` in window [subStartSec - 0.06s .. subEndSec + 0.35s]
  * to locate the real original seiyuu speech start (`refVocalStartSec`) and end (`refVocalEndSec`).
- * Falls back cleanly to subtitle timestamps when vocals stem is missing or silent in that region.
+ * Ignores pre-subtitle breaths or previous speaker tails and falls back cleanly to subtitle timestamps.
  */
 export function findOriginalVocalsAnchorForSub(
   vocalsBuffer: AudioBuffer | undefined,
@@ -673,8 +710,11 @@ export function findOriginalVocalsAnchorForSub(
   }
 
   const totalLen = channels[0].length;
-  const scanStartSec = Math.max(0, subStartSec - 0.45);
-  const scanEndSec = Math.min(vocalsBuffer.duration, subEndSec + 0.45);
+  // Never scan 450ms before subStartSec (which captures previous speaker tails or pre-line inhales)!
+  const preSubMaxSec = TIMING_RULES.VOCALS_ANCHOR_PRE_SUB_MAX_SEC ?? 0.06;
+  const postSubMaxSec = TIMING_RULES.VOCALS_ANCHOR_POST_SUB_MAX_SEC ?? 0.35;
+  const scanStartSec = Math.max(0, subStartSec - preSubMaxSec);
+  const scanEndSec = Math.min(vocalsBuffer.duration, subEndSec + postSubMaxSec);
   const startSample = Math.max(0, Math.floor(scanStartSec * sampleRate));
   const endSample = Math.min(totalLen, Math.ceil(scanEndSec * sampleRate));
 
@@ -716,27 +756,102 @@ export function findOriginalVocalsAnchorForSub(
   const noisePlus12Amp = Math.pow(10, (noiseDb + 12) / 20);
   const threshold = Math.max(noisePlus12Amp, peakRms * 0.16, Math.pow(10, -44 / 20));
 
-  let onsetFrame = -1;
-  let offsetFrame = -1;
+  // Build active frame mask and segment into vocal clusters (merging micro-gaps <= 30ms / 3 frames)
+  const activeMask = new Uint8Array(numFrames);
   let activeFrames = 0;
-
   for (let f = 0; f < numFrames; f++) {
     if (rmsFrames[f] <= threshold) continue;
     const confirmedAdj =
       (f + 1 < numFrames && rmsFrames[f + 1] > threshold) ||
       (f - 1 >= 0 && rmsFrames[f - 1] > threshold) ||
       rmsFrames[f] > peakRms * 0.35;
-    if (!confirmedAdj) continue;
-    activeFrames++;
-    if (onsetFrame === -1) onsetFrame = f;
-    offsetFrame = f + 1;
+    if (confirmedAdj) {
+      activeMask[f] = 1;
+      activeFrames++;
+    }
   }
 
-  if (onsetFrame === -1 || offsetFrame === -1 || activeFrames < 3) {
+  if (activeFrames < 3) {
     return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
   }
 
-  const refVocalStartSec = Number((scanStartSec + (onsetFrame * winSamples) / sampleRate).toFixed(3));
+  // Bridge intra-syllable micro-gaps <= 3 frames (30ms)
+  let gapRun = 0;
+  for (let f = 0; f < numFrames; f++) {
+    if (activeMask[f] === 0) {
+      gapRun++;
+    } else {
+      if (gapRun > 0 && gapRun <= 3 && f - gapRun > 0) {
+        for (let k = f - gapRun; k < f; k++) activeMask[k] = 1;
+      }
+      gapRun = 0;
+    }
+  }
+
+  const clusters: Array<{ startFrame: number; endFrame: number; durFrames: number; clusterPeak: number }> = [];
+  let idx = 0;
+  while (idx < numFrames) {
+    if (activeMask[idx] === 1) {
+      const cStart = idx;
+      let cPeak = 0;
+      while (idx < numFrames && activeMask[idx] === 1) {
+        if (rmsFrames[idx] > cPeak) cPeak = rmsFrames[idx];
+        idx++;
+      }
+      const cEnd = idx;
+      if (cEnd - cStart >= 2) {
+        clusters.push({
+          startFrame: cStart,
+          endFrame: cEnd,
+          durFrames: cEnd - cStart,
+          clusterPeak: cPeak
+        });
+      }
+    } else {
+      idx++;
+    }
+  }
+
+  if (clusters.length === 0) {
+    return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+  }
+
+  // If the first cluster is a brief pre-speech breath or leftover tail from a previous line
+  // (duration <= 150ms or weak peak < 45% of main speech) separated by >= 40ms valley from a main cluster,
+  // skip the pre-breath and anchor on the real speech cluster!
+  let chosenClusterIdx = 0;
+  if (clusters.length >= 2) {
+    const first = clusters[0];
+    const second = clusters[1];
+    const firstStartSec = scanStartSec + (first.startFrame * winSamples) / sampleRate;
+    const valleyFrames = second.startFrame - first.endFrame;
+    const isFirstPreBreathOrTail =
+      firstStartSec <= subStartSec + 0.06 &&
+      valleyFrames >= 4 &&
+      (first.durFrames <= 15 || first.clusterPeak < peakRms * 0.45) &&
+      (second.durFrames >= 10 || second.clusterPeak >= first.clusterPeak * 1.25);
+    if (isFirstPreBreathOrTail) {
+      chosenClusterIdx = 1;
+    }
+  }
+
+  let onsetFrame = clusters[chosenClusterIdx].startFrame;
+  const offsetFrame = clusters[clusters.length - 1].endFrame;
+
+  // Gentle 1-3 frame (<= 30ms) backward consonant edge walk on the chosen Japanese vocal cluster
+  const edgeThreshold = Math.max(Math.pow(10, (noiseDb + 8) / 20), peakRms * 0.08);
+  const minEdgeFrame = chosenClusterIdx > 0 ? clusters[chosenClusterIdx - 1].endFrame + 2 : 0;
+  for (let b = onsetFrame - 1; b >= Math.max(minEdgeFrame, onsetFrame - 3); b--) {
+    if (rmsFrames[b] >= edgeThreshold) {
+      onsetFrame = b;
+    } else {
+      break;
+    }
+  }
+
+  const minAllowedVocalStartSec = Math.max(0, subStartSec - preSubMaxSec);
+  const rawVocalStartSec = scanStartSec + (onsetFrame * winSamples) / sampleRate;
+  const refVocalStartSec = Number(Math.max(minAllowedVocalStartSec, rawVocalStartSec).toFixed(3));
   const refVocalEndSec = Number(
     Math.max(refVocalStartSec + 0.08, scanStartSec + (offsetFrame * winSamples) / sampleRate).toFixed(3)
   );
