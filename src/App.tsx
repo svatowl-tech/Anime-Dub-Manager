@@ -117,6 +117,11 @@ function AppContent() {
     selectedProjectIdRef.current = selectedProjectId;
   }, [selectedProjectId]);
 
+  const projectsRef = useRef<Project[]>(projects);
+  useEffect(() => {
+    projectsRef.current = projects;
+  }, [projects]);
+
   const standaloneEpisodeRef = useRef<Episode | null>(null);
   useEffect(() => {
     standaloneEpisodeRef.current = standaloneEpisode;
@@ -128,59 +133,70 @@ function AppContent() {
 
   useGlobalKeyboard();
 
-  const loadProjects = useCallback(async () => {
+  const loadProjects = useCallback(async (): Promise<void> => {
     try {
       const data = await ipcSafe.invoke('get-projects');
-      if (data) {
-        setProjects(data);
-        
+      if (Array.isArray(data)) {
+        const normalizedData: Project[] = data.map((p: Project) => ({
+          ...p,
+          episodes: Array.isArray(p.episodes)
+            ? [...p.episodes].sort((a, b) => (a.number || 0) - (b.number || 0))
+            : []
+        }));
+
+        projectsRef.current = normalizedData;
+        setProjects(normalizedData);
+
         let currentSelectedId = selectedProjectIdRef.current;
-        
+
         // Do not auto-select first project on initial load, allowing the General Hub to open by default
-        if (isInitialLoad.current && data.length > 0 && !currentSelectedId) {
+        if (isInitialLoad.current && normalizedData.length > 0 && !currentSelectedId) {
           currentSelectedId = null;
+          selectedProjectIdRef.current = null;
           setSelectedProjectId(null);
         }
         isInitialLoad.current = false;
-        
+
         if (currentSelectedId) {
-          const updatedProject = data.find((p: Project) => p.id === currentSelectedId);
+          const updatedProject = normalizedData.find((p: Project) => p.id === currentSelectedId);
           if (updatedProject) {
-            const ep = updatedProject.episodes?.find((e: Episode) => e.number === updatedProject.lastActiveEpisode) || updatedProject.episodes?.[0];
+            const ep =
+              updatedProject.episodes?.find((e: Episode) => e.number === updatedProject.lastActiveEpisode) ||
+              updatedProject.episodes?.[0];
             setCurrentEpisode(ep ? { ...ep, project: updatedProject } : null);
           } else {
-             // Project was deleted
-             setCurrentEpisode(null);
-             setSelectedProjectId(null);
+            // Project was deleted
+            setCurrentEpisode(null);
+            selectedProjectIdRef.current = null;
+            setSelectedProjectId(null);
           }
         } else {
           setCurrentEpisode(null);
         }
-      }
-      
-      const currentStandalone = standaloneEpisodeRef.current;
-      if (currentStandalone) {
-         try {
-             // Retrieve the updated episode from local storage 
-             // without losing the session file references
-             const epsRaw = localStorage.getItem('episodes');
-             if (epsRaw) {
-                 const eps = JSON.parse(epsRaw);
-                 const updatedStandalone = eps.find((e: any) => e.id === currentStandalone.id);
-                 if (updatedStandalone) {
-                     setStandaloneEpisode({
-                         ...updatedStandalone,
-                         // @ts-ignore
-                         project: currentStandalone.project,
-                         _standaloneVideoBuffer: (currentStandalone as any)._standaloneVideoBuffer,
-                         _standaloneVideoUrl: (currentStandalone as any)._standaloneVideoUrl,
-                         _standaloneSubText: (currentStandalone as any)._standaloneSubText
-                     });
-                 }
-             }
-         } catch(e) {}
-      }
 
+        const currentStandalone = standaloneEpisodeRef.current;
+        if (currentStandalone) {
+          try {
+            // Retrieve the updated episode from local storage
+            // without losing the session file references
+            const epsRaw = localStorage.getItem('episodes');
+            if (epsRaw) {
+              const eps = JSON.parse(epsRaw);
+              const updatedStandalone = eps.find((e: any) => e.id === currentStandalone.id);
+              if (updatedStandalone) {
+                setStandaloneEpisode({
+                  ...updatedStandalone,
+                  // @ts-ignore
+                  project: currentStandalone.project,
+                  _standaloneVideoBuffer: (currentStandalone as any)._standaloneVideoBuffer,
+                  _standaloneVideoUrl: (currentStandalone as any)._standaloneVideoUrl,
+                  _standaloneSubText: (currentStandalone as any)._standaloneSubText
+                });
+              }
+            }
+          } catch (e) {}
+        }
+      }
     } catch (error) {
       console.error("Failed to load projects:", error);
     }
@@ -239,14 +255,18 @@ function AppContent() {
   const handleProjectSelect = (projectId: string) => {
     confirmIfUnsaved(() => {
       appLogger.info('PROJECT', `Выбор проекта: "${projectId || 'none'}"`);
-      setSelectedProjectId(projectId || null);
-      if (!projectId) {
+      const nextId = projectId || null;
+      selectedProjectIdRef.current = nextId;
+      setSelectedProjectId(nextId);
+      if (!nextId) {
         setCurrentEpisode(null);
         return;
       }
-      const project = projects.find(p => p.id === projectId);
+      const project = projectsRef.current.find(p => p.id === nextId);
       if (project) {
-        const ep = project.episodes.find(e => e.number === project.lastActiveEpisode) || project.episodes[0];
+        const ep =
+          project.episodes?.find(e => e.number === project.lastActiveEpisode) ||
+          project.episodes?.[0];
         if (ep) {
           setCurrentEpisode({ ...ep, project });
         } else {
@@ -260,13 +280,19 @@ function AppContent() {
 
   const handleEpisodeSelect = async (episodeNumber: number) => {
     confirmIfUnsaved(async () => {
-      if (!selectedProjectId) return;
-      appLogger.info('PROJECT', `Выбор эпизода #${episodeNumber} в проекте "${selectedProjectId}"`);
-      const project = projects.find(p => p.id === selectedProjectId);
+      const activeProjectId = selectedProjectIdRef.current;
+      if (!activeProjectId) return;
+      appLogger.info('PROJECT', `Выбор эпизода #${episodeNumber} в проекте "${activeProjectId}"`);
+      const project = projectsRef.current.find(p => p.id === activeProjectId);
       if (project) {
         const updatedProject: Project = { ...project, lastActiveEpisode: episodeNumber };
         const ep = updatedProject.episodes?.find(e => e.number === episodeNumber) || updatedProject.episodes?.[0];
-        setProjects(prev => prev.map(p => (p.id === selectedProjectId ? updatedProject : p)));
+        projectsRef.current = projectsRef.current.map(p =>
+          p.id === activeProjectId ? { ...p, lastActiveEpisode: episodeNumber } : p
+        );
+        setProjects(prev =>
+          prev.map(p => (p.id === activeProjectId ? { ...p, lastActiveEpisode: episodeNumber } : p))
+        );
         setCurrentEpisode(ep ? { ...ep, project: updatedProject } : null);
 
         if (project.lastActiveEpisode !== episodeNumber) {

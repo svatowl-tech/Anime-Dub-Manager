@@ -630,16 +630,252 @@ def process_deepfilternet(args):
     sys.stdout.flush()
 
 # ------------------------------------------------------------------------------
-# 5. DEMUCS v4 (STEM SEPARATION - OFFICIAL DEMUCS API)
+# 5. DEMUCS v4 & ONNX MDX-NET (STEM SEPARATION - HTDEMUCS_SAFE_SEGMENT_V8)
 # ------------------------------------------------------------------------------
+def _resolve_safe_demucs_segment(model, adaptive_segment: float = 14.0):
+    """
+    HTDEMUCS_SAFE_SEGMENT_V8
+    Determines a safe `segment` argument for `demucs.apply.apply_model`.
+    CRITICAL: Hybrid Transformer Demucs (`HTDemucs` / `htdemucs` / `htdemucs_ft` / `htdemucs_6s`)
+    has a fixed transformer positional window `training_length = int(7.8 * 44100) = 343980` samples.
+    Passing `segment=14.0` (or `18.0`/`26.0`) to a `BagOfModels([HTDemucs])` causes `BagOfModels`
+    to slice 14.0s chunks (617,400 samples -> 4,939,200 elements) and call `HTDemucs.forward`
+    with `split=False`, crashing on `xt = xt.view(B, S, -1, 343980)`.
+    Returning `None` lets Demucs use each sub-model's exact native `model.segment` (7.8s = 343,980 samples).
+    """
+    sub_models = getattr(model, "models", None) or [model]
+    for sub in sub_models:
+        cls_name = sub.__class__.__name__.lower()
+        if "htdemucs" in cls_name or getattr(sub, "use_train_segment", False):
+            return None
+        sub_seg = getattr(sub, "segment", None)
+        if sub_seg is not None:
+            try:
+                if float(sub_seg) <= 12.0:
+                    return None
+            except Exception:
+                return None
+        max_allowed = getattr(sub, "max_allowed_segment", None)
+        if max_allowed is not None and max_allowed != float("inf"):
+            try:
+                if float(max_allowed) <= float(adaptive_segment):
+                    return None
+            except Exception:
+                return None
+    return None
+
+
+def _export_separated_stems(output_dir, prefix, stems_mode, vocals_data, inst_data, target_sr, extra_sources=None, engine_label="Demucs v4"):
+    """
+    Resamples separated stems to 48 kHz 24-bit WAV and writes the standardized RESULT JSON payload.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    emit_progress(86.0, f"Пост-обработка стемов ({engine_label}): ресемплинг в 48 кГц и сохранение 24-бит WAV...")
+    exported_files = []
+
+    vocals_out_path = os.path.join(output_dir, f"{prefix}vocals.wav")
+    inst_out_path = os.path.join(output_dir, f"{prefix}no_vocals.wav")
+
+    if stems_mode in ["vocals_only", "both", "all"] and vocals_data is not None:
+        AudioConditioner.save_audio(vocals_out_path, vocals_data, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
+        alt_vocals = os.path.join(output_dir, f"{prefix}original_vocals.wav")
+        if alt_vocals != vocals_out_path:
+            try:
+                import shutil
+                shutil.copyfile(vocals_out_path, alt_vocals)
+            except Exception:
+                pass
+        exported_files.append({"type": "vocals", "path": vocals_out_path})
+
+    if stems_mode in ["instrumental_only", "both", "all"] and inst_data is not None:
+        AudioConditioner.save_audio(inst_out_path, inst_data, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
+        alt_inst = os.path.join(output_dir, f"{prefix}original_instrumental_ME.wav")
+        if alt_inst != inst_out_path:
+            try:
+                import shutil
+                shutil.copyfile(inst_out_path, alt_inst)
+            except Exception:
+                pass
+        exported_files.append({"type": "instrumental", "path": inst_out_path})
+
+    if stems_mode == "all" and isinstance(extra_sources, dict):
+        for stem_key in ["drums", "bass", "other"]:
+            s_arr = extra_sources.get(stem_key)
+            if s_arr is not None:
+                s_path = os.path.join(output_dir, f"{prefix}{stem_key}.wav")
+                AudioConditioner.save_audio(s_path, s_arr, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
+                exported_files.append({"type": stem_key, "path": s_path})
+
+    emit_progress(100.0, f"Разделение {engine_label} завершено ({len(exported_files)} стемов создано)!")
+    sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
+    sys.stdout.flush()
+
+
+def _try_mdx_onnx_separation(args, stems_mode: str, output_dir: str, prefix: str) -> bool:
+    """
+    Executes direct ONNX Runtime STFT spectrogram separation for UVR MDX-Net models
+    (`UVR-MDX-NET-Voc_FT.onnx`, `UVR-MDX-NET-Inst_HQ_3.onnx`, `Kim_Vocal_2.onnx`)
+    when both the `.onnx` model file and `onnxruntime` are available.
+    Returns True if separation succeeded, or False to fall back to Demucs v4 (`htdemucs`).
+    """
+    model_path = getattr(args, "model_path", None) or ""
+    model_id = (getattr(args, "model_id", None) or getattr(args, "model_name", None) or "").lower()
+    if not model_path or not model_path.lower().endswith(".onnx") or not os.path.isfile(model_path):
+        return False
+    try:
+        if os.path.getsize(model_path) < 512 * 1024:
+            return False
+    except Exception:
+        return False
+
+    try:
+        import onnxruntime as ort
+        import torch
+    except ImportError:
+        sys.stdout.write("LOG:[MDX-Net ONNX] Пакет onnxruntime не установлен в окружении — переключение на Demucs v4 (htdemucs).\n")
+        sys.stdout.flush()
+        return False
+
+    try:
+        model_label = os.path.basename(model_path)
+        emit_progress(8.0, f"Инициализация ONNX Runtime для MDX-Net ({model_label})...")
+        avail_providers = ort.get_available_providers()
+        providers = []
+        for p in ["CUDAExecutionProvider", "DmlExecutionProvider", "CoreMLExecutionProvider", "CPUExecutionProvider"]:
+            if p in avail_providers:
+                providers.append(p)
+        if not providers:
+            providers = ["CPUExecutionProvider"]
+
+        sess_opts = ort.SessionOptions()
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        session = ort.InferenceSession(model_path, sess_options=sess_opts, providers=providers)
+        inp_meta = session.get_inputs()[0]
+        input_name = inp_meta.name
+        inp_shape = inp_meta.shape  # Expected: [batch, 4, dim_f, dim_t]
+
+        if not inp_shape or len(inp_shape) != 4:
+            return False
+        dim_f = int(inp_shape[2]) if isinstance(inp_shape[2], int) else 3072
+        dim_t = int(inp_shape[3]) if isinstance(inp_shape[3], int) else 256
+
+        ident = f"{model_id}_{model_label.lower()}"
+        if "kim_vocal" in ident or "voc_ft" in ident:
+            n_fft = 7680 if "kim_vocal" in ident else 6144
+            compensate = 1.028 if "kim_vocal" in ident else 1.035
+        elif "inst_hq" in ident:
+            n_fft = 6144
+            compensate = 1.035
+        else:
+            n_fft = 6144 if dim_f <= 3072 else max(7680, dim_f * 2)
+            compensate = 1.03
+
+        if n_fft // 2 + 1 <= dim_f:
+            n_fft = dim_f * 2
+
+        hop_length = 1024
+        chunk_size = hop_length * (dim_t - 1)
+        n_bins = n_fft // 2 + 1
+        is_inst_primary = ("inst" in ident or "no_voc" in ident)
+
+        target_sr = 44100
+        emit_progress(18.0, f"Загрузка аудио ({target_sr} Гц Stereo) для MDX-Net «{model_label}»...")
+        audio_data, _, _, _ = AudioConditioner.load_audio(
+            args.input, target_sr=target_sr, force_stereo=True, remove_dc=True
+        )
+        orig_samples = audio_data.shape[-1]
+        if orig_samples == 0:
+            return False
+
+        overlap_ratio = max(0.15, min(0.75, float(getattr(args, "overlap", 0.25) or 0.25)))
+        trim = n_fft // 2
+        gen_size = max(hop_length * 16, int(round((chunk_size - 2 * trim) * (1.0 - (overlap_ratio - 0.25) * 0.5))))
+        if gen_size >= chunk_size:
+            gen_size = chunk_size - 2 * trim
+
+        pad_len = gen_size - (orig_samples % gen_size) if (orig_samples % gen_size) != 0 else 0
+        padded_mix = np.pad(audio_data, ((0, 0), (trim, trim + pad_len + chunk_size)), mode="constant").astype(np.float32)
+
+        out_primary = np.zeros((2, padded_mix.shape[-1]), dtype=np.float32)
+        weight_sum = np.zeros((1, padded_mix.shape[-1]), dtype=np.float32)
+        fade_window = np.hanning(chunk_size).astype(np.float32)[None, :]
+        hann_win = torch.hann_window(n_fft, periodic=True, dtype=torch.float32)
+
+        starts = list(range(0, orig_samples + pad_len, gen_size))
+        total_chunks = max(1, len(starts))
+        sys.stdout.write(
+            f"LOG:[MDX-Net ONNX] Старт разделения ({model_label}, провайдер={providers[0]}, "
+            f"n_fft={n_fft}, dim_f={dim_f}, dim_t={dim_t}, чанков={total_chunks})\n"
+        )
+        sys.stdout.flush()
+
+        for idx, pos in enumerate(starts):
+            chunk_wave = padded_mix[:, pos:pos + chunk_size]
+            if chunk_wave.shape[-1] < chunk_size:
+                chunk_wave = np.pad(chunk_wave, ((0, 0), (0, chunk_size - chunk_wave.shape[-1])), mode="constant")
+
+            wave_t = torch.from_numpy(np.ascontiguousarray(chunk_wave, dtype=np.float32))
+            stft_c = torch.stft(
+                wave_t, n_fft=n_fft, hop_length=hop_length, window=hann_win, center=True, return_complex=True
+            )
+            spec_crop = stft_c[:, :dim_f, :dim_t]
+            ort_in = torch.stack([spec_crop[0].real, spec_crop[0].imag, spec_crop[1].real, spec_crop[1].imag], dim=0).unsqueeze(0).numpy()
+
+            ort_out = session.run(None, {input_name: ort_in})[0][0]  # shape: (4, dim_f, dim_t)
+            pred_t = torch.from_numpy(ort_out)
+            pred_c = torch.stack([
+                torch.complex(pred_t[0], pred_t[1]),
+                torch.complex(pred_t[2], pred_t[3])
+            ], dim=0)
+
+            if n_bins > dim_f:
+                pad_bins = torch.zeros((2, n_bins - dim_f, pred_c.shape[-1]), dtype=pred_c.dtype)
+                pred_full = torch.cat([pred_c, pad_bins], dim=1)
+            else:
+                pred_full = pred_c[:, :n_bins, :]
+
+            recon_wave = torch.istft(
+                pred_full, n_fft=n_fft, hop_length=hop_length, window=hann_win, center=True, length=chunk_size
+            ).numpy()
+
+            out_primary[:, pos:pos + chunk_size] += recon_wave * fade_window
+            weight_sum[:, pos:pos + chunk_size] += fade_window
+
+            if idx == 0 or (idx + 1) % max(1, total_chunks // 20) == 0 or (idx + 1) == total_chunks:
+                ratio = (idx + 1) / float(total_chunks)
+                pct = 25.0 + 58.0 * ratio
+                emit_progress(pct, f"MDX-Net ({model_label}): обработано {idx + 1}/{total_chunks} блоков ({int(ratio * 100)}%)...")
+
+        valid_w = weight_sum > 1e-5
+        out_primary[:, valid_w[0]] /= weight_sum[:, valid_w[0]]
+        primary_stem = np.ascontiguousarray(out_primary[:, trim:trim + orig_samples] * compensate, dtype=np.float32)
+
+        if is_inst_primary:
+            inst_data = primary_stem
+            vocals_data = np.ascontiguousarray(audio_data - inst_data, dtype=np.float32)
+        else:
+            vocals_data = primary_stem
+            inst_data = np.ascontiguousarray(audio_data - vocals_data, dtype=np.float32)
+
+        _export_separated_stems(
+            output_dir, prefix, stems_mode, vocals_data, inst_data, target_sr=target_sr,
+            extra_sources=None, engine_label=f"MDX-Net ({model_label})"
+        )
+        return True
+    except Exception as onnx_err:
+        sys.stdout.write(f"LOG:[MDX-Net ONNX] Переключение с ONNX на Demucs v4 (htdemucs) по причине: {onnx_err}\n")
+        sys.stdout.flush()
+        return False
+
+
 def process_demucs(args):
     """
-    Stem separation (Vocals / Instrumental / Drums / Bass / Other) using the official Demucs v4 library.
+    Stem separation (Vocals / Instrumental / Drums / Bass / Other) using ONNX MDX-Net or official Demucs v4.
     Input conditioned to 44100 Hz Stereo, output exported as 48000 Hz 24-bit WAV.
     """
     input_path = args.input
     output_dir = args.output_dir or os.path.dirname(os.path.abspath(args.output or input_path))
-    model_name = args.model_name or "htdemucs"
+    raw_model_name = (args.model_name or getattr(args, "model_id", None) or "htdemucs").strip()
     shifts = int(args.shifts) if args.shifts is not None else 1
     overlap = float(args.overlap) if args.overlap is not None else 0.25
     raw_stems = str(args.stems or "both").strip().lower()
@@ -658,6 +894,17 @@ def process_demucs(args):
         os.environ['HF_TOKEN'] = hf_token
         os.environ['HUGGINGFACE_HUB_TOKEN'] = hf_token
 
+    # 1. If a local .onnx MDX-Net model is provided and onnxruntime is available, run native MDX-Net inference first
+    if stems_mode != "all" and _try_mdx_onnx_separation(args, stems_mode, output_dir, prefix):
+        return
+
+    # 2. Map non-Demucs UVR/MDX identifiers cleanly to 'htdemucs' without noisy stderr failures
+    known_demucs_models = {
+        "htdemucs", "htdemucs_ft", "htdemucs_6s", "hdemucs_mmi",
+        "mdx", "mdx_extra", "mdx_q", "mdx_extra_q"
+    }
+    model_name = raw_model_name if raw_model_name in known_demucs_models else "htdemucs"
+
     emit_progress(5.0, f"Инициализация Demucs v4 ({model_name})...")
     device = get_optimal_device()
 
@@ -674,42 +921,137 @@ def process_demucs(args):
     try:
         model = demucs.pretrained.get_model(model_name)
     except Exception as e:
-        sys.stderr.write(f"Warning: get_model({model_name}) failed ({e}). Retrying with 'htdemucs'...\n")
+        sys.stdout.write(f"LOG:Модель {model_name} недоступна ({e}), используется базовая 'htdemucs'...\n")
+        sys.stdout.flush()
         model = demucs.pretrained.get_model("htdemucs")
 
     model = model.to(device)
     model.eval()
 
-    target_sr = getattr(model, 'samplerate', 44100)
+    target_sr = int(getattr(model, 'samplerate', 44100) or 44100)
     emit_progress(25.0, f"Аудио-подготовка дорожки к стандарту Demucs ({target_sr} Гц Stereo)...")
-    
+
     audio_data, current_sr, orig_channels, orig_len = AudioConditioner.load_audio(
         input_path, target_sr=target_sr, force_stereo=True, remove_dc=True
     )
 
     import torch
+    total_samples = audio_data.shape[-1]
+    total_duration_sec = total_samples / float(target_sr)
     audio_tensor = torch.from_numpy(np.ascontiguousarray(audio_data, dtype=np.float32))
 
-    # Variance standardization
+    # Global variance standardization
     ref = audio_tensor.mean(0)
-    audio_std = ref.std().item()
-    audio_norm = (audio_tensor / audio_std) if audio_std > 1e-6 else audio_tensor
+    audio_std = float(ref.std().item()) if total_samples > 1 else 1.0
+    if not math.isfinite(audio_std) or audio_std <= 1e-6:
+        audio_std = 1.0
+    audio_norm = audio_tensor / audio_std
 
     adaptive_segment = VADChunkBatcher.get_adaptive_chunk_duration()
-    sys.stdout.write(f"LOG:[Demucs Батчинг] Адаптивный размер чанка VRAM/RAM: {adaptive_segment:.1f}с (split=True, overlap={overlap})\n")
+    safe_segment = _resolve_safe_demucs_segment(model, adaptive_segment)
+    native_seg_info = getattr(model, "segment", "7.8")
+    sys.stdout.write(
+        f"LOG:[Demucs v4] Старт разделения ({model_name}, устройство={device}, длительность={total_duration_sec:.1f}с, "
+        f"native_segment={native_seg_info}с, apply_segment={safe_segment}, overlap={overlap})\n"
+    )
     sys.stdout.flush()
-    emit_progress(35.0, f"Выполнение нейросетевого разделения Demucs v4 (чанками по {adaptive_segment:.1f}с, overlap={overlap})...")
-    inp_tensor = audio_norm[None].to(device)
 
-    with torch.no_grad():
-        sources = apply_model(model, inp_tensor, shifts=shifts, split=True, overlap=overlap, segment=adaptive_segment, progress=True, device=device)[0]
+    def _apply_demucs_window(win_tensor_cpu):
+        nonlocal device, model, safe_segment
+        try:
+            inp_dev = win_tensor_cpu[None].to(device)
+            with torch.no_grad():
+                try:
+                    out = apply_model(
+                        model, inp_dev, shifts=shifts, split=True, overlap=overlap,
+                        segment=safe_segment, progress=False, device=device
+                    )[0]
+                except (RuntimeError, ValueError) as seg_err:
+                    if safe_segment is not None:
+                        safe_segment = None
+                        out = apply_model(
+                            model, inp_dev, shifts=shifts, split=True, overlap=overlap,
+                            segment=None, progress=False, device=device
+                        )[0]
+                    else:
+                        raise seg_err
+            return out.cpu().numpy()
+        except RuntimeError as oom_err:
+            if device != "cpu":
+                sys.stdout.write(f"LOG:[Demucs v4] Переключение с {device} на CPU ({oom_err})...\n")
+                sys.stdout.flush()
+                device = "cpu"
+                model = model.to("cpu")
+                inp_cpu = win_tensor_cpu[None].to("cpu")
+                with torch.no_grad():
+                    out = apply_model(
+                        model, inp_cpu, shifts=shifts, split=True, overlap=overlap,
+                        segment=None, progress=False, device="cpu"
+                    )[0]
+                return out.cpu().numpy()
+            raise
+
+    num_sources = len(getattr(model, "sources", ["drums", "bass", "other", "vocals"]))
+    macro_window_sec = 60.0
+    macro_crossfade_sec = 1.5
+
+    if total_duration_sec <= 75.0:
+        emit_progress(35.0, f"Выполнение нейросетевого разделения Demucs v4 ({total_duration_sec:.1f}с)...")
+        sources_np = _apply_demucs_window(audio_norm)
+        emit_progress(82.0, "Нейросетевой инференс Demucs v4 завершен, сборка стемов...")
+    else:
+        win_samples = int(round(macro_window_sec * target_sr))
+        xfade_samples = int(round(macro_crossfade_sec * target_sr))
+        step_samples = max(target_sr * 10, win_samples - xfade_samples)
+
+        sources_np = np.zeros((num_sources, 2, total_samples), dtype=np.float32)
+        weight_acc = np.zeros((1, 1, total_samples), dtype=np.float32)
+
+        starts = list(range(0, total_samples, step_samples))
+        if len(starts) > 1 and (total_samples - starts[-1]) < xfade_samples * 2:
+            starts.pop()
+        total_macros = max(1, len(starts))
+
+        fade_in = np.linspace(0.0, 1.0, xfade_samples, dtype=np.float32)
+        fade_out = np.linspace(1.0, 0.0, xfade_samples, dtype=np.float32)
+
+        emit_progress(30.0, f"Потоковое разделение Demucs v4 ({total_macros} макро-блоков по {macro_window_sec:.0f}с)...")
+
+        for m_idx, st in enumerate(starts):
+            ed = total_samples if (m_idx == total_macros - 1) else min(total_samples, st + win_samples)
+            cur_len = ed - st
+            if cur_len <= 0:
+                continue
+
+            win_slice = audio_norm[:, st:ed]
+            pred_sources = _apply_demucs_window(win_slice)
+            pred_sources = pred_sources[..., :cur_len]
+
+            w = np.ones(cur_len, dtype=np.float32)
+            if m_idx > 0 and cur_len > xfade_samples:
+                w[:xfade_samples] = fade_in
+            if m_idx < total_macros - 1 and cur_len > xfade_samples:
+                w[-xfade_samples:] = fade_out
+
+            w_view = w[None, None, :]
+            sources_np[:, :, st:ed] += pred_sources * w_view
+            weight_acc[:, :, st:ed] += w_view
+
+            ratio = (m_idx + 1) / float(total_macros)
+            pct = 30.0 + 54.0 * ratio
+            done_sec = min(total_duration_sec, ed / float(target_sr))
+            emit_progress(
+                pct,
+                f"Demucs v4 ({model_name}): {int(ratio * 100)}% ({done_sec:.0f}с / {total_duration_sec:.0f}с)..."
+            )
+
+        valid_mask = weight_acc[0, 0] > 1e-6
+        sources_np[:, :, valid_mask] /= weight_acc[:, :, valid_mask]
 
     if audio_std > 1e-6:
-        sources = sources * audio_std
+        sources_np = sources_np * audio_std
 
-    sources_dict = dict(zip(model.sources, sources.cpu().numpy()))
-
-    os.makedirs(output_dir, exist_ok=True)
+    sources_dict = dict(zip(model.sources, sources_np))
     vocals_data = sources_dict.get('vocals')
 
     # Instrumental = sum of all non-vocal stems (drums + bass + other)
@@ -718,43 +1060,10 @@ def process_demucs(args):
         if name != 'vocals':
             inst_data = s_data.copy() if inst_data is None else (inst_data + s_data)
 
-    emit_progress(85.0, "Пост-обработка стемов: ресемплинг в 48 кГц и сохранение 24-бит WAV...")
-    exported_files = []
-
-    vocals_out_path = os.path.join(output_dir, f"{prefix}vocals.wav")
-    inst_out_path = os.path.join(output_dir, f"{prefix}no_vocals.wav")
-
-    if stems_mode in ["vocals_only", "both", "all"] and vocals_data is not None:
-        AudioConditioner.save_audio(vocals_out_path, vocals_data, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
-        alt_vocals = os.path.join(output_dir, f"{prefix}original_vocals.wav")
-        if alt_vocals != vocals_out_path:
-            try:
-                import shutil
-                shutil.copyfile(vocals_out_path, alt_vocals)
-            except Exception: pass
-        exported_files.append({"type": "vocals", "path": vocals_out_path})
-
-    if stems_mode in ["instrumental_only", "both", "all"] and inst_data is not None:
-        AudioConditioner.save_audio(inst_out_path, inst_data, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
-        alt_inst = os.path.join(output_dir, f"{prefix}original_instrumental_ME.wav")
-        if alt_inst != inst_out_path:
-            try:
-                import shutil
-                shutil.copyfile(inst_out_path, alt_inst)
-            except Exception: pass
-        exported_files.append({"type": "instrumental", "path": inst_out_path})
-
-    if stems_mode == "all":
-        for stem_key in ["drums", "bass", "other"]:
-            s_arr = sources_dict.get(stem_key)
-            if s_arr is not None:
-                s_path = os.path.join(output_dir, f"{prefix}{stem_key}.wav")
-                AudioConditioner.save_audio(s_path, s_arr, current_sr=target_sr, target_sr=48000, bit_depth='PCM_24')
-                exported_files.append({"type": stem_key, "path": s_path})
-
-    emit_progress(100.0, f"Разделение Demucs v4 завершено ({len(exported_files)} стемов создано)!")
-    sys.stdout.write(f"RESULT:{json.dumps(exported_files)}\n")
-    sys.stdout.flush()
+    _export_separated_stems(
+        output_dir, prefix, stems_mode, vocals_data, inst_data, target_sr=target_sr,
+        extra_sources=sources_dict, engine_label=f"Demucs v4 ({model_name})"
+    )
 
 # ------------------------------------------------------------------------------
 # 6. SPOTIFY PEDALBOARD STUDIO VOICE DSP ENGINE

@@ -1456,7 +1456,8 @@ function registerExportHandlers(getData, mainWindow) {
         prefix: 'stem_',
         onProgress: (p) => {
           if (p && typeof p.percent === 'number') {
-            sendProgress(Math.round(55 + p.percent * 0.35), `Нейросеть: ${p.percent}%`);
+            const detail = p.message ? ` (${p.message})` : '';
+            sendProgress(Math.round(55 + p.percent * 0.35), `Нейросеть: ${Math.round(p.percent)}%${detail}`);
           }
         },
         onLog: (msg) => log.info(`[TimingStems] ${msg}`)
@@ -1465,15 +1466,22 @@ function registerExportHandlers(getData, mainWindow) {
       let foundVocals = null;
       let foundInst = null;
       if (Array.isArray(neuralRes)) {
-        foundVocals = neuralRes.find(s => s.type === 'vocals' || /vocal/i.test(s.path || s.name))?.path;
-        foundInst = neuralRes.find(s => s.type === 'instrumental' || /instrumental|no_vocal|accompaniment|other/i.test(s.path || s.name))?.path;
+        foundVocals = neuralRes.find(
+          s => s.type === 'vocals' || (!/no_vocal|instrumental|accompaniment|other/i.test(s.path || s.name || '') && /vocal/i.test(s.path || s.name || ''))
+        )?.path;
+        foundInst = neuralRes.find(
+          s => s.type === 'instrumental' || /instrumental|no_vocal|accompaniment|other/i.test(s.path || s.name || '')
+        )?.path;
       }
       if (!foundVocals || !foundInst) {
         const tempFiles = require('fs').readdirSync(tempOutputDir);
         for (const tf of tempFiles) {
           const fullTf = path.join(tempOutputDir, tf);
-          if (/vocal/i.test(tf)) foundVocals = fullTf;
-          else if (/instrumental|no_vocal|other|accompaniment/i.test(tf)) foundInst = fullTf;
+          if (/instrumental|no_vocal|other|accompaniment/i.test(tf)) {
+            if (!foundInst) foundInst = fullTf;
+          } else if (/vocal/i.test(tf)) {
+            if (!foundVocals) foundVocals = fullTf;
+          }
         }
       }
 

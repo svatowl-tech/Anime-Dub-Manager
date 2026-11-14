@@ -37,18 +37,21 @@ export function extractEpisodeNumber(
   // 3. Strip CRC32 hash tags (e.g. [A1B2C3D4], [12345678])
   clean = clean.replace(/\[[0-9a-fA-F]{8}\]/g, ' ');
 
-  // 4. Strip video resolutions to prevent false matching (e.g. 2160p, 1080p, 720p, 480p, 4k, 8k)
-  clean = clean.replace(/\b(?:2160p|1080p|720p|480p|360p|4k|8k|uhd|fhd|hd)\b/gi, ' ');
+  // 4. Strip video dimensions, resolutions, codecs, units, and ID tags to prevent false matching
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))\d{3,4}\s*[xх×]\s*\d{3,4}(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:2160p|1080p|720p|480p|360p|4k|8k|uhd|fhd|hd)(?=$|[\s._\]\)-])/gi, ' ');
 
-  // 5. Strip codecs, audio formats, and bit-depths (e.g. x264, x265, hevc, 10bit, flac, ddp5.1)
-  clean = clean.replace(/\b(?:x264|x265|h264|h265|hevc|avc|av1|vp9|10bit|8bit|hi10p|aac\d?|flac\d?|mp3|opus|ac3|eac3|dts(?:-hd)?|truehd|ddp?5\.1|5\.1ch|2\.0ch|stereo)\b/gi, ' ');
+  // 5. Strip codecs, audio formats, bitrates/units, and database ID tags
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:x264|x265|h264|h265|hevc|avc|av1|vp9|10bit|8bit|hi10p|aac\d?|flac\d?|mp3|opus|ac3|eac3|dts(?:-hd)?|truehd|ddp?5\.1|5\.1ch|2\.0ch|stereo)(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))\d+(?:[.,]\d+)?\s*(?:ms|sec|fps|hz|khz|kbps|mbps|kb|mb|gb|tb|px|bit|ch)(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:id|aid|eid|shiki|shikimori|mal|anidb|a365|anime365|tg|msg|uid|pid)[_:#-]?\d+(?=$|[\s._\]\)-])/gi, ' ');
 
   // 6. Strip release type tags
-  clean = clean.replace(/\b(?:WEBRip|WEB-DL|BDRip|BD-Rip|BluRay|HDTV|DVDRip|DVD|Remux)\b/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:WEBRip|WEB-DL|BDRip|BD-Rip|BluRay|HDTV|DVDRip|DVD|Remux)(?=$|[\s._\]\)-])/gi, ' ');
 
   // 7. Strip common year tags (e.g. (2020), (2024), [2026], or standalone 2024)
   clean = clean.replace(/[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]/g, ' ');
-  clean = clean.replace(/\b(?:19|20)\d{2}\b/g, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:19|20)\d{2}(?=$|[\s._\]\)-])/g, ' ');
 
   // 8. If projectTitle(s) are supplied, strip them and their words to avoid title digits conflicting
   for (const pt of projTitles) {
@@ -65,17 +68,17 @@ export function extractEpisodeNumber(
   }
 
   // 9. Strip season phrases (e.g., "Season 2", "2nd Season", "Сезон 2", "2 сезон", "Part 2", "Cour 2")
-  clean = clean.replace(/\b(?:season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s*season|сезон\s*\d{1,2}|\d{1,2}\s*сезон|part\s*\d{1,2}|часть\s*\d{1,2}|cour\s*\d{1,2})\b/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s*season|сезон\s*\d{1,2}|\d{1,2}\s*сезон|part\s*\d{1,2}|часть\s*\d{1,2}|cour\s*\d{1,2})(?=$|[\s._\]\)-])/gi, ' ');
 
   // Pattern 1: Russian batch/episode indicator: [01 из 12], (01 из 24), [01-12 из 12], [01 of 12]
-  const ruBatchMatch = clean.match(/\[?\b0*([1-9]\d{0,3})\s*(?:-|–|—)?\s*\d*\s*(?:из|of)\s*\d+\b/i);
+  const ruBatchMatch = clean.match(/\[?\b0*([1-9]\d{0,3})\s*(?:-|–|—)?\s*\d*\s*(?:из|of)\s*\d+(?=$|[\s._\]\)-])/i);
   if (ruBatchMatch && ruBatchMatch[1]) {
     const num = parseInt(ruBatchMatch[1], 10);
     if (num > 0 && num < 2000) return num;
   }
 
   // Pattern 2: Explicit Season & Episode pattern (e.g., S01E05, S1E5, S2 - 04, 2x05, S01EP05)
-  const seasonEpMatch = clean.match(/(?:s\d{1,2}[\s._-]*e|season\s*\d{1,2}[\s._-]*ep(?:isode)?\s*|\b\d{1,2}x)0*([1-9]\d{0,3})\b/i);
+  const seasonEpMatch = clean.match(/(?:s\d{1,2}[\s._-]*e|season\s*\d{1,2}[\s._-]*ep(?:isode)?\s*|(?:^|(?<=[\s._\[(-]))\d{1,2}x)0*([1-9]\d{0,3})(?=$|[\s._\]\)-])/i);
   if (seasonEpMatch && seasonEpMatch[1]) {
     const num = parseInt(seasonEpMatch[1], 10);
     if (num > 0 && num < 2000) return num;
@@ -89,9 +92,16 @@ export function extractEpisodeNumber(
   }
 
   // Pattern 4: Explicit Episode prefix (e.g., Ep 05, Episode 05, Ep. 05, Серия 5, Эпизод 5, Выпуск 5, #05)
-  const epPrefixMatch = clean.match(/(?:ep(?:isode)?\.?|серия|эпизод|выпуск|\#)[\s._-]*0*([1-9]\d{0,3})\b/i);
+  const epPrefixMatch = clean.match(/(?:ep(?:isode)?\.?|серия|эпизод|выпуск|\#)[\s._-]*0*([1-9]\d{0,3})(?=$|[\s._\]\)-])/i);
   if (epPrefixMatch && epPrefixMatch[1]) {
     const num = parseInt(epPrefixMatch[1], 10);
+    if (num > 0 && num < 2000) return num;
+  }
+
+  // Pattern 4b: Explicit Episode suffix (e.g., 5 серия, 05 эпизод, 5 ep)
+  const epSuffixMatch = clean.match(/(?:^|(?<=[\s._\[(-]))0*([1-9]\d{0,3})[_\s-]*(?:серия|эпизод|серии|выпуск|ep|eps|episode)(?=$|[\s._\]\)-])/i);
+  if (epSuffixMatch && epSuffixMatch[1]) {
+    const num = parseInt(epSuffixMatch[1], 10);
     if (num > 0 && num < 2000) return num;
   }
 

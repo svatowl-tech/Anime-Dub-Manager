@@ -8,9 +8,16 @@ function registerEpisodeHandlers(getData, saveData) {
     if (!item || !item.id) throw new Error('Invalid episode data');
     
     const items = await getData('episodes.json');
-    const index = items.findIndex((i) => i.id === item.id);
+    const existingByIdIndex = items.findIndex((i) => i.id === item.id);
+    const existingByNumIndex = existingByIdIndex === -1 && item.projectId && typeof item.number === 'number'
+      ? items.findIndex((i) => i.projectId === item.projectId && i.number === item.number)
+      : -1;
+    const index = existingByIdIndex !== -1 ? existingByIdIndex : existingByNumIndex;
     
     const { project, ...dataToSave } = item;
+    if (existingByNumIndex !== -1 && items[existingByNumIndex]?.id) {
+      dataToSave.id = items[existingByNumIndex].id;
+    }
     if (dataToSave.assignments) {
       dataToSave.assignments = dataToSave.assignments.map(a => {
         const { dubber, substitute, ...rest } = a;
@@ -121,30 +128,93 @@ function registerEpisodeHandlers(getData, saveData) {
     } else {
       items.push(dataToSave);
     }
+    const savedEpisode = index !== -1 ? items[index] : dataToSave;
     await saveData('episodes.json', items);
+
+    // Clear any matching deletion tombstone when an episode is explicitly created/saved
+    try {
+      const deletedList = await getData('deleted_episodes.json');
+      if (Array.isArray(deletedList) && deletedList.length > 0) {
+        const filteredDeleted = deletedList.filter((d) => {
+          if (!d) return false;
+          if (d.id === savedEpisode.id) return false;
+          if (d.projectId === savedEpisode.projectId && d.number === savedEpisode.number) return false;
+          return true;
+        });
+        if (filteredDeleted.length !== deletedList.length) {
+          await saveData('deleted_episodes.json', filteredDeleted);
+        }
+      }
+    } catch (_) {}
 
     // Save individual episode.json on disk inside episode folder
     try {
       const config = await getData('config.json');
       const baseDir = config?.baseDir || require('electron').app.getPath('userData');
       const projects = await getData('projects.json');
-      const associatedProject = projects.find(p => p.id === dataToSave.projectId);
+      const associatedProject = projects.find(p => p.id === savedEpisode.projectId);
       if (associatedProject) {
         const ProjectScanner = require('../lib/ProjectScanner.cjs');
-        await ProjectScanner.saveEpisodeJsonOnDisk(baseDir, associatedProject, items[index] || dataToSave);
+        await ProjectScanner.saveEpisodeJsonOnDisk(baseDir, associatedProject, savedEpisode);
       }
     } catch (e) {
       console.error('[save-episode] Error saving individual episode.json on disk:', e.message);
     }
 
-    return true;
+    return savedEpisode;
   }));
   
   ipcMain.handle('delete-episode', wrapIpcHandler(async (event, id) => {
     if (!id) throw new Error('Invalid episode ID');
     const items = await getData('episodes.json');
+    const targetEp = items.find((i) => i.id === id) || null;
     const filtered = items.filter((i) => i.id !== id);
     await saveData('episodes.json', filtered);
+
+    if (targetEp) {
+      const deletedAt = new Date().toISOString();
+      try {
+        const deletedList = await getData('deleted_episodes.json');
+        const nextDeleted = Array.isArray(deletedList) ? deletedList.filter((d) => d && d.id !== id) : [];
+        nextDeleted.push({
+          id: targetEp.id,
+          projectId: targetEp.projectId,
+          number: targetEp.number,
+          deletedAt,
+        });
+        // Keep last 500 tombstones
+        await saveData('deleted_episodes.json', nextDeleted.slice(-500));
+      } catch (e) {
+        console.error('[delete-episode] Error recording deletion tombstone:', e.message);
+      }
+
+      try {
+        const config = await getData('config.json');
+        const baseDir = config?.baseDir || require('electron').app.getPath('userData');
+        const projects = await getData('projects.json');
+        const projIdx = projects.findIndex((p) => p.id === targetEp.projectId);
+        const associatedProject = projIdx !== -1 ? projects[projIdx] : null;
+        if (associatedProject) {
+          const ProjectScanner = require('../lib/ProjectScanner.cjs');
+          await ProjectScanner.removeEpisodeOnDisk(baseDir, associatedProject, targetEp);
+
+          if (associatedProject.lastActiveEpisode === targetEp.number) {
+            const remainingEps = filtered
+              .filter((e) => e.projectId === associatedProject.id)
+              .sort((a, b) => (a.number || 0) - (b.number || 0));
+            projects[projIdx] = {
+              ...associatedProject,
+              lastActiveEpisode: remainingEps.length > 0 ? remainingEps[0].number : 1,
+              updatedAt: deletedAt,
+            };
+            await saveData('projects.json', projects);
+          }
+        }
+      } catch (e) {
+        console.error('[delete-episode] Error cleaning up episode on disk:', e.message);
+      }
+    }
+
     return true;
   }));
 }

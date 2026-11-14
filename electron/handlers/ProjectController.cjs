@@ -37,15 +37,31 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
           createdAt: index !== -1 && items[index].createdAt ? items[index].createdAt : (projectData.createdAt || new Date().toISOString())
         };
 
-        // If episodes were passed inside project, only persist new episodes that do not exist yet.
-        // Existing episodes are authoritative and managed exclusively by save-episode.
+        // If episodes were passed inside project, only persist new episodes that do not exist yet
+        // and were not explicitly deleted (tombstoned). Existing episodes are authoritative via save-episode.
         if (Array.isArray(episodes) && episodes.length > 0) {
           try {
-            const allEpisodes = await getData('episodes.json');
+            const [allEpisodes, deletedEpisodes] = await Promise.all([
+              getData('episodes.json'),
+              getData('deleted_episodes.json').catch(() => [])
+            ]);
+            const deletedEpIds = new Set(Array.isArray(deletedEpisodes) ? deletedEpisodes.map(d => d && d.id).filter(Boolean) : []);
+            const deletedEpNums = new Set(
+              Array.isArray(deletedEpisodes)
+                ? deletedEpisodes
+                    .filter(d => d && d.projectId === item.id && typeof d.number === 'number')
+                    .map(d => d.number)
+                : []
+            );
             let episodesModified = false;
             for (const ep of episodes) {
               if (!ep || !ep.id) continue;
-              const epIdx = allEpisodes.findIndex(e => e.id === ep.id);
+              if (deletedEpIds.has(ep.id) || (typeof ep.number === 'number' && deletedEpNums.has(ep.number))) {
+                continue;
+              }
+              const epIdx = allEpisodes.findIndex(
+                e => e.id === ep.id || (e.projectId === item.id && typeof ep.number === 'number' && e.number === ep.number)
+              );
               if (epIdx === -1) {
                 allEpisodes.push({ ...ep, projectId: item.id, updatedAt: new Date().toISOString() });
                 episodesModified = true;
@@ -116,14 +132,59 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
         items.push(dataToSave);
       }
       await saveData(filename, items);
+
+      if (name === 'project') {
+        try {
+          const deletedProjects = await getData('deleted_projects.json');
+          if (Array.isArray(deletedProjects) && deletedProjects.length > 0) {
+            const nextDeleted = deletedProjects.filter(d => d && d.id !== dataToSave.id);
+            if (nextDeleted.length !== deletedProjects.length) {
+              await saveData('deleted_projects.json', nextDeleted);
+            }
+          }
+        } catch (_) {}
+      }
+
       return items;
     }));
 
     ipcMain.handle(`delete-${name}`, wrapIpcHandler(async (event, id) => {
       if (!id) throw new Error(`Invalid ${name} ID`);
       const items = await getData(filename);
+      const targetItem = items.find((i) => i.id === id) || null;
       const filtered = items.filter((i) => i.id !== id);
       await saveData(filename, filtered);
+
+      if (name === 'project' && targetItem) {
+        const deletedAt = new Date().toISOString();
+        try {
+          const deletedProjects = await getData('deleted_projects.json');
+          const nextDeletedProj = Array.isArray(deletedProjects) ? deletedProjects.filter(d => d && d.id !== id) : [];
+          nextDeletedProj.push({ id: targetItem.id, title: targetItem.title, deletedAt });
+          await saveData('deleted_projects.json', nextDeletedProj.slice(-200));
+        } catch (_) {}
+
+        try {
+          const allEpisodes = await getData('episodes.json');
+          const projectEps = allEpisodes.filter(ep => ep.projectId === id);
+          if (projectEps.length > 0) {
+            const remainingEps = allEpisodes.filter(ep => ep.projectId !== id);
+            await saveData('episodes.json', remainingEps);
+
+            const deletedEpisodes = await getData('deleted_episodes.json');
+            const nextDeletedEps = Array.isArray(deletedEpisodes) ? [...deletedEpisodes] : [];
+            for (const ep of projectEps) {
+              if (!nextDeletedEps.some(d => d && d.id === ep.id)) {
+                nextDeletedEps.push({ id: ep.id, projectId: ep.projectId, number: ep.number, deletedAt });
+              }
+            }
+            await saveData('deleted_episodes.json', nextDeletedEps.slice(-500));
+          }
+        } catch (e) {
+          console.error('Error cascading project delete to episodes:', e);
+        }
+      }
+
       return filtered;
     }));
   }
@@ -194,7 +255,9 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
       }
 
       const hydratedProjects = (projects || []).map(project => {
-        const rawEpisodes = episodesByProject.get(project.id) || [];
+        const rawEpisodes = (episodesByProject.get(project.id) || [])
+          .slice()
+          .sort((a, b) => (a.number || 0) - (b.number || 0));
         const projectEpisodes = rawEpisodes.map(ep => {
           const assignments = (ep.assignments || []).map(assignment => {
             const dubber = assignment.dubberId ? participantMap.get(assignment.dubberId) : undefined;
@@ -266,6 +329,7 @@ function registerProjectHandlers(getData, saveData, mainWindow) {
 
     const projectEpisodes = (episodes || [])
       .filter(ep => ep.projectId === project.id)
+      .sort((a, b) => (a.number || 0) - (b.number || 0))
       .map(ep => {
         const assignments = (ep.assignments || []).map(assignment => {
           const dubber = assignment.dubberId ? participantMap.get(assignment.dubberId) : undefined;

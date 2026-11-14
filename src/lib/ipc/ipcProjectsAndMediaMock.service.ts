@@ -288,17 +288,20 @@ export function handleProjectsAndMediaIpcMock(channel: string, args: any[]): { h
             const participants = getLocalData('participants');
 
             return projects.map((project: any) => {
-              const projectEpisodes = episodes.filter((ep: any) => ep.projectId === project.id).map((ep: any) => {
-                const assignments = (ep.assignments || []).map((assignment: any) => {
-                  const dubber = participants.find((p: any) => p.id === assignment.dubberId);
-                  return { ...assignment, dubber };
+              const projectEpisodes = episodes
+                .filter((ep: any) => ep.projectId === project.id)
+                .sort((a: any, b: any) => (a.number || 0) - (b.number || 0))
+                .map((ep: any) => {
+                  const assignments = (ep.assignments || []).map((assignment: any) => {
+                    const dubber = participants.find((p: any) => p.id === assignment.dubberId);
+                    return { ...assignment, dubber };
+                  });
+                  const uploads = (ep.uploads || []).map((upload: any) => {
+                    const uploadedBy = participants.find((p: any) => p.id === upload.uploadedById);
+                    return { ...upload, uploadedBy };
+                  });
+                  return { ...ep, assignments, uploads };
                 });
-                const uploads = (ep.uploads || []).map((upload: any) => {
-                  const uploadedBy = participants.find((p: any) => p.id === upload.uploadedById);
-                  return { ...upload, uploadedBy };
-                });
-                return { ...ep, assignments, uploads };
-              });
               return { ...project, episodes: projectEpisodes };
             });
           }
@@ -313,9 +316,20 @@ export function handleProjectsAndMediaIpcMock(channel: string, args: any[]): { h
         result: (async () => {
           const items = getLocalData(key);
           const item = args[0];
-          const index = items.findIndex((i: any) => i.id === item.id);
+          const existingByIdIndex = items.findIndex((i: any) => i.id === item.id);
+          const existingByNumIndex =
+            existingByIdIndex === -1 &&
+            entity === 'episode' &&
+            item.projectId &&
+            typeof item.number === 'number'
+              ? items.findIndex((i: any) => i.projectId === item.projectId && i.number === item.number)
+              : -1;
+          const index = existingByIdIndex !== -1 ? existingByIdIndex : existingByNumIndex;
 
           const dataToSave = { ...item };
+          if (existingByNumIndex !== -1 && items[existingByNumIndex]?.id) {
+            dataToSave.id = items[existingByNumIndex].id;
+          }
           if (entity === 'episode') {
             delete dataToSave.project;
             if (dataToSave.assignments) {
@@ -332,15 +346,20 @@ export function handleProjectsAndMediaIpcMock(channel: string, args: any[]): { h
             }
           } else if (entity === 'project') {
             delete dataToSave.episodes;
+            delete dataToSave.soundEngineer;
+            delete dataToSave.assignedDubbers;
           }
 
           if (index !== -1) {
-            items[index] = dataToSave;
+            items[index] = { ...items[index], ...dataToSave };
           } else {
             items.push(dataToSave);
           }
           saveLocalData(key, items);
 
+          if (entity === 'episode') {
+            return index !== -1 ? items[index] : dataToSave;
+          }
           return { success: true };
         })()
       };
@@ -354,6 +373,14 @@ export function handleProjectsAndMediaIpcMock(channel: string, args: any[]): { h
           const id = args[0];
           const filtered = items.filter((i: any) => i.id !== id);
           saveLocalData(key, filtered);
+
+          if (entity === 'project') {
+            const eps = getLocalData('episodes');
+            saveLocalData(
+              'episodes',
+              eps.filter((ep: any) => ep.projectId !== id)
+            );
+          }
 
           return { success: true };
         })()

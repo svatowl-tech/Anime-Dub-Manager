@@ -8,10 +8,15 @@ export const isWeb = typeof window !== 'undefined' && !(window as any).electronA
 const HEAVY_CHANNELS: Record<string, number> = {
   // Audio AI Cleanup & DSP
   'ai-denoise-audio': 60000,
-  'ai-separate-stems': 120000,
+  'ai-separate-stems': 300000,
   'ai-dereverb-audio': 60000,
   'ai-voice-fixer': 60000,
   'ai-process-subtitles': 90000,
+  'timing-separate-original-stems': 300000,
+  'timing-extract-original-audio': 90000,
+  'timing-import-original-stem': 60000,
+  'timing-download-stem-model': 180000,
+  'mixing-download-module': 180000,
   
   // Whisper Speech-to-Text & Diarization
   'transcribe-whisper-snippet': 30000,

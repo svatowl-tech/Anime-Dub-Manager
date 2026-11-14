@@ -45,7 +45,7 @@ export const DashboardProjectDetailView: React.FC<{
   participants: Participant[];
   onProjectSelect: (id: string) => void;
   onEpisodeSelect: (num: number) => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<any> | void;
   onNavigate?: (tab: string) => void;
   newEpisodeAvailable: number | null;
   nextEpisodeDate: string | null;
@@ -419,7 +419,9 @@ export const DashboardProjectDetailView: React.FC<{
 
           {/* Episode Selector */}
           <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-hide">
-            {selectedProject?.episodes?.map((ep, idx) => (
+            {[...(selectedProject?.episodes || [])]
+              .sort((a, b) => (a.number || 0) - (b.number || 0))
+              .map((ep, idx) => (
               <button
                 key={ep.id || ('ep-' + idx)}
                 onClick={() => onEpisodeSelect(ep.number)}

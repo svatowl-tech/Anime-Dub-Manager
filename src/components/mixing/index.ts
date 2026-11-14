@@ -18,3 +18,5 @@ export { MixingExternalImportModal } from './MixingExternalImportModal';
 export { MixingAcousticMatchModal } from './MixingAcousticMatchModal';
 export { MixingVst3Modal } from './MixingVst3Modal';
 export { MixingLogsDrawer } from './MixingLogsDrawer';
+export { MixingAddModuleModal } from './MixingAddModuleModal';
+export type { MixingAddModuleModalProps } from './MixingAddModuleModal';

@@ -91,9 +91,9 @@ function registerSyncHandlers(getData, saveData, dataPath) {
     const yandexService = await getYandexService();
     const results = [];
 
-    // 1. Sync data JSONs
+    // 1. Sync data JSONs (including deletion tombstones)
     await yandexService.ensureFolder(config.yandexToken, 'disk:/AnimeDubManagerData');
-    const jsonFiles = ['participants.json', 'projects.json', 'episodes.json', 'config.json'];
+    const jsonFiles = ['deleted_projects.json', 'deleted_episodes.json', 'participants.json', 'projects.json', 'episodes.json', 'config.json'];
     for (const file of jsonFiles) {
       const localPath = path.join(dataPath, file);
       const remotePath = `disk:/AnimeDubManagerData/${file}`;
@@ -132,8 +132,8 @@ function registerSyncHandlers(getData, saveData, dataPath) {
     const isLightweight = Boolean(options && options.lightweight && !config.isFirstSync);
     const pullDeadline = Date.now() + (isLightweight ? 15000 : 45000);
 
-    // 1. Pull JSONs
-    const jsonFiles = ['participants.json', 'projects.json', 'episodes.json', 'config.json'];
+    // 1. Pull JSONs (tombstones first so deleted items are never resurrected)
+    const jsonFiles = ['deleted_projects.json', 'deleted_episodes.json', 'participants.json', 'projects.json', 'episodes.json', 'config.json'];
     for (const file of jsonFiles) {
       if (Date.now() > pullDeadline) break;
       const localPath = path.join(dataPath, file);
@@ -179,11 +179,46 @@ function registerSyncHandlers(getData, saveData, dataPath) {
                   const t = new Date(item.createdAt).getTime();
                   if (!isNaN(t) && t > 0) return t;
                 }
+                if (item.deletedAt) {
+                  const t = new Date(item.deletedAt).getTime();
+                  if (!isNaN(t) && t > 0) return t;
+                }
                 return 0;
+              };
+
+              let deletedById = new Map();
+              let deletedEpByProjNum = new Map();
+              if (file === 'episodes.json' || file === 'projects.json') {
+                const tombFile = file === 'episodes.json' ? 'deleted_episodes.json' : 'deleted_projects.json';
+                const tombList = await getData(tombFile).catch(() => []);
+                if (Array.isArray(tombList)) {
+                  for (const t of tombList) {
+                    if (!t) continue;
+                    const delTs = t.deletedAt ? new Date(t.deletedAt).getTime() : 0;
+                    if (t.id) deletedById.set(t.id, Math.max(deletedById.get(t.id) || 0, delTs));
+                    if (file === 'episodes.json' && t.projectId && typeof t.number === 'number') {
+                      const key = `${t.projectId}::${t.number}`;
+                      deletedEpByProjNum.set(key, Math.max(deletedEpByProjNum.get(key) || 0, delTs));
+                    }
+                  }
+                }
+              }
+
+              const isItemTombstoned = (item) => {
+                if (!item) return false;
+                const itemTs = getTimestamp(item);
+                if (item.id && deletedById.has(item.id) && deletedById.get(item.id) >= itemTs) return true;
+                if (file === 'episodes.json' && item.projectId && typeof item.number === 'number') {
+                  const key = `${item.projectId}::${item.number}`;
+                  if (deletedEpByProjNum.has(key) && deletedEpByProjNum.get(key) >= itemTs) return true;
+                }
+                return false;
               };
 
               for (const folderItem of folderList) {
                 if (!folderItem || !folderItem.id) continue;
+                if (isItemTombstoned(folderItem)) continue;
+
                 const existingIndex = mergedList.findIndex((item) => item && item.id === folderItem.id);
                 if (existingIndex === -1) {
                   mergedList.push(folderItem);
@@ -214,6 +249,16 @@ function registerSyncHandlers(getData, saveData, dataPath) {
                   }
                 }
               }
+
+              if (file === 'episodes.json' || file === 'projects.json') {
+                const pruned = mergedList.filter((item) => !isItemTombstoned(item));
+                if (pruned.length !== mergedList.length) {
+                  mergedList.length = 0;
+                  mergedList.push(...pruned);
+                  listChanged = true;
+                }
+              }
+
               if (listChanged) {
                 await saveData(file, mergedList);
               }

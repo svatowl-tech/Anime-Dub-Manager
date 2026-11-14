@@ -40,8 +40,24 @@ function registerMixingHandlers(getData, mainWindow) {
     };
   };
 
-  ipcMain.handle('mixing-get-status', wrapIpcHandler(async (event, { episode, targetDir }) => {
-    if (!episode) throw new Error('Параметр серии обязателен');
+  ipcMain.handle('mixing-get-module-database', wrapIpcHandler(async () => {
+    return {
+      success: true,
+      moduleDatabase: MixingPipelineService.getModuleDatabase()
+    };
+  }));
+
+  ipcMain.handle('mixing-get-status', wrapIpcHandler(async (event, { episode, targetDir } = {}) => {
+    if (!episode) {
+      return {
+        success: true,
+        workingDir: '',
+        manifest: null,
+        rolesVolumeMap: {},
+        timingMetadata: null,
+        moduleDatabase: MixingPipelineService.getModuleDatabase()
+      };
+    }
     const config = await getData('config.json');
     const baseDir = config.baseDir || app.getPath('userData');
     console.log(`[MixingController] get-status: episode=${episode?.number || 'unknown'}, targetDir=${targetDir || 'default'}`);

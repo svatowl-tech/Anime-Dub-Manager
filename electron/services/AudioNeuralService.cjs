@@ -65,7 +65,8 @@ class AudioNeuralService {
             if (
               content.includes('--noise_reduction_db') &&
               content.includes('vst3_open_editor') &&
-              content.includes('VST3_WAVESHELL_V7')
+              content.includes('VST3_WAVESHELL_V7') &&
+              content.includes('HTDEMUCS_SAFE_SEGMENT_V8')
             ) {
               sourceContent = content;
               break;
@@ -112,7 +113,7 @@ class AudioNeuralService {
 
   /**
    * Очищает целевой скрипт на диске от устаревших meta_path хуков (_TorchTestingFinder)
-   * и гарантирует наличие актуальных аргументов CLI (--noise_reduction_db, --post_filter, parse_known_args).
+   * и гарантирует наличие актуальных аргументов CLI (--noise_reduction_db, --post_filter, parse_known_args, HTDEMUCS_SAFE_SEGMENT_V8).
    */
   _sanitizeSidecarScript(scriptPath) {
     if (!scriptPath || !fs.existsSync(scriptPath)) return;
@@ -128,7 +129,8 @@ class AudioNeuralService {
         !code.includes('--noise_reduction_db') ||
         !code.includes('--post_filter') ||
         !code.includes('parse_known_args') ||
-        !code.includes('VST3_WAVESHELL_V7')
+        !code.includes('VST3_WAVESHELL_V7') ||
+        !code.includes('HTDEMUCS_SAFE_SEGMENT_V8')
       ) {
         const bundledCandidates = [
           path.join(__dirname, 'audio_ai_processor.py'),
@@ -145,7 +147,12 @@ class AudioNeuralService {
           if (fs.existsSync(c)) {
             try {
               const fresh = fs.readFileSync(c, 'utf8');
-              if (fresh && !fresh.includes('_TorchTestingFinder') && fresh.includes('VST3_WAVESHELL_V7')) {
+              if (
+                fresh &&
+                !fresh.includes('_TorchTestingFinder') &&
+                fresh.includes('VST3_WAVESHELL_V7') &&
+                fresh.includes('HTDEMUCS_SAFE_SEGMENT_V8')
+              ) {
                 fs.writeFileSync(scriptPath, fresh, 'utf8');
                 log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на актуальную версию.`);
                 break;

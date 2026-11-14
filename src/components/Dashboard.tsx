@@ -18,7 +18,7 @@ export interface DashboardProps {
   currentEpisode: Episode | null;
   onProjectSelect: (id: string) => void;
   onEpisodeSelect: (num: number) => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<any> | void;
 }
 
 export const STATUS_LABELS: Record<EpisodeStatus, string> = {

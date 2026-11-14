@@ -153,36 +153,48 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
     return moduleId === 'phrase_smart_leveler' || moduleId === 'ffmpeg_loudnorm' || moduleId === 'pyloudnorm';
   }, []);
 
-  // Load Status
+  // Load Status & Module Database
   const loadStatus = useCallback(async () => {
-    if (!currentEpisode) return;
     try {
       setIsLoading(true);
-      mixLog('debug', 'Статус', `Запрос состояния сведения серии #${currentEpisode.number || 1}...`);
+      if (currentEpisode) {
+        mixLog('debug', 'Статус', `Запрос состояния сведения серии #${currentEpisode.number || 1}...`);
+      }
       const res: any = await ipcSafe.invoke('mixing-get-status', {
-        episode: currentEpisode,
+        episode: currentEpisode || null,
         targetDir: customTargetDir || undefined
       });
-      if (res && res.manifest) {
-        setManifest(res.manifest);
-        setWorkingDir(res.workingDir || '');
-        if (res.moduleDatabase) {
+      if (res) {
+        if (Array.isArray(res.moduleDatabase) && res.moduleDatabase.length > 0) {
           setModuleDatabase(res.moduleDatabase);
         }
-        if (res.rolesVolumeMap) {
-          setRolesVolumeMap(res.rolesVolumeMap);
+        if (res.manifest) {
+          setManifest(res.manifest);
+          setWorkingDir(res.workingDir || '');
+          if (res.rolesVolumeMap) {
+            setRolesVolumeMap(res.rolesVolumeMap);
+          }
+          if (Array.isArray(res.timingMetadata?.intentionalOverlaps)) {
+            setIntentionalOverlaps(res.timingMetadata.intentionalOverlaps);
+          }
+          mixLog('info', 'Статус', `Состояние загружено: «${res.workingDir || ''}». Модулей: ${res.manifest.pipeline?.length || 0}. Исходных дорожек: ${res.manifest.sourceFiles?.dubberTracks?.length || 0}`, {
+            manifest: res.manifest,
+            workingDir: res.workingDir
+          });
         }
-        if (Array.isArray(res.timingMetadata?.intentionalOverlaps)) {
-          setIntentionalOverlaps(res.timingMetadata.intentionalOverlaps);
-        }
-        mixLog('info', 'Статус', `Состояние загружено: «${res.workingDir || ''}». Модулей: ${res.manifest.pipeline?.length || 0}. Исходных дорожек: ${res.manifest.sourceFiles?.dubberTracks?.length || 0}`, {
-          manifest: res.manifest,
-          workingDir: res.workingDir
-        });
       }
     } catch (e: any) {
-      mixLog('error', 'Статус', `Ошибка загрузки статуса сведения: ${e.message || String(e)}`, { error: e, stack: e.stack });
-      toast.error(`Ошибка загрузки статуса сведения: ${e.message || String(e)}`);
+      // Fallback: ensure moduleDatabase is loaded even if episode status failed
+      try {
+        const dbRes: any = await ipcSafe.invoke('mixing-get-module-database', {});
+        if (Array.isArray(dbRes?.moduleDatabase) && dbRes.moduleDatabase.length > 0) {
+          setModuleDatabase(dbRes.moduleDatabase);
+        }
+      } catch (_) {}
+      if (currentEpisode) {
+        mixLog('error', 'Статус', `Ошибка загрузки статуса сведения: ${e.message || String(e)}`, { error: e, stack: e.stack });
+        toast.error(`Ошибка загрузки статуса сведения: ${e.message || String(e)}`);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -191,6 +203,26 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
   useEffect(() => {
     loadStatus();
   }, [loadStatus]);
+
+  const loadPipelinePresets = useCallback(async () => {
+    try {
+      setIsLoadingPresets(true);
+      const res: any = await ipcSafe.invoke('mixing-get-pipeline-presets', {});
+      if (Array.isArray(res?.presets)) {
+        setPipelinePresets(res.presets);
+      } else if (Array.isArray(res)) {
+        setPipelinePresets(res);
+      }
+    } catch (e: any) {
+      mixLog('warn', 'Пресеты', `Не удалось загрузить пресеты конвейера: ${e.message || String(e)}`);
+    } finally {
+      setIsLoadingPresets(false);
+    }
+  }, [mixLog]);
+
+  useEffect(() => {
+    loadPipelinePresets();
+  }, [loadPipelinePresets]);
 
   // Real-time IPC listeners for task and mixing updates
   useEffect(() => {
@@ -254,9 +286,27 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
 
   // Save Pipeline
   const savePipeline = useCallback(async (newPipeline: PipelineStep[], immediate = false) => {
-    if (!currentEpisode) return;
+    setManifest(prev => {
+      if (prev) return { ...prev, pipeline: newPipeline };
+      return {
+        episodeId: currentEpisode?.id || 'local',
+        projectId: currentEpisode?.projectId || 'local',
+        workingDir: workingDir || '',
+        createdAt: new Date().toISOString(),
+        isImported: false,
+        sourceFiles: {
+          video: null,
+          originalAudio: null,
+          subtitles: null,
+          dubberTracks: []
+        },
+        pipeline: newPipeline,
+        modulesState: {},
+        finalVideo: null
+      };
+    });
 
-    setManifest(prev => prev ? { ...prev, pipeline: newPipeline } : null);
+    if (!currentEpisode) return;
 
     const performSave = async () => {
       try {
@@ -376,29 +426,28 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
   }, [manifest, savePipeline]);
 
   const handleAddModuleFromDatabase = useCallback((modDef: MixingModuleDef) => {
-    if (!manifest?.pipeline) return;
-    const newIndex = manifest.pipeline.length;
-    const newPrefix = `${String(newIndex + 1).padStart(2, '0')}_${modDef.defaultPrefix}`;
+    const existingPipeline = Array.isArray(manifest?.pipeline) ? manifest!.pipeline : [];
+    const newIndex = existingPipeline.length;
+    const cleanDefaultPrefix = (modDef.defaultPrefix || `${modDef.id}_`).replace(/^\d+_/, '');
+    const newPrefix = `${String(newIndex + 1).padStart(2, '0')}_${cleanDefaultPrefix}`;
     const newStep: PipelineStep = {
-      stepId: `step_${Date.now()}_${modDef.id}`,
+      stepId: `step_${Date.now()}_${Math.random().toString(36).substring(2, 6)}_${modDef.id}`,
       moduleId: modDef.id,
       prefix: newPrefix,
       enabled: true,
-      params: { ...modDef.defaultParams },
+      params: { ...(modDef.defaultParams || {}) },
       status: 'idle',
       outputFiles: []
     };
-    const newPipeline = [...manifest.pipeline, newStep];
+    const newPipeline = [...existingPipeline, newStep];
+    setExpandedSettings(prev => ({ ...prev, [newStep.stepId]: true }));
     mixLog('info', 'Конвейер', `Добавлен модуль «${modDef.title}» (префикс: ${newPrefix}) в позицию #${newIndex + 1}`);
     savePipeline(newPipeline, true);
-    toast.success(`Модуль «${modDef.title}» добавлен в конвейер!`);
+    toast.success(`Модуль «${modDef.title}» добавлен в конвейер (#${newIndex + 1})!`);
   }, [manifest, mixLog, savePipeline]);
 
   const handleResetToDefaultPipeline = useCallback(async () => {
     if (!currentEpisode) return;
-    if (!window.confirm('Сбросить цепочку модулей к базовому заводскому конвейеру? Все текущие настройки шагов будут сброшены.')) {
-      return;
-    }
     try {
       const res: any = await ipcSafe.invoke('mixing-reset-pipeline-default', {
         episode: currentEpisode,
@@ -696,6 +745,7 @@ export function useMixingPipeline({ currentEpisode, onRefresh }: UseMixingPipeli
     handleCopyLogs,
     getModuleMeta,
     loadStatus,
+    loadPipelinePresets,
     savePipeline,
     handleMoveStepUp,
     handleMoveStepDown,

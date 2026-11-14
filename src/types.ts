@@ -389,7 +389,7 @@ export interface MixingModulePreset {
 export interface MixingModuleDef {
   id: string;
   name?: string;
-  category: 'timing' | 'cleaning' | 'denoise' | 'dereverb' | 'separation' | 'vocal_match' | 'loudness' | 'dynamics' | 'equalization' | 'effects' | 'balance' | 'mastering' | 'export' | 'analysis';
+  category: 'timbre' | 'timing' | 'cleaning' | 'denoise' | 'dereverb' | 'separation' | 'vocal_match' | 'loudness' | 'dynamics' | 'equalization' | 'effects' | 'balance' | 'mastering' | 'export' | 'analysis' | 'restoration' | 'vst3' | string;
   defaultPrefix: string;
   title: string;
   description: string;

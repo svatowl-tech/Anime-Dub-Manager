@@ -113,10 +113,20 @@ const ConfigSchema = z.object({
   syncEnabled: z.boolean().optional().nullable(),
 }).passthrough();
 
+const TombstoneSchema = z.object({
+  id: z.string(),
+  projectId: z.string().optional().nullable(),
+  number: z.number().optional().nullable(),
+  title: z.string().optional().nullable(),
+  deletedAt: z.string(),
+}).passthrough();
+
 const Schemas = {
   'participants.json': z.array(ParticipantSchema),
   'projects.json': z.array(ProjectSchema),
   'episodes.json': z.array(EpisodeSchema),
+  'deleted_episodes.json': z.array(TombstoneSchema),
+  'deleted_projects.json': z.array(TombstoneSchema),
   'config.json': ConfigSchema,
 };
 
@@ -169,7 +179,7 @@ class DataManager {
     if (!this.baseDir) return;
     try {
       await fs.mkdir(this.baseDir, { recursive: true });
-      const files = ['projects.json', 'episodes.json', 'participants.json', 'config.json'];
+      const files = ['deleted_projects.json', 'deleted_episodes.json', 'participants.json', 'projects.json', 'episodes.json', 'config.json'];
       
       for (const file of files) {
         const localPath = path.join(this.userDataPath, file);
@@ -200,9 +210,40 @@ class DataManager {
             // Entities: smart merge prioritizing newer updatedAt and preserving rich nested arrays
             const mergedList = Array.isArray(localData) ? [...localData] : [];
             const folderList = Array.isArray(folderData) ? folderData : [];
+
+            let deletedById = new Map();
+            let deletedEpByProjNum = new Map();
+            if (file === 'episodes.json' || file === 'projects.json') {
+              const tombFile = file === 'episodes.json' ? 'deleted_episodes.json' : 'deleted_projects.json';
+              const tombList = await this.getData(tombFile).catch(() => []);
+              if (Array.isArray(tombList)) {
+                for (const t of tombList) {
+                  if (!t) continue;
+                  const delTs = t.deletedAt ? new Date(t.deletedAt).getTime() : 0;
+                  if (t.id) deletedById.set(t.id, Math.max(deletedById.get(t.id) || 0, delTs));
+                  if (file === 'episodes.json' && t.projectId && typeof t.number === 'number') {
+                    const key = `${t.projectId}::${t.number}`;
+                    deletedEpByProjNum.set(key, Math.max(deletedEpByProjNum.get(key) || 0, delTs));
+                  }
+                }
+              }
+            }
+
+            const isItemTombstoned = (item) => {
+              if (!item) return false;
+              const itemTs = this.getItemTimestamp(item);
+              if (item.id && deletedById.has(item.id) && deletedById.get(item.id) >= itemTs) return true;
+              if (file === 'episodes.json' && item.projectId && typeof item.number === 'number') {
+                const key = `${item.projectId}::${item.number}`;
+                if (deletedEpByProjNum.has(key) && deletedEpByProjNum.get(key) >= itemTs) return true;
+              }
+              return false;
+            };
             
             for (const folderItem of folderList) {
               if (!folderItem || !folderItem.id) continue;
+              if (isItemTombstoned(folderItem)) continue;
+
               const existingIndex = mergedList.findIndex(item => item && item.id === folderItem.id);
               if (existingIndex === -1) {
                 mergedList.push(folderItem);
@@ -230,8 +271,12 @@ class DataManager {
                 mergedList[existingIndex] = mergedItem;
               }
             }
+
+            const cleanedMergedList = (file === 'episodes.json' || file === 'projects.json')
+              ? mergedList.filter(item => !isItemTombstoned(item))
+              : mergedList;
             
-            await this.saveData(file, mergedList);
+            await this.saveData(file, cleanedMergedList);
           }
         } else if (localData) {
           // If no folder data but local data exists, sync it to the folder

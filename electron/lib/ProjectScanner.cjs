@@ -8,8 +8,32 @@ function sanitizeFolderName(name) {
   return safeSanitizeFolder(name, 'Project');
 }
 
-function extractEpisodeNumber(str, projectTitle) {
-  if (!str) return null;
+const AUXILIARY_DIR_NAMES = new Set([
+  'torrents_temp',
+  'torrents_meta',
+  'backups',
+  'models',
+  'subs',
+  'audio',
+  'dubs',
+  'mix',
+  'mixing',
+  'renders',
+  'covers',
+  'export',
+  'exports',
+  'sound_engineer',
+  'qa',
+  'timing',
+  'temp',
+  'cache',
+  'vst3_presets',
+  '.git',
+  'node_modules',
+]);
+
+function extractEpisodeNumberWithMeta(str, projectTitle, options = {}) {
+  if (!str) return { number: null, confidence: 'none' };
   let clean = str.trim();
 
   // 1. Strip file extension if present
@@ -18,17 +42,20 @@ function extractEpisodeNumber(str, projectTitle) {
   // 2. Strip leading release group [Group] or (Group)
   clean = clean.replace(/^\[[^\]]+\]\s*/, '').replace(/^\([^)]+\)\s*/, '');
 
-  // 3. Strip CRC32 tags
+  // 3. Strip CRC32 tags and hex hashes
   clean = clean.replace(/\[[0-9a-fA-F]{8}\]/g, ' ');
 
-  // 4. Strip video resolutions and specs
-  clean = clean.replace(/\b(?:2160p|1080p|720p|480p|360p|4k|8k|uhd|fhd|hd)\b/gi, ' ');
-  clean = clean.replace(/\b(?:x264|x265|h264|h265|hevc|avc|av1|vp9|10bit|8bit|hi10p|aac\d?|flac\d?|mp3|opus|ac3|eac3|dts(?:-hd)?|truehd|ddp?5\.1|5\.1ch|2\.0ch|stereo)\b/gi, ' ');
-  clean = clean.replace(/\b(?:WEBRip|WEB-DL|BDRip|BD-Rip|BluRay|HDTV|DVDRip|DVD|Remux)\b/gi, ' ');
+  // 4. Strip video resolutions, dimensions, codecs, bitrates, and unit-suffixed numbers
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))\d{3,4}\s*[xх×]\s*\d{3,4}(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:2160p|1080p|720p|480p|360p|4k|8k|uhd|fhd|hd)(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:x264|x265|h264|h265|hevc|avc|av1|vp9|10bit|8bit|hi10p|aac\d?|flac\d?|mp3|opus|ac3|eac3|dts(?:-hd)?|truehd|ddp?5\.1|5\.1ch|2\.0ch|stereo)(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:WEBRip|WEB-DL|BDRip|BD-Rip|BluRay|HDTV|DVDRip|DVD|Remux)(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))\d+(?:[.,]\d+)?\s*(?:ms|sec|fps|hz|khz|kbps|mbps|kb|mb|gb|tb|px|bit|ch)(?=$|[\s._\]\)-])/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:id|aid|eid|shiki|shikimori|mal|anidb|a365|anime365|tg|msg|uid|pid)[_:#-]?\d+(?=$|[\s._\]\)-])/gi, ' ');
 
   // 5. Strip 4-digit years
   clean = clean.replace(/[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]/g, ' ');
-  clean = clean.replace(/\b(?:19|20)\d{2}\b/g, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:19|20)\d{2}(?=$|[\s._\]\)-])/g, ' ');
 
   // 6. Strip projectTitle if provided
   if (projectTitle && typeof projectTitle === 'string' && projectTitle.trim()) {
@@ -42,47 +69,47 @@ function extractEpisodeNumber(str, projectTitle) {
   }
 
   // 7. Strip season markers
-  clean = clean.replace(/\b(?:season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s*season|сезон\s*\d{1,2}|\d{1,2}\s*сезон|part\s*\d{1,2}|часть\s*\d{1,2}|cour\s*\d{1,2})\b/gi, ' ');
+  clean = clean.replace(/(?:^|(?<=[\s._\[(-]))(?:season\s*\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s*season|сезон\s*\d{1,2}|\d{1,2}\s*сезон|part\s*\d{1,2}|часть\s*\d{1,2}|cour\s*\d{1,2})(?=$|[\s._\]\)-])/gi, ' ');
 
   // 8. Pure digits like "1", "01", "12"
   if (/^\d+$/.test(clean.trim())) {
     const num = parseInt(clean.trim(), 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'strong' };
   }
 
   // 9. Russian batch/indicator [01 из 12], (01 из 24)
-  const ruBatchMatch = clean.match(/\[?\b0*([1-9]\d{0,3})\s*(?:-|–|—)?\s*\d*\s*(?:из|of)\s*\d+\b/i);
+  const ruBatchMatch = clean.match(/\[?\b0*([1-9]\d{0,3})\s*(?:-|–|—)?\s*\d*\s*(?:из|of)\s*\d+(?=$|[\s._\]\)-])/i);
   if (ruBatchMatch && ruBatchMatch[1]) {
     const num = parseInt(ruBatchMatch[1], 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'strong' };
   }
 
   // 10. Standard S01E02 / E02 / E2 / 2x05 patterns
-  const sEPattern = clean.match(/(?:s\d{1,2}[\s._-]*e|season\s*\d{1,2}[\s._-]*ep(?:isode)?\s*|\b\d{1,2}x)0*([1-9]\d{0,3})\b/i);
+  const sEPattern = clean.match(/(?:s\d{1,2}[\s._-]*e|season\s*\d{1,2}[\s._-]*ep(?:isode)?\s*|(?:^|(?<=[\s._\[(-]))\d{1,2}x)0*([1-9]\d{0,3})(?=$|[\s._\]\)-])/i);
   if (sEPattern && sEPattern[1]) {
     const num = parseInt(sEPattern[1], 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'strong' };
   }
 
   // 11. Russian season + episode: "2 сезон 5 серия"
   const ruSeasonEp = clean.match(/\d{1,2}\s*сезон[,\s._-]*0*([1-9]\d{0,3})\s*сери[яи]/i);
   if (ruSeasonEp && ruSeasonEp[1]) {
     const num = parseInt(ruSeasonEp[1], 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'strong' };
   }
 
   // 12. Keywords before digits: "Episode 1", "Ep_01", "Серия 1", "Эпизод 1", "Выпуск 1"
-  const prefixMatch = clean.match(/(?:ep(?:isode)?\.?|серия|эпизод|выпуск|\#)[\s._-]*0*([1-9]\d{0,3})\b/i);
+  const prefixMatch = clean.match(/(?:ep(?:isode)?\.?|серия|эпизод|выпуск|\#)[\s._-]*0*([1-9]\d{0,3})(?=$|[\s._\]\)-])/i);
   if (prefixMatch && prefixMatch[1]) {
     const num = parseInt(prefixMatch[1], 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'strong' };
   }
 
   // 13. Keywords after digits: "1 серия", "01 серия", "1 эпизод", "01 эпизод", "1 ep"
-  const suffixMatch = clean.match(/0*([1-9]\d{0,3})[_\s-]*(?:серия|эпизод|серии|выпуск|ep|eps|episode)\b/i);
+  const suffixMatch = clean.match(/(?:^|(?<=[\s._\[(-]))0*([1-9]\d{0,3})[_\s-]*(?:серия|эпизод|серии|выпуск|ep|eps|episode)(?=$|[\s._\]\)-])/i);
   if (suffixMatch && suffixMatch[1]) {
     const num = parseInt(suffixMatch[1], 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'strong' };
   }
 
   // 14. Standard anime release format with DASH delimiter: "Title 2 - 05" or "Title — 05" (last match)
@@ -90,7 +117,11 @@ function extractEpisodeNumber(str, projectTitle) {
   if (dashMatches.length > 0) {
     const lastMatch = dashMatches[dashMatches.length - 1];
     const num = parseInt(lastMatch[1], 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'medium' };
+  }
+
+  if (options.strictOnly) {
+    return { number: null, confidence: 'none' };
   }
 
   // 15. Brackets around digits: "[01]", "(01)", "[1]"
@@ -100,7 +131,7 @@ function extractEpisodeNumber(str, projectTitle) {
       const val = bm[1] || bm[2];
       if (val) {
         const num = parseInt(val, 10);
-        if (!isNaN(num) && num > 0 && num < 2000) return num;
+        if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'weak' };
       }
     }
   }
@@ -109,7 +140,7 @@ function extractEpisodeNumber(str, projectTitle) {
   const endMatch = clean.match(/[\s._-]+0*([1-9]\d{0,3})(?:v\d+)?$/i);
   if (endMatch && endMatch[1]) {
     const num = parseInt(endMatch[1], 10);
-    if (!isNaN(num) && num > 0 && num < 2000) return num;
+    if (!isNaN(num) && num > 0 && num < 2000) return { number: num, confidence: 'weak' };
   }
 
   // 17. Delimited standalone numbers (take the last candidate)
@@ -117,10 +148,23 @@ function extractEpisodeNumber(str, projectTitle) {
   if (delimitedMatches.length > 0) {
     const last = delimitedMatches[delimitedMatches.length - 1];
     const num = parseInt(last[1], 10);
-    if (!isNaN(num) && num > 0 && num < 1000) return num;
+    if (!isNaN(num) && num > 0 && num < 1000) return { number: num, confidence: 'weak' };
   }
 
-  return null;
+  return { number: null, confidence: 'none' };
+}
+
+function extractEpisodeNumber(str, projectTitle, options = {}) {
+  const res = extractEpisodeNumberWithMeta(str, projectTitle, options);
+  if (res.number === null) return null;
+  const totalEpisodes = typeof options.totalEpisodes === 'number' && options.totalEpisodes > 0 ? options.totalEpisodes : 0;
+  if (totalEpisodes > 0) {
+    const reasonableCeiling = Math.max(totalEpisodes * 2, 120);
+    if (res.number > reasonableCeiling && res.confidence !== 'strong') {
+      return null;
+    }
+  }
+  return res.number;
 }
 
 async function fileExists(p) {
@@ -229,7 +273,7 @@ async function scanEpisodeFolder(epFolder, epNum) {
   }
 
   // 2. Scan for video and subtitle files
-  const videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.m4a'];
+  const videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts'];
   const subExts = ['.ass', '.srt', '.vtt'];
 
   const foundVideos = [];
@@ -292,10 +336,90 @@ async function saveEpisodeJsonOnDisk(baseDir, project, episode) {
 }
 
 /**
+ * Removes an episode's metadata file (and empty episode folder) on disk after explicit deletion
+ * so ProjectScanner will never resurrect a deleted episode.
+ */
+async function removeEpisodeOnDisk(baseDir, project, episode) {
+  if (!baseDir || !project || !episode) return;
+  try {
+    const projectDir = await findProjectDirectory(baseDir, project);
+    if (!projectDir || !(await dirExists(projectDir))) return;
+
+    const candidateFolderNames = new Set([
+      sanitizeFolderName(`Episode_${episode.number}`),
+      `Episode_${episode.number}`,
+      `episode_${episode.number}`,
+    ]);
+
+    const entries = await fs.readdir(projectDir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const lower = entry.name.toLowerCase();
+      if (AUXILIARY_DIR_NAMES.has(lower)) continue;
+
+      const epNum = extractEpisodeNumber(entry.name, project.title);
+      if (candidateFolderNames.has(entry.name) || epNum === episode.number) {
+        const epFolder = path.join(projectDir, entry.name);
+        const files = await fs.readdir(epFolder, { withFileTypes: true }).catch(() => []);
+        for (const f of files) {
+          if (!f.isFile()) continue;
+          const lf = f.name.toLowerCase();
+          if (lf === 'episode.json' || lf === `episode_${episode.number}.json`) {
+            await fs.unlink(path.join(epFolder, f.name)).catch(() => {});
+          }
+        }
+        const remaining = await fs.readdir(epFolder).catch(() => []);
+        if (remaining.length === 0) {
+          await fs.rmdir(epFolder).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    log.warn(`[ProjectScanner] Failed cleaning up disk metadata for deleted Ep ${episode?.number}:`, err.message);
+  }
+}
+
+function buildDeletedLookup(deletedList) {
+  const byId = new Map();
+  const byProjAndNum = new Map();
+  if (!Array.isArray(deletedList)) return { byId, byProjAndNum };
+  for (const item of deletedList) {
+    if (!item) continue;
+    const ts = item.deletedAt ? new Date(item.deletedAt).getTime() : Date.now();
+    if (item.id) {
+      const prev = byId.get(item.id) || 0;
+      if (ts >= prev) byId.set(item.id, ts);
+    }
+    if (item.projectId && typeof item.number === 'number') {
+      const key = `${item.projectId}::${item.number}`;
+      const prev = byProjAndNum.get(key) || 0;
+      if (ts >= prev) byProjAndNum.set(key, ts);
+    }
+  }
+  return { byId, byProjAndNum };
+}
+
+function isEpisodeTombstoned(deletedLookup, projectId, epNum, epId, itemUpdatedAtMs = 0) {
+  if (!deletedLookup) return false;
+  if (epId && deletedLookup.byId.has(epId)) {
+    const delTs = deletedLookup.byId.get(epId);
+    if (delTs >= itemUpdatedAtMs) return true;
+  }
+  if (projectId && typeof epNum === 'number') {
+    const key = `${projectId}::${epNum}`;
+    if (deletedLookup.byProjAndNum.has(key)) {
+      const delTs = deletedLookup.byProjAndNum.get(key);
+      if (delTs >= itemUpdatedAtMs) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Scans project folder for episode subfolders/files, restores missing episodes,
  * updates missing/broken paths, and creates episode.json for each episode.
  */
-async function scanAndRecoverProject(baseDir, project, allEpisodes) {
+async function scanAndRecoverProject(baseDir, project, allEpisodes, deletedEpisodes = []) {
   if (!baseDir || !project) return { hasChanges: false, updatedEpisodes: allEpisodes };
 
   const projectDir = await findProjectDirectory(baseDir, project);
@@ -305,6 +429,8 @@ async function scanAndRecoverProject(baseDir, project, allEpisodes) {
 
   log.info(`[ProjectScanner] Scanning project folder for "${project.title}" at: ${projectDir}`);
 
+  const deletedLookup = buildDeletedLookup(deletedEpisodes);
+  const extractOpts = { totalEpisodes: project.totalEpisodes || 0 };
   const diskMap = new Map(); // epNum -> { folderPath, episodeJson, videoPath, subPath }
 
   // 1. Scan subdirectories in projectDir
@@ -313,28 +439,44 @@ async function scanAndRecoverProject(baseDir, project, allEpisodes) {
   for (const entry of entries) {
     if (entry.isDirectory()) {
       const dirName = entry.name;
-      if (['torrents_temp', 'torrents_meta', 'backups', 'models'].includes(dirName.toLowerCase())) continue;
+      if (AUXILIARY_DIR_NAMES.has(dirName.toLowerCase())) continue;
 
-      const epNum = extractEpisodeNumber(dirName, project.title);
-      if (epNum !== null) {
+      const epNumFromName = extractEpisodeNumber(dirName, project.title, extractOpts);
+      if (epNumFromName !== null) {
         const epFolder = path.join(projectDir, dirName);
-        const scannedData = await scanEpisodeFolder(epFolder, epNum);
-        diskMap.set(epNum, scannedData);
+        const scannedData = await scanEpisodeFolder(epFolder, epNumFromName);
+
+        // Ignore unrelated folders that contain no episode.json and no media/subtitles
+        if (!scannedData.episodeJson && !scannedData.videoPath && !scannedData.subPath) {
+          continue;
+        }
+
+        // Verify episode.json belongs to this project if specified
+        if (scannedData.episodeJson && scannedData.episodeJson.projectId && scannedData.episodeJson.projectId !== project.id) {
+          continue;
+        }
+
+        const resolvedEpNum = (scannedData.episodeJson && typeof scannedData.episodeJson.number === 'number' && scannedData.episodeJson.number > 0)
+          ? scannedData.episodeJson.number
+          : epNumFromName;
+
+        diskMap.set(resolvedEpNum, scannedData);
       }
     }
   }
 
-  // 2. Scan files in projectDir root
-  const videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.m4a'];
+  // 2. Scan ONLY actual video & subtitle files in projectDir root
+  const videoExts = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts'];
   const subExts = ['.ass', '.srt', '.vtt'];
 
   for (const entry of entries) {
     if (entry.isFile()) {
-      const epNum = extractEpisodeNumber(entry.name, project.title);
-      if (epNum !== null) {
-        const ext = path.extname(entry.name).toLowerCase();
-        const fullPath = path.join(projectDir, entry.name);
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!videoExts.includes(ext) && !subExts.includes(ext)) continue;
 
+      const epNum = extractEpisodeNumber(entry.name, project.title, extractOpts);
+      if (epNum !== null) {
+        const fullPath = path.join(projectDir, entry.name);
         let existingDisk = diskMap.get(epNum) || { folderPath: null, episodeJson: null, videoPath: null, subPath: null };
         if (videoExts.includes(ext) && !existingDisk.videoPath) {
           existingDisk.videoPath = fullPath;
@@ -352,8 +494,11 @@ async function scanAndRecoverProject(baseDir, project, allEpisodes) {
     const subFiles = await fs.readdir(subsDir, { withFileTypes: true }).catch(() => []);
     for (const sf of subFiles) {
       if (sf.isFile()) {
-        const epNum = extractEpisodeNumber(sf.name, project.title);
-        if (epNum !== null && subExts.includes(path.extname(sf.name).toLowerCase())) {
+        const ext = path.extname(sf.name).toLowerCase();
+        if (!subExts.includes(ext)) continue;
+
+        const epNum = extractEpisodeNumber(sf.name, project.title, extractOpts);
+        if (epNum !== null) {
           let existingDisk = diskMap.get(epNum) || { folderPath: null, episodeJson: null, videoPath: null, subPath: null };
           if (!existingDisk.subPath) {
             existingDisk.subPath = path.join(subsDir, sf.name);
@@ -372,8 +517,22 @@ async function scanAndRecoverProject(baseDir, project, allEpisodes) {
     let existingEp = projectEpisodes.find(e => e.number === epNum);
 
     if (!existingEp) {
-      log.info(`[ProjectScanner] Restoring missing episode ${epNum} for project "${project.title}" from disk files!`);
+      // Never auto-restore an episode that has no media/metadata or was explicitly deleted
+      if (!diskData.episodeJson && !diskData.videoPath && !diskData.subPath) {
+        continue;
+      }
+
       const baseJson = diskData.episodeJson || {};
+      const diskUpdatedAtMs = baseJson.updatedAt
+        ? new Date(baseJson.updatedAt).getTime()
+        : (baseJson.createdAt ? new Date(baseJson.createdAt).getTime() : 0);
+
+      if (isEpisodeTombstoned(deletedLookup, project.id, epNum, baseJson.id, Number.isFinite(diskUpdatedAtMs) ? diskUpdatedAtMs : 0)) {
+        log.info(`[ProjectScanner] Skipping deleted/tombstoned episode ${epNum} in project "${project.title}".`);
+        continue;
+      }
+
+      log.info(`[ProjectScanner] Restoring missing episode ${epNum} for project "${project.title}" from disk files!`);
       const newEp = {
         id: baseJson.id || `ep_${project.id}_${epNum}_${Date.now()}`,
         projectId: project.id,
@@ -473,6 +632,23 @@ async function scanAndRecoverAllProjects(getData, saveData, userDataPath, baseDi
     let episodes = await getData('episodes.json');
     if (!Array.isArray(episodes)) episodes = [];
 
+    let deletedProjects = [];
+    let deletedEpisodes = [];
+    try {
+      const dp = await getData('deleted_projects.json');
+      if (Array.isArray(dp)) deletedProjects = dp;
+    } catch (_) {}
+    try {
+      const de = await getData('deleted_episodes.json');
+      if (Array.isArray(de)) deletedEpisodes = de;
+    } catch (_) {}
+
+    const deletedProjectTitles = new Set(
+      deletedProjects
+        .map(p => (p?.title || '').toLowerCase().replace(/[^a-z0-9а-яё]/gi, ''))
+        .filter(Boolean)
+    );
+
     let projectsChanged = false;
 
     // Discover projects on disk if project list is missing or incomplete
@@ -483,10 +659,14 @@ async function scanAndRecoverAllProjects(getData, saveData, userDataPath, baseDi
       for (const se of subEntries) {
         if (!se.isDirectory()) continue;
         const dirName = se.name;
-        if (['torrents_temp', 'torrents_meta', 'backups', 'models', 'projects'].includes(dirName.toLowerCase())) continue;
+        if (AUXILIARY_DIR_NAMES.has(dirName.toLowerCase()) || dirName.toLowerCase() === 'projects') continue;
 
         const folderPath = path.join(sd, dirName);
         const normDirName = dirName.toLowerCase().replace(/[^a-z0-9а-яё]/gi, '');
+
+        if (deletedProjectTitles.has(normDirName)) {
+          continue;
+        }
 
         const existingProject = projects.find(p => {
           if (p.id === dirName || p.title === dirName) return true;
@@ -495,11 +675,15 @@ async function scanAndRecoverAllProjects(getData, saveData, userDataPath, baseDi
         });
 
         if (!existingProject) {
-          // Check if folder contains episode files or subfolders
+          // Check if folder contains episode subfolders with media/episode.json or project.json
           const innerFiles = await fs.readdir(folderPath, { withFileTypes: true }).catch(() => []);
+          const mediaExts = new Set(['.mp4', '.mkv', '.avi', '.mov', '.webm', '.ts', '.ass', '.srt', '.vtt']);
           const hasEpContent = innerFiles.some(f => {
+            if (f.name.toLowerCase() === 'project.json') return true;
+            if (f.isFile() && !mediaExts.has(path.extname(f.name).toLowerCase())) return false;
+            if (f.isDirectory() && AUXILIARY_DIR_NAMES.has(f.name.toLowerCase())) return false;
             const epNum = extractEpisodeNumber(f.name);
-            return epNum !== null || f.name.toLowerCase() === 'project.json';
+            return epNum !== null;
           });
 
           if (hasEpContent) {
@@ -528,7 +712,7 @@ async function scanAndRecoverAllProjects(getData, saveData, userDataPath, baseDi
     let overallEpisodeChanges = false;
 
     for (const project of projects) {
-      const { hasChanges, updatedEpisodes } = await scanAndRecoverProject(baseDir, project, episodes);
+      const { hasChanges, updatedEpisodes } = await scanAndRecoverProject(baseDir, project, episodes, deletedEpisodes);
       if (hasChanges) {
         overallEpisodeChanges = true;
         episodes = updatedEpisodes;
@@ -551,6 +735,7 @@ module.exports = {
   extractEpisodeNumber,
   findProjectDirectory,
   saveEpisodeJsonOnDisk,
+  removeEpisodeOnDisk,
   scanAndRecoverProject,
   scanAndRecoverAllProjects,
 };

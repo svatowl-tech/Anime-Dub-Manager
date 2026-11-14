@@ -109,7 +109,7 @@ export interface UseDashboardProjectAndRolesParams {
   setCharacterName: React.Dispatch<React.SetStateAction<string>>;
   onProjectSelect: (id: string) => void;
   onEpisodeSelect: (num: number) => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<any> | void;
   setIsNewProjectModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setIsNewEpisodeModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setIsDeleteProjectModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -302,7 +302,7 @@ export function useDashboardProjectAndRoles({
     };
     await ipcSafe.invoke('save-project', updatedProject);
     toast.success('Состав даберов обновлен. Привязки снятых даберов очищены.');
-    onRefresh();
+    await onRefresh();
     setIsAssignDubbersModalOpen(false);
   };
 
@@ -340,7 +340,7 @@ export function useDashboardProjectAndRoles({
       const newProject = initNewProjectWithPreset(baseProject);
       await ipcSafe.invoke('save-project', newProject);
       toast.success('Проект успешно создан!');
-      onRefresh();
+      await onRefresh();
       onProjectSelect(newProject.id);
       setIsNewProjectModalOpen(false);
     } catch (e) {
@@ -360,7 +360,7 @@ export function useDashboardProjectAndRoles({
         try {
           await ipcSafe.invoke('delete-project', selectedProjectId);
           onProjectSelect('');
-          onRefresh();
+          await onRefresh();
           setIsDeleteProjectModalOpen(false);
           toast.success('Проект удален');
         } catch (error) {
@@ -381,7 +381,7 @@ export function useDashboardProjectAndRoles({
       onConfirm: async () => {
         try {
           await ipcSafe.invoke('delete-episode', currentEpisode.id);
-          onRefresh();
+          await onRefresh();
           setIsDeleteEpisodeModalOpen(false);
           toast.success('Серия удалена');
         } catch (error) {
@@ -407,7 +407,7 @@ export function useDashboardProjectAndRoles({
             status: 'FINISHED' as EpisodeStatus
           };
           await ipcSafe.invoke('save-episode', updatedEpisode);
-          onRefresh();
+          await onRefresh();
           toast.success('Серия завершена!');
         } catch (error) {
           console.error('Failed to finish episode:', error);
@@ -465,14 +465,15 @@ export function useDashboardProjectAndRoles({
 
       await ipcSafe.invoke('save-episode', newEpisode);
 
+      const { episodes: _eps, soundEngineer: _se, assignedDubbers: _ad, ...cleanProject } = selectedProject;
       await ipcSafe.invoke('save-project', {
-        ...selectedProject,
+        ...cleanProject,
         lastActiveEpisode: episodeNumber
       });
 
       await onRefresh();
       if (onEpisodeSelect) {
-        onEpisodeSelect(episodeNumber);
+        await onEpisodeSelect(episodeNumber);
       }
       setIsNewEpisodeModalOpen(false);
       toast.success(`Серия ${episodeNumber} успешно добавлена!`);
@@ -603,7 +604,7 @@ export function useDashboardProjectAndRoles({
 
           await ipcSafe.invoke('save-episode', updatedEpisode);
           await updateProjectGlobalMapping(mainName, selectedUserId);
-          onRefresh();
+          await onRefresh();
           toast.success('Роль переназначена');
         }
       });
@@ -626,7 +627,7 @@ export function useDashboardProjectAndRoles({
     await ipcSafe.invoke('save-episode', updatedEpisode);
     await updateProjectGlobalMapping(mainName, selectedUserId);
 
-    onRefresh();
+    await onRefresh();
     setIsAssignModalOpen(false);
     setSelectedUserId('');
     setCharacterName('');
@@ -634,10 +635,10 @@ export function useDashboardProjectAndRoles({
 
   const handleAssignSoundEngineer = async (soundEngineerId: string) => {
     if (selectedProject) {
-      const updatedProject = { ...selectedProject, soundEngineerId };
-      await ipcSafe.invoke('save-project', updatedProject);
+      const { episodes: _eps, soundEngineer: _se, assignedDubbers: _ad, ...cleanProject } = selectedProject;
+      await ipcSafe.invoke('save-project', { ...cleanProject, soundEngineerId });
     }
-    onRefresh();
+    await onRefresh();
     setIsAssignSoundEngineerModalOpen(false);
   };
 

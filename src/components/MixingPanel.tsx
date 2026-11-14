@@ -21,6 +21,7 @@ import {
   MixingAcousticMatchModal,
   MixingVst3Modal,
   MixingLogsDrawer,
+  MixingAddModuleModal,
   useMixingPipeline,
   useMixingAudioPlayer,
   useMixingVst3Manager,
@@ -68,6 +69,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     handleCopyLogs,
     getModuleMeta,
     loadStatus,
+    loadPipelinePresets,
     savePipeline,
     handleMoveStepUp,
     handleMoveStepDown,
@@ -194,6 +196,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
   });
 
   // Modals dialog states
+  const [isAddModuleModalOpen, setIsAddModuleModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(0);
@@ -425,6 +428,66 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
     }
   };
 
+  const handleSaveCustomPipelinePreset = async () => {
+    if (!newPresetName.trim()) return;
+    try {
+      await ipcSafe.invoke('mixing-save-pipeline-preset', {
+        name: newPresetName.trim(),
+        description: newPresetDesc.trim(),
+        pipeline: manifest?.pipeline || []
+      });
+      setNewPresetName('');
+      setNewPresetDesc('');
+      setIsSavePresetModalOpen(false);
+      await loadPipelinePresets();
+      toast.success('Пресет цепочки успешно сохранен!');
+    } catch (e: any) {
+      toast.error(`Ошибка сохранения пресета: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleDeleteCustomPipelinePreset = async (presetId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await ipcSafe.invoke('mixing-delete-pipeline-preset', { presetId });
+      await loadPipelinePresets();
+      toast.success('Пресет удален');
+    } catch (err: any) {
+      toast.error(`Ошибка удаления пресета: ${err.message || String(err)}`);
+    }
+  };
+
+  const handleExportPipelineFile = async () => {
+    try {
+      const res: any = await ipcSafe.invoke('mixing-export-pipeline-file', {
+        pipeline: manifest?.pipeline || [],
+        defaultName: `mixing_pipeline_ep${currentEpisode?.number || 1}.json`
+      });
+      if (res && !res.canceled && res.filePath) {
+        toast.success(`Конвейер экспортирован: ${res.filePath}`);
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка экспорта файла конвейера: ${e.message || String(e)}`);
+    }
+  };
+
+  const handleImportPipelineFile = async () => {
+    if (!currentEpisode) return;
+    try {
+      const res: any = await ipcSafe.invoke('mixing-import-pipeline-file', {
+        episode: currentEpisode,
+        targetDir: workingDir || customTargetDir
+      });
+      if (res && !res.canceled && res.manifest) {
+        setManifest(res.manifest);
+        setIsPresetsModalOpen(false);
+        toast.success('Конвейер успешно импортирован из файла!');
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка импорта файла конвейера: ${e.message || String(e)}`);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full bg-[#0a0a0c] text-neutral-200 select-none overflow-hidden">
       {/* Header Bar */}
@@ -436,7 +499,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         isAborting={isAborting}
         isSavingFinalVideo={isSavingFinalVideo}
         onOpenImportModal={() => setIsImportModalOpen(true)}
-        onOpenPresetsModal={() => setIsPresetsModalOpen(true)}
+        onOpenPresetsModal={() => {
+          loadPipelinePresets();
+          setIsPresetsModalOpen(true);
+        }}
         onOpenExternalImportModal={() => setIsExternalImportModalOpen(true)}
         onOpenVst3Modal={() => setIsVst3ModalOpen(true)}
         onOpenExportSeModal={() => setIsExportSeModalOpen(true)}
@@ -481,7 +547,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
           onDownloadUvrModel={handleDownloadUvrModel}
           onApplyPreset={handleApplyPreset}
           onUpdateStepParams={handleUpdateStepParams}
-          onOpenAddModuleModal={() => {}}
+          onOpenAddModuleModal={() => setIsAddModuleModalOpen(true)}
           onResetToDefaultPipeline={handleResetToDefaultPipeline}
         />
 
@@ -534,6 +600,18 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         logs={logs}
         onClearLogs={handleClearLogs}
         onCopyLogs={handleCopyLogs}
+      />
+
+      {/* Add Module Catalog Modal */}
+      <MixingAddModuleModal
+        isOpen={isAddModuleModalOpen}
+        onClose={() => setIsAddModuleModalOpen(false)}
+        moduleDatabase={moduleDatabase}
+        currentPipeline={manifest?.pipeline || []}
+        onAddModule={handleAddModuleFromDatabase}
+        onDownloadModel={handleDownloadUvrModel}
+        isDownloadingModel={isDownloadingUvrModel}
+        downloadPercent={uvrDownloadPercent}
       />
 
       {/* Modals */}
@@ -594,10 +672,10 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
           setIsPresetsModalOpen(false);
           toast.success(`Пресет «${p.name}» применен!`);
         }}
-        onDeletePreset={() => {}}
+        onDeletePreset={handleDeleteCustomPipelinePreset}
         onOpenSavePresetModal={() => setIsSavePresetModalOpen(true)}
-        onExportToFile={() => {}}
-        onImportFromFile={() => {}}
+        onExportToFile={handleExportPipelineFile}
+        onImportFromFile={handleImportPipelineFile}
         getModuleMeta={getModuleMeta}
       />
 
@@ -608,10 +686,7 @@ export default function MixingPanel({ currentEpisode, onRefresh }: MixingPanelPr
         setName={setNewPresetName}
         desc={newPresetDesc}
         setDesc={setNewPresetDesc}
-        onSave={() => {
-          setIsSavePresetModalOpen(false);
-          toast.success('Пресет сохранен!');
-        }}
+        onSave={handleSaveCustomPipelinePreset}
       />
 
       <MixingExternalImportModal
