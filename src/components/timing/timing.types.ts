@@ -29,8 +29,26 @@ export interface AudioClip {
   volumeGainDb?: number;    // Gain dB offset (e.g. 0 dB for main voice, -10 dB for secondary voice in overlaps)
   isFix?: boolean;          // Flag for spliced fix takes
   isPhysics?: boolean;      // Non-dialogue character sound ("физика": sighs, grunts, laughs, gasps outside subtitles)
+  physicsSynced?: boolean;  // Physics clip aligned by onset to an unoccupied burst on original_vocals.wav (±1.0s)
+  physicsBurstStartSec?: number;
+  physicsBurstEndSec?: number;
+  internalPauseEdit?: {     // Compressed internal stumble pause (>300ms -> 120ms) when original seiyuu had no pause
+    pauseStartSec: number;
+    pauseEndSec: number;
+    targetPauseSec: number;
+  };
+  playbackRate?: number;    // Pitch-preserving Soft Time-Fit speed factor (1.03 .. 1.18)
+  unscaledDurationSec?: number;
+  timeFitApplied?: boolean;
+  crossRoleMatched?: boolean; // Rescued from another track's unassigned/physics clip within ±2.0s & <=40% dur diff
+  crossRoleOriginalActor?: string;
+  crossRoleTargetTrackId?: string;
   coveredSubIds?: string[]; // All subtitle IDs voiced by this single clip (supports 1 clip -> K consecutive subtitles)
-  speechOnsetOffsetSec?: number; // Offset from sourceStartSec to actual speech attack peak for unison sync
+  speechOnsetOffsetSec?: number; // Offset from sourceStartSec to actual voice attack (RMS > noise+12dB || 20% peak)
+  speechOffsetSec?: number;      // Offset from sourceStartSec to actual voice end inside the clip
+  refVocalStartSec?: number;     // Measured speech onset on original_vocals.wav inside [sub.start-0.45 .. sub.end+0.45]
+  refVocalEndSec?: number;       // Measured speech end on original_vocals.wav
+  hasRefVocalAnchor?: boolean;   // True if original_vocals.wav contained clear speech for this subtitle
   overlapGroupId?: string;  // Intentional subtitle overlap group ID
   overlapRole?: 'main' | 'secondary' | 'background' | null; // Main (0 dB) vs Secondary (-10 dB) voice in overlapping dialogue
   recoveredFrom?: 'fix' | 'original'; // Set if recovered by Iterative Self-Healing Final Audit

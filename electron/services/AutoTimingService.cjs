@@ -5,6 +5,13 @@ const log = require('electron-log');
 const { getRawSubtitles } = require('./subtitleService.cjs');
 const { detectSpeechIntervals, addProcess, getFfmpegPath } = require('./ffmpegService.cjs');
 const ffmpeg = require('fluent-ffmpeg');
+const {
+  TIMING_RULES,
+  getMaxSafeShiftSec,
+  isPhraseTimingNotRequired: sharedIsPhraseTimingNotRequired,
+  isIntentionalOverlapDecision,
+  evaluateSoftTimeFit,
+} = require('../lib/TimingRulesConfig.cjs');
 
 /**
  * Высокоточная конвертация Float32 сэмпла в 16-битный PCM (Int16LE)
@@ -681,16 +688,1113 @@ class AutoTimingService {
   }
 
   /**
+   * Поиск пути к отделённому вокалу оригинала (`original_vocals.wav` / `vocals.wav`).
+   */
+  static resolveOriginalVocalsPath(options = {}, subPath = null) {
+    const directCandidates = [
+      options.originalVocalsPath,
+      options.vocalsPath,
+      options.manifest?.sourceFiles?.originalVocals?.path,
+      options.episode?.vocalsPath,
+      options.episode?.originalVocalsPath,
+      options.episode?.stems?.vocalsPath
+    ].filter(Boolean);
+
+    for (const cand of directCandidates) {
+      try {
+        if (typeof cand === 'string' && fs.existsSync(cand)) return cand;
+      } catch (e) {}
+    }
+
+    const baseDirs = [
+      options.workingDir,
+      options.targetDir,
+      subPath ? path.dirname(subPath) : null,
+      options.episode?.rawPath ? path.dirname(options.episode.rawPath) : null
+    ].filter(Boolean);
+
+    for (const dir of baseDirs) {
+      const staticNames = [
+        path.join(dir, 'original_vocals.wav'),
+        path.join(dir, 'vocals.wav'),
+        path.join(dir, 'Тайминг', 'original_vocals.wav'),
+        path.join(dir, 'Тайминг', 'vocals.wav'),
+        path.join(dir, '00_исходные', 'original_vocals.wav'),
+        path.join(dir, 'stems', 'vocals.wav')
+      ];
+      for (const sPath of staticNames) {
+        try {
+          if (fs.existsSync(sPath)) return sPath;
+        } catch (e) {}
+      }
+
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const ent of entries) {
+          const lower = ent.name.toLowerCase();
+          if (ent.isFile() && /\.(wav|flac|mp3|ogg|m4a)$/i.test(lower) && (lower === 'original_vocals.wav' || lower === 'vocals.wav' || lower.includes('_vocals') || lower.includes('(vocals)'))) {
+            return path.join(dir, ent.name);
+          }
+          if (ent.isDirectory() && (lower.includes('demucs') || lower.includes('separation') || lower.includes('uvr') || lower.includes('stem'))) {
+            const subDir = path.join(dir, ent.name);
+            const v1 = path.join(subDir, 'original_vocals.wav');
+            const v2 = path.join(subDir, 'vocals.wav');
+            if (fs.existsSync(v1)) return v1;
+            if (fs.existsSync(v2)) return v2;
+          }
+        }
+      } catch (e) {}
+    }
+
+    return null;
+  }
+
+  /**
+   * Потоковый расчёт 10-мс RMS кадров через временный моно 16 кГц PCM файл (без нагрузки на V8 Heap).
+   */
+  static async analyzeAudioRmsFramesFromFile(audioPath, tempDir, sampleRate = 16000) {
+    if (!audioPath || !fs.existsSync(audioPath)) return null;
+    const dir = tempDir || os.tmpdir();
+    try { await fs.promises.mkdir(dir, { recursive: true }); } catch (e) {}
+    const tempRawPath = path.join(dir, `adm_rms_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.raw`);
+    const frameDurSec = 0.01; // 10ms window
+    const winSamples = Math.max(64, Math.floor(sampleRate * frameDurSec));
+    const bytesPerWin = winSamples * 2; // mono s16le
+
+    try {
+      await this.decodeToPcmFile(audioPath, tempRawPath, sampleRate, 1);
+      const stat = fs.statSync(tempRawPath);
+      const totalFrames = Math.floor(stat.size / bytesPerWin);
+      if (totalFrames <= 0) return null;
+
+      const rmsFrames = new Float32Array(totalFrames);
+      const fd = fs.openSync(tempRawPath, 'r');
+      const chunkWindows = 1000; // 10 seconds per chunk
+      const chunkBuf = Buffer.alloc(chunkWindows * bytesPerWin);
+      let frameIdx = 0;
+
+      try {
+        while (frameIdx < totalFrames) {
+          const winsToRead = Math.min(chunkWindows, totalFrames - frameIdx);
+          const bytesToRead = winsToRead * bytesPerWin;
+          const bytesRead = fs.readSync(fd, chunkBuf, 0, bytesToRead, frameIdx * bytesPerWin);
+          const actualWins = Math.floor(bytesRead / bytesPerWin);
+          if (actualWins <= 0) break;
+
+          for (let w = 0; w < actualWins; w++) {
+            const winOffset = w * bytesPerWin;
+            let sumSq = 0;
+            for (let s = 0; s < winSamples; s++) {
+              const sampleNorm = chunkBuf.readInt16LE(winOffset + s * 2) / 32768.0;
+              sumSq += sampleNorm * sampleNorm;
+            }
+            rmsFrames[frameIdx++] = Math.sqrt(sumSq / winSamples);
+          }
+        }
+      } finally {
+        try { fs.closeSync(fd); } catch (e) {}
+      }
+
+      // Adaptive room noise floor estimation
+      const sampleStep = Math.max(1, Math.floor(totalFrames / 6000));
+      const dbSamples = [];
+      for (let f = 0; f < totalFrames; f += sampleStep) {
+        const r = rmsFrames[f];
+        dbSamples.push(r > 3.16e-5 ? 20 * Math.log10(r) : -91);
+      }
+      dbSamples.sort((a, b) => a - b);
+      const nonNull = dbSamples.filter(v => v > -88);
+      const isSparse = nonNull.length / Math.max(1, dbSamples.length) < 0.55;
+      let roomNoiseDb = -54;
+      if (isSparse) {
+        const raw = nonNull.length > 20 ? nonNull[Math.floor(nonNull.length * 0.08)] : -72;
+        roomNoiseDb = Math.max(-84, Math.min(-50, raw));
+      } else if (dbSamples.length > 0) {
+        roomNoiseDb = Math.max(-84, Math.min(-48, dbSamples[Math.floor(dbSamples.length * 0.15)]));
+      }
+
+      return {
+        rmsFrames,
+        frameDurSec,
+        durationSec: totalFrames * frameDurSec,
+        roomNoiseDb
+      };
+    } catch (err) {
+      log.warn(`[AutoTiming] Не удалось проанализировать RMS кадры (${path.basename(audioPath)}): ${err.message}`);
+      return null;
+    } finally {
+      try { if (fs.existsSync(tempRawPath)) fs.unlinkSync(tempRawPath); } catch (e) {}
+    }
+  }
+
+  /**
+   * Вычисляет точное смещение атаки голоса (speechOnsetOffsetSec) и конца речи (speechOffsetSec)
+   * внутри клипа [sourceStartSec .. sourceEndSec] по 10-мс кадрам RMS:
+   * первое 10-мс окно, где RMS > room_noise + 12 дБ ИЛИ RMS > 20% от пика фразы.
+   */
+  static detectClipSpeechBoundsFromFrames(framesData, sourceStartSec, sourceEndSec) {
+    const clipDur = Math.max(0.05, (sourceEndSec || 0) - (sourceStartSec || 0));
+    if (!framesData || !framesData.rmsFrames || framesData.rmsFrames.length === 0) {
+      return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms: 0, roomNoiseDb: -54 };
+    }
+
+    const { rmsFrames, frameDurSec, roomNoiseDb } = framesData;
+    const fStart = Math.max(0, Math.floor(sourceStartSec / frameDurSec));
+    const fEnd = Math.min(rmsFrames.length, Math.ceil(sourceEndSec / frameDurSec));
+    if (fEnd <= fStart) {
+      return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms: 0, roomNoiseDb };
+    }
+
+    let peakRms = 0;
+    for (let f = fStart; f < fEnd; f++) {
+      if (rmsFrames[f] > peakRms) peakRms = rmsFrames[f];
+    }
+
+    const noiseFloorAmp = Math.pow(10, roomNoiseDb / 20);
+    const noisePlus12Amp = Math.pow(10, (roomNoiseDb + 12) / 20);
+    const peak20Amp = peakRms * 0.20;
+
+    if (peakRms < Math.max(1e-5, noiseFloorAmp * 1.35)) {
+      return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms, roomNoiseDb };
+    }
+
+    const isSpeechFrame = (idx) => {
+      const r = rmsFrames[idx];
+      return r > noiseFloorAmp * 1.4 && (r > noisePlus12Amp || r > peak20Amp);
+    };
+
+    let onsetFrame = -1;
+    let offsetFrame = -1;
+    for (let f = fStart; f < fEnd; f++) {
+      if (!isSpeechFrame(f)) continue;
+      const confirmedAdj =
+        (f + 1 < fEnd && isSpeechFrame(f + 1)) ||
+        (f - 1 >= fStart && isSpeechFrame(f - 1)) ||
+        rmsFrames[f] > peakRms * 0.35;
+      if (confirmedAdj) {
+        if (onsetFrame === -1) onsetFrame = f;
+        offsetFrame = f + 1;
+      }
+    }
+
+    if (onsetFrame === -1 || offsetFrame === -1) {
+      return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms, roomNoiseDb };
+    }
+
+    const onsetOffsetSec = Number(Math.max(0, Math.min(clipDur - 0.04, (onsetFrame - fStart) * frameDurSec)).toFixed(3));
+    const offsetSec = Number(Math.max(Math.min(clipDur, onsetOffsetSec + 0.02), Math.min(clipDur, (offsetFrame - fStart) * frameDurSec)).toFixed(3));
+    return { onsetOffsetSec, offsetSec, peakRms, roomNoiseDb };
+  }
+
+  /**
+   * Сканирует окно [subStartSec - 0.45s .. subEndSec + 0.45s] на original_vocals.wav
+   * для нахождения реального начала (refVocalStartSec) и конца (refVocalEndSec) речи сейю.
+   */
+  static findOriginalVocalsAnchor(vocalsFramesData, subStartSec, subEndSec) {
+    if (!vocalsFramesData || !vocalsFramesData.rmsFrames || vocalsFramesData.rmsFrames.length === 0) {
+      return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+    }
+
+    const { rmsFrames, frameDurSec, roomNoiseDb, durationSec } = vocalsFramesData;
+    const scanStartSec = Math.max(0, subStartSec - 0.45);
+    const scanEndSec = Math.min(durationSec, subEndSec + 0.45);
+    const fStart = Math.max(0, Math.floor(scanStartSec / frameDurSec));
+    const fEnd = Math.min(rmsFrames.length, Math.ceil(scanEndSec / frameDurSec));
+    if (fEnd <= fStart + 4) {
+      return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+    }
+
+    let peakRms = 0;
+    for (let f = fStart; f < fEnd; f++) {
+      if (rmsFrames[f] > peakRms) peakRms = rmsFrames[f];
+    }
+    if (peakRms < Math.pow(10, -46 / 20)) {
+      return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+    }
+
+    const noisePlus12Amp = Math.pow(10, (roomNoiseDb + 12) / 20);
+    const threshold = Math.max(noisePlus12Amp, peakRms * 0.16, Math.pow(10, -44 / 20));
+
+    let onsetFrame = -1;
+    let offsetFrame = -1;
+    let activeFrames = 0;
+    for (let f = fStart; f < fEnd; f++) {
+      if (rmsFrames[f] <= threshold) continue;
+      const confirmedAdj =
+        (f + 1 < fEnd && rmsFrames[f + 1] > threshold) ||
+        (f - 1 >= fStart && rmsFrames[f - 1] > threshold) ||
+        rmsFrames[f] > peakRms * 0.35;
+      if (!confirmedAdj) continue;
+      activeFrames++;
+      if (onsetFrame === -1) onsetFrame = f;
+      offsetFrame = f + 1;
+    }
+
+    if (onsetFrame === -1 || offsetFrame === -1 || activeFrames < 3) {
+      return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+    }
+
+    const refVocalStartSec = Number((onsetFrame * frameDurSec).toFixed(3));
+    const refVocalEndSec = Number(Math.max(refVocalStartSec + 0.08, offsetFrame * frameDurSec).toFixed(3));
+    return {
+      refVocalStartSec,
+      refVocalEndSec,
+      anchorStartSec: refVocalStartSec,
+      anchorEndSec: refVocalEndSec,
+      hasRefVocal: true
+    };
+  }
+
+  /**
+   * Строгое правило освобождения от автотайминга (единый модуль TimingRulesConfig):
+   * фраза НЕ двигается ТОЛЬКО если атака речи отклоняется <= 0.12 с (120 мс) И конец речи вылезает <= min(25%, 0.35 с).
+   */
+  static isPhraseTimingNotRequired(
+    clipStartSec,
+    clipDurationSec,
+    anchorStartSec,
+    anchorEndSec,
+    speechOnsetOffsetSec = 0,
+    speechOffsetSec
+  ) {
+    return sharedIsPhraseTimingNotRequired(
+      clipStartSec,
+      clipDurationSec,
+      anchorStartSec,
+      anchorEndSec,
+      speechOnsetOffsetSec,
+      speechOffsetSec
+    );
+  }
+
+  /**
+   * Пост-проверка коллизий после сдвигов внутри одной дорожки:
+   * гарантирует зазор >= minGapSec (по умолчанию 60 мс из TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) между соседними фразами.
+   */
+  static enforceSameTrackMinGap(phrases, minGapSec = TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) {
+    if (!Array.isArray(phrases) || phrases.length < 2) return phrases;
+    phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
+
+    for (let i = 0; i < phrases.length - 1; i++) {
+      const p1 = phrases[i];
+      const p2 = phrases[i + 1];
+      const gap = p2.targetStartSec - p1.targetEndSec;
+      if (gap >= minGapSec - 0.001) continue;
+
+      let remaining = minGapSec - gap;
+
+      // 1. Срезаем только тихий post-roll хвост до speechOffsetSec + 25мс
+      const speechEndFloor = typeof p1.speechOffsetSec === 'number' && p1.speechOffsetSec > 0
+        ? Math.max(0.18, p1.speechOffsetSec + 0.025)
+        : Math.max(0.22, p1.durationSec - 0.12);
+      const maxSafeTrim = Math.max(0, p1.durationSec - speechEndFloor);
+      if (maxSafeTrim > 0.005) {
+        const trim = Math.min(remaining, maxSafeTrim);
+        p1.durationSec = Number((p1.durationSec - trim).toFixed(3));
+        p1.sourceEndSec = Number((p1.sourceStartSec + p1.durationSec).toFixed(3));
+        p1.targetEndSec = Number((p1.targetStartSec + p1.durationSec).toFixed(3));
+        remaining -= trim;
+      }
+
+      // 2. Микро-сдвиг p1 влево (<= 0.18с) при наличии места за p0
+      if (remaining > 0.005 && !p1.isUnisonPhrase) {
+        const prevEnd = i > 0 ? (phrases[i - 1].targetEndSec + minGapSec) : 0;
+        const canPull = Math.min(0.18, Math.max(0, p1.targetStartSec - prevEnd));
+        if (canPull > 0.005) {
+          const pull = Math.min(remaining, canPull);
+          p1.targetStartSec = Number(Math.max(0, p1.targetStartSec - pull).toFixed(3));
+          p1.targetEndSec = Number((p1.targetStartSec + p1.durationSec).toFixed(3));
+          p1.shiftDeltaSec = Number((p1.targetStartSec - p1.sourceStartSec).toFixed(3));
+          remaining -= pull;
+        }
+      }
+
+      // 3. Микро-сдвиг p2 вправо (<= 0.35с) внутри коридора до p3
+      if (remaining > 0.005 && !p2.isUnisonPhrase) {
+        const nextLimit = i + 2 < phrases.length
+          ? (phrases[i + 2].targetStartSec - p2.durationSec - minGapSec)
+          : Infinity;
+        const canPush = Math.min(0.35, Math.max(0, nextLimit - p2.targetStartSec));
+        if (canPush > 0.005) {
+          const push = Math.min(remaining, canPush);
+          p2.targetStartSec = Number((p2.targetStartSec + push).toFixed(3));
+          p2.targetEndSec = Number((p2.targetStartSec + p2.durationSec).toFixed(3));
+          p2.shiftDeltaSec = Number((p2.targetStartSec - p2.sourceStartSec).toFixed(3));
+          p2.collisionResolved = true;
+          remaining -= push;
+        }
+      }
+
+      // 4. Жёсткая защита от наезда вплотную
+      if (p1.targetEndSec > p2.targetStartSec - minGapSec) {
+        const safeEnd = Math.max(p1.targetStartSec + 0.14, p2.targetStartSec - minGapSec);
+        if (safeEnd < p1.targetEndSec) {
+          p1.durationSec = Number((safeEnd - p1.targetStartSec).toFixed(3));
+          p1.sourceEndSec = Number((p1.sourceStartSec + p1.durationSec).toFixed(3));
+          p1.targetEndSec = Number(safeEnd.toFixed(3));
+        }
+      }
+    }
+
+    return phrases;
+  }
+
+  /**
+   * Правило 2A / вспомогательный метод: Поиск самой тихой 40-мс долины (4 x 10мс) в диапазоне [searchStartSec .. searchEndSec].
+   */
+  static findQuietValley40ms(framesData, searchStartSec, searchEndSec) {
+    if (!framesData || !framesData.rmsFrames || framesData.rmsFrames.length < 4) return null;
+    if (searchEndSec <= searchStartSec + 0.05) return null;
+
+    const { rmsFrames, frameDurSec } = framesData;
+    const fStart = Math.max(0, Math.floor(Math.max(0, searchStartSec) / frameDurSec));
+    const fEnd = Math.min(rmsFrames.length, Math.ceil(Math.min(framesData.durationSec, searchEndSec) / frameDurSec));
+    const winLen = 4; // 40ms
+    if (fEnd - fStart < winLen) return null;
+
+    let minAvg = Infinity;
+    let minIdx = fStart;
+    for (let f = fStart; f <= fEnd - winLen; f++) {
+      const avg = (rmsFrames[f] + rmsFrames[f + 1] + rmsFrames[f + 2] + rmsFrames[f + 3]) / winLen;
+      if (avg < minAvg) {
+        minAvg = avg;
+        minIdx = f;
+      }
+    }
+
+    return {
+      valleySec: Number(((minIdx + winLen / 2) * frameDurSec).toFixed(3)),
+      valleyRms: minAvg
+    };
+  }
+
+  /**
+   * Правило 2B: Поиск внутренней паузы длительностью 200-550 мс внутри речевого клипа [sourceStartSec .. sourceEndSec].
+   */
+  static detectInternalPausesFromFrames(framesData, sourceStartSec, sourceEndSec, minPauseSec = 0.20, maxPauseSec = 0.55) {
+    const clipDur = (sourceEndSec || 0) - (sourceStartSec || 0);
+    if (!framesData || !framesData.rmsFrames || clipDur < 0.65) return [];
+
+    const { rmsFrames, frameDurSec, roomNoiseDb } = framesData;
+    const fStart = Math.max(0, Math.floor(sourceStartSec / frameDurSec));
+    const fEnd = Math.min(rmsFrames.length, Math.ceil(sourceEndSec / frameDurSec));
+    if (fEnd - fStart < 40) return [];
+
+    let peakRms = 0;
+    for (let f = fStart; f < fEnd; f++) {
+      if (rmsFrames[f] > peakRms) peakRms = rmsFrames[f];
+    }
+    const noiseFloorAmp = Math.pow(10, roomNoiseDb / 20);
+    const silenceThreshold = Math.max(noiseFloorAmp * 2.4, Math.pow(10, (roomNoiseDb + 9) / 20), peakRms * 0.09);
+
+    const len = fEnd - fStart;
+    const isSilent = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      isSilent[i] = rmsFrames[fStart + i] < silenceThreshold ? 1 : 0;
+    }
+    for (let i = 1; i < len - 1; i++) {
+      if (isSilent[i - 1] === 1 && isSilent[i + 1] === 1) isSilent[i] = 1;
+    }
+
+    let firstAct = -1;
+    let lastAct = -1;
+    for (let i = 0; i < len; i++) {
+      if (isSilent[i] === 0) {
+        if (firstAct === -1) firstAct = i;
+        lastAct = i;
+      }
+    }
+    const minEdgeFrames = Math.max(8, Math.round(0.10 / frameDurSec));
+    if (firstAct === -1 || lastAct - firstAct < minEdgeFrames * 2) return [];
+
+    const pauses = [];
+    let inPause = false;
+    let pStart = 0;
+    for (let i = firstAct; i <= lastAct; i++) {
+      if (isSilent[i] === 1 && !inPause) {
+        inPause = true;
+        pStart = i;
+      } else if (isSilent[i] === 0 && inPause) {
+        inPause = false;
+        if (pStart - firstAct >= minEdgeFrames && lastAct - i + 1 >= minEdgeFrames) {
+          const pStartSec = Number(((fStart + pStart) * frameDurSec).toFixed(3));
+          const pEndSec = Number(((fStart + i) * frameDurSec).toFixed(3));
+          const pDur = Number((pEndSec - pStartSec).toFixed(3));
+          if (pDur >= minPauseSec && pDur <= maxPauseSec) {
+            let bestIdx = Math.floor((pStart + i) / 2);
+            let min4 = Infinity;
+            for (let k = pStart; k <= i - 4; k++) {
+              const gf = fStart + k;
+              const avg = (rmsFrames[gf] + rmsFrames[gf + 1] + rmsFrames[gf + 2] + rmsFrames[gf + 3]) / 4;
+              if (avg < min4) {
+                min4 = avg;
+                bestIdx = k + 2;
+              }
+            }
+            pauses.push({
+              pauseStartSec: pStartSec,
+              pauseEndSec: pEndSec,
+              pauseDurationSec: pDur,
+              valleyCenterSec: Number(((fStart + bestIdx) * frameDurSec).toFixed(3))
+            });
+          }
+        }
+      }
+    }
+
+    return pauses;
+  }
+
+  /**
+   * Правило 2B: Проверяет наличие паузы > 180 мс в эталонном original_vocals.wav внутри субтитра.
+   */
+  static checkOriginalVocalsPauseInWindow(vocalsFramesData, subStartSec, subEndSec, approxRelFrac, searchRadiusSec = 0.45, minOrigPauseSec = 0.18) {
+    const fallback = { hasPause: false, origHalf1StartSec: subStartSec, origHalf1EndSec: subEndSec };
+    if (!vocalsFramesData || !vocalsFramesData.rmsFrames || subEndSec <= subStartSec + 0.4) return fallback;
+
+    const { rmsFrames, frameDurSec, roomNoiseDb, durationSec } = vocalsFramesData;
+    const fStart = Math.max(0, Math.floor(Math.max(0, subStartSec - 0.35) / frameDurSec));
+    const fEnd = Math.min(rmsFrames.length, Math.ceil(Math.min(durationSec, subEndSec + 0.35) / frameDurSec));
+    if (fEnd - fStart < 30) return fallback;
+
+    let peakRms = 0;
+    for (let f = fStart; f < fEnd; f++) {
+      if (rmsFrames[f] > peakRms) peakRms = rmsFrames[f];
+    }
+    if (peakRms < Math.pow(10, -46 / 20)) return fallback;
+
+    const threshold = Math.max(Math.pow(10, (roomNoiseDb + 11) / 20), peakRms * 0.14, Math.pow(10, -44 / 20));
+    const len = fEnd - fStart;
+    const isSilent = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      isSilent[i] = rmsFrames[fStart + i] <= threshold ? 1 : 0;
+    }
+
+    let firstAct = -1;
+    let lastAct = -1;
+    for (let i = 0; i < len; i++) {
+      if (isSilent[i] === 0) {
+        if (firstAct === -1) firstAct = i;
+        lastAct = i;
+      }
+    }
+    if (firstAct === -1 || lastAct <= firstAct + 20) return fallback;
+
+    const origStart = Number(((fStart + firstAct) * frameDurSec).toFixed(3));
+    const origEnd = Number(((fStart + lastAct + 1) * frameDurSec).toFixed(3));
+    const expectedCenter = origStart + (origEnd - origStart) * Math.max(0.15, Math.min(0.85, approxRelFrac));
+
+    let bestPause = null;
+    let inPause = false;
+    let pStart = 0;
+    for (let i = firstAct; i <= lastAct; i++) {
+      if (isSilent[i] === 1 && !inPause) {
+        inPause = true;
+        pStart = i;
+      } else if (isSilent[i] === 0 && inPause) {
+        inPause = false;
+        const pStartSec = (fStart + pStart) * frameDurSec;
+        const pEndSec = (fStart + i) * frameDurSec;
+        const pDur = pEndSec - pStartSec;
+        const dist = Math.abs((pStartSec + pEndSec) / 2 - expectedCenter);
+        if (pDur > minOrigPauseSec && dist <= searchRadiusSec + 0.35 && (pStart - firstAct) >= 8 && (lastAct - i + 1) >= 8) {
+          if (!bestPause || dist < bestPause.dist) {
+            bestPause = {
+              start: Number(pStartSec.toFixed(3)),
+              end: Number(pEndSec.toFixed(3)),
+              dist,
+              lastBeforeIdx: pStart,
+              firstAfterIdx: i
+            };
+          }
+        }
+      }
+    }
+
+    if (!bestPause) {
+      return { hasPause: false, origHalf1StartSec: origStart, origHalf1EndSec: origEnd };
+    }
+
+    return {
+      hasPause: true,
+      origPauseStartSec: bestPause.start,
+      origPauseEndSec: bestPause.end,
+      origHalf1StartSec: origStart,
+      origHalf1EndSec: Number(((fStart + bestPause.lastBeforeIdx) * frameDurSec).toFixed(3)),
+      origHalf2StartSec: Number(((fStart + bestPause.firstAfterIdx) * frameDurSec).toFixed(3)),
+      origHalf2EndSec: origEnd
+    };
+  }
+
+  /**
+   * Правила 2A и 2B на этапе предобработки интервалов дорожки:
+   * - 2A: Если 2 соседние реплики склеились в один кусок, находит самую тихую 40-мс долину в original_vocals.wav
+   *       в окне ±0.45с от границы `.ass` и режет кусок по соответствующей 40-мс долине даббера.
+   * - 2B: Для длинной реплики с внутренней паузой 200-550 мс: если пауза в оригинале >180 мс -> делит надвое;
+   *       если оригинал слитный и пауза даббера >300 мс -> НЕ режет, а задаёт internalPauseEdit (сжатие до 120 мс).
+   */
+  static refineAndAdaptIntervalsWithVocals(intervals, charLines, trackFramesData, vocalsFramesData, statsAcc) {
+    if (!Array.isArray(intervals) || intervals.length === 0 || !trackFramesData) {
+      return intervals;
+    }
+
+    // Шаг 2A: Разрезаем интервалы, объединившие 2 соседних субтитра (поиск 40-мс долины в оригинале ±0.45с)
+    const sortedSubs = [...(charLines || [])].sort((a, b) => a.startSec - b.startSec);
+    let afterSplit2A = [...intervals];
+    if (sortedSubs.length >= 2) {
+      let splitHappened = true;
+      let passes = 0;
+      while (splitHappened && passes < 4) {
+        splitHappened = false;
+        passes++;
+        const nextList = [];
+        for (const inv of afterSplit2A) {
+          const spanning = sortedSubs.filter(s => s.startSec >= inv.startSec - 0.55 && s.endSec <= inv.endSec + 0.55);
+          if (spanning.length >= 2 && spanning.length <= 4) {
+            let cutPerformed = false;
+            for (let si = 0; si < spanning.length - 1; si++) {
+              const subA = spanning[si];
+              const subB = spanning[si + 1];
+              if (subB.startSec - subA.endSec >= 1.25) continue;
+
+              const assBoundary = (subA.endSec + subB.startSec) / 2;
+              const origValley = vocalsFramesData
+                ? this.findQuietValley40ms(vocalsFramesData, assBoundary - 0.45, assBoundary + 0.45)
+                : null;
+              const searchCenter = origValley ? (assBoundary * 0.35 + origValley.valleySec * 0.65) : assBoundary;
+              const searchStart = Math.max(inv.startSec + 0.25, searchCenter - 0.45);
+              const searchEnd = Math.min(inv.endSec - 0.25, searchCenter + 0.45);
+              const dubValley = this.findQuietValley40ms(trackFramesData, searchStart, searchEnd);
+              const splitPoint = dubValley ? dubValley.valleySec : searchCenter;
+
+              if (splitPoint - inv.startSec >= 0.25 && inv.endSec - splitPoint >= 0.25) {
+                nextList.push({
+                  startSec: inv.startSec,
+                  endSec: Number(splitPoint.toFixed(3)),
+                  durationSec: Number((splitPoint - inv.startSec).toFixed(3))
+                });
+                nextList.push({
+                  startSec: Number(splitPoint.toFixed(3)),
+                  endSec: inv.endSec,
+                  durationSec: Number((inv.endSec - splitPoint).toFixed(3))
+                });
+                splitHappened = true;
+                cutPerformed = true;
+                break;
+              }
+            }
+            if (!cutPerformed) nextList.push(inv);
+          } else {
+            nextList.push(inv);
+          }
+        }
+        afterSplit2A = nextList;
+      }
+    }
+
+    if (!vocalsFramesData) return afterSplit2A;
+
+    // Шаг 2B: Адаптивная проверка внутренних пауз 200-550 мс внутри одиночного длинного субтитра
+    const result = [];
+    for (const inv of afterSplit2A) {
+      if ((inv.durationSec || 0) < 0.70) {
+        result.push(inv);
+        continue;
+      }
+
+      // Находим ближайший длинный субтитр
+      let bestSub = null;
+      let bestDiff = Infinity;
+      for (const s of sortedSubs) {
+        const d = Math.abs(s.startSec - inv.startSec);
+        if (d < 1.5 && d < bestDiff) {
+          bestDiff = d;
+          bestSub = s;
+        }
+      }
+
+      if (!bestSub || (bestSub.endSec - bestSub.startSec) < 0.85) {
+        result.push(inv);
+        continue;
+      }
+
+      const pauses = this.detectInternalPausesFromFrames(
+        trackFramesData,
+        inv.startSec,
+        inv.endSec,
+        TIMING_RULES.INTERNAL_PAUSE_MIN_SEC,
+        TIMING_RULES.INTERNAL_PAUSE_MAX_SEC
+      );
+      if (pauses.length === 0) {
+        result.push(inv);
+        continue;
+      }
+
+      pauses.sort((a, b) => b.pauseDurationSec - a.pauseDurationSec);
+      const mainPause = pauses[0];
+      const relFrac = (mainPause.valleyCenterSec - inv.startSec) / Math.max(0.2, inv.endSec - inv.startSec);
+      const origCheck = this.checkOriginalVocalsPauseInWindow(
+        vocalsFramesData,
+        bestSub.startSec,
+        bestSub.endSec,
+        relFrac,
+        0.45,
+        TIMING_RULES.ORIG_VOCAL_PAUSE_MIN_SEC
+      );
+
+      if (origCheck.hasPause && origCheck.origHalf2StartSec !== undefined) {
+        const p1End = Number(Math.max(inv.startSec + 0.22, mainPause.valleyCenterSec - 0.01).toFixed(3));
+        const p2Start = Number(Math.min(inv.endSec - 0.22, mainPause.valleyCenterSec + 0.01).toFixed(3));
+        if (p1End - inv.startSec >= 0.22 && inv.endSec - p2Start >= 0.22) {
+          result.push({
+            startSec: inv.startSec,
+            endSec: p1End,
+            durationSec: Number((p1End - inv.startSec).toFixed(3)),
+            _overrideSub: {
+              ...bestSub,
+              id: `${bestSub.id ?? bestSub.rawLineIndex ?? 'sub'}_h1`,
+              startSec: origCheck.origHalf1StartSec,
+              endSec: origCheck.origHalf1EndSec,
+              text: `${bestSub.text || ''} (ч. 1)`
+            },
+            _overrideAnchor: {
+              refVocalStartSec: origCheck.origHalf1StartSec,
+              refVocalEndSec: origCheck.origHalf1EndSec,
+              anchorStartSec: origCheck.origHalf1StartSec,
+              anchorEndSec: origCheck.origHalf1EndSec,
+              hasRefVocal: true
+            }
+          });
+          result.push({
+            startSec: p2Start,
+            endSec: inv.endSec,
+            durationSec: Number((inv.endSec - p2Start).toFixed(3)),
+            _overrideSub: {
+              ...bestSub,
+              id: `${bestSub.id ?? bestSub.rawLineIndex ?? 'sub'}_h2`,
+              startSec: origCheck.origHalf2StartSec,
+              endSec: origCheck.origHalf2EndSec ?? bestSub.endSec,
+              text: `${bestSub.text || ''} (ч. 2)`
+            },
+            _overrideAnchor: {
+              refVocalStartSec: origCheck.origHalf2StartSec,
+              refVocalEndSec: origCheck.origHalf2EndSec ?? bestSub.endSec,
+              anchorStartSec: origCheck.origHalf2StartSec,
+              anchorEndSec: origCheck.origHalf2EndSec ?? bestSub.endSec,
+              hasRefVocal: true
+            }
+          });
+          if (statsAcc) statsAcc.pausesSplitCount++;
+          continue;
+        }
+      } else if (mainPause.pauseDurationSec > TIMING_RULES.INTERNAL_PAUSE_COMPRESS_TRIGGER_SEC) {
+        const targetPauseSec = TIMING_RULES.INTERNAL_PAUSE_TARGET_SEC;
+        const savedSec = Number((mainPause.pauseDurationSec - targetPauseSec).toFixed(3));
+        result.push({
+          ...inv,
+          internalPauseEdit: {
+            pauseStartSec: mainPause.pauseStartSec,
+            pauseEndSec: mainPause.pauseEndSec,
+            targetPauseSec
+          },
+          unscaledDurationSec: Number(Math.max(0.25, inv.durationSec - savedSec).toFixed(3)),
+          durationSec: Number(Math.max(0.25, inv.durationSec - savedSec).toFixed(3))
+        });
+        if (statsAcc) statsAcc.pausesCompressedCount++;
+        continue;
+      }
+
+      result.push(inv);
+    }
+
+    return result;
+  }
+
+  /**
+   * Правило 1: Поиск свободного неартикулированного всплеска (0.12с .. 2.50с) в окне ±1.0с на original_vocals.wav для клипа «Физика».
+   */
+  static findOriginalVocalsBurstForPhysics(vocalsFramesData, clipStartSec, clipEndSec, onsetOffsetSec, occupiedWindows) {
+    if (!vocalsFramesData || !vocalsFramesData.rmsFrames || vocalsFramesData.rmsFrames.length === 0) {
+      return { found: false };
+    }
+
+    const { rmsFrames, frameDurSec, roomNoiseDb, durationSec } = vocalsFramesData;
+    const clipAttack = clipStartSec + (onsetOffsetSec || 0);
+    const fStart = Math.max(0, Math.floor(Math.max(0, clipStartSec - 1.0) / frameDurSec));
+    const fEnd = Math.min(rmsFrames.length, Math.ceil(Math.min(durationSec, Math.max(clipEndSec + 1.0, clipStartSec + 3.5)) / frameDurSec));
+    if (fEnd - fStart < 12) return { found: false };
+
+    let peakRms = 0;
+    for (let f = fStart; f < fEnd; f++) {
+      if (rmsFrames[f] > peakRms) peakRms = rmsFrames[f];
+    }
+    if (peakRms < Math.pow(10, -47 / 20)) return { found: false };
+
+    const noisePlus10Amp = Math.pow(10, (roomNoiseDb + 10) / 20);
+    const threshold = Math.max(noisePlus10Amp, peakRms * 0.14, Math.pow(10, -44 / 20));
+    const len = fEnd - fStart;
+    const active = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      const gf = fStart + i;
+      if (rmsFrames[gf] > threshold) {
+        const adj =
+          (gf + 1 < fEnd && rmsFrames[gf + 1] > threshold * 0.8) ||
+          (gf - 1 >= fStart && rmsFrames[gf - 1] > threshold * 0.8) ||
+          rmsFrames[gf] > peakRms * 0.30;
+        if (adj) active[i] = 1;
+      }
+    }
+
+    const maxMergeDip = Math.max(2, Math.round(0.12 / frameDurSec));
+    let zeroRun = 0;
+    for (let i = 0; i < len; i++) {
+      if (active[i] === 0) {
+        zeroRun++;
+      } else {
+        if (zeroRun > 0 && zeroRun <= maxMergeDip) {
+          for (let k = i - zeroRun; k < i; k++) active[k] = 1;
+        }
+        zeroRun = 0;
+      }
+    }
+
+    const bursts = [];
+    let inBurst = false;
+    let bStartIdx = 0;
+    for (let i = 0; i <= len; i++) {
+      const isAct = i < len && active[i] === 1;
+      if (isAct && !inBurst) {
+        inBurst = true;
+        bStartIdx = i;
+      } else if (!isAct && inBurst) {
+        inBurst = false;
+        const bStart = Number(((fStart + bStartIdx) * frameDurSec).toFixed(3));
+        const bEnd = Number(((fStart + i) * frameDurSec).toFixed(3));
+        const bDur = Number((bEnd - bStart).toFixed(3));
+        if (
+          bDur >= TIMING_RULES.PHYSICS_MIN_BURST_SEC &&
+          bDur <= TIMING_RULES.PHYSICS_MAX_BURST_SEC &&
+          Math.abs(bStart - clipAttack) <= TIMING_RULES.PHYSICS_SEARCH_WINDOW_SEC
+        ) {
+          const isOccupied = occupiedWindows.some(occ => {
+            const ov = Math.min(bEnd, occ.endSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) - Math.max(bStart, occ.startSec - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
+            return ov >= Math.min(0.08, bDur * 0.25);
+          });
+          if (!isOccupied) {
+            bursts.push({ startSec: bStart, endSec: bEnd, durationSec: bDur, dist: Math.abs(bStart - clipAttack) });
+          }
+        }
+      }
+    }
+
+    if (bursts.length === 0) return { found: false };
+    bursts.sort((a, b) => a.dist - b.dist);
+    return {
+      found: true,
+      burstStartSec: bursts[0].startSec,
+      burstEndSec: bursts[0].endSec,
+      burstDurationSec: bursts[0].durationSec
+    };
+  }
+
+  /**
+   * Правило 1: Умная синхронизация «Физики» (вздохи, смех, реакции без субтитров) по ±1.0с окну original_vocals.wav.
+   */
+  static applyPhysicsSmartSync(trackPhraseResults, vocalsFramesData, collisionLogs) {
+    if (!vocalsFramesData) return 0;
+
+    const occupiedWindows = [];
+    for (const tr of trackPhraseResults) {
+      for (const s of (tr.track?.lines || [])) {
+        occupiedWindows.push({ startSec: s.startSec, endSec: s.endSec });
+      }
+      for (const p of tr.phrases) {
+        if (p.isPhysics) continue;
+        occupiedWindows.push({
+          startSec: p.refVocalStartSec ?? p.targetStartSec,
+          endSec: p.refVocalEndSec ?? p.targetEndSec
+        });
+      }
+    }
+
+    let syncedCount = 0;
+    for (const tr of trackPhraseResults) {
+      if (tr.track?.isFix) continue;
+      const phrases = tr.phrases;
+      phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
+
+      for (let i = 0; i < phrases.length; i++) {
+        const p = phrases[i];
+        if (!p.isPhysics) continue;
+
+        const burst = this.findOriginalVocalsBurstForPhysics(
+          vocalsFramesData,
+          p.targetStartSec,
+          p.targetEndSec,
+          p.speechOnsetOffsetSec || 0,
+          occupiedWindows
+        );
+
+        if (!burst.found) {
+          p.physicsSynced = false;
+          continue;
+        }
+
+        const desiredStart = Math.max(0, burst.burstStartSec - (p.speechOnsetOffsetSec || 0));
+        const maxWin = TIMING_RULES.PHYSICS_SEARCH_WINDOW_SEC;
+        const clampedWindow = Math.max(p.sourceStartSec - maxWin, Math.min(p.sourceStartSec + maxWin, desiredStart));
+        const prevEnd = i > 0 ? (phrases[i - 1].targetEndSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : 0;
+        const nextStart = i + 1 < phrases.length ? (phrases[i + 1].targetStartSec - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : Infinity;
+        const safeStart = Number(Math.max(0, Math.max(prevEnd, Math.min(clampedWindow, Math.max(prevEnd, nextStart - p.durationSec)))).toFixed(3));
+
+        if (Math.abs(safeStart - p.targetStartSec) >= TIMING_RULES.MIN_EFFECTIVE_SHIFT_SEC && Math.abs(safeStart - desiredStart) < Math.abs(p.targetStartSec - desiredStart) - 0.02) {
+          p.physicsBurstStartSec = burst.burstStartSec;
+          p.physicsBurstEndSec = burst.burstEndSec;
+          p.refVocalStartSec = burst.burstStartSec;
+          p.refVocalEndSec = burst.burstEndSec;
+          p.hasRefVocalAnchor = true;
+          p.physicsSynced = true;
+          p.targetStartSec = safeStart;
+          p.targetEndSec = Number((safeStart + p.durationSec).toFixed(3));
+          p.shiftDeltaSec = Number((safeStart - p.sourceStartSec).toFixed(3));
+          occupiedWindows.push({ startSec: burst.burstStartSec, endSec: burst.burstEndSec });
+          syncedCount++;
+          if (collisionLogs) {
+            collisionLogs.push(`[${formatSeconds(safeStart)}] ⚡ Умная синхронизация «Физики» (${tr.track?.characterName || tr.track?.dubberNick}): атака подтянута к всплеску сейю на ${formatSeconds(burst.burstStartSec)}.`);
+          }
+        } else {
+          p.physicsSynced = false;
+        }
+      }
+    }
+
+    return syncedCount;
+  }
+
+  /**
+   * Правило 4: Кросс-спасение пропущенных фраз (crossRoleMatched: true).
+   */
+  static rescueCrossRoleMissingPhrases(trackPhraseResults, vocalsFramesData, collisionLogs) {
+    let rescuedCount = 0;
+    const nonFixTracks = trackPhraseResults.filter(t => !t.track?.isFix);
+
+    for (const trA of nonFixTracks) {
+      const charLines = [...(trA.track?.lines || [])].sort((a, b) => a.startSec - b.startSec);
+      const aCharacter = trA.track?.characterName || trA.track?.dubberNick || 'Персонаж';
+
+      for (let sIdx = 0; sIdx < charLines.length; sIdx++) {
+        const sub = charLines[sIdx];
+        const subIdStr = String(sub.id ?? sub.rawLineIndex ?? sIdx);
+        const subDur = Math.max(0.25, sub.endSec - sub.startSec);
+
+        const coveredOnA = trA.phrases.some(p => {
+          if (String(p.subId) === subIdStr) return true;
+          if (p.isPhysics) return false;
+          const ov = Math.min(p.targetEndSec, sub.endSec + 0.25) - Math.max(p.targetStartSec, sub.startSec - 0.25);
+          return ov >= Math.min(0.28, subDur * 0.35);
+        });
+        if (coveredOnA) continue;
+
+        const coveredByOtherDialogue = nonFixTracks.some(otherTr => {
+          if (otherTr.track.trackId === trA.track.trackId) return false;
+          return otherTr.phrases.some(op => {
+            if (op.isPhysics || op.durationSec >= 90) return false;
+            const ov = Math.min(op.targetEndSec, sub.endSec + 0.25) - Math.max(op.targetStartSec, sub.startSec - 0.25);
+            return ov >= Math.min(0.28, subDur * 0.35);
+          });
+        });
+        if (coveredByOtherDialogue) continue;
+
+        const anchor = this.findOriginalVocalsAnchor(vocalsFramesData, sub.startSec, sub.endSec);
+        const refDur = Math.max(0.20, anchor.anchorEndSec - anchor.anchorStartSec);
+
+        let bestMatch = null;
+        for (const trB of nonFixTracks) {
+          if (trB.track.trackId === trA.track.trackId) continue;
+          for (let pIdx = 0; pIdx < trB.phrases.length; pIdx++) {
+            const cand = trB.phrases[pIdx];
+            const isUnassigned = cand.isPhysics || !cand.hasMatchedSub;
+            if (!isUnassigned || cand.crossRoleMatched || cand.physicsSynced) continue;
+
+            const vocalAttack = cand.targetStartSec + (cand.speechOnsetOffsetSec || 0);
+            const startDist = Math.abs(vocalAttack - anchor.anchorStartSec);
+            const searchWin = TIMING_RULES.CROSS_ROLE_SEARCH_WINDOW_SEC;
+            if (startDist > searchWin || cand.targetEndSec < sub.startSec - searchWin || cand.targetStartSec > sub.endSec + searchWin) {
+              continue;
+            }
+
+            const speechDur = typeof cand.speechOffsetSec === 'number' && cand.speechOffsetSec > (cand.speechOnsetOffsetSec || 0)
+              ? Math.max(0.12, cand.speechOffsetSec - (cand.speechOnsetOffsetSec || 0))
+              : cand.durationSec;
+            const minDurDiff = Math.min(
+              Math.abs(cand.durationSec - refDur) / Math.max(0.25, refDur),
+              Math.abs(speechDur - refDur) / Math.max(0.25, refDur)
+            );
+            if (minDurDiff > TIMING_RULES.CROSS_ROLE_MAX_DUR_DIFF_RATIO) continue;
+
+            const score = startDist + minDurDiff * 1.5;
+            if (!bestMatch || score < bestMatch.score) {
+              bestMatch = { trB, pIdx, cand, score };
+            }
+          }
+        }
+
+        if (bestMatch) {
+          const bPhrases = bestMatch.trB.phrases;
+          const targetP = bPhrases[bestMatch.pIdx];
+          const desiredStart = Math.max(0, anchor.anchorStartSec - (targetP.speechOnsetOffsetSec || 0));
+          const prevEnd = bestMatch.pIdx > 0 ? (bPhrases[bestMatch.pIdx - 1].targetEndSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : 0;
+          const nextStart = bestMatch.pIdx + 1 < bPhrases.length ? (bPhrases[bestMatch.pIdx + 1].targetStartSec - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : Infinity;
+          const safeStart = Number(Math.max(0, Math.max(prevEnd, Math.min(desiredStart, Math.max(prevEnd, nextStart - targetP.durationSec)))).toFixed(3));
+
+          targetP.isPhysics = false;
+          targetP.hasMatchedSub = true;
+          targetP.crossRoleMatched = true;
+          targetP.crossRoleOriginalActor = aCharacter;
+          targetP.subId = subIdStr;
+          targetP.subStartSec = sub.startSec;
+          targetP.subEndSec = sub.endSec;
+          targetP.subText = sub.text || '';
+          targetP.refVocalStartSec = anchor.refVocalStartSec;
+          targetP.refVocalEndSec = anchor.refVocalEndSec;
+          targetP.hasRefVocalAnchor = anchor.hasRefVocal;
+          targetP.targetStartSec = safeStart;
+          targetP.targetEndSec = Number((safeStart + targetP.durationSec).toFixed(3));
+          targetP.shiftDeltaSec = Number((safeStart - targetP.sourceStartSec).toFixed(3));
+          rescuedCount++;
+
+          if (collisionLogs) {
+            collisionLogs.push(`[${formatSeconds(safeStart)}] 🎭 Кросс-спасение реплики: пустой саб «${(sub.text || '').slice(0, 35)}» (${aCharacter}) закрыт непривязанным клипом «${bestMatch.trB.track?.dubberNick}».`);
+          }
+        }
+      }
+    }
+
+    return rescuedCount;
+  }
+
+  /**
+   * Правило 3: Мягкий Time-Fit (подгонка длительности длинных переводов):
+   * 1) Сначала подрезает пустой хвост клипа в конце до speechOffsetSec + 40 мс;
+   * 2) Включается при вылете хвоста > 25% И наезде на следующую фразу,
+   *    задаёт безопасное pitch-preserving ускорение playbackRate / timeStretch в [1.0x .. 1.18x].
+   */
+  static applySoftTimeFitToTrackPhrases(
+    phrases,
+    allProjectPhrases,
+    subOverlapMatrix,
+    minGapSec = TIMING_RULES.MIN_SAME_TRACK_GAP_SEC,
+    collisionLogs
+  ) {
+    if (!Array.isArray(phrases) || phrases.length === 0) return 0;
+    phrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
+
+    const interGapSec = TIMING_RULES.MIN_INTER_TRACK_GAP_SEC;
+    let fitCount = 0;
+    for (let i = 0; i < phrases.length; i++) {
+      const p = phrases[i];
+      if (p.isPhysics || p.isUnisonPhrase || p.isIntentionalSubOverlap || p.durationSec >= 25) {
+        continue;
+      }
+
+      const anchorStart = p.refVocalStartSec ?? p.subStartSec;
+      const anchorEnd = p.refVocalEndSec ?? p.subEndSec;
+      if (anchorEnd === undefined) continue;
+
+      const prevIntraEnd = i > 0 ? (phrases[i - 1].targetEndSec + minGapSec) : 0;
+      const nextIntraStart = i + 1 < phrases.length ? (phrases[i + 1].targetStartSec - minGapSec) : Infinity;
+
+      let nextInterStart = Infinity;
+      for (const op of allProjectPhrases) {
+        if (op.trackId === p.trackId || op.isPhysics || op.isIntentionalSubOverlap) continue;
+        if (op.targetStartSec <= p.targetStartSec + interGapSec || op.targetStartSec >= p.targetEndSec + 0.5) continue;
+        const ovKey = `${p.subId}:${op.subId}`;
+        if (subOverlapMatrix && subOverlapMatrix.has(ovKey)) continue;
+        if (op.targetStartSec - interGapSec < nextInterStart) {
+          nextInterStart = op.targetStartSec - interGapSec;
+        }
+      }
+
+      const nextPhraseCeiling = Math.min(nextIntraStart, nextInterStart);
+      const evalInitial = evaluateSoftTimeFit({
+        curStartSec: p.targetStartSec,
+        clipDurationSec: p.durationSec,
+        unscaledDurationSec: p.unscaledDurationSec,
+        anchorStartSec: anchorStart,
+        anchorEndSec: anchorEnd,
+        speechOffsetSec: p.speechOffsetSec,
+        nextPhraseCeilingSec: nextPhraseCeiling,
+        playbackRate: p.playbackRate || p.timeStretch || 1.0,
+      });
+
+      if (!evalInitial.collidesNext && !evalInitial.hasOverhangOver25) continue;
+
+      const alignedStart = Math.max(0, anchorStart - (p.speechOnsetOffsetSec || 0));
+      const canPullLeft = Math.max(0, p.targetStartSec - Math.max(prevIntraEnd, alignedStart - 0.06));
+      if (canPullLeft > TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC && !evalInitial.hasOverhangOver25) continue;
+
+      // Шаг 1: Подрезка пустого хвоста в конце до speechOffsetSec + 40мс
+      const pauseSaved = p.internalPauseEdit
+        ? Math.max(0, (p.internalPauseEdit.pauseEndSec - p.internalPauseEdit.pauseStartSec) - p.internalPauseEdit.targetPauseSec)
+        : 0;
+      const tailFloor = typeof p.speechOffsetSec === 'number' && p.speechOffsetSec > 0
+        ? Math.max(0.20, p.speechOffsetSec + 0.04)
+        : Math.max(0.25, p.durationSec - 0.08);
+
+      if ((p.sourceEndSec - p.sourceStartSec - pauseSaved) > tailFloor + 0.015) {
+        const newSrcEnd = Number((p.sourceStartSec + pauseSaved + tailFloor).toFixed(3));
+        if (newSrcEnd < p.sourceEndSec) {
+          p.sourceEndSec = newSrcEnd;
+          p.unscaledDurationSec = Number(Math.max(0.20, tailFloor).toFixed(3));
+          const curRate = p.playbackRate || p.timeStretch || 1.0;
+          p.durationSec = Number((p.unscaledDurationSec / curRate).toFixed(3));
+          p.targetEndSec = Number((p.targetStartSec + p.durationSec).toFixed(3));
+        }
+      }
+
+      // Шаг 2: Безопасный pitch-preserving time compression [1.0x .. 1.18x] при вылете > 25% и наезде на следующую фразу
+      const unscaledDur = p.unscaledDurationSec ?? Math.max(0.25, (p.sourceEndSec - p.sourceStartSec) - pauseSaved);
+      const evalAfterTrim = evaluateSoftTimeFit({
+        curStartSec: p.targetStartSec,
+        clipDurationSec: p.durationSec,
+        unscaledDurationSec: unscaledDur,
+        anchorStartSec: anchorStart,
+        anchorEndSec: anchorEnd,
+        speechOffsetSec: p.speechOffsetSec,
+        nextPhraseCeilingSec: nextPhraseCeiling,
+        playbackRate: p.playbackRate || p.timeStretch || 1.0,
+      });
+
+      if (evalAfterTrim.shouldApply) {
+        const clampedRate = evalAfterTrim.recommendedRate;
+        p.unscaledDurationSec = Number(unscaledDur.toFixed(3));
+        p.playbackRate = clampedRate;
+        p.timeStretch = clampedRate;
+        p.durationSec = Number((unscaledDur / clampedRate).toFixed(3));
+        p.targetEndSec = Number((p.targetStartSec + p.durationSec).toFixed(3));
+        p.timeFitApplied = true;
+        fitCount++;
+        if (collisionLogs) {
+          collisionLogs.push(`[${formatSeconds(p.targetStartSec)}] ⏩ Soft Time-Fit ${clampedRate.toFixed(2)}x (${p.dubberNick}): длинный перевод сжат с ${unscaledDur.toFixed(2)}с до ${p.durationSec.toFixed(2)}с без изменения тона.`);
+        }
+      }
+    }
+
+    return fitCount;
+  }
+
+  /**
    * Выравнивание тайминга фраз и разведение коллизий диалогов.
-   * Адаптивный pre-roll минимум 90 мс для защиты взрывных согласных ('П', 'Б', 'Т') и микрофонных вдохов.
+   * Синхронизация строго по реальной атаке речи (speechOnsetOffsetSec) и эталону original_vocals.wav.
    */
   static async alignProjectAndResolveCollisions({
     subPath,
     matchedTracks,
     options = {}
   }) {
-    const minGapSec = options.minGapSec !== undefined ? Number(options.minGapSec) : 0.12; // 120ms
-    const leadInSec = options.leadInSec !== undefined ? Number(options.leadInSec) : 0.090; // 90ms adaptive pre-roll
+    const minGapSec = options.minGapSec !== undefined ? Number(options.minGapSec) : TIMING_RULES.MIN_INTER_TRACK_GAP_SEC; // 80ms inter-track
+    const intraTrackMinGapSec = TIMING_RULES.MIN_SAME_TRACK_GAP_SEC; // 60ms post-shift intra-track guarantee
+    const leadInSec = options.leadInSec !== undefined ? Number(options.leadInSec) : 0.090;
     const maxShiftEarlySec = options.maxShiftEarlySec !== undefined ? Number(options.maxShiftEarlySec) : 0.20;
     const silenceThresholdDb = options.silenceThresholdDb !== undefined ? Number(options.silenceThresholdDb) : (options.noiseDb !== undefined ? Number(options.noiseDb) : -45);
     const minSilenceDuration = options.minSilenceDuration !== undefined ? Number(options.minSilenceDuration) : 0.30;
@@ -706,8 +1810,24 @@ class AutoTimingService {
     }));
     const subOverlapMatrix = this.buildSubtitleOverlapMatrix(allSubtitleLines);
 
+    const analysisTmpDir = path.join(os.tmpdir(), 'adm_timing_rms');
+    const origVocalsPath = this.resolveOriginalVocalsPath(options, subPath);
+    const vocalsFramesData = origVocalsPath
+      ? await this.analyzeAudioRmsFramesFromFile(origVocalsPath, analysisTmpDir)
+      : null;
+    if (vocalsFramesData) {
+      log.info(`[AutoTiming] Эталон original_vocals.wav подключен: ${origVocalsPath} (шум: ${vocalsFramesData.roomNoiseDb.toFixed(1)} dB)`);
+    }
+
     const trackPhraseResults = [];
     const allProjectPhrases = [];
+    const edgeStats = {
+      pausesSplitCount: 0,
+      pausesCompressedCount: 0,
+      physicsSyncedCount: 0,
+      crossRoleRescuedCount: 0,
+      softTimeFitCount: 0
+    };
 
     for (const track of matchedTracks) {
       let intervals = [];
@@ -720,6 +1840,8 @@ class AutoTimingService {
       } catch (err) {
         intervals = [{ startSec: 0, endSec: 300, durationSec: 300 }];
       }
+
+      const trackFramesData = await this.analyzeAudioRmsFramesFromFile(track.trackPath, analysisTmpDir);
 
       const charLines = track.lines || [];
       const phrases = [];
@@ -742,12 +1864,20 @@ class AutoTimingService {
         }
       }
 
+      if (isTrackInTimeline && charLines.length > 0 && trackFramesData) {
+        intervals = this.refineAndAdaptIntervalsWithVocals(intervals, charLines, trackFramesData, vocalsFramesData, edgeStats);
+      }
+
       // Two-pass surgical subtitle matching for timeline tracks so no phrase ever steals a neighbor's subtitle
       const matchedSubByInterval = new Array(intervals.length).fill(null);
       if (isTrackInTimeline && charLines.length > 0) {
         const usedSubIdx = new Set();
         const candidatePairs = [];
         for (let k = 0; k < intervals.length; k++) {
+          if (intervals[k]._overrideSub) {
+            matchedSubByInterval[k] = intervals[k]._overrideSub;
+            continue;
+          }
           for (let sIdx = 0; sIdx < charLines.length; sIdx++) {
             const diff = Math.abs(charLines[sIdx].startSec - intervals[k].startSec);
             if (diff <= 2.2) {
@@ -793,29 +1923,50 @@ class AutoTimingService {
           }
         }
 
+        const clipBounds = this.detectClipSpeechBoundsFromFrames(trackFramesData, interval.startSec, interval.endSec);
+        const onsetOffsetSec = clipBounds.onsetOffsetSec;
+        const speechOffsetSec = clipBounds.offsetSec;
+
+        const hasMatchedSub = Boolean(subLine);
         const subStart = subLine ? subLine.startSec : interval.startSec;
         const subEnd = subLine ? subLine.endSec : interval.endSec;
         const subId = subLine ? String(subLine.id ?? subLine.rawLineIndex ?? k) : `track_${track.trackId}_${k}`;
 
+        const anchor = interval._overrideAnchor
+          ? interval._overrideAnchor
+          : (subLine
+            ? this.findOriginalVocalsAnchor(vocalsFramesData, subStart, subEnd)
+            : { anchorStartSec: interval.startSec, anchorEndSec: interval.endSec, hasRefVocal: false });
+
         let initialStart = interval.startSec;
         if (!isTrackInTimeline && track.isFix) {
-          initialStart = Math.max(0, subStart - leadInSec);
+          initialStart = Number(Math.max(0, anchor.anchorStartSec - onsetOffsetSec).toFixed(3));
         } else if (subLine) {
-          // Surgical scalpel nudge: only nudge if desync is between 0.30s and 1.50s, and stay strictly inside local track corridor!
-          const rawDelta = subStart - interval.startSec;
-          const absDelta = Math.abs(rawDelta);
-          if (absDelta >= 0.30 && absDelta <= 1.50) {
-            const prevEnd = k > 0 ? (phrases[k - 1].targetEndSec + 0.05) : 0;
-            const nextStart = (k + 1 < intervals.length) ? (intervals[k + 1].startSec - 0.05) : Infinity;
-            const clampedDelta = Math.max(-1.20, Math.min(1.20, rawDelta));
+          const timingExempt = this.isPhraseTimingNotRequired(
+            interval.startSec,
+            interval.durationSec,
+            anchor.anchorStartSec,
+            anchor.anchorEndSec,
+            onsetOffsetSec,
+            speechOffsetSec
+          );
+          if (!timingExempt.notRequired) {
+            const desiredClipStart = Math.max(0, anchor.anchorStartSec - onsetOffsetSec);
+            const rawDelta = desiredClipStart - interval.startSec;
+            const maxAutoShift = getMaxSafeShiftSec(anchor.hasRefVocal);
+            const prevEnd = k > 0 ? (phrases[k - 1].targetEndSec + intraTrackMinGapSec) : 0;
+            const nextStart = (k + 1 < intervals.length) ? (intervals[k + 1].startSec - intraTrackMinGapSec) : Infinity;
+            const clampedDelta = Math.max(-maxAutoShift, Math.min(maxAutoShift, rawDelta));
             let desiredStart = interval.startSec + clampedDelta;
-            desiredStart = Math.max(prevEnd, Math.min(desiredStart, nextStart - interval.durationSec));
-            if (desiredStart >= prevEnd && desiredStart + interval.durationSec <= nextStart) {
-              initialStart = Number(Math.max(0, desiredStart).toFixed(3));
+            desiredStart = Math.max(prevEnd, Math.min(desiredStart, Math.max(prevEnd, nextStart - interval.durationSec)));
+            desiredStart = Number(Math.max(0, desiredStart).toFixed(3));
+            if (Math.abs(desiredStart - interval.startSec) >= TIMING_RULES.MIN_EFFECTIVE_SHIFT_SEC && Math.abs(desiredStart - desiredClipStart) < Math.abs(interval.startSec - desiredClipStart) - 0.02) {
+              initialStart = desiredStart;
             }
           }
         }
-        const initialEnd = initialStart + interval.durationSec;
+        const effectiveDuration = interval.unscaledDurationSec ?? interval.durationSec;
+        const initialEnd = Number((initialStart + effectiveDuration).toFixed(3));
 
         const phraseObj = {
           id: `phrase_${track.trackId}_${k}`,
@@ -825,17 +1976,28 @@ class AutoTimingService {
           dubberId: track.dubberId,
           characterName: track.characterName,
           isFix: track.isFix || false,
+          isPhysics: !track.isFix && isTrackInTimeline && !hasMatchedSub && charLines.length > 0,
+          hasMatchedSub,
           indexInTrack: k,
           sourceStartSec: interval.startSec,
           sourceEndSec: interval.endSec,
-          durationSec: interval.durationSec,
+          durationSec: effectiveDuration,
+          unscaledDurationSec: effectiveDuration,
+          internalPauseEdit: interval.internalPauseEdit || undefined,
+          speechOnsetOffsetSec: onsetOffsetSec,
+          speechOffsetSec: interval.internalPauseEdit
+            ? Math.max(0.15, speechOffsetSec - ((interval.internalPauseEdit.pauseEndSec - interval.internalPauseEdit.pauseStartSec) - interval.internalPauseEdit.targetPauseSec))
+            : speechOffsetSec,
+          refVocalStartSec: anchor.refVocalStartSec,
+          refVocalEndSec: anchor.refVocalEndSec,
+          hasRefVocalAnchor: anchor.hasRefVocal,
           subStartSec: subStart,
           subEndSec: subEnd,
           subId: subId,
           subText: subLine?.text || '',
           targetStartSec: initialStart,
           targetEndSec: initialEnd,
-          shiftDeltaSec: initialStart - interval.startSec,
+          shiftDeltaSec: Number((initialStart - interval.startSec).toFixed(3)),
           collisionResolved: false,
           collisionDetails: null,
           isUnisonPhrase: false,
@@ -848,6 +2010,7 @@ class AutoTimingService {
         }
       }
 
+      this.enforceSameTrackMinGap(phrases, intraTrackMinGapSec);
       trackPhraseResults.push({
         track,
         phrases
@@ -860,8 +2023,14 @@ class AutoTimingService {
     let totalIntentionalOverlapsPreserved = 0;
     let unisonPhrasesCount = 0;
 
+    // Правило 1 (Граничный случай): Умная синхронизация «Физики» по окну ±1.0с на original_vocals.wav
+    edgeStats.physicsSyncedCount = this.applyPhysicsSmartSync(trackPhraseResults, vocalsFramesData, collisionLogs);
+
+    // Правило 4 (Граничный случай): Кросс-спасение пропущенных фраз между актёрами
+    edgeStats.crossRoleRescuedCount = this.rescueCrossRoleMissingPhrases(trackPhraseResults, vocalsFramesData, collisionLogs);
+
     // ПРАВИЛО 1: Если в сабах назначена на несколько дабберов ОДНА И ТА ЖЕ ФРАЗА,
-    // такие фразы НЕ считаются конфликтами и должны быть оттаймлены в абсолютном синхроне.
+    // такие фразы выравниваются в унисон по атаке голоса и эталону original_vocals.wav.
     const visitedUnison = new Set();
     for (let i = 0; i < allProjectPhrases.length; i++) {
       const pA = allProjectPhrases[i];
@@ -877,14 +2046,15 @@ class AutoTimingService {
       }
 
       if (unisonGroup.length >= 2) {
-        const syncStartSec = Number(Math.max(0, pA.subStartSec).toFixed(3));
+        const unisonAnchor = this.findOriginalVocalsAnchor(vocalsFramesData, pA.subStartSec, pA.subEndSec);
         for (const p of unisonGroup) {
           visitedUnison.add(p.id);
           const trResult = trackPhraseResults.find(tr => tr.track.trackId === p.trackId);
           const trPhrases = trResult ? trResult.phrases : [];
           const idx = p.indexInTrack;
-          const prevEnd = idx > 0 && trPhrases[idx - 1] ? (trPhrases[idx - 1].targetEndSec + 0.03) : 0;
-          const nextStart = (idx + 1 < trPhrases.length && trPhrases[idx + 1]) ? (trPhrases[idx + 1].targetStartSec - 0.03) : Infinity;
+          const prevEnd = idx > 0 && trPhrases[idx - 1] ? (trPhrases[idx - 1].targetEndSec + intraTrackMinGapSec) : 0;
+          const nextStart = (idx + 1 < trPhrases.length && trPhrases[idx + 1]) ? (trPhrases[idx + 1].targetStartSec - intraTrackMinGapSec) : Infinity;
+          const syncStartSec = Number(Math.max(0, unisonAnchor.anchorStartSec - (p.speechOnsetOffsetSec || 0)).toFixed(3));
 
           if (syncStartSec >= prevEnd && syncStartSec + p.durationSec <= nextStart && Math.abs(syncStartSec - p.sourceStartSec) <= 2.2) {
             p.targetStartSec = syncStartSec;
@@ -895,7 +2065,7 @@ class AutoTimingService {
         }
         unisonPhrasesCount += unisonGroup.length;
         const dubbersList = unisonGroup.map(u => `${u.dubberNick} (${u.characterName})`).join(', ');
-        collisionLogs.push(`[${formatSeconds(syncStartSec)}] 🔗 Синхронный унисон (одна фраза в сабах): «${(pA.subText || '').slice(0, 45)}» синхронизирована в абсолютный унисон для: ${dubbersList}.`);
+        collisionLogs.push(`[${formatSeconds(unisonAnchor.anchorStartSec)}] 🔗 Синхронный унисон (атака голоса): «${(pA.subText || '').slice(0, 45)}» синхронизирована для: ${dubbersList}.`);
       }
     }
 
@@ -918,9 +2088,11 @@ class AutoTimingService {
 
         if (current.trackId === next.trackId) continue;
 
-        // 1. Проверка на одну и ту же фразу (Унисон) — не конфликт и не раздвигаем
+        // 1. Проверка на одну и ту же фразу (Унисон) — синхронизация по атаке голоса
         if (this.isSameSubtitlePhrase(current, next) || (current.isUnisonPhrase && next.isUnisonPhrase && Math.abs(current.subStartSec - next.subStartSec) <= 0.08)) {
-          next.targetStartSec = current.targetStartSec;
+          const curVocalStart = current.targetStartSec + (current.speechOnsetOffsetSec || 0);
+          const alignedNextStart = Number(Math.max(0, curVocalStart - (next.speechOnsetOffsetSec || 0)).toFixed(3));
+          next.targetStartSec = alignedNextStart;
           next.targetEndSec = Number((next.targetStartSec + next.durationSec).toFixed(3));
           next.shiftDeltaSec = Number((next.targetStartSec - next.sourceStartSec).toFixed(3));
           current.isUnisonPhrase = true;
@@ -928,10 +2100,18 @@ class AutoTimingService {
           continue;
         }
 
-        // 2. Проверка на наложение разных фраз в исходных субтитрах
+        // 2. Проверка намеренного наложения по единым правилам:
+        //    перекрытие > 0.35 с, ИЛИ > 35% короткой фразы, ИЛИ пересечение в .ass субтитрах
         const overlapKey = `${current.subId}:${next.subId}`;
-        const directSubOverlap = Math.min(current.subEndSec, next.subEndSec) - Math.max(current.subStartSec, next.subStartSec) > 0.05;
-        const subOriginallyOverlapped = subOverlapMatrix.has(overlapKey) || directSubOverlap;
+        const actualOverlapSec = Math.max(0, Math.min(current.targetEndSec, next.targetEndSec) - Math.max(current.targetStartSec, next.targetStartSec));
+        const subOriginallyOverlapped = isIntentionalOverlapDecision({
+          overlapSec: actualOverlapSec,
+          earlyDurSec: current.durationSec,
+          lateDurSec: next.durationSec,
+          sub1: { id: current.subId, startSec: current.subStartSec, endSec: current.subEndSec },
+          sub2: { id: next.subId, startSec: next.subStartSec, endSec: next.subEndSec },
+          hasGlobalAssOverlap: subOverlapMatrix.has(overlapKey),
+        });
 
         if (subOriginallyOverlapped) {
           totalIntentionalOverlapsPreserved++;
@@ -1014,8 +2194,8 @@ class AutoTimingService {
         }
 
         const collisionOverlapSec = (current.targetEndSec + minGapSec) - next.targetStartSec;
-        // Surgical guard: only auto-resolve small tail overlaps (<= 1.2s); never shove a phrase several seconds away
-        if (collisionOverlapSec > 1.25) {
+        // Защитный предел: разводим только случайные хвосты <= 1.25 с
+        if (collisionOverlapSec > TIMING_RULES.MAX_SAFE_SHIFT_WITH_VOCALS_SEC) {
           continue;
         }
 
@@ -1035,7 +2215,7 @@ class AutoTimingService {
 
         const finalNextStart = current.targetEndSec + minGapSec;
         const delta = finalNextStart - next.targetStartSec;
-        if (delta > 0 && delta <= 1.25) {
+        if (delta > 0 && delta <= TIMING_RULES.MAX_SAFE_SHIFT_WITH_VOCALS_SEC) {
           next.targetStartSec = finalNextStart;
           next.targetEndSec = next.targetStartSec + next.durationSec;
           next.shiftDeltaSec = next.targetStartSec - next.sourceStartSec;
@@ -1046,6 +2226,24 @@ class AutoTimingService {
           collisionLogs.push(logMsg);
         }
       }
+    }
+
+    // Правило 3 (Граничный случай): Мягкий Time-Fit для длинных фраз с заблокированным сдвигом влево
+    for (const trResult of trackPhraseResults) {
+      if (!trResult.track?.isFix) {
+        edgeStats.softTimeFitCount += this.applySoftTimeFitToTrackPhrases(
+          trResult.phrases,
+          allProjectPhrases,
+          subOverlapMatrix,
+          intraTrackMinGapSec,
+          collisionLogs
+        );
+      }
+    }
+
+    // Финальная пост-проверка 40 мс зазоров внутри каждой дорожки после всех сдвигов и разведений коллизий
+    for (const trResult of trackPhraseResults) {
+      this.enforceSameTrackMinGap(trResult.phrases, intraTrackMinGapSec);
     }
 
     const intentionalOverlaps = Array.from(intentionalOverlapsMap.values()).sort((a, b) => a.startSec - b.startSec);
@@ -1059,6 +2257,7 @@ class AutoTimingService {
       subOverlapMatrix,
       intentionalOverlaps,
       unisonPhrasesCount,
+      hasOriginalVocalsAnchor: Boolean(vocalsFramesData),
       stats: {
         totalTracks: matchedTracks.length,
         totalPhrases: allProjectPhrases.length,
@@ -1066,7 +2265,8 @@ class AutoTimingService {
         totalCollisionsResolved,
         totalIntentionalOverlapsPreserved,
         unisonPhrasesCount,
-        intentionalOverlapsCount: intentionalOverlaps.length
+        intentionalOverlapsCount: intentionalOverlaps.length,
+        ...edgeStats
       },
       collisionLogs
     };
@@ -1076,7 +2276,7 @@ class AutoTimingService {
    * Слияние правок (FIX) с оригинальными дорожками с защитой от хвостов и каскадным сдвигом.
    */
   static smartApplyFixesToTimedTracks(timingResult, options = {}) {
-    const minGapSec = Number(options.minGapSec ?? 0.12);
+    const minGapSec = Number(options.minGapSec ?? TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
     const cleanLeftoverTails = options.cleanLeftoverTails !== false;
     const adjustLongerCollisions = options.adjustLongerCollisions !== false;
     const safetyPaddingMs = Number(options.safetyPaddingMs ?? 80);
@@ -1211,6 +2411,10 @@ class AutoTimingService {
       }
     }
 
+    for (const item of originalTracks) {
+      this.enforceSameTrackMinGap(item.phrases, TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
+    }
+
     return {
       ...timingResult,
       finalTrackPhraseResults: originalTracks,
@@ -1336,13 +2540,47 @@ class AutoTimingService {
   }
 
   /**
+   * Декодирует срез аудиофайла с pitch-preserving изменением темпа (-af atempo=...) в .raw PCM файл.
+   */
+  static decodeStretchedSliceToPcmFile(audioPath, startSec, durationSec, rate, outRawPath, sampleRate = 48000, channels = 2) {
+    return new Promise((resolve, reject) => {
+      let killed = false;
+      const safeRate = Math.max(0.5, Math.min(2.0, Number(rate || 1.0)));
+      const ffmpegCmd = ffmpeg(audioPath)
+        .noVideo()
+        .inputOptions(['-ss', String(Math.max(0, startSec)), '-t', String(Math.max(0.05, durationSec))])
+        .audioFilters(`atempo=${safeRate.toFixed(4)}`)
+        .audioCodec('pcm_s16le')
+        .audioFrequency(sampleRate)
+        .audioChannels(channels)
+        .outputOptions(['-ar', String(sampleRate), '-ac', String(channels), '-f', 's16le'])
+        .output(outRawPath);
+
+      const timeout = setTimeout(() => {
+        killed = true;
+        try { ffmpegCmd.kill('SIGKILL'); } catch (e) {}
+        reject(new Error(`Таймаут atempo декодирования PCM slice: ${audioPath}`));
+      }, 60000);
+
+      ffmpegCmd.on('end', () => {
+        clearTimeout(timeout);
+        resolve(outRawPath);
+      });
+      ffmpegCmd.on('error', (err) => {
+        clearTimeout(timeout);
+        if (!killed) reject(err);
+      });
+
+      ffmpegCmd.run();
+    });
+  }
+
+  /**
    * ПОТОКОВАЯ СБОРКА АУДИОДОРОЖКИ С МИНИМАЛЬНЫМ ПОТРЕБЛЕНИЕМ RAM (< 20 МБ):
    * 1. Исходные файлы стримятся в 48kHz 16-bit stereo .raw файлы на диске.
    * 2. Аудио рендерится блоками (чанками по 10 секунд) непосредственно в выходной WAV файл.
-   * 3. Адаптивный pre-roll (>= 90 мс) с плавным 10 мс S-образным (Hann window) fade-in сохраняет вдохи и взрывные 'П','Б','Т'.
-   * 4. Post-roll (>= 180 мс) с 15 мс S-образным (Hann window) fade-out сохраняет естественное затухание реверберации.
-   * 5. Учитываются коэффициенты phrase_volume_map.json / timing_metadata.json.
-   * 6. Полностью исключен JavaScript heap out of memory на сериях любой длительности (25+ мин).
+   * 3. Поддерживает сжатие внутренних пауз (Rule 2B internalPauseEdit) и pitch-preserving atempo (Rule 3 playbackRate).
+   * 4. Адаптивный pre-roll / post-roll с Hann window fade-in / fade-out.
    */
   static async assembleMultiSourceTrack(defaultInputPath, phrases, outputAudioPath, options = {}) {
     const sampleRate = 48000;
@@ -1350,9 +2588,51 @@ class AutoTimingService {
     const bytesPerSampleFrame = 4; // 2 канала * 2 байта (16-bit)
     const bytesPerSec = sampleRate * bytesPerSampleFrame; // 192,000 байт/сек
 
+    // 0. Раскрытие фраз с internalPauseEdit в два бесшовных склеиваемых суб-сегмента
+    const renderPhrases = [];
+    for (const p of (phrases || [])) {
+      const rate = Number(p.playbackRate || p.timeStretch || 1.0);
+      const srcStart = typeof p.sourceStartSec === 'number' ? p.sourceStartSec : 0;
+      const srcEnd = typeof p.sourceEndSec === 'number' ? p.sourceEndSec : (srcStart + (p.durationSec || 1.0));
+      const trgStart = typeof p.targetStartSec === 'number' ? p.targetStartSec : 0;
+
+      if (p.internalPauseEdit && p.internalPauseEdit.pauseEndSec > p.internalPauseEdit.pauseStartSec) {
+        const halfTargetPause = Math.max(0.02, (p.internalPauseEdit.targetPauseSec ?? 0.12) * 0.5);
+        const s1End = Math.min(srcEnd, p.internalPauseEdit.pauseStartSec + halfTargetPause);
+        const s2Start = Math.max(s1End, p.internalPauseEdit.pauseEndSec - halfTargetPause);
+        const s1Unscaled = Math.max(0.05, s1End - srcStart);
+        const s2Unscaled = Math.max(0.05, srcEnd - s2Start);
+        const s1Dur = Number((s1Unscaled / (rate > 1.005 ? rate : 1.0)).toFixed(3));
+        const s2Dur = Number((s2Unscaled / (rate > 1.005 ? rate : 1.0)).toFixed(3));
+
+        renderPhrases.push({
+          ...p,
+          id: `${p.id}_ps1`,
+          sourceStartSec: srcStart,
+          sourceEndSec: Number(s1End.toFixed(3)),
+          durationSec: s1Dur,
+          targetStartSec: trgStart,
+          targetEndSec: Number((trgStart + s1Dur).toFixed(3)),
+          suppressPostSafety: true
+        });
+        renderPhrases.push({
+          ...p,
+          id: `${p.id}_ps2`,
+          sourceStartSec: Number(s2Start.toFixed(3)),
+          sourceEndSec: srcEnd,
+          durationSec: s2Dur,
+          targetStartSec: Number((trgStart + s1Dur).toFixed(3)),
+          targetEndSec: Number((trgStart + s1Dur + s2Dur).toFixed(3)),
+          suppressPreSafety: true
+        });
+      } else {
+        renderPhrases.push({ ...p });
+      }
+    }
+
     // 1. Сбор всех уникальных исходных путей
     const sourcePaths = new Set([defaultInputPath]);
-    for (const p of phrases) {
+    for (const p of renderPhrases) {
       if (p.sourceAudioPath) sourcePaths.add(p.sourceAudioPath);
     }
 
@@ -1374,6 +2654,41 @@ class AutoTimingService {
           } catch (decErr) {
             log.warn(`[AutoTiming] Ошибка конвертации в PCM ${src}:`, decErr.message);
           }
+        }
+      }
+
+      // 2B. Предрендеринг сегментов с pitch-preserving atempo (Rule 3: Soft Time-Fit [1.03..1.18])
+      for (let rIdx = 0; rIdx < renderPhrases.length; rIdx++) {
+        const seg = renderPhrases[rIdx];
+        const rate = Number(seg.playbackRate || seg.timeStretch || 1.0);
+        if (rate <= 1.005) continue;
+
+        const origSrc = seg.sourceAudioPath || defaultInputPath;
+        if (!origSrc || !fs.existsSync(origSrc)) continue;
+
+        const sStart = typeof seg.sourceStartSec === 'number' ? seg.sourceStartSec : 0;
+        const sEnd = typeof seg.sourceEndSec === 'number' ? seg.sourceEndSec : (sStart + (seg.durationSec || 1.0));
+        const rawSliceDur = Math.max(0.05, sEnd - sStart);
+        const stretchedRawPath = path.join(tempDir, `temp_atempo_${Date.now()}_${rIdx}_${Math.random().toString(36).slice(2, 6)}.raw`);
+
+        try {
+          await this.decodeStretchedSliceToPcmFile(origSrc, sStart, rawSliceDur, rate, stretchedRawPath, sampleRate, channels);
+          const statSize = fs.statSync(stretchedRawPath).size;
+          const actualStretchedSec = Math.floor(statSize / bytesPerSampleFrame) / sampleRate;
+          if (actualStretchedSec > 0.04) {
+            const syntheticKey = `__atempo_${rIdx}_${stretchedRawPath}`;
+            rawPcmFilesMap.set(syntheticKey, stretchedRawPath);
+            tempRawFilesToCleanup.push(stretchedRawPath);
+            seg.sourceAudioPath = syntheticKey;
+            seg.sourceStartSec = 0;
+            seg.sourceEndSec = Number(actualStretchedSec.toFixed(4));
+            seg.durationSec = Number(actualStretchedSec.toFixed(4));
+            seg.targetEndSec = Number(((seg.targetStartSec || 0) + actualStretchedSec).toFixed(4));
+            seg.suppressPreSafety = true;
+            seg.suppressPostSafety = true;
+          }
+        } catch (atempoErr) {
+          log.warn(`[AutoTiming] Ошибка atempo x${rate} для сегмента ${seg.id}:`, atempoErr.message);
         }
       }
 
@@ -1406,7 +2721,7 @@ class AutoTimingService {
 
       // 4. Определение общей длительности трека
       let maxSec = defaultDurationSec;
-      for (const p of phrases) {
+      for (const p of renderPhrases) {
         if (p.targetEndSec > maxSec) maxSec = p.targetEndSec;
       }
       if (options.timingMetadata && Array.isArray(options.timingMetadata.phrases)) {
@@ -1527,7 +2842,7 @@ class AutoTimingService {
         }
 
         // Шаг В: Наложение фраз, пересекающих текущий чанк (в 32-битном Float формате)
-        for (const p of phrases) {
+        for (const p of renderPhrases) {
           if (isTimelineTrack && !p.isReplacedByFix && (!p.collisionResolved || Math.abs(p.shiftDeltaSec) <= 0.03)) {
             // Фраза уже находится на своем месте в базовом таймлайн-аудио
             continue;
@@ -1543,8 +2858,10 @@ class AutoTimingService {
           const srcEnd = typeof p.sourceEndSec === 'number' ? p.sourceEndSec : (srcStart + (p.durationSec || 1.0));
           const trgStart = typeof p.targetStartSec === 'number' ? p.targetStartSec : 0;
 
-          const availablePreSec = Math.max(0, Math.min(safetyPreSec, srcStart, trgStart));
-          const availablePostSec = Math.max(0, Math.min(safetyPostSec, srcDurationSec - srcEnd));
+          const effPreSafety = p.suppressPreSafety ? 0 : safetyPreSec;
+          const effPostSafety = p.suppressPostSafety ? 0 : safetyPostSec;
+          const availablePreSec = Math.max(0, Math.min(effPreSafety, srcStart, trgStart));
+          const availablePostSec = Math.max(0, Math.min(effPostSafety, srcDurationSec - srcEnd));
 
           const rawSrcStartSec = srcStart - availablePreSec;
           const rawSrcEndSec = srcEnd + availablePostSec;

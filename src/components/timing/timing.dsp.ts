@@ -153,6 +153,8 @@ export function detectSpeechIntervals(
     mergeCloseGapsSec?: number;
     manualThresholdDb?: number;
     subLines?: Array<{ startSec: number; endSec: number }>;
+    vocalsBuffer?: AudioBuffer;
+    vocalsNoiseDbHint?: number;
     onCalibration?: (calib: NoiseCalibration) => void;
   } = {}
 ): Array<{ startSec: number; endSec: number; durationSec: number }> {
@@ -164,6 +166,7 @@ export function detectSpeechIntervals(
     mergeCloseGapsSec = 0.22,
     manualThresholdDb,
     subLines,
+    vocalsBuffer,
     onCalibration
   } = options;
 
@@ -402,13 +405,56 @@ export function detectSpeechIntervals(
       const subB = overlappingSubs[sIdx + 1];
       if (subB.startSec < subA.endSec - 0.10) continue;
 
-      const searchStartSec = Math.max(currentStart + 0.30, subA.endSec - 0.35);
-      const searchEndSec = Math.min(iv.endSec - 0.30, subB.startSec + 0.35);
+      const assBoundarySec = (subA.endSec + subB.startSec) / 2;
+      let anchorBoundarySec = assBoundarySec;
+
+      // Rule 2A: If original_vocals.wav is available, locate the quietest 40ms valley in [assBoundary ± 0.45s]
+      if (vocalsBuffer && typeof vocalsBuffer.getChannelData === 'function') {
+        const vSr = vocalsBuffer.sampleRate;
+        const vCh = vocalsBuffer.getChannelData(0);
+        const vWin = Math.max(64, Math.floor(vSr * 0.01)); // 10ms RMS step -> 4x = 40ms valley
+        const vScanStart = Math.max(0, assBoundarySec - 0.45);
+        const vScanEnd = Math.min(vocalsBuffer.duration, assBoundarySec + 0.45);
+        const sSamp = Math.max(0, Math.floor(vScanStart * vSr));
+        const eSamp = Math.min(vCh.length, Math.ceil(vScanEnd * vSr));
+        const numVFrames = Math.floor((eSamp - sSamp) / vWin);
+        if (numVFrames >= 6) {
+          const vRms = new Float32Array(numVFrames);
+          for (let vf = 0; vf < numVFrames; vf++) {
+            const base = sSamp + vf * vWin;
+            let sumSq = 0;
+            for (let k = 0; k < vWin; k++) {
+              const s = vCh[base + k];
+              sumSq += s * s;
+            }
+            vRms[vf] = Math.sqrt(sumSq / vWin);
+          }
+          let minVAvg = Infinity;
+          let minVFrame = -1;
+          for (let vf = 0; vf <= numVFrames - 4; vf++) {
+            const avg4 = (vRms[vf] + vRms[vf + 1] + vRms[vf + 2] + vRms[vf + 3]) / 4;
+            if (avg4 < minVAvg) {
+              minVAvg = avg4;
+              minVFrame = vf + 2;
+            }
+          }
+          if (minVFrame !== -1) {
+            anchorBoundarySec = sSamp / vSr + (minVFrame * vWin) / vSr;
+          }
+        }
+      }
+
+      const searchStartSec = vocalsBuffer
+        ? Math.max(currentStart + 0.25, Math.min(subA.endSec - 0.35, anchorBoundarySec - 0.35))
+        : Math.max(currentStart + 0.30, subA.endSec - 0.35);
+      const searchEndSec = vocalsBuffer
+        ? Math.min(iv.endSec - 0.25, Math.max(subB.startSec + 0.35, anchorBoundarySec + 0.35))
+        : Math.min(iv.endSec - 0.30, subB.startSec + 0.35);
       if (searchEndSec <= searchStartSec + 0.08) continue;
 
       const cStart = Math.max(0, Math.floor((searchStartSec * sampleRate) / chunkSize));
-      const cEnd = Math.min(totalChunks - 3, Math.floor((searchEndSec * sampleRate) / chunkSize));
-      if (cEnd <= cStart + 2) continue;
+      const cEnd = Math.min(totalChunks - 2, Math.floor((searchEndSec * sampleRate) / chunkSize));
+      if (cEnd <= cStart + 1) continue;
 
       // Measure surrounding phrase peak RMS
       const phraseStartChunk = Math.max(0, Math.floor((currentStart * sampleRate) / chunkSize));
@@ -418,13 +464,13 @@ export function detectSpeechIntervals(
         if (chunkRmsValues[k] > localPhrasePeakRms) localPhrasePeakRms = chunkRmsValues[k];
       }
 
-      // Find the quietest 3-chunk (60ms) valley inside [cStart, cEnd]
+      // Find the quietest 2-chunk (40ms) valley inside [cStart, cEnd]
       let minValleyRms = Infinity;
       let minValleyChunk = -1;
       for (let k = cStart; k <= cEnd; k++) {
-        const avg3 = (chunkRmsValues[k] + chunkRmsValues[k + 1] + chunkRmsValues[k + 2]) / 3;
-        if (avg3 < minValleyRms) {
-          minValleyRms = avg3;
+        const avg2 = (chunkRmsValues[k] + chunkRmsValues[k + 1]) / 2;
+        if (avg2 < minValleyRms) {
+          minValleyRms = avg2;
           minValleyChunk = k + 1;
         }
       }
@@ -460,49 +506,248 @@ export function detectSpeechIntervals(
   return finalIntervals;
 }
 
+const roomNoiseDbCache = new WeakMap<AudioBuffer, number>();
+
+/**
+ * Computes and caches the adaptive room noise floor (dBFS) for an AudioBuffer.
+ */
+export function getAudioBufferRoomNoiseDb(audioBuffer: AudioBuffer | undefined): number {
+  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') return -48;
+  const cached = roomNoiseDbCache.get(audioBuffer);
+  if (cached !== undefined) return cached;
+  const calib = analyzeTrackAudioNoiseFloor(audioBuffer);
+  roomNoiseDbCache.set(audioBuffer, calib.noiseFloorDb);
+  return calib.noiseFloorDb;
+}
+
+export interface ClipSpeechBounds {
+  /** Offset in seconds from sourceStartSec where actual voice begins (pre-roll / breath length) */
+  onsetOffsetSec: number;
+  /** Offset in seconds from sourceStartSec where actual voice ends */
+  offsetSec: number;
+  /** Peak RMS amplitude detected inside [sourceStartSec, sourceEndSec] */
+  peakRms: number;
+  /** Estimated room noise floor in dBFS */
+  roomNoiseDb: number;
+}
+
+/**
+ * Analyzes 10-ms RMS windows across [sourceStartSec, sourceEndSec] (all channels)
+ * to determine:
+ * - `onsetOffsetSec`: first 10ms frame with RMS > room_noise + 12 dB OR RMS > 20% of phrase peak
+ * - `offsetSec`: end of last active speech 10ms frame
+ */
+export function detectClipSpeechBounds(
+  audioBuffer: AudioBuffer | undefined,
+  sourceStartSec: number,
+  sourceEndSec: number,
+  roomNoiseDbHint?: number
+): ClipSpeechBounds {
+  const clipDur = Math.max(0.05, (sourceEndSec || 0) - (sourceStartSec || 0));
+  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') {
+    return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms: 0, roomNoiseDb: -48 };
+  }
+
+  const sampleRate = audioBuffer.sampleRate;
+  const numChannels = Math.max(1, audioBuffer.numberOfChannels || 1);
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch++) {
+    channels.push(audioBuffer.getChannelData(ch));
+  }
+
+  const totalLen = channels[0].length;
+  const startSample = Math.max(0, Math.floor(sourceStartSec * sampleRate));
+  const endSample = Math.min(totalLen, Math.ceil(sourceEndSec * sampleRate));
+  if (endSample <= startSample) {
+    return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms: 0, roomNoiseDb: -48 };
+  }
+
+  const winSamples = Math.max(64, Math.floor(sampleRate * 0.01)); // 10ms windows
+  const numFrames = Math.floor((endSample - startSample) / winSamples);
+  if (numFrames <= 0) {
+    return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms: 0, roomNoiseDb: -48 };
+  }
+
+  const rmsFrames = new Float32Array(numFrames);
+  let peakRms = 0;
+
+  for (let f = 0; f < numFrames; f++) {
+    const base = startSample + f * winSamples;
+    let sumSq = 0;
+    for (let i = 0; i < winSamples; i++) {
+      let sampleVal = 0;
+      for (let ch = 0; ch < numChannels; ch++) {
+        sampleVal += channels[ch][base + i];
+      }
+      sampleVal /= numChannels;
+      sumSq += sampleVal * sampleVal;
+    }
+    const rms = Math.sqrt(sumSq / winSamples);
+    rmsFrames[f] = rms;
+    if (rms > peakRms) peakRms = rms;
+  }
+
+  const roomNoiseDb = roomNoiseDbHint ?? getAudioBufferRoomNoiseDb(audioBuffer);
+  const noiseFloorAmp = Math.pow(10, roomNoiseDb / 20);
+  const noisePlus12Amp = Math.pow(10, (roomNoiseDb + 12) / 20);
+  const peak20Amp = peakRms * 0.20;
+
+  // Guard against scanning pure room-noise / silence clips
+  if (peakRms < Math.max(1e-5, noiseFloorAmp * 1.35)) {
+    return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms, roomNoiseDb };
+  }
+
+  const isSpeechFrame = (idx: number): boolean => {
+    const r = rmsFrames[idx];
+    return r > noiseFloorAmp * 1.4 && (r > noisePlus12Amp || r > peak20Amp);
+  };
+
+  let onsetFrame = -1;
+  let offsetFrame = -1;
+
+  for (let f = 0; f < numFrames; f++) {
+    if (!isSpeechFrame(f)) continue;
+    // Require adjacent 10ms confirmation or strong transient (>= 35% peak) to avoid isolated 10ms mic clicks
+    const confirmedNext = f + 1 < numFrames && isSpeechFrame(f + 1);
+    const confirmedPrev = f - 1 >= 0 && isSpeechFrame(f - 1);
+    const strongPeak = rmsFrames[f] > peakRms * 0.35;
+    if (confirmedNext || confirmedPrev || strongPeak) {
+      if (onsetFrame === -1) onsetFrame = f;
+      offsetFrame = f + 1;
+    }
+  }
+
+  if (onsetFrame === -1 || offsetFrame === -1) {
+    return { onsetOffsetSec: 0, offsetSec: clipDur, peakRms, roomNoiseDb };
+  }
+
+  const onsetSecRaw = (onsetFrame * winSamples) / sampleRate;
+  const offsetSecRaw = (offsetFrame * winSamples) / sampleRate;
+
+  const onsetOffsetSec = Number(Math.max(0, Math.min(clipDur - 0.04, onsetSecRaw)).toFixed(3));
+  const offsetSec = Number(Math.max(Math.min(clipDur, onsetOffsetSec + 0.02), Math.min(clipDur, offsetSecRaw)).toFixed(3));
+
+  return { onsetOffsetSec, offsetSec, peakRms, roomNoiseDb };
+}
+
 /**
  * Detects the exact acoustic vocal onset offset inside a clip [sourceStartSec, sourceEndSec].
- * Used for unison / mass phrases and surgical alignment so that the dubber's actual vocal attack
- * lands on the subtitle start without being delayed by lead-in padding.
+ * Used so that pre-roll / breath shifts left of the reference anchor and actual vocal attack lands synchronously.
  */
 export function detectSpeechOnsetOffsetSec(
   audioBuffer: AudioBuffer | undefined,
   sourceStartSec: number,
   sourceEndSec: number
 ): number {
-  if (!audioBuffer || typeof audioBuffer.getChannelData !== 'function') return 0;
-  const channelData = audioBuffer.getChannelData(0);
-  const sampleRate = audioBuffer.sampleRate;
-  const startSample = Math.max(0, Math.floor(sourceStartSec * sampleRate));
-  const scanLimitSec = Math.min(sourceEndSec, sourceStartSec + 0.45);
-  const endSample = Math.min(channelData.length, Math.floor(scanLimitSec * sampleRate));
-  if (endSample <= startSample) return 0;
+  return detectClipSpeechBounds(audioBuffer, sourceStartSec, sourceEndSec).onsetOffsetSec;
+}
 
-  const winSamples = Math.max(64, Math.floor(sampleRate * 0.01)); // 10ms window
-  const rmsList: number[] = [];
-  let maxRms = 0;
+export interface OriginalVocalsAnchorResult {
+  refVocalStartSec?: number;
+  refVocalEndSec?: number;
+  anchorStartSec: number;
+  anchorEndSec: number;
+  hasRefVocal: boolean;
+}
 
-  for (let pos = startSample; pos + winSamples <= endSample; pos += winSamples) {
+/**
+ * Scans separated `original_vocals.wav` in window [subStartSec - 0.45s .. subEndSec + 0.45s]
+ * to locate the real original seiyuu speech start (`refVocalStartSec`) and end (`refVocalEndSec`).
+ * Falls back cleanly to subtitle timestamps when vocals stem is missing or silent in that region.
+ */
+export function findOriginalVocalsAnchorForSub(
+  vocalsBuffer: AudioBuffer | undefined,
+  subStartSec: number,
+  subEndSec: number,
+  vocalsNoiseDbHint?: number
+): OriginalVocalsAnchorResult {
+  if (!vocalsBuffer || typeof vocalsBuffer.getChannelData !== 'function') {
+    return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+  }
+
+  const sampleRate = vocalsBuffer.sampleRate;
+  const numChannels = Math.max(1, vocalsBuffer.numberOfChannels || 1);
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < numChannels; ch++) {
+    channels.push(vocalsBuffer.getChannelData(ch));
+  }
+
+  const totalLen = channels[0].length;
+  const scanStartSec = Math.max(0, subStartSec - 0.45);
+  const scanEndSec = Math.min(vocalsBuffer.duration, subEndSec + 0.45);
+  const startSample = Math.max(0, Math.floor(scanStartSec * sampleRate));
+  const endSample = Math.min(totalLen, Math.ceil(scanEndSec * sampleRate));
+
+  if (endSample <= startSample + Math.floor(sampleRate * 0.04)) {
+    return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+  }
+
+  const winSamples = Math.max(64, Math.floor(sampleRate * 0.01)); // 10ms windows
+  const numFrames = Math.floor((endSample - startSample) / winSamples);
+  if (numFrames <= 0) {
+    return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+  }
+
+  const rmsFrames = new Float32Array(numFrames);
+  let peakRms = 0;
+  for (let f = 0; f < numFrames; f++) {
+    const base = startSample + f * winSamples;
     let sumSq = 0;
     for (let i = 0; i < winSamples; i++) {
-      const s = channelData[pos + i];
+      let s = 0;
+      for (let ch = 0; ch < numChannels; ch++) {
+        s += channels[ch][base + i];
+      }
+      s /= numChannels;
       sumSq += s * s;
     }
     const rms = Math.sqrt(sumSq / winSamples);
-    rmsList.push(rms);
-    if (rms > maxRms) maxRms = rms;
+    rmsFrames[f] = rms;
+    if (rms > peakRms) peakRms = rms;
   }
 
-  if (rmsList.length === 0 || maxRms < 1e-4) return 0;
-  const onsetThreshold = Math.max(1e-3, maxRms * 0.25);
-
-  for (let idx = 0; idx < rmsList.length; idx++) {
-    if (rmsList[idx] >= onsetThreshold) {
-      const offsetSec = (idx * winSamples) / sampleRate;
-      return Number(Math.max(0, Math.min(0.25, offsetSec)).toFixed(3));
-    }
+  // Must have real vocal energy (>= -46 dBFS peak)
+  const minVoiceFloorAmp = Math.pow(10, -46 / 20);
+  if (peakRms < minVoiceFloorAmp) {
+    return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
   }
-  return 0;
+
+  const noiseDb = vocalsNoiseDbHint ?? getAudioBufferRoomNoiseDb(vocalsBuffer);
+  const noisePlus12Amp = Math.pow(10, (noiseDb + 12) / 20);
+  const threshold = Math.max(noisePlus12Amp, peakRms * 0.16, Math.pow(10, -44 / 20));
+
+  let onsetFrame = -1;
+  let offsetFrame = -1;
+  let activeFrames = 0;
+
+  for (let f = 0; f < numFrames; f++) {
+    if (rmsFrames[f] <= threshold) continue;
+    const confirmedAdj =
+      (f + 1 < numFrames && rmsFrames[f + 1] > threshold) ||
+      (f - 1 >= 0 && rmsFrames[f - 1] > threshold) ||
+      rmsFrames[f] > peakRms * 0.35;
+    if (!confirmedAdj) continue;
+    activeFrames++;
+    if (onsetFrame === -1) onsetFrame = f;
+    offsetFrame = f + 1;
+  }
+
+  if (onsetFrame === -1 || offsetFrame === -1 || activeFrames < 3) {
+    return { anchorStartSec: subStartSec, anchorEndSec: subEndSec, hasRefVocal: false };
+  }
+
+  const refVocalStartSec = Number((scanStartSec + (onsetFrame * winSamples) / sampleRate).toFixed(3));
+  const refVocalEndSec = Number(
+    Math.max(refVocalStartSec + 0.08, scanStartSec + (offsetFrame * winSamples) / sampleRate).toFixed(3)
+  );
+
+  return {
+    refVocalStartSec,
+    refVocalEndSec,
+    anchorStartSec: refVocalStartSec,
+    anchorEndSec: refVocalEndSec,
+    hasRefVocal: true
+  };
 }
 
 /**

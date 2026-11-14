@@ -7,6 +7,7 @@ const ExportService = require('../services/ExportService.cjs');
 const AutoTimingService = require('../services/AutoTimingService.cjs');
 const AudioAnalysisService = require('../services/AudioAnalysisService.cjs');
 const { sanitizePath, sanitizeProjectTitle } = require('../lib/pathSanitizer.cjs');
+const { TIMING_RULES } = require('../lib/TimingRulesConfig.cjs');
 
 function registerExportHandlers(getData, mainWindow) {
   const getWin = () => (typeof mainWindow === 'function' ? mainWindow() : mainWindow);
@@ -122,7 +123,7 @@ function registerExportHandlers(getData, mainWindow) {
     const timingResult = await AutoTimingService.alignProjectAndResolveCollisions({
       subPath: episode.subPath,
       matchedTracks: matchResult.matchedTracks,
-      options: options || { minGapSec: 0.12, leadInSec: 0.05 }
+      options: { ...(options || { minGapSec: TIMING_RULES.MIN_INTER_TRACK_GAP_SEC, leadInSec: 0.05 }), episode }
     });
 
     return {
@@ -469,6 +470,12 @@ function registerExportHandlers(getData, mainWindow) {
               targetStartSec,
               targetEndSec,
               durationSec: phraseDuration,
+              unscaledDurationSec: c.unscaledDurationSec,
+              playbackRate: c.playbackRate || c.timeStretch || 1.0,
+              timeStretch: c.playbackRate || c.timeStretch || 1.0,
+              internalPauseEdit: c.internalPauseEdit,
+              crossRoleMatched: Boolean(c.crossRoleMatched),
+              physicsSynced: Boolean(c.physicsSynced),
               volumePercent: 100,
               isFix: Boolean(fullFixTrack || c.isFix)
             });
@@ -523,6 +530,12 @@ function registerExportHandlers(getData, mainWindow) {
                   targetStartSec: fixTargetStart,
                   targetEndSec: fixTargetEnd,
                   durationSec: fixDur,
+                  unscaledDurationSec: fClip.unscaledDurationSec,
+                  playbackRate: fClip.playbackRate || fClip.timeStretch || 1.0,
+                  timeStretch: fClip.playbackRate || fClip.timeStretch || 1.0,
+                  internalPauseEdit: fClip.internalPauseEdit,
+                  crossRoleMatched: Boolean(fClip.crossRoleMatched),
+                  physicsSynced: Boolean(fClip.physicsSynced),
                   volumePercent: 100,
                   isFix: true
                 };
@@ -556,7 +569,10 @@ function registerExportHandlers(getData, mainWindow) {
             const overlapEnd = Math.min(last.targetEndSec, p.targetEndSec);
             const overlapSec = Math.max(0, overlapEnd - overlapStart);
 
-            if (overlapSec > 0.35 && overlapSec > Math.min(last.durationSec, p.durationSec) * 0.4) {
+            if (
+              overlapSec > TIMING_RULES.INTENTIONAL_OVERLAP_MIN_SEC &&
+              overlapSec > Math.min(last.durationSec, p.durationSec) * TIMING_RULES.INTENTIONAL_OVERLAP_SHORTER_RATIO
+            ) {
               if (p.isFix && !last.isFix) {
                 cleanPhrases[cleanPhrases.length - 1] = p;
               } else if (!last.isFix && p.durationSec > last.durationSec) {
@@ -961,6 +977,12 @@ function registerExportHandlers(getData, mainWindow) {
             targetStartSec,
             targetEndSec,
             durationSec: phraseDuration,
+            unscaledDurationSec: c.unscaledDurationSec,
+            playbackRate: c.playbackRate || c.timeStretch || 1.0,
+            timeStretch: c.playbackRate || c.timeStretch || 1.0,
+            internalPauseEdit: c.internalPauseEdit,
+            crossRoleMatched: Boolean(c.crossRoleMatched),
+            physicsSynced: Boolean(c.physicsSynced),
             volumePercent: 100, // Строго сохраняем 100% исходный уровень без нормализации и изменения громкости в тайминге!
             isFix: Boolean(fullFixTrack || c.isFix)
           });
@@ -1016,6 +1038,12 @@ function registerExportHandlers(getData, mainWindow) {
                 targetStartSec: fixTargetStart,
                 targetEndSec: fixTargetEnd,
                 durationSec: fixDur,
+                unscaledDurationSec: fClip.unscaledDurationSec,
+                playbackRate: fClip.playbackRate || fClip.timeStretch || 1.0,
+                timeStretch: fClip.playbackRate || fClip.timeStretch || 1.0,
+                internalPauseEdit: fClip.internalPauseEdit,
+                crossRoleMatched: Boolean(fClip.crossRoleMatched),
+                physicsSynced: Boolean(fClip.physicsSynced),
                 volumePercent: 100,
                 isFix: true
               };

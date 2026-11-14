@@ -135,7 +135,11 @@ export function useTimingExportController({
               volumePercent: b.volumePercent ?? 100,
               volumeGainDb: b.volumeGainDb ?? 0,
               pan: 0,
-              timeStretch: 1.0,
+              timeStretch: Number((b.playbackRate ?? 1.0).toFixed(3)),
+              playbackRate: Number((b.playbackRate ?? 1.0).toFixed(3)),
+              internalPauseEdit: b.internalPauseEdit,
+              crossRoleMatched: Boolean(b.crossRoleMatched),
+              physicsSynced: Boolean(b.physicsSynced),
               headTrimSec: 0,
               tailTrimSec: 0
             };
@@ -280,7 +284,11 @@ export function useTimingExportController({
               volumePercent: b.volumePercent ?? 100,
               volumeGainDb: b.volumeGainDb ?? 0,
               pan: 0,
-              timeStretch: 1.0,
+              timeStretch: Number((b.playbackRate ?? 1.0).toFixed(3)),
+              playbackRate: Number((b.playbackRate ?? 1.0).toFixed(3)),
+              internalPauseEdit: b.internalPauseEdit,
+              crossRoleMatched: Boolean(b.crossRoleMatched),
+              physicsSynced: Boolean(b.physicsSynced),
               headTrimSec: 0,
               tailTrimSec: 0
             };

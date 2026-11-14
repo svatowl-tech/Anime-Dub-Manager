@@ -8,6 +8,7 @@ import {
   IntentionalOverlapMoment,
   IntentionalOverlapTrackEntry,
   MissingSubtitleMarker,
+  OriginalStemsState,
   TimingIssue,
   VoiceCollisionMarker,
 } from './timing.types';
@@ -16,9 +17,14 @@ import {
   normalizeName,
 } from './timing.utils';
 import {
-  detectSpeechOnsetOffsetSec,
+  detectClipSpeechBounds,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
 } from './timing.dsp';
+import { ensureOriginalVocalsBuffer } from './timing.waveform';
+import { enforceSameTrackMinGapService } from './timing.service';
 import { runStage1Pass1And2Engine } from './timing.stage1Pass1And2.engine';
+import { TIMING_RULES, isIntentionalOverlapDecision } from './timing.rules';
 
 export interface UseTimingStage1AnalysisParams {
   tracks: Track[];
@@ -27,6 +33,7 @@ export interface UseTimingStage1AnalysisParams {
   subtitles: SubtitleLine[];
   isSilenceRemoved: boolean;
   timingSettings: TimingSettings;
+  originalStems?: OriginalStemsState;
   intentionalOverlaps: IntentionalOverlapMoment[];
   audioBuffersRef: React.MutableRefObject<Record<string, AudioBuffer>>;
   setAudioClips: React.Dispatch<React.SetStateAction<Record<string, AudioClip[]>>>;
@@ -50,6 +57,7 @@ export function useTimingStage1Analysis({
   subtitles,
   isSilenceRemoved,
   timingSettings,
+  originalStems,
   intentionalOverlaps,
   audioBuffersRef,
   setAudioClips,
@@ -75,6 +83,9 @@ export function useTimingStage1Analysis({
       updateProcess('1. Анализ проблем (Whisper)', 'Подготовка речевых интервалов и поиск проблем...', 8, 1, 4);
       addLog('Запуск Этапа 1: глубокий анализ наездов, рассинхронов и пропущенных реплик...', 'info');
 
+      const vocalsBuf = await ensureOriginalVocalsBuffer(originalStems?.vocalsPath, audioBuffersRef);
+      const vocalsNoiseDb = vocalsBuf ? getAudioBufferRoomNoiseDb(vocalsBuf) : undefined;
+
       const {
         updatedClips,
         newIssues,
@@ -88,6 +99,7 @@ export function useTimingStage1Analysis({
         trackSubLinesMap,
         isSilenceRemoved,
         timingSettings,
+        vocalsPath: originalStems?.vocalsPath,
         audioBuffersRef,
         setIsSilenceRemoved,
         updateProcess,
@@ -185,18 +197,23 @@ export function useTimingStage1Analysis({
               if (isSameSubPhrase) {
                 const buf1 = audioBuffersRef.current[c1.sourceAudioTrackId || trackIds[i]];
                 const buf2 = audioBuffersRef.current[c2.sourceAudioTrackId || trackIds[j]];
-                const onset1 = detectSpeechOnsetOffsetSec(buf1, c1.sourceStartSec, c1.sourceEndSec);
-                const onset2 = detectSpeechOnsetOffsetSec(buf2, c2.sourceStartSec, c2.sourceEndSec);
+                const b1 = detectClipSpeechBounds(buf1, c1.sourceStartSec, c1.sourceEndSec);
+                const b2 = detectClipSpeechBounds(buf2, c2.sourceStartSec, c2.sourceEndSec);
+                const onset1 = c1.speechOnsetOffsetSec ?? b1.onsetOffsetSec;
+                const onset2 = c2.speechOnsetOffsetSec ?? b2.onsetOffsetSec;
                 c1.speechOnsetOffsetSec = onset1;
+                c1.speechOffsetSec = c1.speechOffsetSec ?? b1.offsetSec;
                 c2.speechOnsetOffsetSec = onset2;
+                c2.speechOffsetSec = c2.speechOffsetSec ?? b2.offsetSec;
 
-                const syncTarget1 = Number(Math.max(0, sub1.startSec - onset1).toFixed(3));
-                const syncTarget2 = Number(Math.max(0, sub1.startSec - onset2).toFixed(3));
+                const unisonAnchor = findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, sub1.startSec, sub1.endSec, vocalsNoiseDb);
+                const syncTarget1 = Number(Math.max(0, unisonAnchor.anchorStartSec - onset1).toFixed(3));
+                const syncTarget2 = Number(Math.max(0, unisonAnchor.anchorStartSec - onset2).toFixed(3));
 
-                const prev1End = idx1 > 0 ? (tr1Clips[idx1 - 1].clipStartSec + (tr1Clips[idx1 - 1].offsetSec || 0) + tr1Clips[idx1 - 1].durationSec + 0.02) : 0;
-                const next1Start = idx1 + 1 < tr1Clips.length ? (tr1Clips[idx1 + 1].clipStartSec + (tr1Clips[idx1 + 1].offsetSec || 0) - 0.02) : Infinity;
-                const prev2End = idx2 > 0 ? (tr2Clips[idx2 - 1].clipStartSec + (tr2Clips[idx2 - 1].offsetSec || 0) + tr2Clips[idx2 - 1].durationSec + 0.02) : 0;
-                const next2Start = idx2 + 1 < tr2Clips.length ? (tr2Clips[idx2 + 1].clipStartSec + (tr2Clips[idx2 + 1].offsetSec || 0) - 0.02) : Infinity;
+                const prev1End = idx1 > 0 ? (tr1Clips[idx1 - 1].clipStartSec + (tr1Clips[idx1 - 1].offsetSec || 0) + tr1Clips[idx1 - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : 0;
+                const next1Start = idx1 + 1 < tr1Clips.length ? (tr1Clips[idx1 + 1].clipStartSec + (tr1Clips[idx1 + 1].offsetSec || 0) - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : Infinity;
+                const prev2End = idx2 > 0 ? (tr2Clips[idx2 - 1].clipStartSec + (tr2Clips[idx2 - 1].offsetSec || 0) + tr2Clips[idx2 - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : 0;
+                const next2Start = idx2 + 1 < tr2Clips.length ? (tr2Clips[idx2 + 1].clipStartSec + (tr2Clips[idx2 + 1].offsetSec || 0) - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : Infinity;
 
                 if (syncTarget1 >= prev1End && syncTarget1 + c1.durationSec <= next1Start) {
                   c1.clipStartSec = syncTarget1;
@@ -264,9 +281,19 @@ export function useTimingStage1Analysis({
                 if (isSamePhrase) {
                   const buf1 = audioBuffersRef.current[c1.sourceAudioTrackId || trackIds[i]];
                   const buf2 = audioBuffersRef.current[c2.sourceAudioTrackId || trackIds[j]];
-                  const onset1 = c1.speechOnsetOffsetSec ?? detectSpeechOnsetOffsetSec(buf1, c1.sourceStartSec, c1.sourceEndSec);
-                  const onset2 = c2.speechOnsetOffsetSec ?? detectSpeechOnsetOffsetSec(buf2, c2.sourceStartSec, c2.sourceEndSec);
-                  const baseSync = sub1 ? sub1.startSec : c1Start;
+                  const b1 = detectClipSpeechBounds(buf1, c1.sourceStartSec, c1.sourceEndSec);
+                  const b2 = detectClipSpeechBounds(buf2, c2.sourceStartSec, c2.sourceEndSec);
+                  const onset1 = c1.speechOnsetOffsetSec ?? b1.onsetOffsetSec;
+                  const onset2 = c2.speechOnsetOffsetSec ?? b2.onsetOffsetSec;
+                  c1.speechOnsetOffsetSec = onset1;
+                  c1.speechOffsetSec = c1.speechOffsetSec ?? b1.offsetSec;
+                  c2.speechOnsetOffsetSec = onset2;
+                  c2.speechOffsetSec = c2.speechOffsetSec ?? b2.offsetSec;
+
+                  const unisonAnchor = sub1
+                    ? findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, sub1.startSec, sub1.endSec, vocalsNoiseDb)
+                    : null;
+                  const baseSync = unisonAnchor ? unisonAnchor.anchorStartSec : c1Start;
                   c1.clipStartSec = Number(Math.max(0, baseSync - onset1).toFixed(3));
                   c1.offsetSec = 0;
                   c2.clipStartSec = Number(Math.max(0, baseSync - onset2).toFixed(3));
@@ -278,50 +305,43 @@ export function useTimingStage1Analysis({
                   continue;
                 }
 
-                // Classify as intentional simultaneous scene whenever:
-                // 1) The two clips' subtitles overlap in .ass (> -0.02s), OR
-                // 2) Global .ass subtitles have two overlapping lines at this moment, OR
-                // 3) One clip is contained inside the other (e.g. a short line inside a 7-9s reaction) or overlap > 0.48s
-                let isSpecifiedInSubtitles = false;
+                // Classify as intentional simultaneous scene using unified studio rules:
+                // 1) Subtitles overlap in .ass (tolerance 0.02s), OR
+                // 2) Global .ass subtitles have overlapping lines at this moment, OR
+                // 3) Overlap > 0.35s or > 35% of shorter phrase or contained inside the other
                 const [earlyC, lateC] = c1Start <= c2Start ? [c1, c2] : [c2, c1];
                 const earlyS = Math.min(c1Start, c2Start);
                 const earlyE = c1Start <= c2Start ? c1End : c2End;
                 const lateS = Math.max(c1Start, c2Start);
                 const lateE = c1Start <= c2Start ? c2End : c1End;
-                const minClipDur = Math.min(c1.durationSec, c2.durationSec);
 
-                if (sub1 && sub2) {
-                  const subOverlapStart = Math.max(sub1.startSec, sub2.startSec);
-                  const subOverlapEnd = Math.min(sub1.endSec, sub2.endSec);
-                  if (subOverlapEnd - subOverlapStart > -0.02) {
-                    isSpecifiedInSubtitles = true;
-                  }
-                }
-                if (!isSpecifiedInSubtitles) {
-                  const activeGlobal = subtitles.filter(
-                    s => s.endSec >= overlapStart - 0.05 && s.startSec <= overlapEnd + 0.05
-                  );
-                  for (let a = 0; a < activeGlobal.length; a++) {
-                    for (let b = a + 1; b < activeGlobal.length; b++) {
-                      const gOv = Math.min(activeGlobal[a].endSec, activeGlobal[b].endSec) -
-                        Math.max(activeGlobal[a].startSec, activeGlobal[b].startSec);
-                      if (gOv >= 0.05) {
-                        isSpecifiedInSubtitles = true;
-                        break;
-                      }
+                let hasGlobalAssOverlap = false;
+                const activeGlobal = subtitles.filter(
+                  s => s.endSec >= overlapStart - 0.05 && s.startSec <= overlapEnd + 0.05
+                );
+                for (let a = 0; a < activeGlobal.length; a++) {
+                  for (let b = a + 1; b < activeGlobal.length; b++) {
+                    const gOv = Math.min(activeGlobal[a].endSec, activeGlobal[b].endSec) -
+                      Math.max(activeGlobal[a].startSec, activeGlobal[b].startSec);
+                    if (gOv >= 0.05) {
+                      hasGlobalAssOverlap = true;
+                      break;
                     }
-                    if (isSpecifiedInSubtitles) break;
                   }
+                  if (hasGlobalAssOverlap) break;
                 }
-                if (
-                  !isSpecifiedInSubtitles &&
-                  (lateS - earlyS <= 0.10 ||
-                    lateE <= earlyE + 0.18 ||
-                    overlapDur > 0.48 ||
-                    overlapDur > minClipDur * 0.42)
-                ) {
-                  isSpecifiedInSubtitles = true;
-                }
+
+                const isSpecifiedInSubtitles =
+                  lateS - earlyS <= 0.10 ||
+                  lateE <= earlyE + 0.18 ||
+                  isIntentionalOverlapDecision({
+                    overlapSec: overlapDur,
+                    earlyDurSec: earlyC.durationSec,
+                    lateDurSec: lateC.durationSec,
+                    sub1,
+                    sub2,
+                    hasGlobalAssOverlap,
+                  });
 
                 if (isSpecifiedInSubtitles && (sub1 || sub2 || earlyC)) {
                   const effSub1 = sub1 || ({ id: earlyC.id, startSec: earlyS, endSec: earlyE, text: earlyC.text } as unknown as SubtitleLine);
@@ -452,6 +472,12 @@ export function useTimingStage1Analysis({
               }
             }
           }
+        }
+      }
+
+      if (unisonSyncedCount > 0) {
+        for (const tId of trackIds) {
+          updatedClips[tId] = enforceSameTrackMinGapService(updatedClips[tId] || [], TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
         }
       }
 

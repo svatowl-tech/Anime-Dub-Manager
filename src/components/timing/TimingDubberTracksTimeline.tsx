@@ -428,10 +428,36 @@ export const TimingDubberTracksTimeline: React.FC<TimingDubberTracksTimelineProp
                           )}
                           {clip.isPhysics && (
                             <span
-                              className="bg-fuchsia-500 text-white px-1 rounded text-[8px] font-black shrink-0"
-                              title="Физика (охи/вздохи/смех вне субтитров — защищена от притягивания к чужим сабам)"
+                              className={`${clip.physicsSynced ? 'bg-fuchsia-400 text-neutral-950' : 'bg-fuchsia-500 text-white'} px-1 rounded text-[8px] font-black shrink-0`}
+                              title={clip.physicsSynced
+                                ? 'Физика синхронизирована по неартикулированному всплеску на original_vocals.wav (±1.0с)'
+                                : 'Физика (охи/вздохи/смех вне субтитров — тишина в оригинале ±1.0с, оставлено на месте)'}
                             >
-                              ⚡ ФИЗИКА
+                              {clip.physicsSynced ? '⚡ ФИЗИКА ⇄' : '⚡ ФИЗИКА'}
+                            </span>
+                          )}
+                          {clip.crossRoleMatched && (
+                            <span
+                              className="bg-teal-400 text-neutral-950 px-1 rounded text-[8px] font-black shrink-0"
+                              title={`Кросс-спасение реплики: привязано к пропущенному субтитру роли «${clip.crossRoleOriginalActor || 'другой актёр'}»`}
+                            >
+                              🎭 КРОСС-РОЛЬ
+                            </span>
+                          )}
+                          {clip.playbackRate && clip.playbackRate > 1.005 && (
+                            <span
+                              className="bg-violet-400 text-neutral-950 px-1 rounded text-[8px] font-black shrink-0"
+                              title={`Soft Time-Fit: локальное сжатие без изменения тона (${clip.playbackRate.toFixed(2)}x)`}
+                            >
+                              ⏩ {clip.playbackRate.toFixed(2)}x
+                            </span>
+                          )}
+                          {clip.internalPauseEdit && (
+                            <span
+                              className="bg-amber-300 text-neutral-950 px-1 rounded text-[8px] font-black shrink-0"
+                              title={`Пустая пауза внутри фразы сжата до ${Math.round(clip.internalPauseEdit.targetPauseSec * 1000)} мс (оригинал без паузы)`}
+                            >
+                              🗜 120мс
                             </span>
                           )}
                           {clip.coveredSubIds && clip.coveredSubIds.length > 1 && (
@@ -453,9 +479,9 @@ export const TimingDubberTracksTimeline: React.FC<TimingDubberTracksTimelineProp
                           {clip.timingNotRequired && !clip.timingIssue && !clip.hasCollision && (
                             <span
                               className="bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 px-1 rounded text-[8px] font-bold shrink-0"
-                              title={clip.timingNotRequiredReason || 'Фраза в пределах саба (хвост ≤30%) — тайминг не требуется'}
+                              title={clip.timingNotRequiredReason || 'Атака голоса синхронна (≤140 мс) — тайминг не требуется'}
                             >
-                              ✓ В САБЕ (≤30%)
+                              ✓ В ТАЙМИНГЕ
                             </span>
                           )}
                           {clip.hasCollision && <span className="bg-red-500 text-white px-1 rounded text-[8px] font-black">НАЕЗД</span>}

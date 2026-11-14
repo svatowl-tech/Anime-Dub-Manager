@@ -12,8 +12,19 @@ import {
   formatSeconds,
   getPlayableAudioUrl,
   detectSpeechIntervals,
+  detectClipSpeechBounds,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
+  ensureOriginalVocalsBuffer,
+  enforceSameTrackMinGapService,
   isPhraseTimingNotRequired,
-  normalizeName
+  applyPhysicsSmartSyncOnMap,
+  applySoftTimeFitToTrackClips,
+  rescueCrossRoleMissingSubtitles,
+  normalizeName,
+  TIMING_RULES,
+  getMaxSafeShiftSec,
+  isIntentionalOverlapDecision
 } from "./timingAudioUtils";
 
 export async function runStage1TimingAnalysisEngine(params: {
@@ -23,6 +34,7 @@ export async function runStage1TimingAnalysisEngine(params: {
   audioBuffersRef: { current: Record<string, AudioBuffer> };
   timingSettings: TimingSettings;
   trackSubLinesMap: Record<string, SubtitleLine[]>;
+  vocalsPath?: string | null;
   setStatusMessage: (msg: string) => void;
   addLog: (msg: string, level?: "info" | "success" | "warn" | "error") => void;
 }): Promise<{
@@ -39,9 +51,13 @@ export async function runStage1TimingAnalysisEngine(params: {
     audioBuffersRef,
     timingSettings,
     trackSubLinesMap,
+    vocalsPath,
     setStatusMessage,
     addLog
   } = params;
+
+  const vocalsBuf = await ensureOriginalVocalsBuffer(vocalsPath, audioBuffersRef);
+  const vocalsNoiseDb = vocalsBuf ? getAudioBufferRoomNoiseDb(vocalsBuf) : undefined;
 
   let currentClips = { ...audioClips };
   let didCutSilence = false;
@@ -75,11 +91,14 @@ export async function runStage1TimingAnalysisEngine(params: {
           leadInPaddingSec: timingSettings.leadInPaddingSec,
           leadOutPaddingSec: timingSettings.leadOutPaddingSec,
           minSpeechDurationSec: timingSettings.minSpeechDurationSec,
-          mergeCloseGapsSec: timingSettings.mergeCloseGapsSec
+          mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
+          vocalsBuffer: vocalsBuf ?? undefined,
+          vocalsNoiseDbHint: vocalsNoiseDb
         });
         const trSubs = trackSubLinesMap[track.id] || [];
         currentClips[track.id] = intervals.map((iv, idx) => {
           const sub = trSubs[idx];
+          const bounds = detectClipSpeechBounds(audioBuf, iv.startSec, iv.endSec);
           return {
             id: `clip_${track.id}_${idx}`,
             trackId: track.id,
@@ -91,6 +110,8 @@ export async function runStage1TimingAnalysisEngine(params: {
             sourceEndSec: iv.endSec,
             rawSourceStartSec: iv.startSec,
             rawSourceEndSec: iv.endSec,
+            speechOnsetOffsetSec: bounds.onsetOffsetSec,
+            speechOffsetSec: bounds.offsetSec,
             text: sub?.text || `Фраза ${idx + 1}`,
             volumePercent: 100,
             isFix: isFixTrack(track),
@@ -239,37 +260,57 @@ export async function runStage1TimingAnalysisEngine(params: {
 
     for (let cIdx = 0; cIdx < clips.length; cIdx++) {
       const clip = { ...clips[cIdx] };
+      if (clip.speechOnsetOffsetSec === undefined || clip.speechOffsetSec === undefined) {
+        const srcBuf = audioBuffersRef.current[clip.sourceAudioTrackId || track.id] || audioBuffersRef.current[track.id];
+        const bounds = detectClipSpeechBounds(srcBuf, clip.sourceStartSec, clip.sourceEndSec);
+        clip.speechOnsetOffsetSec = bounds.onsetOffsetSec;
+        clip.speechOffsetSec = bounds.offsetSec;
+      }
+      const onsetOffset = clip.speechOnsetOffsetSec || 0;
       const cStart = clip.clipStartSec + (clip.offsetSec || 0);
+      const origStart = clip.rawSourceStartSec ?? clip.sourceStartSec ?? cStart;
       const bestSubIdx = clipMatchedSubIdx[cIdx];
       const bestSub = bestSubIdx !== -1 ? trSubs[bestSubIdx] : null;
       const matchedByWhisper = clipMatchedByWhisper[cIdx];
 
       const prevClipEnd = cIdx > 0
-        ? (mappedClips[cIdx - 1].clipStartSec + (mappedClips[cIdx - 1].offsetSec || 0) + mappedClips[cIdx - 1].durationSec + 0.04)
+        ? (mappedClips[cIdx - 1].clipStartSec + (mappedClips[cIdx - 1].offsetSec || 0) + mappedClips[cIdx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
         : 0;
       const nextClipStart = cIdx + 1 < clips.length
-        ? (clips[cIdx + 1].clipStartSec + (clips[cIdx + 1].offsetSec || 0) - 0.04)
+        ? (clips[cIdx + 1].clipStartSec + (clips[cIdx + 1].offsetSec || 0) - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
         : Infinity;
 
       if (bestSub && bestSubIdx !== -1) {
-        const maxShift = 1.5;
-        let surgicalTarget = Math.max(cStart - maxShift, Math.min(cStart + maxShift, bestSub.startSec));
+        const anchor = findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, bestSub.startSec, bestSub.endSec, vocalsNoiseDb);
+        const desiredClipStart = Math.max(0, anchor.anchorStartSec - onsetOffset);
+        const maxAutoShift = getMaxSafeShiftSec(Boolean(anchor.hasRefVocal || matchedByWhisper));
+        let surgicalTarget = Math.max(origStart - maxAutoShift, Math.min(origStart + maxAutoShift, desiredClipStart));
         surgicalTarget = Math.max(prevClipEnd, Math.min(surgicalTarget, Math.max(prevClipEnd, nextClipStart - clip.durationSec)));
         surgicalTarget = Number(Math.max(0, surgicalTarget).toFixed(3));
 
-        const rawTimeDiff = cStart - bestSub.startSec;
+        const rawTimeDiff = (cStart + onsetOffset) - anchor.anchorStartSec;
         const absRawDiff = Math.abs(rawTimeDiff);
         const effectiveShift = Math.abs(surgicalTarget - cStart);
 
+        clip.refVocalStartSec = anchor.refVocalStartSec;
+        clip.refVocalEndSec = anchor.refVocalEndSec;
+        clip.hasRefVocalAnchor = anchor.hasRefVocal;
         clip.text = bestSub.text;
         clip.targetSubStartSec = surgicalTarget;
-        clip.targetSubEndSec = bestSub.endSec;
+        clip.targetSubEndSec = anchor.anchorEndSec;
         clip.timeDiffSec = Number(rawTimeDiff.toFixed(2));
         if (matchedByWhisper) {
           clip.whisperMatchedScore = clipWhisperScore[cIdx];
         }
 
-        const timingExempt = isPhraseTimingNotRequired(cStart, clip.durationSec, bestSub.startSec, bestSub.endSec);
+        const timingExempt = isPhraseTimingNotRequired(
+          cStart,
+          clip.durationSec,
+          anchor.anchorStartSec,
+          anchor.anchorEndSec,
+          onsetOffset,
+          clip.speechOffsetSec
+        );
 
         if (timingExempt.notRequired) {
           clip.timingNotRequired = true;
@@ -293,12 +334,12 @@ export async function runStage1TimingAnalysisEngine(params: {
             durationSec: clip.durationSec,
             subText: bestSub.text,
             subStartSec: surgicalTarget,
-            subEndSec: bestSub.endSec,
+            subEndSec: anchor.anchorEndSec,
             whisperText: clip.recognizedText,
             whisperMatchScore: clipWhisperScore[cIdx],
             description: `Хирургическая привязка Whisper «${clip.recognizedText}» ➔ «${bestSub.text.slice(0, 35)}» [${formatSeconds(surgicalTarget)}]`
           });
-        } else if (absRawDiff >= 0.32 && absRawDiff <= 1.8 && effectiveShift >= 0.12) {
+        } else if ((absRawDiff > TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC || !timingExempt.notRequired) && effectiveShift >= TIMING_RULES.MIN_EFFECTIVE_SHIFT_SEC) {
           clip.timingNotRequired = false;
           clip.timingIssue = 'desync';
           clip.timingIssueText = rawTimeDiff > 0
@@ -316,13 +357,14 @@ export async function runStage1TimingAnalysisEngine(params: {
             durationSec: clip.durationSec,
             subText: bestSub.text,
             subStartSec: surgicalTarget,
-            subEndSec: bestSub.endSec,
+            subEndSec: anchor.anchorEndSec,
             timeDiffSec: Number(rawTimeDiff.toFixed(2)),
             description: rawTimeDiff > 0
               ? `Фраза #${cIdx + 1} опаздывает на +${absRawDiff.toFixed(2)}с: «${bestSub.text.slice(0, 35)}»`
               : `Фраза #${cIdx + 1} спешит на -${absRawDiff.toFixed(2)}с: «${bestSub.text.slice(0, 35)}»`
           });
         } else {
+          clip.timingNotRequired = false;
           clip.timingIssue = null;
           clip.timingIssueText = undefined;
         }
@@ -373,7 +415,59 @@ export async function runStage1TimingAnalysisEngine(params: {
       }
     }
 
-    updatedClips[track.id] = mappedClips;
+    updatedClips[track.id] = enforceSameTrackMinGapService(mappedClips, TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
+  }
+
+  // Rule 1: Smart "Физика" Sync on unoccupied original_vocals.wav bursts (±1.0s)
+  applyPhysicsSmartSyncOnMap({
+    tracks,
+    clipsMap: updatedClips,
+    trackSubLinesMap,
+    vocalsBuffer: vocalsBuf ?? undefined,
+    vocalsNoiseDbHint: vocalsNoiseDb,
+    applyShift: false,
+    addLog
+  });
+
+  // Rule 4: Cross-role rescue for unvoiced subtitles
+  const { rescuedSubKeys } = rescueCrossRoleMissingSubtitles({
+    tracks,
+    clipsMap: updatedClips,
+    trackSubLinesMap,
+    vocalsBuffer: vocalsBuf ?? undefined,
+    vocalsNoiseDbHint: vocalsNoiseDb,
+    applyShift: false,
+    addLog
+  });
+  if (rescuedSubKeys.size > 0) {
+    for (let mIdx = newMissingMarkers.length - 1; mIdx >= 0; mIdx--) {
+      const m = newMissingMarkers[mIdx];
+      if (rescuedSubKeys.has(`${m.trackId}_${m.subId}`)) {
+        newMissingMarkers.splice(mIdx, 1);
+      }
+    }
+    for (let iIdx = newIssues.length - 1; iIdx >= 0; iIdx--) {
+      const iss = newIssues[iIdx];
+      if (iss.type === 'missing') {
+        const matchedKey = Array.from(rescuedSubKeys).find(k => k.startsWith(`${iss.trackId}_`));
+        if (matchedKey && !newMissingMarkers.some(mm => mm.trackId === iss.trackId && Math.abs(mm.startSec - iss.timeSec) < 0.1)) {
+          newIssues.splice(iIdx, 1);
+        }
+      }
+    }
+  }
+
+  // Rule 3: Soft Time-Fit across tracks
+  const allSubsFlat = Object.values(trackSubLinesMap).flat();
+  for (const track of tracks) {
+    applySoftTimeFitToTrackClips({
+      trackId: track.id,
+      clipsMap: updatedClips,
+      trackSubLinesMap,
+      subtitles: allSubsFlat,
+      addLog
+    });
+    updatedClips[track.id] = enforceSameTrackMinGapService(updatedClips[track.id] || [], TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
   }
 
   for (const track of tracks) {
@@ -386,7 +480,7 @@ export async function runStage1TimingAnalysisEngine(params: {
       const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
       const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
 
-      if (c1End > c2Start + 0.04) {
+      if (c1End > c2Start + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) {
         const overlapDur = c1End - c2Start;
         c1.timingIssue = 'overlap';
         c2.timingIssue = 'overlap';
@@ -430,7 +524,7 @@ export async function runStage1TimingAnalysisEngine(params: {
           const overlapEnd = Math.min(c1End, c2End);
           const overlapDur = overlapEnd - overlapStart;
 
-          if (overlapDur > 0.08) {
+          if (overlapDur > TIMING_RULES.MIN_INTER_TRACK_GAP_SEC) {
             const sub1 = trackSubLinesMap[trackIds[i]]?.find(s =>
               s.text === c1.text || (typeof c1.targetSubStartSec === 'number' && Math.abs(s.startSec - c1.targetSubStartSec) < 0.15)
             );
@@ -438,14 +532,13 @@ export async function runStage1TimingAnalysisEngine(params: {
               s.text === c2.text || (typeof c2.targetSubStartSec === 'number' && Math.abs(s.startSec - c2.targetSubStartSec) < 0.15)
             );
 
-            let isSpecifiedInSubtitles = false;
-            if (sub1 && sub2) {
-              const subOverlapStart = Math.max(sub1.startSec, sub2.startSec);
-              const subOverlapEnd = Math.min(sub1.endSec, sub2.endSec);
-              if (subOverlapEnd > subOverlapStart + 0.05) {
-                isSpecifiedInSubtitles = true;
-              }
-            }
+            const isSpecifiedInSubtitles = isIntentionalOverlapDecision({
+              overlapSec: overlapDur,
+              earlyDurSec: c1.durationSec,
+              lateDurSec: c2.durationSec,
+              sub1,
+              sub2,
+            });
 
             if (isSpecifiedInSubtitles) {
               c1.isIntentionalOverlap = true;

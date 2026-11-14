@@ -60,7 +60,10 @@ class MixingAlignmentExecutors {
           leadInSec,
           silenceThresholdDb,
           minSilenceDuration,
-          preventCollisions
+          preventCollisions,
+          episode,
+          workingDir,
+          manifest
         }
       });
     }
@@ -331,7 +334,7 @@ class MixingAlignmentExecutors {
       const timingResult = await AutoTimingService.alignProjectAndResolveCollisions({
         subPath,
         matchedTracks: matchResult.matchedTracks,
-        options: { minGapSec }
+        options: { minGapSec, episode, workingDir, manifest }
       });
       mergedResult = AutoTimingService.smartApplyFixesToTimedTracks(timingResult, {
         minGapSec,

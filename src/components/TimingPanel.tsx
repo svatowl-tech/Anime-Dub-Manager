@@ -21,6 +21,8 @@ import {
   TimingFinalReportBanner,
   TimingCalibrationBanner,
   TimingTrackNavigationBar,
+  TimingSyncQualityBar,
+  QuestionableTimingClipItem,
   TimingOperationLogsDrawer,
   TimingFloatingVideoWindow,
   TimingTimeRulerHeader,
@@ -290,6 +292,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     subtitles: s.subtitles,
     isSilenceRemoved: s.isSilenceRemoved,
     timingSettings: s.timingSettings,
+    originalStems: s.originalStems,
     intentionalOverlaps: s.intentionalOverlaps,
     audioBuffersRef: s.audioBuffersRef,
     setAudioClips: s.setAudioClips,
@@ -320,6 +323,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     trackSubLinesMap: s.trackSubLinesMap,
     subtitles: s.subtitles,
     timingSettings: s.timingSettings,
+    originalStems: s.originalStems,
     audioBuffersRef: s.audioBuffersRef,
     origBuffersByTrackRef: s.origBuffersByTrackRef,
     fixBuffersByActorRef: s.fixBuffersByActorRef,
@@ -345,6 +349,7 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     trackSubLinesMap: s.trackSubLinesMap,
     subtitles: s.subtitles,
     timingIssues: s.timingIssues,
+    originalStems: s.originalStems,
     audioBuffersRef: s.audioBuffersRef,
     setAudioClips: s.setAudioClips,
     setTimingIssues: s.setTimingIssues,
@@ -391,6 +396,16 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
     clearProcess: s.clearProcess,
     addLog: s.addLog,
   });
+
+  const { setSelectedClipId } = s;
+  const handleJumpToQuestionableClip = React.useCallback((item: QuestionableTimingClipItem) => {
+    jumpToTime(item.timeSec);
+    setSelectedClipId(item.clipId);
+    const trackRowEl = document.getElementById(`track-row-${item.trackId}`);
+    if (trackRowEl) {
+      trackRowEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [jumpToTime, setSelectedClipId]);
 
   return (
     <div className="flex flex-col h-full bg-[#08090d] text-neutral-100 overflow-hidden font-sans">
@@ -481,6 +496,11 @@ export default function TimingPanel({ currentEpisode, onRefresh: _onRefresh, onN
       <TimingCalibrationBanner
         calibrationsByTrack={s.calibrationsByTrack}
         tracks={s.tracks}
+      />
+
+      <TimingSyncQualityBar
+        audioClips={s.audioClips}
+        onJumpToQuestionableClip={handleJumpToQuestionableClip}
       />
 
       <TimingTrackNavigationBar

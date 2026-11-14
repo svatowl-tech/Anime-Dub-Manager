@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'http';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -100,7 +101,18 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const httpServer = http.createServer(app);
+  const portArgIdx = process.argv.indexOf('--port');
+  const portEqArg = process.argv.find((arg) => arg.startsWith('--port='));
+  const rawCliPort = portEqArg
+    ? portEqArg.slice('--port='.length)
+    : (portArgIdx !== -1 ? process.argv[portArgIdx + 1] : undefined);
+  const cliPort = rawCliPort !== undefined ? Number(rawCliPort) : NaN;
+  const rawEnvPort = process.env.APP_PORT || (process.env.PORT && process.env.PORT !== '8080' ? process.env.PORT : undefined);
+  const envPort = rawEnvPort !== undefined ? Number(rawEnvPort) : NaN;
+  const PORT = (!Number.isNaN(cliPort) && cliPort > 0)
+    ? cliPort
+    : ((!Number.isNaN(envPort) && envPort > 0) ? envPort : 3000);
 
   app.use(express.json());
 
@@ -679,7 +691,10 @@ async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -691,9 +706,17 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.on('error', (err) => {
+    console.error('[Server] HTTP listen error:', err);
+    process.exit(1);
+  });
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[Server] Fatal startup error:', err);
+  process.exit(1);
+});

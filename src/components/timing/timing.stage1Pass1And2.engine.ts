@@ -5,6 +5,7 @@ import { getSharedAudioContext } from '../../lib/qa/sharedAudioContext';
 import { normalizeSpeechText } from '../../lib/qa/whisperTextChecker';
 import { TimingSettings } from '../TimingSettingsModal';
 import { isPhraseTimingNotRequired } from './timingAudioUtils';
+import { TIMING_RULES, getMaxSafeShiftSec } from './timing.rules';
 import {
   AudioClip,
   MissingSubtitleMarker,
@@ -17,9 +18,18 @@ import {
   isFixTrack,
 } from './timing.utils';
 import {
+  detectClipSpeechBounds,
   detectSpeechIntervals,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
   measureClipActiveSpeechStats,
 } from './timing.dsp';
+import {
+  applyAdaptiveInternalPauseRuleOnTrack,
+  applyPhysicsSmartSyncOnMap,
+  rescueCrossRoleMissingSubtitles,
+} from './timing.edgeRules.service';
+import { ensureOriginalVocalsBuffer } from './timing.waveform';
 
 export interface Stage1Pass1And2Params {
   tracks: Track[];
@@ -27,6 +37,7 @@ export interface Stage1Pass1And2Params {
   trackSubLinesMap: Record<string, SubtitleLine[]>;
   isSilenceRemoved: boolean;
   timingSettings: TimingSettings;
+  vocalsPath?: string | null;
   audioBuffersRef: React.MutableRefObject<Record<string, AudioBuffer>>;
   setIsSilenceRemoved: React.Dispatch<React.SetStateAction<boolean>>;
   updateProcess: (title: string, detail: string, progress: number, stepCurrent?: number, stepTotal?: number) => void;
@@ -48,12 +59,18 @@ export async function runStage1Pass1And2Engine({
   trackSubLinesMap,
   isSilenceRemoved,
   timingSettings,
+  vocalsPath,
   audioBuffersRef,
   setIsSilenceRemoved,
   updateProcess,
   addLog,
 }: Stage1Pass1And2Params): Promise<Stage1Pass1And2Result> {
   let currentClips = { ...audioClips };
+  const vocalsBuf = await ensureOriginalVocalsBuffer(vocalsPath, audioBuffersRef);
+  const vocalsNoiseDb = vocalsBuf ? getAudioBufferRoomNoiseDb(vocalsBuf) : undefined;
+  if (vocalsBuf) {
+    addLog('🎤 Эталон оригинала (original_vocals.wav) загружен — автотайминг ориентируется на реальную атаку речи сейю!', 'info');
+  }
 
   const hasUncutTracks = tracks.some(t => {
     const c = currentClips[t.id];
@@ -86,10 +103,13 @@ export async function runStage1Pass1And2Engine({
           leadOutPaddingSec: timingSettings.leadOutPaddingSec,
           minSpeechDurationSec: timingSettings.minSpeechDurationSec,
           mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
-          subLines: trSubs
+          subLines: trSubs,
+          vocalsBuffer: vocalsBuf ?? undefined,
+          vocalsNoiseDbHint: vocalsNoiseDb
         });
         currentClips[track.id] = intervals.map((iv, idx) => {
           const sub = trSubs[idx];
+          const bounds = detectClipSpeechBounds(audioBuf, iv.startSec, iv.endSec);
           return {
             id: `clip_${track.id}_${idx}`,
             trackId: track.id,
@@ -101,6 +121,8 @@ export async function runStage1Pass1And2Engine({
             sourceEndSec: iv.endSec,
             rawSourceStartSec: iv.startSec,
             rawSourceEndSec: iv.endSec,
+            speechOnsetOffsetSec: bounds.onsetOffsetSec,
+            speechOffsetSec: bounds.offsetSec,
             text: sub?.text || `Фраза ${idx + 1}`,
             volumePercent: 100,
             isFix: isFixTrack(track),
@@ -420,17 +442,25 @@ export async function runStage1Pass1And2Engine({
 
     for (let cIdx = 0; cIdx < clips.length; cIdx++) {
       const clip = { ...clips[cIdx] };
+      if (clip.speechOnsetOffsetSec === undefined || clip.speechOffsetSec === undefined) {
+        const srcBuf = audioBuffersRef.current[clip.sourceAudioTrackId || track.id] || trackBuf;
+        const bounds = detectClipSpeechBounds(srcBuf, clip.sourceStartSec, clip.sourceEndSec);
+        clip.speechOnsetOffsetSec = bounds.onsetOffsetSec;
+        clip.speechOffsetSec = bounds.offsetSec;
+      }
+      const onsetOffset = clip.speechOnsetOffsetSec || 0;
       const cStart = clip.clipStartSec + (clip.offsetSec || 0);
+      const origStart = clip.rawSourceStartSec ?? clip.sourceStartSec ?? cStart;
       const bestSubIdx = clipMatchedSubIdx[cIdx];
       const bestSub = bestSubIdx !== -1 ? trSubs[bestSubIdx] : null;
       const isContinuation = clipIsSplitContinuation[cIdx];
       const matchedByWhisper = clipMatchedByWhisper[cIdx];
 
       const prevClipEnd = cIdx > 0
-        ? (mappedClips[cIdx - 1].clipStartSec + (mappedClips[cIdx - 1].offsetSec || 0) + mappedClips[cIdx - 1].durationSec + 0.04)
+        ? (mappedClips[cIdx - 1].clipStartSec + (mappedClips[cIdx - 1].offsetSec || 0) + mappedClips[cIdx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
         : 0;
       const nextClipStart = cIdx + 1 < clips.length
-        ? (clips[cIdx + 1].clipStartSec + (clips[cIdx + 1].offsetSec || 0) - 0.04)
+        ? (clips[cIdx + 1].clipStartSec + (clips[cIdx + 1].offsetSec || 0) - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
         : Infinity;
 
       if (bestSub && bestSubIdx !== -1) {
@@ -452,31 +482,50 @@ export async function runStage1Pass1And2Engine({
           const firstSub = coveredSubs[0] || bestSub;
           const lastSub = coveredSubs[coveredSubs.length - 1] || bestSub;
 
-          const maxShift = 1.6;
-          let surgicalTarget = Math.max(cStart - maxShift, Math.min(cStart + maxShift, firstSub.startSec));
+          const firstAnchor = findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, firstSub.startSec, firstSub.endSec, vocalsNoiseDb);
+          const lastAnchor = lastSub === firstSub
+            ? firstAnchor
+            : findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, lastSub.startSec, lastSub.endSec, vocalsNoiseDb);
+
+          // Target start places pre-roll/breath LEFT of original speech attack so dubber voice aligns synchronously
+          const desiredClipStart = Math.max(0, firstAnchor.anchorStartSec - onsetOffset);
+          const maxAutoShift = getMaxSafeShiftSec(Boolean(firstAnchor.hasRefVocal || matchedByWhisper));
+          let surgicalTarget = Math.max(origStart - maxAutoShift, Math.min(origStart + maxAutoShift, desiredClipStart));
           surgicalTarget = Math.max(prevClipEnd, Math.min(surgicalTarget, Math.max(prevClipEnd, nextClipStart - clip.durationSec)));
           surgicalTarget = Number(Math.max(0, surgicalTarget).toFixed(3));
 
-          const rawTimeDiff = cStart - firstSub.startSec;
+          // Deviation measured at actual vocal attack point vs original vocal/subtitle anchor
+          const actualVocalStart = cStart + onsetOffset;
+          const rawTimeDiff = actualVocalStart - firstAnchor.anchorStartSec;
           const absRawDiff = Math.abs(rawTimeDiff);
           const effectiveShift = Math.abs(surgicalTarget - cStart);
 
           clip.isPhysics = false;
           clip.isSplitContinuation = false;
+          clip.refVocalStartSec = firstAnchor.refVocalStartSec;
+          clip.refVocalEndSec = lastAnchor.refVocalEndSec;
+          clip.hasRefVocalAnchor = firstAnchor.hasRefVocal;
           clip.text = coveredSubs.length > 1
             ? coveredSubs.map(s => s.text).join(' / ')
             : firstSub.text;
           clip.matchedSubId = String(firstSub.id ?? bestSubIdx);
           clip.coveredSubIds = coveredSubs.map((s, idx) => String(s.id ?? coveredIdxs[idx]));
           clip.targetSubStartSec = surgicalTarget;
-          clip.targetSubEndSec = lastSub.endSec;
+          clip.targetSubEndSec = lastAnchor.anchorEndSec;
           clip.timeDiffSec = Number(rawTimeDiff.toFixed(2));
           if (matchedByWhisper) {
             clip.whisperMatchedScore = clipWhisperScore[cIdx];
           }
 
-          // User Rule: If phrase does not exceed subtitle boundaries or tail <= 30% of sub duration, timing is NOT required!
-          const timingExempt = isPhraseTimingNotRequired(cStart, clip.durationSec, firstSub.startSec, lastSub.endSec);
+          // Strict Rule: phrase is exempt ONLY if vocal attack <= ±120ms AND vocal end overhang <= min(25%, 0.35s)
+          const timingExempt = isPhraseTimingNotRequired(
+            cStart,
+            clip.durationSec,
+            firstAnchor.anchorStartSec,
+            lastAnchor.anchorEndSec,
+            onsetOffset,
+            clip.speechOffsetSec
+          );
 
           if (timingExempt.notRequired) {
             clip.timingNotRequired = true;
@@ -487,7 +536,7 @@ export async function runStage1Pass1And2Engine({
           } else if (matchedByWhisper && effectiveShift >= 0.25) {
             clip.timingNotRequired = false;
             clip.timingIssue = 'orphan';
-            clip.timingIssueText = `Подтяжка к субтитру: «${(clip.recognizedText || clip.text).slice(0, 20)}» ➔ [${formatSeconds(surgicalTarget)}]`;
+            clip.timingIssueText = `Подтяжка к оригиналу: «${(clip.recognizedText || clip.text).slice(0, 20)}» ➔ [${formatSeconds(surgicalTarget)}]`;
 
             newIssues.push({
               id: `issue_orphan_matched_${clip.id}`,
@@ -500,17 +549,18 @@ export async function runStage1Pass1And2Engine({
               durationSec: clip.durationSec,
               subText: clip.text,
               subStartSec: surgicalTarget,
-              subEndSec: lastSub.endSec,
+              subEndSec: lastAnchor.anchorEndSec,
               whisperText: clip.recognizedText,
               whisperMatchScore: clipWhisperScore[cIdx],
               description: `Привязка реплики «${(clip.recognizedText || clip.text).slice(0, 35)}» ➔ [${formatSeconds(surgicalTarget)}]`
             });
-          } else if (absRawDiff >= 0.30 && absRawDiff <= 1.8 && effectiveShift >= 0.10) {
+          } else if ((absRawDiff > TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC || !timingExempt.notRequired) && effectiveShift >= TIMING_RULES.MIN_EFFECTIVE_SHIFT_SEC) {
+            const anchorTag = firstAnchor.hasRefVocal ? 'вокалу оригинала' : 'субтитру';
             clip.timingNotRequired = false;
             clip.timingIssue = 'desync';
-            clip.timingIssueText = rawTimeDiff > 0 
-              ? `Опаздывает на +${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})` 
-              : `Спешит на -${absRawDiff.toFixed(2)}с (сдвиг до ${formatSeconds(surgicalTarget)})`;
+            clip.timingIssueText = rawTimeDiff > 0
+              ? `Атака голоса опаздывает на +${absRawDiff.toFixed(2)}с по ${anchorTag} (сдвиг до ${formatSeconds(surgicalTarget)})`
+              : `Атака голоса спешит на -${absRawDiff.toFixed(2)}с по ${anchorTag} (сдвиг до ${formatSeconds(surgicalTarget)})`;
 
             newIssues.push({
               id: `issue_desync_${clip.id}`,
@@ -523,13 +573,14 @@ export async function runStage1Pass1And2Engine({
               durationSec: clip.durationSec,
               subText: clip.text,
               subStartSec: surgicalTarget,
-              subEndSec: lastSub.endSec,
+              subEndSec: lastAnchor.anchorEndSec,
               timeDiffSec: Number(rawTimeDiff.toFixed(2)),
               description: rawTimeDiff > 0
-                ? `Фраза #${cIdx + 1} опаздывает на +${absRawDiff.toFixed(2)}с: «${clip.text.slice(0, 35)}»`
-                : `Фраза #${cIdx + 1} спешит на -${absRawDiff.toFixed(2)}с: «${clip.text.slice(0, 35)}»`
+                ? `Фраза #${cIdx + 1} опаздывает на +${absRawDiff.toFixed(2)}с (${anchorTag}): «${clip.text.slice(0, 35)}»`
+                : `Фраза #${cIdx + 1} спешит на -${absRawDiff.toFixed(2)}с (${anchorTag}): «${clip.text.slice(0, 35)}»`
             });
           } else {
+            clip.timingNotRequired = false;
             clip.timingIssue = null;
             clip.timingIssueText = undefined;
           }
@@ -551,66 +602,106 @@ export async function runStage1Pass1And2Engine({
       mappedClips.push(clip);
     }
 
-    // 3. Problem: Missing Subtitle Lines (checking both this dubber AND cross-dubber voicing across all other tracks!)
+    // Rule 2B: Adaptive internal pause split (>180ms in vocals) or compression (>300ms -> 120ms when vocals continuous)
+    const { clips: adaptedClips } = applyAdaptiveInternalPauseRuleOnTrack({
+      track,
+      clips: mappedClips,
+      trSubs,
+      audioBuffer: trackBuf,
+      vocalsBuffer: vocalsBuf ?? undefined,
+      vocalsNoiseDbHint: vocalsNoiseDb,
+      addLog
+    });
+    updatedClips[track.id] = adaptedClips;
+  }
+
+  // Rule 1: Smart "Физика" Sync against unoccupied original_vocals.wav bursts (±1.0s)
+  applyPhysicsSmartSyncOnMap({
+    tracks,
+    clipsMap: updatedClips,
+    trackSubLinesMap,
+    vocalsBuffer: vocalsBuf ?? undefined,
+    vocalsNoiseDbHint: vocalsNoiseDb,
+    applyShift: false,
+    addLog
+  });
+
+  // Rule 4: Cross-role rescue for unvoiced subtitles matching another track's orphan/physics clip (±2.0s & <=40% dur)
+  const { rescuedSubKeys } = rescueCrossRoleMissingSubtitles({
+    tracks,
+    clipsMap: updatedClips,
+    trackSubLinesMap,
+    vocalsBuffer: vocalsBuf ?? undefined,
+    vocalsNoiseDbHint: vocalsNoiseDb,
+    applyShift: false,
+    addLog
+  });
+
+  // Pass 2D: Final Missing Subtitle check across all tracks (taking Rule 4 & cross-dubber coverage into account)
+  for (const track of tracks) {
+    const dubberName = track.participant || track.dubberName || 'Даббер';
+    const characterName = track.character || track.characterName || 'Персонаж';
+    const trSubs = [...(trackSubLinesMap[track.id] || [])].sort((a, b) => a.startSec - b.startSec);
+    const mappedClips = updatedClips[track.id] || [];
+
     for (let sIdx = 0; sIdx < trSubs.length; sIdx++) {
-      if (!assignedSubIndices.has(sIdx)) {
-        const sub = trSubs[sIdx];
-        const subIdStr = String(sub.id ?? sIdx);
-        const subDur = Math.max(0.25, sub.endSec - sub.startSec);
-        const hasAudioCover = mappedClips.some(c => {
-          if (c.coveredSubIds?.includes(subIdStr) || c.matchedSubId === subIdStr) return true;
-          if (c.isPhysics) return false;
-          const cStart = c.clipStartSec + (c.offsetSec || 0);
-          const cEnd = cStart + c.durationSec;
-          const ov = Math.min(cEnd, sub.endSec + 0.25) - Math.max(cStart, sub.startSec - 0.25);
+      const sub = trSubs[sIdx];
+      const subIdStr = String(sub.id ?? sIdx);
+      if (rescuedSubKeys.has(`${track.id}_${subIdStr}`)) continue;
+
+      const subDur = Math.max(0.25, sub.endSec - sub.startSec);
+      const hasAudioCover = mappedClips.some(c => {
+        if (c.coveredSubIds?.includes(subIdStr) || c.matchedSubId === subIdStr) return true;
+        if (c.isPhysics) return false;
+        const cStart = c.clipStartSec + (c.offsetSec || 0);
+        const cEnd = cStart + c.durationSec;
+        const ov = Math.min(cEnd, sub.endSec + 0.25) - Math.max(cStart, sub.startSec - 0.25);
+        return ov >= Math.min(0.28, subDur * 0.35);
+      });
+      if (hasAudioCover) continue;
+
+      const voicedByOtherDubber = tracks.some(otherTr => {
+        if (otherTr.id === track.id || isFixTrack(otherTr)) return false;
+        const otherList = updatedClips[otherTr.id] || [];
+        return otherList.some(oc => {
+          if (oc.matchedSubId === subIdStr && oc.crossRoleTargetTrackId === track.id) return true;
+          if (oc.isPhysics || oc.durationSec >= 90) return false;
+          const oStart = oc.clipStartSec + (oc.offsetSec || 0);
+          const oEnd = oStart + oc.durationSec;
+          const ov = Math.min(oEnd, sub.endSec + 0.25) - Math.max(oStart, sub.startSec - 0.25);
           return ov >= Math.min(0.28, subDur * 0.35);
         });
+      });
 
-        // Cross-dubber check: if another dubber voiced this subtitle window, it is NOT a missing phrase!
-        const voicedByOtherDubber = !hasAudioCover && tracks.some(otherTr => {
-          if (otherTr.id === track.id || isFixTrack(otherTr)) return false;
-          const otherList = updatedClips[otherTr.id] || currentClips[otherTr.id] || [];
-          return otherList.some(oc => {
-            if (oc.isPhysics || oc.durationSec >= 90) return false;
-            const oStart = oc.clipStartSec + (oc.offsetSec || 0);
-            const oEnd = oStart + oc.durationSec;
-            const ov = Math.min(oEnd, sub.endSec + 0.25) - Math.max(oStart, sub.startSec - 0.25);
-            return ov >= Math.min(0.28, subDur * 0.35);
-          });
+      if (voicedByOtherDubber) {
+        crossDubberCoveredCount++;
+      } else {
+        newIssues.push({
+          id: `issue_missing_${track.id}_${sub.id || sIdx}`,
+          type: 'missing',
+          trackId: track.id,
+          dubberName,
+          characterName,
+          timeSec: sub.startSec,
+          durationSec: sub.endSec - sub.startSec,
+          subText: sub.text,
+          subStartSec: sub.startSec,
+          subEndSec: sub.endSec,
+          description: `Пропущена реплика «${characterName}»: «${sub.text.slice(0, 40)}» [${formatSeconds(sub.startSec)}]`
         });
 
-        if (voicedByOtherDubber) {
-          crossDubberCoveredCount++;
-        } else if (!hasAudioCover) {
-          newIssues.push({
-            id: `issue_missing_${track.id}_${sub.id || sIdx}`,
-            type: 'missing',
-            trackId: track.id,
-            dubberName,
-            characterName,
-            timeSec: sub.startSec,
-            durationSec: sub.endSec - sub.startSec,
-            subText: sub.text,
-            subStartSec: sub.startSec,
-            subEndSec: sub.endSec,
-            description: `Пропущена реплика «${characterName}»: «${sub.text.slice(0, 40)}» [${formatSeconds(sub.startSec)}]`
-          });
-
-          newMissingMarkers.push({
-            id: `missing_${track.id}_${sub.id ?? sIdx}`,
-            subId: subIdStr,
-            trackId: track.id,
-            dubberName,
-            characterName,
-            startSec: sub.startSec,
-            endSec: sub.endSec,
-            text: sub.text
-          });
-        }
+        newMissingMarkers.push({
+          id: `missing_${track.id}_${sub.id ?? sIdx}`,
+          subId: subIdStr,
+          trackId: track.id,
+          dubberName,
+          characterName,
+          startSec: sub.startSec,
+          endSec: sub.endSec,
+          text: sub.text
+        });
       }
     }
-
-    updatedClips[track.id] = mappedClips;
   }
 
   return {

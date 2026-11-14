@@ -3,47 +3,6 @@ import { normalizeSpeechText } from '../../lib/qa/whisperTextChecker';
 import { resolveLocalPath } from '../../lib/webFileSystem';
 
 /**
- * Checks whether a phrase is already within subtitle bounds or its tail overhang
- * does not exceed 30% of the subtitle duration (meaning timing shift is not required).
- */
-export function isPhraseTimingNotRequired(
-  clipStartSec: number,
-  clipDurationSec: number,
-  subStartSec: number,
-  subEndSec: number
-): { notRequired: boolean; reason?: string } {
-  const clipEndSec = clipStartSec + clipDurationSec;
-  const subDurationSec = Math.max(0.1, subEndSec - subStartSec);
-
-  // Must start inside or within a tiny tolerance (-0.12s) of subtitle start
-  if (clipStartSec < subStartSec - 0.12 || clipStartSec > subEndSec) {
-    return { notRequired: false };
-  }
-
-  // Case 1: Phrase fits completely within subtitle boundaries
-  if (clipEndSec <= subEndSec + 0.05) {
-    return {
-      notRequired: true,
-      reason: 'Фраза полностью в границах субтитра — тайминг не требуется'
-    };
-  }
-
-  // Case 2: Tail overhang after subtitle end is <= 30% of subtitle duration
-  const tailOverhangSec = clipEndSec - subEndSec;
-  const maxAllowedTailSec = subDurationSec * 0.30;
-  if (tailOverhangSec <= maxAllowedTailSec + 0.02) {
-    const tailPct = Math.round((tailOverhangSec / subDurationSec) * 100);
-    return {
-      notRequired: true,
-      reason: `Хвост фразы (+${tailOverhangSec.toFixed(2)}с / ${tailPct}%) ≤ 30% саба — тайминг не требуется`
-    };
-  }
-
-  return { notRequired: false };
-}
-
-
-/**
  * Calculates text similarity for Whisper speech vs. Subtitle text
  * Word-level Dice coefficient with prefix/stem matching for Russian morphology.
  */

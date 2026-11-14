@@ -8,13 +8,28 @@ import { isPhraseTimingNotRequired } from './timingAudioUtils';
 import {
   AudioClip,
   MissingSubtitleMarker,
+  OriginalStemsState,
   TimingIssue,
   VoiceCollisionMarker,
 } from './timing.types';
 import {
   formatSeconds,
 } from './timing.utils';
+import {
+  detectClipSpeechBounds,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
+} from './timing.dsp';
+import { ensureOriginalVocalsBuffer } from './timing.waveform';
+import { enforceSameTrackMinGapService } from './timing.service';
+import {
+  applyAdaptiveInternalPauseRuleOnTrack,
+  applyPhysicsSmartSyncOnMap,
+  applySoftTimeFitToTrackClips,
+  rescueCrossRoleMissingSubtitles,
+} from './timing.edgeRules.service';
 import { SelfHealingVerificationReport } from './useTimingSelfHealingAndOverlaps';
+import { TIMING_RULES, getMaxSafeShiftSec } from './timing.rules';
 
 export interface UseTimingStage2AndClipsParams {
   tracks: Track[];
@@ -22,6 +37,7 @@ export interface UseTimingStage2AndClipsParams {
   trackSubLinesMap: Record<string, SubtitleLine[]>;
   subtitles: SubtitleLine[];
   timingIssues: TimingIssue[];
+  originalStems?: OriginalStemsState;
   audioBuffersRef: React.MutableRefObject<Record<string, AudioBuffer>>;
   setAudioClips: React.Dispatch<React.SetStateAction<Record<string, AudioClip[]>>>;
   setTimingIssues: React.Dispatch<React.SetStateAction<TimingIssue[]>>;
@@ -56,6 +72,7 @@ export function useTimingStage2AndClips({
   trackSubLinesMap,
   subtitles,
   timingIssues,
+  originalStems,
   audioBuffersRef,
   setAudioClips,
   setTimingIssues,
@@ -84,6 +101,9 @@ export function useTimingStage2AndClips({
       updateProcess('2. Точечный автотайминг', 'Монотонная привязка фраз к субтитрам и защита физики...', 25, 1, 3);
       addLog(`Запуск Этапа 2: хирургический автотайминг (режим: ${typeFilter})...`, 'info');
       await new Promise(r => setTimeout(r, 0));
+
+      const vocalsBuf = await ensureOriginalVocalsBuffer(originalStems?.vocalsPath, audioBuffersRef);
+      const vocalsNoiseDb = vocalsBuf ? getAudioBufferRoomNoiseDb(vocalsBuf) : undefined;
 
       const updatedClips: Record<string, AudioClip[]> = {};
       for (const track of tracks) {
@@ -134,7 +154,7 @@ export function useTimingStage2AndClips({
                 const bs = b.clip.clipStartSec + (b.clip.offsetSec || 0);
                 const be = bs + b.clip.durationSec;
                 const ov = Math.min(ae, be) - Math.max(as, bs);
-                if (ov > 0.015 && ov <= 0.48) {
+                if (ov > 0.015 && ov <= TIMING_RULES.INTENTIONAL_OVERLAP_MIN_SEC) {
                   entryA = as <= bs ? a : b;
                   entryB = as <= bs ? b : a;
                   break;
@@ -196,18 +216,22 @@ export function useTimingStage2AndClips({
             if (bStart >= aEnd - 0.015) break;
 
             const ov = aEnd - bStart;
-            if (ov <= 0.48) {
+            if (ov <= TIMING_RULES.INTENTIONAL_OVERLAP_MIN_SEC) {
               if (separateOverlappingClipPair(a.clip, b.clip, clipsMap[a.trackId] || [], clipsMap[b.trackId] || [], clipsMap)) {
                 resolved++;
               }
             } else {
-              // Clear false collision badge on long simultaneous overlaps (> 0.48s)
+              // Clear false collision badge on intentional simultaneous overlaps (> 0.35s)
               a.clip.hasCollision = false;
               b.clip.hasCollision = false;
               if (a.clip.timingIssue === 'overlap') a.clip.timingIssue = null;
               if (b.clip.timingIssue === 'overlap') b.clip.timingIssue = null;
             }
           }
+        }
+
+        for (const tId of Object.keys(clipsMap)) {
+          clipsMap[tId] = enforceSameTrackMinGapService(clipsMap[tId] || [], TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
         }
 
         return resolved;
@@ -224,109 +248,186 @@ export function useTimingStage2AndClips({
         return;
       }
 
-      // 1 & 2. Хирургическое выравнивание только реально рассинхроненных фраз
-      // (НЕ трогаем фразы, которые уже стоят внутри своего субтитра [sub.startSec - 0.35s .. sub.startSec + 0.55s]!)
+      // 1 & 2. Хирургическое выравнивание по атаке голоса даббера и эталону original_vocals.wav
       for (const trackId of Object.keys(updatedClips)) {
         const clips = [...(updatedClips[trackId] || [])].sort(
           (a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0))
         );
 
         for (let idx = 0; idx < clips.length; idx++) {
-          const clip = clips[idx];
-          if (clip.isPhysics || clip.isUnisonPhrase || clip.isSplitContinuation || clip.overlapResolvedLock || clip.overlapRole || clip.timingNotRequired) continue;
+          const clip = { ...clips[idx] };
+          if (clip.isPhysics || clip.isUnisonPhrase || clip.isSplitContinuation || clip.overlapResolvedLock || clip.overlapRole) continue;
 
+          if (clip.speechOnsetOffsetSec === undefined || clip.speechOffsetSec === undefined) {
+            const srcBuf = audioBuffersRef.current[clip.sourceAudioTrackId || trackId] || audioBuffersRef.current[trackId];
+            const bounds = detectClipSpeechBounds(srcBuf, clip.sourceStartSec, clip.sourceEndSec);
+            clip.speechOnsetOffsetSec = bounds.onsetOffsetSec;
+            clip.speechOffsetSec = bounds.offsetSec;
+          }
+          const onsetOffset = clip.speechOnsetOffsetSec || 0;
           const curStart = clip.clipStartSec + (clip.offsetSec || 0);
           const trSubs = trackSubLinesMap[trackId] || [];
           const matchedSub = clip.matchedSubId
             ? (trSubs.find(s => String(s.id) === String(clip.matchedSubId)) || subtitles.find(s => String(s.id) === String(clip.matchedSubId)))
             : undefined;
-          const subStart = matchedSub ? matchedSub.startSec : clip.targetSubStartSec;
-          const subEnd = matchedSub ? matchedSub.endSec : (clip.targetSubEndSec ?? (typeof subStart === 'number' ? subStart + clip.durationSec : undefined));
 
-          // User Rule: If phrase is inside sub or tail <= 30% of sub duration, timing is NOT required!
-          if (typeof subStart === 'number' && typeof subEnd === 'number') {
-            const exemptCheck = isPhraseTimingNotRequired(curStart, clip.durationSec, subStart, subEnd);
-            if (exemptCheck.notRequired) {
-              clips[idx] = {
-                ...clip,
-                timingNotRequired: true,
-                timingNotRequiredReason: exemptCheck.reason,
-                timingIssue: null,
-                timingIssueText: undefined
-              };
-              continue;
-            }
+          const anchor = matchedSub
+            ? findOriginalVocalsAnchorForSub(vocalsBuf ?? undefined, matchedSub.startSec, matchedSub.endSec, vocalsNoiseDb)
+            : (typeof clip.targetSubStartSec === 'number'
+                ? {
+                    anchorStartSec: clip.targetSubStartSec + onsetOffset,
+                    anchorEndSec: clip.targetSubEndSec ?? (clip.targetSubStartSec + clip.durationSec),
+                    refVocalStartSec: clip.refVocalStartSec,
+                    refVocalEndSec: clip.refVocalEndSec,
+                    hasRefVocal: Boolean(clip.hasRefVocalAnchor)
+                  }
+                : null);
+
+          if (!anchor) continue;
+
+          clip.refVocalStartSec = anchor.refVocalStartSec;
+          clip.refVocalEndSec = anchor.refVocalEndSec;
+          clip.hasRefVocalAnchor = anchor.hasRefVocal;
+          clip.targetSubEndSec = anchor.anchorEndSec;
+
+          // Strict Rule: exempt ONLY if vocal attack <= ±140ms AND vocal end overhang <= min(25%, 0.35s)
+          const exemptCheck = isPhraseTimingNotRequired(
+            curStart,
+            clip.durationSec,
+            anchor.anchorStartSec,
+            anchor.anchorEndSec,
+            onsetOffset,
+            clip.speechOffsetSec
+          );
+          if (exemptCheck.notRequired) {
+            clips[idx] = {
+              ...clip,
+              timingNotRequired: true,
+              timingNotRequiredReason: exemptCheck.reason,
+              timingIssue: null,
+              timingIssueText: undefined
+            };
+            continue;
           }
 
           const shouldFixDesync = (typeFilter === 'all' || typeFilter === 'desync');
           const shouldFixOrphan = clip.timingIssue === 'orphan' && (typeFilter === 'all' || typeFilter === 'orphan');
 
-          if ((shouldFixDesync || shouldFixOrphan) && typeof clip.targetSubStartSec === 'number') {
+          if (shouldFixDesync || shouldFixOrphan) {
             const origStart = clip.rawSourceStartSec ?? clip.sourceStartSec ?? curStart;
-            const signedDiff = curStart - clip.targetSubStartSec;
-            const rawDiff = Math.abs(signedDiff);
-
-            // If the phrase is already inside its subtitle window (-0.35s .. +0.55s) and not explicitly flagged as desync/orphan, DO NOT TOUCH IT!
-            const isAlreadyInSubtitleWindow = signedDiff >= -0.35 && signedDiff <= 0.55;
-            if (isAlreadyInSubtitleWindow && clip.timingIssue !== 'desync' && clip.timingIssue !== 'orphan') {
-              clips[idx] = {
-                ...clip,
-                timingIssue: null,
-                timingIssueText: undefined
-              };
-              continue;
-            }
+            const idealTargetStart = Math.max(0, anchor.anchorStartSec - onsetOffset);
 
             const prevIntraEnd = idx > 0
-              ? (clips[idx - 1].clipStartSec + (clips[idx - 1].offsetSec || 0) + clips[idx - 1].durationSec + 0.03)
+              ? (clips[idx - 1].clipStartSec + (clips[idx - 1].offsetSec || 0) + clips[idx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
               : 0;
             // Respect preceding speaker's phrase end on other tracks when pulling earlier
             let prevInterEnd = 0;
-            if (clip.targetSubStartSec < curStart) {
+            if (idealTargetStart < curStart) {
               for (const [otherTrId, otherClips] of Object.entries(updatedClips)) {
                 if (otherTrId === trackId) continue;
                 for (const oc of otherClips) {
                   if (oc.isPhysics) continue;
                   const os = oc.clipStartSec + (oc.offsetSec || 0);
                   const oe = os + oc.durationSec;
-                  if (os < curStart - 0.10 && oe > clip.targetSubStartSec - 0.04 && oe <= curStart + 0.65) {
-                    prevInterEnd = Math.max(prevInterEnd, oe + 0.04);
+                  if (os < curStart - 0.10 && oe > idealTargetStart - TIMING_RULES.MIN_INTER_TRACK_GAP_SEC && oe <= curStart + 0.65) {
+                    prevInterEnd = Math.max(prevInterEnd, oe + TIMING_RULES.MIN_INTER_TRACK_GAP_SEC);
                   }
                 }
               }
             }
             const prevEnd = Math.max(prevIntraEnd, prevInterEnd);
             const nextStart = idx + 1 < clips.length
-              ? (clips[idx + 1].clipStartSec + (clips[idx + 1].offsetSec || 0) - 0.03)
+              ? (clips[idx + 1].clipStartSec + (clips[idx + 1].offsetSec || 0) - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
               : Infinity;
 
-            // Cap maximum automatic shift to 0.35s from original recorded position
-            let safeStart = Math.max(origStart - 0.35, Math.min(origStart + 0.35, clip.targetSubStartSec));
+            const maxAutoShift = getMaxSafeShiftSec(
+              Boolean(anchor.hasRefVocal || clip.timingIssue === 'orphan' || (clip.whisperMatchedScore ?? 0) > 0)
+            );
+            let safeStart = Math.max(origStart - maxAutoShift, Math.min(origStart + maxAutoShift, idealTargetStart));
             safeStart = Math.max(prevEnd, Math.min(safeStart, Math.max(prevEnd, nextStart - clip.durationSec)));
             safeStart = Number(Math.max(0, safeStart).toFixed(3));
 
-            if (Math.abs(safeStart - curStart) >= 0.06 && Math.abs(safeStart - clip.targetSubStartSec) < rawDiff - 0.04) {
+            if (Math.abs(safeStart - curStart) >= TIMING_RULES.MIN_EFFECTIVE_SHIFT_SEC && Math.abs(safeStart - idealTargetStart) < Math.abs(curStart - idealTargetStart) - 0.02) {
               if (clip.timingIssue === 'orphan') fixedOrphanCount++;
               else fixedDesyncCount++;
-              addLog(`🎯 Хирургически пододвинута фраза «${clip.text.slice(0, 25)}» с ${formatSeconds(curStart)} ➔ ${formatSeconds(safeStart)}`, 'info');
+              addLog(`🎯 Атака выровнена «${clip.text.slice(0, 25)}» с ${formatSeconds(curStart)} ➔ ${formatSeconds(safeStart)} (${anchor.hasRefVocal ? 'по вокалу оригинала' : 'по сабу'})`, 'info');
               clips[idx] = {
                 ...clip,
                 clipStartSec: safeStart,
                 offsetSec: 0,
+                targetSubStartSec: safeStart,
+                timingNotRequired: false,
                 timingIssue: null,
                 timingIssueText: undefined,
-                timeDiffSec: 0
+                timeDiffSec: Number(((safeStart + onsetOffset) - anchor.anchorStartSec).toFixed(2))
               };
             } else {
               clips[idx] = {
                 ...clip,
+                timingNotRequired: false,
                 timingIssue: null,
                 timingIssueText: undefined
               };
             }
+          } else {
+            clips[idx] = clip;
           }
         }
         updatedClips[trackId] = clips;
+      }
+
+      if (typeFilter === 'all' || typeFilter === 'desync') {
+        // Rule 2B: Adaptive pause splitting/compression by original_vocals.wav
+        for (const tr of tracks) {
+          const res = applyAdaptiveInternalPauseRuleOnTrack({
+            track: tr,
+            clips: updatedClips[tr.id] || [],
+            trSubs: trackSubLinesMap[tr.id] || [],
+            audioBuffer: audioBuffersRef.current[tr.id],
+            vocalsBuffer: vocalsBuf ?? undefined,
+            vocalsNoiseDbHint: vocalsNoiseDb,
+            addLog
+          });
+          updatedClips[tr.id] = res.clips;
+        }
+
+        // Rule 1: Smart "Физика" Sync on unoccupied original_vocals.wav bursts (±1.0s)
+        applyPhysicsSmartSyncOnMap({
+          tracks,
+          clipsMap: updatedClips,
+          trackSubLinesMap,
+          vocalsBuffer: vocalsBuf ?? undefined,
+          vocalsNoiseDbHint: vocalsNoiseDb,
+          applyShift: true,
+          addLog
+        });
+
+        // Rule 4: Cross-role rescue of missed subtitles from another track's orphan/physics clip
+        rescueCrossRoleMissingSubtitles({
+          tracks,
+          clipsMap: updatedClips,
+          trackSubLinesMap,
+          vocalsBuffer: vocalsBuf ?? undefined,
+          vocalsNoiseDbHint: vocalsNoiseDb,
+          applyShift: true,
+          addLog
+        });
+
+        // Rule 3: Soft Time-Fit (trim tail to 40ms -> pitch-preserving 1.0x..1.18x if >25% overhang + collision)
+        for (const trId of Object.keys(updatedClips)) {
+          applySoftTimeFitToTrackClips({
+            trackId: trId,
+            clipsMap: updatedClips,
+            trackSubLinesMap,
+            subtitles,
+            addLog
+          });
+          updatedClips[trId] = enforceSameTrackMinGapService(updatedClips[trId] || [], TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
+        }
+      } else {
+        for (const trId of Object.keys(updatedClips)) {
+          updatedClips[trId] = enforceSameTrackMinGapService(updatedClips[trId] || [], TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
+        }
       }
 
       // 3. ИТЕРАЦИОННАЯ ФИНАЛЬНАЯ ПРОВЕРКА И САМОВОССТАНОВЛЕНИЕ ВСЕХ САБОВ ВСЕХ ДАББЕРОВ
@@ -406,7 +507,7 @@ export function useTimingStage2AndClips({
       const trClips = prev[trackId] || [];
       const updated = trClips.map(c => {
         if (c.id === clipId && typeof c.targetSubStartSec === 'number') {
-          addLog(`🎯 Фраза «${c.text.slice(0, 25)}» точечно пододвинута под субтитр на ${formatSeconds(c.targetSubStartSec)}`, 'success');
+          addLog(`🎯 Фраза «${c.text.slice(0, 25)}» точечно пододвинута под эталон на ${formatSeconds(c.targetSubStartSec)}`, 'success');
           return {
             ...c,
             clipStartSec: c.targetSubStartSec,
@@ -418,10 +519,10 @@ export function useTimingStage2AndClips({
         }
         return c;
       });
-      return { ...prev, [trackId]: updated };
+      return { ...prev, [trackId]: enforceSameTrackMinGapService(updated, TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) };
     });
     setTimingIssues(prev => prev.filter(i => i.clipId !== clipId));
-    toast.success('Фраза точечно пододвинута к субтитру!');
+    toast.success('Фраза точечно пододвинута к эталону!');
   };
 
   // Quick surgical fixer for an overlap collision (intra-track or inter-track, by clipId or timeSec)
@@ -455,7 +556,7 @@ export function useTimingStage2AndClips({
             const cs = c.clipStartSec + (c.offsetSec || 0);
             const ce = cs + c.durationSec;
             const ov = Math.min(aEnd, ce) - Math.max(aStart, cs);
-            if (ov > 0.015 && ov <= 0.48) {
+            if (ov > 0.015 && ov <= TIMING_RULES.INTENTIONAL_OVERLAP_MIN_SEC) {
               entryB = { clip: c, trackId: tId };
               break;
             }
@@ -486,7 +587,7 @@ export function useTimingStage2AndClips({
             const bs = b.clip.clipStartSec + (b.clip.offsetSec || 0);
             const be = bs + b.clip.durationSec;
             const ov = Math.min(ae, be) - Math.max(as, bs);
-            if (ov > 0.015 && ov <= 0.48) {
+            if (ov > 0.015 && ov <= TIMING_RULES.INTENTIONAL_OVERLAP_MIN_SEC) {
               entryA = as <= bs ? a : b;
               entryB = as <= bs ? b : a;
               break;

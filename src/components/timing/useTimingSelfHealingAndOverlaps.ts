@@ -8,21 +8,31 @@ import {
   AudioClip,
   IntentionalOverlapMoment,
   MissingSubtitleMarker,
+  OriginalStemsState,
 } from './timing.types';
 import {
   formatSeconds,
   normalizeName,
 } from './timing.utils';
 import {
-  detectSpeechOnsetOffsetSec,
+  detectClipSpeechBounds,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
 } from './timing.dsp';
 import {
   bindTrackClipsToSubtitlesMonotonicallyService,
   scanBufferWindowForSpeech,
 } from './timing.waveform';
 import {
+  enforceSameTrackMinGapService,
   separateOverlappingClipPair as separateOverlappingClipPairService,
 } from './timing.service';
+import {
+  applyPhysicsSmartSyncOnMap,
+  applySoftTimeFitToTrackClips,
+  rescueCrossRoleMissingSubtitles,
+} from './timing.edgeRules.service';
+import { TIMING_RULES, getMaxSafeShiftSec } from './timing.rules';
 
 export interface SelfHealingVerificationReport {
   totalSubs: number;
@@ -42,6 +52,7 @@ export interface UseTimingSelfHealingAndOverlapsParams {
   trackSubLinesMap: Record<string, SubtitleLine[]>;
   subtitles: SubtitleLine[];
   timingSettings: TimingSettings;
+  originalStems?: OriginalStemsState;
   audioBuffersRef: React.MutableRefObject<Record<string, AudioBuffer>>;
   origBuffersByTrackRef: React.MutableRefObject<Record<string, { buffer: AudioBuffer; filePath?: string; sourceTrackId: string }>>;
   fixBuffersByActorRef: React.MutableRefObject<Record<string, Array<{ buffer: AudioBuffer; filePath?: string; sourceTrackId: string; participant: string }>>>;
@@ -55,6 +66,7 @@ export function useTimingSelfHealingAndOverlaps({
   trackSubLinesMap,
   subtitles,
   timingSettings,
+  originalStems,
   audioBuffersRef,
   origBuffersByTrackRef,
   fixBuffersByActorRef,
@@ -256,8 +268,19 @@ export function useTimingSelfHealingAndOverlaps({
     rawClips: AudioClip[],
     trSubs: SubtitleLine[]
   ): AudioClip[] => {
-    return bindTrackClipsToSubtitlesMonotonicallyService(track, rawClips, trSubs, audioBuffersRef.current);
-  }, [audioBuffersRef]);
+    const vocalsBuf = originalStems?.vocalsPath
+      ? audioBuffersRef.current[`__orig_vocals__:${originalStems.vocalsPath}`]
+      : undefined;
+    const vocalsNoiseDb = vocalsBuf ? getAudioBufferRoomNoiseDb(vocalsBuf) : undefined;
+    return bindTrackClipsToSubtitlesMonotonicallyService(
+      track,
+      rawClips,
+      trSubs,
+      audioBuffersRef.current,
+      vocalsBuf,
+      vocalsNoiseDb
+    );
+  }, [audioBuffersRef, originalStems?.vocalsPath]);
 
   // ---------------------------------------------------------------------------
   // ITERATIVE SELF-HEALING FINAL AUDIT LOOP
@@ -304,8 +327,8 @@ export function useTimingSelfHealingAndOverlaps({
           if (oc.isPhysics) continue;
           const os = oc.clipStartSec + (oc.offsetSec || 0);
           const oe = os + oc.durationSec;
-          if (os < curStart - 0.10 && oe > targetStart - 0.04 && oe <= curStart + 0.65) {
-            maxPrevEnd = Math.max(maxPrevEnd, oe + 0.04);
+          if (os < curStart - 0.10 && oe > targetStart - TIMING_RULES.MIN_INTER_TRACK_GAP_SEC && oe <= curStart + 0.65) {
+            maxPrevEnd = Math.max(maxPrevEnd, oe + TIMING_RULES.MIN_INTER_TRACK_GAP_SEC);
           }
         }
       }
@@ -372,11 +395,36 @@ export function useTimingSelfHealingAndOverlaps({
               continue;
             }
 
+            if (covClip.speechOnsetOffsetSec === undefined || covClip.speechOffsetSec === undefined) {
+              const covBuf = audioBuffersRef.current[covClip.sourceAudioTrackId || track.id];
+              const covBounds = detectClipSpeechBounds(covBuf, covClip.sourceStartSec, covClip.sourceEndSec);
+              covClip.speechOnsetOffsetSec = covBounds.onsetOffsetSec;
+              covClip.speechOffsetSec = covBounds.offsetSec;
+            }
+
+            const vocalsBuf = originalStems?.vocalsPath
+              ? audioBuffersRef.current[`__orig_vocals__:${originalStems.vocalsPath}`]
+              : undefined;
+            const vocalsNoiseDb = vocalsBuf ? getAudioBufferRoomNoiseDb(vocalsBuf) : undefined;
+            const anchor = findOriginalVocalsAnchorForSub(vocalsBuf, sub.startSec, sub.endSec, vocalsNoiseDb);
+            const onsetOffset = covClip.speechOnsetOffsetSec || 0;
             const covStart = covClip.clipStartSec + (covClip.offsetSec || 0);
             const origStart = covClip.rawSourceStartSec ?? covClip.sourceStartSec ?? covStart;
 
-            // User Rule: If phrase does not exceed sub or tail <= 30% of sub duration, timing is NOT required!
-            const exemptCheck = isPhraseTimingNotRequired(covStart, covClip.durationSec, sub.startSec, sub.endSec);
+            covClip.refVocalStartSec = anchor.refVocalStartSec;
+            covClip.refVocalEndSec = anchor.refVocalEndSec;
+            covClip.hasRefVocalAnchor = anchor.hasRefVocal;
+            covClip.targetSubEndSec = anchor.anchorEndSec;
+
+            // Strict Rule: exempt ONLY if vocal attack <= ±140ms AND vocal end overhang <= min(25%, 0.35s)
+            const exemptCheck = isPhraseTimingNotRequired(
+              covStart,
+              covClip.durationSec,
+              anchor.anchorStartSec,
+              anchor.anchorEndSec,
+              onsetOffset,
+              covClip.speechOffsetSec
+            );
             if (exemptCheck.notRequired) {
               covClip.timingNotRequired = true;
               covClip.timingNotRequiredReason = exemptCheck.reason;
@@ -384,45 +432,39 @@ export function useTimingSelfHealingAndOverlaps({
               continue; // Phrase is exempt from timing, leave in place!
             }
 
-            const signedDiff = covStart - sub.startSec;
+            const prevIntraLim = coveringClipIdx > 0
+              ? (trClips[coveringClipIdx - 1].clipStartSec + (trClips[coveringClipIdx - 1].offsetSec || 0) + trClips[coveringClipIdx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
+              : 0;
+            const idealStart = Math.max(0, anchor.anchorStartSec - onsetOffset);
+            const prevInterLim = idealStart < covStart
+              ? getPrevInterTrackTurnEnd(track.id, covStart, idealStart)
+              : 0;
+            const prevLim = Math.max(prevIntraLim, prevInterLim);
 
-            // Only align if the phrase is genuinely displaced (starts > 0.35s BEFORE sub.startSec or > 0.55s AFTER sub.startSec)
-            const isDisplaced = signedDiff < -0.35 || signedDiff > 0.55;
+            const nextLim = coveringClipIdx + 1 < trClips.length
+              ? (trClips[coveringClipIdx + 1].clipStartSec + (trClips[coveringClipIdx + 1].offsetSec || 0) - covClip.durationSec - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
+              : Infinity;
 
-            if (isDisplaced) {
-              const prevIntraLim = coveringClipIdx > 0
-                ? (trClips[coveringClipIdx - 1].clipStartSec + (trClips[coveringClipIdx - 1].offsetSec || 0) + trClips[coveringClipIdx - 1].durationSec + 0.03)
-                : 0;
-              const idealStart = Math.max(0, sub.startSec);
-              const prevInterLim = idealStart < covStart
-                ? getPrevInterTrackTurnEnd(track.id, covStart, idealStart)
-                : 0;
-              const prevLim = Math.max(prevIntraLim, prevInterLim);
+            const maxAutoShift = getMaxSafeShiftSec(anchor.hasRefVocal);
+            const clampedTarget = Math.max(origStart - maxAutoShift, Math.min(origStart + maxAutoShift, idealStart));
+            const healedStart = Number(
+              Math.max(0, Math.max(prevLim, Math.min(clampedTarget, Math.max(prevLim, nextLim)))).toFixed(3)
+            );
 
-              const nextLim = coveringClipIdx + 1 < trClips.length
-                ? (trClips[coveringClipIdx + 1].clipStartSec + (trClips[coveringClipIdx + 1].offsetSec || 0) - covClip.durationSec - 0.03)
-                : Infinity;
-
-              // Never move a clip more than 0.40s from its recorded position
-              const clampedTarget = Math.max(origStart - 0.40, Math.min(origStart + 0.40, idealStart));
-              const healedStart = Number(
-                Math.max(0, Math.max(prevLim, Math.min(clampedTarget, Math.max(prevLim, nextLim)))).toFixed(3)
+            if (Math.abs(healedStart - covStart) >= TIMING_RULES.MIN_EFFECTIVE_SHIFT_SEC && Math.abs(healedStart - idealStart) < Math.abs(covStart - idealStart) - 0.02) {
+              covClip.clipStartSec = healedStart;
+              covClip.offsetSec = 0;
+              covClip.matchedSubId = subIdStr;
+              covClip.targetSubStartSec = healedStart;
+              covClip.timingNotRequired = false;
+              covClip.timeDiffSec = Number(((healedStart + onsetOffset) - anchor.anchorStartSec).toFixed(2));
+              covClip.timingIssue = null;
+              realignedCount++;
+              actionsInPass++;
+              addLog(
+                `🔄 [Аудит Итерация #${iter}] Атака голоса синхронизирована «${sub.text.slice(0, 28)}» (${dubberName}) ➔ ${formatSeconds(healedStart)}`,
+                'info'
               );
-
-              if (Math.abs(healedStart - covStart) >= 0.06 && Math.abs(healedStart - idealStart) < Math.abs(covStart - idealStart) - 0.04) {
-                covClip.clipStartSec = healedStart;
-                covClip.offsetSec = 0;
-                covClip.matchedSubId = subIdStr;
-                covClip.targetSubStartSec = healedStart;
-                covClip.timeDiffSec = Number((healedStart - sub.startSec).toFixed(2));
-                covClip.timingIssue = null;
-                realignedCount++;
-                actionsInPass++;
-                addLog(
-                  `🔄 [Аудит Итерация #${iter}] Выровнена сдвинутая реплика «${sub.text.slice(0, 28)}» (${dubberName}) ➔ ${formatSeconds(healedStart)}`,
-                  'info'
-                );
-              }
             }
             continue;
           }
@@ -496,6 +538,16 @@ export function useTimingSelfHealingAndOverlaps({
             );
             const unusedIv = candidateIntervals.find(iv => !isSourceIntervalAlreadyUsed(iv.startSec, iv.endSec));
             if (unusedIv) {
+              const fixRecBounds = detectClipSpeechBounds(fixSource.buffer, unusedIv.startSec, unusedIv.endSec);
+              const vocalsBufRec = originalStems?.vocalsPath
+                ? audioBuffersRef.current[`__orig_vocals__:${originalStems.vocalsPath}`]
+                : undefined;
+              const recAnchor = findOriginalVocalsAnchorForSub(
+                vocalsBufRec,
+                sub.startSec,
+                sub.endSec,
+                vocalsBufRec ? getAudioBufferRoomNoiseDb(vocalsBufRec) : undefined
+              );
               recoveredClip = {
                 id: `clip_${track.id}_healed_fix_${subIdStr}_${iter}`,
                 trackId: track.id,
@@ -507,14 +559,18 @@ export function useTimingSelfHealingAndOverlaps({
                 sourceEndSec: unusedIv.endSec,
                 rawSourceStartSec: unusedIv.startSec,
                 rawSourceEndSec: unusedIv.endSec,
-                speechOnsetOffsetSec: detectSpeechOnsetOffsetSec(fixSource.buffer, unusedIv.startSec, unusedIv.endSec),
+                speechOnsetOffsetSec: fixRecBounds.onsetOffsetSec,
+                speechOffsetSec: fixRecBounds.offsetSec,
+                refVocalStartSec: recAnchor.refVocalStartSec,
+                refVocalEndSec: recAnchor.refVocalEndSec,
+                hasRefVocalAnchor: recAnchor.hasRefVocal,
                 sourceAudioTrackId: fixSource.sourceTrackId,
                 sourceAudioPath: fixSource.filePath || track.filePath,
                 text: sub.text,
                 matchedSubId: subIdStr,
                 coveredSubIds: [subIdStr],
-                targetSubStartSec: sub.startSec,
-                targetSubEndSec: sub.endSec,
+                targetSubStartSec: Number(Math.max(0, recAnchor.anchorStartSec - fixRecBounds.onsetOffsetSec).toFixed(3)),
+                targetSubEndSec: recAnchor.anchorEndSec,
                 volumePercent: 100,
                 isFix: true,
                 isPhysics: false,
@@ -553,6 +609,16 @@ export function useTimingSelfHealingAndOverlaps({
 
               if (unusedCandidates.length > 0) {
                 const bestIv = unusedCandidates[0];
+                const origRecBounds = detectClipSpeechBounds(origSource.buffer, bestIv.startSec, bestIv.endSec);
+                const vocalsBufRec = originalStems?.vocalsPath
+                  ? audioBuffersRef.current[`__orig_vocals__:${originalStems.vocalsPath}`]
+                  : undefined;
+                const recAnchor = findOriginalVocalsAnchorForSub(
+                  vocalsBufRec,
+                  sub.startSec,
+                  sub.endSec,
+                  vocalsBufRec ? getAudioBufferRoomNoiseDb(vocalsBufRec) : undefined
+                );
                 recoveredClip = {
                   id: `clip_${track.id}_healed_orig_${subIdStr}_${iter}`,
                   trackId: track.id,
@@ -564,14 +630,18 @@ export function useTimingSelfHealingAndOverlaps({
                   sourceEndSec: bestIv.endSec,
                   rawSourceStartSec: bestIv.startSec,
                   rawSourceEndSec: bestIv.endSec,
-                  speechOnsetOffsetSec: detectSpeechOnsetOffsetSec(origSource.buffer, bestIv.startSec, bestIv.endSec),
+                  speechOnsetOffsetSec: origRecBounds.onsetOffsetSec,
+                  speechOffsetSec: origRecBounds.offsetSec,
+                  refVocalStartSec: recAnchor.refVocalStartSec,
+                  refVocalEndSec: recAnchor.refVocalEndSec,
+                  hasRefVocalAnchor: recAnchor.hasRefVocal,
                   sourceAudioTrackId: origSource.sourceTrackId,
                   sourceAudioPath: origSource.filePath || track.filePath,
                   text: sub.text,
                   matchedSubId: subIdStr,
                   coveredSubIds: [subIdStr],
-                  targetSubStartSec: sub.startSec,
-                  targetSubEndSec: sub.endSec,
+                  targetSubStartSec: Number(Math.max(0, recAnchor.anchorStartSec - origRecBounds.onsetOffsetSec).toFixed(3)),
+                  targetSubEndSec: recAnchor.anchorEndSec,
                   volumePercent: 100,
                   isFix: false,
                   isPhysics: false,
@@ -597,20 +667,8 @@ export function useTimingSelfHealingAndOverlaps({
           }
         }
 
-        // Local micro-overlap cleanup (NEVER domino-pushing clips across the track!)
-        trClips.sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
-        for (let i = 0; i < trClips.length - 1; i++) {
-          const c1 = trClips[i];
-          const c2 = trClips[i + 1];
-          const c1Start = c1.clipStartSec + (c1.offsetSec || 0);
-          const c1End = c1Start + c1.durationSec;
-          const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
-          const overlap = c1End - c2Start;
-          if (overlap > 0 && overlap <= 0.16 && c1.durationSec - overlap >= 0.20) {
-            c1.durationSec = Number((c1.durationSec - overlap - 0.01).toFixed(3));
-            c1.sourceEndSec = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
-          }
-        }
+        // Post-shift intra-track collision verification: maintain >= 60 ms gap between adjacent clips
+        trClips = enforceSameTrackMinGapService(trClips, TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
 
         workingClips[track.id] = trClips;
       }
@@ -618,6 +676,45 @@ export function useTimingSelfHealingAndOverlaps({
       if (actionsInPass === 0) {
         break;
       }
+    }
+
+    const vocalsBufFinal = originalStems?.vocalsPath
+      ? audioBuffersRef.current[`__orig_vocals__:${originalStems.vocalsPath}`]
+      : undefined;
+    const vocalsNoiseFinal = vocalsBufFinal ? getAudioBufferRoomNoiseDb(vocalsBufFinal) : undefined;
+
+    // Rule 1: Smart "Физика" Sync on unoccupied bursts in ±1.0s
+    applyPhysicsSmartSyncOnMap({
+      tracks,
+      clipsMap: workingClips,
+      trackSubLinesMap,
+      vocalsBuffer: vocalsBufFinal,
+      vocalsNoiseDbHint: vocalsNoiseFinal,
+      applyShift: true,
+      addLog
+    });
+
+    // Rule 4: Cross-role rescue for remaining missed subtitles from another track's unassigned/physics clip
+    const { rescuedSubKeys } = rescueCrossRoleMissingSubtitles({
+      tracks,
+      clipsMap: workingClips,
+      trackSubLinesMap,
+      vocalsBuffer: vocalsBufFinal,
+      vocalsNoiseDbHint: vocalsNoiseFinal,
+      applyShift: true,
+      addLog
+    });
+
+    // Rule 3: Soft Time-Fit (tail trim -> pitch-preserving 1.0x..1.18x) + final 60ms gap verification
+    for (const tr of tracks) {
+      applySoftTimeFitToTrackClips({
+        trackId: tr.id,
+        clipsMap: workingClips,
+        trackSubLinesMap,
+        subtitles,
+        addLog
+      });
+      workingClips[tr.id] = enforceSameTrackMinGapService(workingClips[tr.id] || [], TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
     }
 
     // Final Verification Tally across 100% of subtitles of all dubbers (with Cross-Dubber Voicing Check)
@@ -639,7 +736,7 @@ export function useTimingSelfHealingAndOverlaps({
         totalSubs++;
         const sub = trSubs[sIdx];
         const subIdStr = String(sub.id ?? sIdx);
-        const isCoveredOnOwnTrack = trClips.some(c => {
+        const isCoveredOnOwnTrack = rescuedSubKeys.has(`${track.id}_${subIdStr}`) || trClips.some(c => {
           if (c.matchedSubId === subIdStr || c.coveredSubIds?.includes(subIdStr)) return true;
           const cs = c.clipStartSec + (c.offsetSec || 0);
           const ce = cs + c.durationSec;
@@ -689,7 +786,7 @@ export function useTimingSelfHealingAndOverlaps({
         passed: unvoicedSubs.length === 0
       }
     };
-  }, [tracks, trackSubLinesMap, timingSettings.leadInPaddingSec, timingSettings.leadOutPaddingSec, bindTrackClipsToSubtitlesMonotonically, origBuffersByTrackRef, fixBuffersByActorRef, audioBuffersRef, addLog]);
+  }, [tracks, trackSubLinesMap, timingSettings.leadInPaddingSec, timingSettings.leadOutPaddingSec, originalStems?.vocalsPath, bindTrackClipsToSubtitlesMonotonically, origBuffersByTrackRef, fixBuffersByActorRef, audioBuffersRef, addLog]);
 
   // ---------------------------------------------------------------------------
   // SURGICAL OVERLAP & COLLISION RESOLVER (INTRA-TRACK & INTER-TRACK)

@@ -6,9 +6,12 @@ import {
 } from './timing.types';
 import {
   analyzeTrackAudioNoiseFloor,
-  detectSpeechOnsetOffsetSec,
+  detectClipSpeechBounds,
+  findOriginalVocalsAnchorForSub,
   measureClipActiveSpeechStats
 } from './timing.dsp';
+import { getPlayableAudioUrl } from './timing.utils';
+import { getSharedAudioContext } from '../../lib/qa/sharedAudioContext';
 
 /**
  * Targeted local window speech scanner for the Iterative Self-Healing Final Audit.
@@ -238,15 +241,47 @@ export async function extractFallbackWebAudioPeaks(
 }
 
 /**
+ * Loads and caches the separated `original_vocals.wav` AudioBuffer inside audioBuffersRef
+ * so Stage 1, Stage 2, and Self-Healing audit can scan real original Japanese speech boundaries.
+ */
+export async function ensureOriginalVocalsBuffer(
+  vocalsPath: string | null | undefined,
+  audioBuffersRef: { current: Record<string, AudioBuffer> }
+): Promise<AudioBuffer | null> {
+  if (!vocalsPath) return null;
+  const cacheKey = `__orig_vocals__:${vocalsPath}`;
+  if (audioBuffersRef.current[cacheKey]) {
+    return audioBuffersRef.current[cacheKey];
+  }
+  try {
+    const playableUrl = await getPlayableAudioUrl(vocalsPath);
+    if (!playableUrl) return null;
+    const resp = await fetch(playableUrl);
+    if (!resp.ok) return null;
+    const arr = await resp.arrayBuffer();
+    const ctx = getSharedAudioContext();
+    if (!ctx) return null;
+    const decoded = await ctx.decodeAudioData(arr);
+    audioBuffersRef.current[cacheKey] = decoded;
+    return decoded;
+  } catch (err) {
+    console.warn('[Timing] Failed to decode original_vocals.wav:', err);
+    return null;
+  }
+}
+
+/**
  * Monotonic Subtitle-to-Clip Binding Service:
  * Ensures clips have accurate 1-to-1 (or 1-to-K continuous breath) subtitle locks,
- * speechOnsetOffsetSec, and isPhysics protection.
+ * speechOnsetOffsetSec/speechOffsetSec, original_vocals.wav anchor, and isPhysics protection.
  */
 export function bindTrackClipsToSubtitlesMonotonicallyService(
   track: Track,
   rawClips: AudioClip[],
   trSubs: SubtitleLine[],
-  audioBuffersMap: Record<string, AudioBuffer>
+  audioBuffersMap: Record<string, AudioBuffer>,
+  vocalsBuffer?: AudioBuffer,
+  vocalsNoiseDbHint?: number
 ): AudioClip[] {
   const characterName = track.character || track.characterName || 'Персонаж';
   const trackBuf = audioBuffersMap[track.id];
@@ -258,9 +293,11 @@ export function bindTrackClipsToSubtitlesMonotonicallyService(
   if (trSubs.length === 0 || clips.length === 0) return clips;
 
   for (let i = 0; i < clips.length; i++) {
-    if (clips[i].speechOnsetOffsetSec === undefined) {
+    if (clips[i].speechOnsetOffsetSec === undefined || clips[i].speechOffsetSec === undefined) {
       const srcBuf = audioBuffersMap[clips[i].sourceAudioTrackId || track.id] || trackBuf;
-      clips[i].speechOnsetOffsetSec = detectSpeechOnsetOffsetSec(srcBuf, clips[i].sourceStartSec, clips[i].sourceEndSec);
+      const bounds = detectClipSpeechBounds(srcBuf, clips[i].sourceStartSec, clips[i].sourceEndSec);
+      clips[i].speechOnsetOffsetSec = bounds.onsetOffsetSec;
+      clips[i].speechOffsetSec = bounds.offsetSec;
     }
   }
 
@@ -432,8 +469,17 @@ export function bindTrackClipsToSubtitlesMonotonicallyService(
       const firstSub = coveredSubs[0] || trSubs[bestSubIdx];
       const lastSub = coveredSubs[coveredSubs.length - 1] || firstSub;
 
+      const firstAnchor = findOriginalVocalsAnchorForSub(vocalsBuffer, firstSub.startSec, firstSub.endSec, vocalsNoiseDbHint);
+      const lastAnchor = lastSub === firstSub
+        ? firstAnchor
+        : findOriginalVocalsAnchorForSub(vocalsBuffer, lastSub.startSec, lastSub.endSec, vocalsNoiseDbHint);
+      const onsetOffset = clip.speechOnsetOffsetSec || 0;
+
       clip.isPhysics = false;
       clip.isSplitContinuation = isSplitPart;
+      clip.refVocalStartSec = firstAnchor.refVocalStartSec;
+      clip.refVocalEndSec = lastAnchor.refVocalEndSec;
+      clip.hasRefVocalAnchor = firstAnchor.hasRefVocal;
       clip.text = isSplitPart
         ? `${firstSub.text} (ч. 2)`
         : coveredSubs.length > 1
@@ -443,8 +489,8 @@ export function bindTrackClipsToSubtitlesMonotonicallyService(
       clip.coveredSubIds = coveredSubs.map((s, idx) => String(s.id ?? coveredIdxs[idx]));
       clip.targetSubStartSec = (isSplitPart || clip.overlapResolvedLock)
         ? Number(cStart.toFixed(3))
-        : Number(firstSub.startSec.toFixed(3));
-      clip.targetSubEndSec = lastSub.endSec;
+        : Number(Math.max(0, firstAnchor.anchorStartSec - onsetOffset).toFixed(3));
+      clip.targetSubEndSec = lastAnchor.anchorEndSec;
     } else {
       clip.isPhysics = true;
       clip.isSplitContinuation = false;

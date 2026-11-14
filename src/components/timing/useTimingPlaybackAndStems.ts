@@ -209,7 +209,39 @@ export function useTimingPlaybackAndStems(params: {
       if (mutedTracks.has(tr.id)) return;
       const trClips = audioClips[tr.id] || [];
       for (const c of trClips) {
-        currentValidClips.set(c.id, { clip: c, trackId: tr.id });
+        if (c.internalPauseEdit) {
+          const rate = c.playbackRate && c.playbackRate > 1.005 ? c.playbackRate : 1.0;
+          const p = c.internalPauseEdit;
+          const baseStart = c.clipStartSec + (c.offsetSec || 0);
+          const part1SrcEnd = Math.min(c.sourceEndSec, p.pauseStartSec + p.targetPauseSec * 0.5);
+          const part1Dur = Math.max(0.04, (part1SrcEnd - c.sourceStartSec) / rate);
+          const part2SrcStart = Math.max(c.sourceStartSec, p.pauseEndSec - p.targetPauseSec * 0.5);
+          const part2Dur = Math.max(0.04, (c.sourceEndSec - part2SrcStart) / rate);
+
+          currentValidClips.set(c.id, {
+            trackId: tr.id,
+            clip: {
+              ...c,
+              clipStartSec: baseStart,
+              offsetSec: 0,
+              sourceEndSec: part1SrcEnd,
+              durationSec: part1Dur
+            }
+          });
+          currentValidClips.set(`${c.id}__p2`, {
+            trackId: tr.id,
+            clip: {
+              ...c,
+              id: `${c.id}__p2`,
+              clipStartSec: baseStart + part1Dur,
+              offsetSec: 0,
+              sourceStartSec: part2SrcStart,
+              durationSec: part2Dur
+            }
+          });
+        } else {
+          currentValidClips.set(c.id, { clip: c, trackId: tr.id });
+        }
       }
     });
 
@@ -224,12 +256,15 @@ export function useTimingPlaybackAndStems(params: {
       const { clip } = entry;
       const curStart = clip.clipStartSec + (clip.offsetSec || 0);
       const curEnd = curStart + clip.durationSec;
+      const expectedRate = clip.playbackRate && clip.playbackRate > 1.005 ? clip.playbackRate : 1.0;
+      const curNodeRate = node.source.playbackRate?.value || 1.0;
 
       const hasTimingMoved =
         Math.abs(node.clipStart - curStart) > 0.015 ||
         Math.abs(node.clipEnd - curEnd) > 0.015 ||
         Math.abs(node.sourceStart - clip.sourceStartSec) > 0.015 ||
-        Math.abs(node.sourceEnd - clip.sourceEndSec) > 0.015;
+        Math.abs(node.sourceEnd - clip.sourceEndSec) > 0.015 ||
+        Math.abs(curNodeRate - expectedRate) > 0.005;
 
       const isOutOfBounds = curEnd <= playheadSec || curStart > playheadSec + 0.35;
 
@@ -280,21 +315,23 @@ export function useTimingPlaybackAndStems(params: {
       try {
         const source = audioCtx.createBufferSource();
         const gainNode = audioCtx.createGain();
+        const rate = clip.playbackRate && clip.playbackRate > 1.005 ? clip.playbackRate : 1.0;
         source.buffer = buf;
+        source.playbackRate.value = rate;
         gainNode.gain.value = targetGain;
         source.connect(gainNode);
         gainNode.connect(audioCtx.destination);
 
         if (playheadSec >= clipStart) {
-          const elapsedInClip = playheadSec - clipStart;
+          const elapsedInClip = (playheadSec - clipStart) * rate;
           const offsetInBuf = Math.max(0, Math.min(buf.duration - 0.01, clip.sourceStartSec + elapsedInClip));
-          const remainingDur = Math.max(0.015, Math.min(clip.durationSec - elapsedInClip, buf.duration - offsetInBuf));
-          source.start(0, offsetInBuf, remainingDur);
+          const remainingSrcDur = Math.max(0.015, Math.min((clip.durationSec * rate) - elapsedInClip, buf.duration - offsetInBuf));
+          source.start(0, offsetInBuf, remainingSrcDur);
         } else {
           const delaySec = Math.max(0, clipStart - playheadSec);
           const offsetInBuf = Math.max(0, Math.min(buf.duration - 0.01, clip.sourceStartSec));
-          const playDur = Math.max(0.015, Math.min(clip.durationSec, buf.duration - offsetInBuf));
-          source.start(nowCtx + delaySec, offsetInBuf, playDur);
+          const playSrcDur = Math.max(0.015, Math.min(clip.durationSec * rate, buf.duration - offsetInBuf));
+          source.start(nowCtx + delaySec, offsetInBuf, playSrcDur);
         }
 
         const scheduledNode = {

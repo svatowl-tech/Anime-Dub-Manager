@@ -1,6 +1,7 @@
 export * from './timing.types';
 export * from './timing.constants';
 export * from './timing.schema';
+export * from './timing.rules';
 export * from './timing.utils';
 export * from './timing.dsp';
 export * from './timing.waveform';
@@ -22,6 +23,7 @@ export * from './ClipWaveform';
 export * from './OriginalPeaksWaveform';
 export * from './TimingHeader';
 export * from './TimingBannersAndDrawers';
+export * from './TimingSyncQualityBar';
 export * from './TimingFloatingVideoWindow';
 export * from './TimingOriginalAndStemsRow';
 export * from './TimingDubberTracksTimeline';

@@ -749,7 +749,7 @@ class ExportService {
           const timingResult = await AutoTimingService.alignProjectAndResolveCollisions({
             subPath: episode.subPath,
             matchedTracks: matchResult.matchedTracks,
-            options: { minGapSec: 0.12, leadInSec: 0.05 }
+            options: { minGapSec: 0.12, leadInSec: 0.05, targetDir, episode }
           });
 
           await logStep(`[Коллизии] Разведение перекрытий завершено: обнаружено ${timingResult.stats.totalCollisionsFound}, успешно разведено ${timingResult.stats.totalCollisionsResolved}`, 'success', 60);

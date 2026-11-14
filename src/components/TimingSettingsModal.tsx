@@ -11,6 +11,7 @@ import {
   Info,
   Layers
 } from 'lucide-react';
+import { TIMING_RULES } from './timing/timing.rules';
 
 export interface TimingSettings {
   // 1. Silence removal
@@ -60,7 +61,7 @@ export const DEFAULT_TIMING_SETTINGS: TimingSettings = {
 
   snapTarget: 'sub_start',
   maxSnapDistanceSec: 8.0,
-  minInterRoleGapSec: 0.12,
+  minInterRoleGapSec: TIMING_RULES.MIN_INTER_TRACK_GAP_SEC,
   collisionStrategy: 'highlight',
   preserveIntentionalOverlaps: true,
 

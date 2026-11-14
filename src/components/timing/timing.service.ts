@@ -14,16 +14,21 @@ import { normalizeSpeechText } from '../../lib/qa/whisperTextChecker';
 import { formatSeconds } from './timing.utils';
 import {
   analyzeTrackAudioNoiseFloor,
+  detectClipSpeechBounds,
   detectSpeechIntervals,
   detectSpeechOnsetOffsetSec,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
   measureClipActiveSpeechStats
 } from './timing.dsp';
 import {
+  ensureOriginalVocalsBuffer,
   scanBufferWindowForSpeech,
   computeOriginalWaveformPeakStats,
   extractFallbackWebAudioPeaks,
   bindTrackClipsToSubtitlesMonotonicallyService
 } from './timing.waveform';
+import { TIMING_RULES, isIntentionalOverlapDecision } from './timing.rules';
 
 /**
  * Surgical Overlap & Collision Resolver (Intra-Track & Inter-Track):
@@ -101,9 +106,12 @@ export function separateOverlappingClipPairService(params: {
 
   const subEarly = findBestSubForClip(earlyClip);
   const subLate = findBestSubForClip(lateClip);
-  const minClipDur = Math.min(earlyClip.durationSec, lateClip.durationSec);
+  const isDifferentTrack = earlyClip.trackId !== lateClip.trackId;
+  const targetGapSec = isDifferentTrack
+    ? TIMING_RULES.MIN_INTER_TRACK_GAP_SEC
+    : TIMING_RULES.MIN_SAME_TRACK_GAP_SEC;
 
-  if (earlyClip.trackId !== lateClip.trackId) {
+  if (isDifferentTrack) {
     if (
       earlyClip.isIntentionalOverlap ||
       lateClip.isIntentionalOverlap ||
@@ -116,26 +124,8 @@ export function separateOverlappingClipPairService(params: {
       clearCollisionFlags();
       return false;
     }
-    if (
-      lateStart - earlyStart <= 0.12 ||
-      lateEnd <= earlyEnd + 0.15 ||
-      overlap > 0.40 ||
-      overlap > minClipDur * 0.38
-    ) {
-      clearCollisionFlags();
-      return false;
-    }
-    if (subEarly && subLate) {
-      if (subEarly.id !== undefined && subLate.id !== undefined && String(subEarly.id) === String(subLate.id)) {
-        clearCollisionFlags();
-        return false;
-      }
-      const subOv = Math.min(subEarly.endSec, subLate.endSec) - Math.max(subEarly.startSec, subLate.startSec);
-      if (subOv > -0.05 || earlyEnd - subLate.startSec > 0.35) {
-        clearCollisionFlags();
-        return false;
-      }
-    }
+
+    let hasGlobalAssOverlap = false;
     const activeGlobalSubs = subtitles.filter(
       s => s.endSec >= lateStart - 0.05 && s.startSec <= earlyEnd + 0.05
     );
@@ -144,10 +134,27 @@ export function separateOverlappingClipPairService(params: {
         const gOv = Math.min(activeGlobalSubs[a].endSec, activeGlobalSubs[b].endSec) -
           Math.max(activeGlobalSubs[a].startSec, activeGlobalSubs[b].startSec);
         if (gOv >= 0.04) {
-          clearCollisionFlags();
-          return false;
+          hasGlobalAssOverlap = true;
+          break;
         }
       }
+      if (hasGlobalAssOverlap) break;
+    }
+
+    if (
+      lateStart - earlyStart <= 0.12 ||
+      lateEnd <= earlyEnd + 0.15 ||
+      isIntentionalOverlapDecision({
+        overlapSec: overlap,
+        earlyDurSec: earlyClip.durationSec,
+        lateDurSec: lateClip.durationSec,
+        sub1: subEarly,
+        sub2: subLate,
+        hasGlobalAssOverlap,
+      })
+    ) {
+      clearCollisionFlags();
+      return false;
     }
   } else {
     if (overlap > 0.50) {
@@ -156,7 +163,7 @@ export function separateOverlappingClipPairService(params: {
     }
   }
 
-  const needed = overlap + 0.03;
+  const needed = overlap + targetGapSec;
   let remaining = needed;
   let movedOrTrimmed = false;
 
@@ -177,7 +184,7 @@ export function separateOverlappingClipPairService(params: {
   );
   const earlyIdx = earlySorted.findIndex(c => c.id === earlyClip.id);
   let earlyPrevEnd = earlyIdx > 0
-    ? (earlySorted[earlyIdx - 1].clipStartSec + (earlySorted[earlyIdx - 1].offsetSec || 0) + earlySorted[earlyIdx - 1].durationSec + 0.04)
+    ? (earlySorted[earlyIdx - 1].clipStartSec + (earlySorted[earlyIdx - 1].offsetSec || 0) + earlySorted[earlyIdx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
     : 0;
 
   if (allClipsMap) {
@@ -188,7 +195,7 @@ export function separateOverlappingClipPairService(params: {
         const os = oc.clipStartSec + (oc.offsetSec || 0);
         const oe = os + oc.durationSec;
         if (oe <= earlyStart + 0.05 && oe > earlyStart - 0.35) {
-          earlyPrevEnd = Math.max(earlyPrevEnd, oe + 0.04);
+          earlyPrevEnd = Math.max(earlyPrevEnd, oe + TIMING_RULES.MIN_INTER_TRACK_GAP_SEC);
         }
       }
     }
@@ -213,7 +220,7 @@ export function separateOverlappingClipPairService(params: {
     );
     const lateIdx = lateSorted.findIndex(c => c.id === lateClip.id);
     let nextAnyTrackStart = lateIdx !== -1 && lateIdx + 1 < lateSorted.length
-      ? (lateSorted[lateIdx + 1].clipStartSec + (lateSorted[lateIdx + 1].offsetSec || 0) - 0.04)
+      ? (lateSorted[lateIdx + 1].clipStartSec + (lateSorted[lateIdx + 1].offsetSec || 0) - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
       : Infinity;
 
     if (allClipsMap) {
@@ -223,7 +230,7 @@ export function separateOverlappingClipPairService(params: {
           if (oc.id === earlyClip.id || oc.id === lateClip.id || oc.isPhysics) continue;
           const os = oc.clipStartSec + (oc.offsetSec || 0);
           if (os >= lateStart + 0.15 && os <= lateEnd + 0.60) {
-            nextAnyTrackStart = Math.min(nextAnyTrackStart, os - 0.04);
+            nextAnyTrackStart = Math.min(nextAnyTrackStart, os - TIMING_RULES.MIN_INTER_TRACK_GAP_SEC);
           }
         }
       }
@@ -488,10 +495,97 @@ export function buildTimingExportMetadata(params: {
   };
 }
 
+/**
+ * Post-shift intra-track collision verification pass:
+ * Ensures neighboring clips on the same track maintain at least `minGapSec` (default 60 ms).
+ * Trims silent post-roll first, then pulls left / pushes right inside local corridor,
+ * or safely clamps tail without triggering domino cascades.
+ */
+export function enforceSameTrackMinGapService(
+  rawClips: AudioClip[],
+  minGapSec = TIMING_RULES.MIN_SAME_TRACK_GAP_SEC
+): AudioClip[] {
+  if (!rawClips || rawClips.length < 2) return rawClips;
+  const clips = [...rawClips]
+    .map(c => ({ ...c }))
+    .sort((a, b) => (a.clipStartSec + (a.offsetSec || 0)) - (b.clipStartSec + (b.offsetSec || 0)));
+
+  for (let i = 0; i < clips.length - 1; i++) {
+    const c1 = clips[i];
+    const c2 = clips[i + 1];
+    const c1Start = c1.clipStartSec + (c1.offsetSec || 0);
+    const c1End = c1Start + c1.durationSec;
+    const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
+    const gap = c2Start - c1End;
+
+    if (gap >= minGapSec - 0.001) continue;
+    let remaining = minGapSec - gap;
+
+    // 1. Trim silent post-roll tail of c1 down to speechOffsetSec + 25ms (never cutting speech)
+    const speechEndFloor = typeof c1.speechOffsetSec === 'number' && c1.speechOffsetSec > 0
+      ? Math.max(0.18, c1.speechOffsetSec + 0.025)
+      : Math.max(0.22, c1.durationSec - 0.12);
+    const maxSafeTrim = Math.max(0, c1.durationSec - speechEndFloor);
+    if (maxSafeTrim > 0.005) {
+      const trim = Math.min(remaining, maxSafeTrim);
+      c1.durationSec = Number((c1.durationSec - trim).toFixed(3));
+      c1.sourceEndSec = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
+      remaining -= trim;
+    }
+
+    // 2. Micro-pull c1 slightly earlier (<= 0.18s) if space exists behind c0
+    if (remaining > 0.005 && !c1.isUnisonPhrase && !c1.isSplitContinuation) {
+      const prevEnd = i > 0
+        ? (clips[i - 1].clipStartSec + (clips[i - 1].offsetSec || 0) + clips[i - 1].durationSec + minGapSec)
+        : 0;
+      const curS1 = c1.clipStartSec + (c1.offsetSec || 0);
+      const canPullLeft = Math.min(0.18, Math.max(0, curS1 - prevEnd));
+      if (canPullLeft > 0.005) {
+        const pull = Math.min(remaining, canPullLeft);
+        c1.clipStartSec = Number(Math.max(0, curS1 - pull).toFixed(3));
+        c1.offsetSec = 0;
+        remaining -= pull;
+      }
+    }
+
+    // 3. Micro-push c2 slightly later (<= 0.35s) within corridor before c3
+    if (remaining > 0.005 && !c2.isUnisonPhrase && !c2.isSplitContinuation) {
+      const nextLimit = i + 2 < clips.length
+        ? (clips[i + 2].clipStartSec + (clips[i + 2].offsetSec || 0) - c2.durationSec - minGapSec)
+        : Infinity;
+      const curS2 = c2.clipStartSec + (c2.offsetSec || 0);
+      const canPushRight = Math.min(0.35, Math.max(0, nextLimit - curS2));
+      if (canPushRight > 0.005) {
+        const push = Math.min(remaining, canPushRight);
+        c2.clipStartSec = Number((curS2 + push).toFixed(3));
+        c2.offsetSec = 0;
+        remaining -= push;
+      }
+    }
+
+    // 4. Hard collision safety guard when sandwiched tightly
+    const finalC1Start = c1.clipStartSec + (c1.offsetSec || 0);
+    const finalC2Start = c2.clipStartSec + (c2.offsetSec || 0);
+    if (finalC1Start + c1.durationSec > finalC2Start - minGapSec) {
+      const safeEnd = Math.max(finalC1Start + 0.14, finalC2Start - minGapSec);
+      if (safeEnd < finalC1Start + c1.durationSec) {
+        c1.durationSec = Number((safeEnd - finalC1Start).toFixed(3));
+        c1.sourceEndSec = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
+      }
+    }
+  }
+
+  return clips;
+}
+
 export {
   analyzeTrackAudioNoiseFloor,
+  detectClipSpeechBounds,
   detectSpeechIntervals,
   detectSpeechOnsetOffsetSec,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
+  ensureOriginalVocalsBuffer,
   measureClipActiveSpeechStats,
   scanBufferWindowForSpeech,
   computeOriginalWaveformPeakStats,
@@ -501,3 +595,6 @@ export {
   separateOverlappingClipPairService as separateOverlappingClipPair,
   buildExportIntentionalOverlapsAndSyncUnisonService as buildExportIntentionalOverlapsAndSyncUnison
 };
+
+export * from './timing.vocalsDsp';
+export * from './timing.edgeRules.service';

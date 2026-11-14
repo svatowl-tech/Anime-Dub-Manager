@@ -18,7 +18,7 @@ import {
 } from './timing.utils';
 import {
   detectSpeechIntervals,
-  detectSpeechOnsetOffsetSec,
+  detectClipSpeechBounds,
 } from './timing.dsp';
 
 export interface UseTimingSilenceAndFixesParams {
@@ -123,6 +123,9 @@ export function useTimingSilenceAndFixes({
                 ? (trackSubLinesMap[tracks.find(t => !isFixTrack(t) && normalizeName(t.dubberName) === normalizeName(track.dubberName))!.id] || trSubs)
                 : trSubs);
 
+          const cachedVocalsEntry = Object.entries(audioBuffersRef.current).find(([k]) => k.startsWith('__orig_vocals__:'));
+          const cachedVocalsBuf = cachedVocalsEntry ? cachedVocalsEntry[1] : undefined;
+
           const intervals = detectSpeechIntervals(audioBuf, {
             minSilenceDurationSec: timingSettings.minSilenceDurationSec,
             leadInPaddingSec: timingSettings.leadInPaddingSec,
@@ -131,6 +134,7 @@ export function useTimingSilenceAndFixes({
             mergeCloseGapsSec: timingSettings.mergeCloseGapsSec,
             manualThresholdDb: timingSettings.autoAnalyzeNoiseFloor ? undefined : timingSettings.silenceThresholdDb,
             subLines: subLinesForVad,
+            vocalsBuffer: cachedVocalsBuf,
             onCalibration: (calib) => {
               newCalibrations[track.id] = calib;
               const normGain = normalizationMetrics[track.id]?.gainDb;
@@ -161,7 +165,7 @@ export function useTimingSilenceAndFixes({
 
           updatedClips[track.id] = intervals.map((iv, idx) => {
             const matchingSub = matchedSubByIv[idx];
-            const onsetSec = detectSpeechOnsetOffsetSec(audioBuf, iv.startSec, iv.endSec);
+            const bounds = detectClipSpeechBounds(audioBuf, iv.startSec, iv.endSec);
 
             totalClips++;
             return {
@@ -175,7 +179,8 @@ export function useTimingSilenceAndFixes({
               sourceEndSec: iv.endSec,
               rawSourceStartSec: iv.startSec,
               rawSourceEndSec: iv.endSec,
-              speechOnsetOffsetSec: onsetSec,
+              speechOnsetOffsetSec: bounds.onsetOffsetSec,
+              speechOffsetSec: bounds.offsetSec,
               sourceAudioPath: track.filePath,
               text: matchingSub?.text || `Фраза ${idx + 1}`,
               matchedSubId: matchingSub ? String(matchingSub.id) : undefined,
@@ -285,6 +290,7 @@ export function useTimingSilenceAndFixes({
             if (mIntervals.length > 0) {
               updatedClips[mTrk.id] = mIntervals.map((iv, idx) => {
                 const nearSub = mSubs.find(s => Math.abs(s.startSec - iv.startSec) <= 2.2);
+                const mBounds = detectClipSpeechBounds(mBuf, iv.startSec, iv.endSec);
                 return {
                   id: `clip_${mTrk.id}_${idx}`,
                   trackId: mTrk.id,
@@ -296,7 +302,8 @@ export function useTimingSilenceAndFixes({
                   sourceEndSec: iv.endSec,
                   rawSourceStartSec: iv.startSec,
                   rawSourceEndSec: iv.endSec,
-                  speechOnsetOffsetSec: detectSpeechOnsetOffsetSec(mBuf, iv.startSec, iv.endSec),
+                  speechOnsetOffsetSec: mBounds.onsetOffsetSec,
+                  speechOffsetSec: mBounds.offsetSec,
                   sourceAudioPath: mTrk.filePath,
                   text: nearSub?.text || `Фраза ${idx + 1}`,
                   matchedSubId: nearSub ? String(nearSub.id) : undefined,
@@ -341,25 +348,29 @@ export function useTimingSilenceAndFixes({
               subLines: trSubs
             });
             if (fixIntervals.length > 0) {
-              fixClips = fixIntervals.map((iv, idx) => ({
-                id: `clip_${fixTrack.id}_${idx}`,
-                trackId: fixTrack.id,
-                dubberName: fixTrack.dubberName || actorNick,
-                characterName: fixTrack.characterName || mainTracks[0].characterName,
-                clipStartSec: iv.startSec,
-                durationSec: iv.durationSec,
-                sourceStartSec: iv.startSec,
-                sourceEndSec: iv.endSec,
-                rawSourceStartSec: iv.startSec,
-                rawSourceEndSec: iv.endSec,
-                speechOnsetOffsetSec: detectSpeechOnsetOffsetSec(fixBuf, iv.startSec, iv.endSec),
-                sourceAudioTrackId: fixTrack.id,
-                sourceAudioPath: fixTrack.filePath,
-                text: trSubs[idx]?.text || `Фраза фикса ${idx + 1}`,
-                volumePercent: 100,
-                isFix: true,
-                offsetSec: 0
-              }));
+              fixClips = fixIntervals.map((iv, idx) => {
+                const fBounds = detectClipSpeechBounds(fixBuf, iv.startSec, iv.endSec);
+                return {
+                  id: `clip_${fixTrack.id}_${idx}`,
+                  trackId: fixTrack.id,
+                  dubberName: fixTrack.dubberName || actorNick,
+                  characterName: fixTrack.characterName || mainTracks[0].characterName,
+                  clipStartSec: iv.startSec,
+                  durationSec: iv.durationSec,
+                  sourceStartSec: iv.startSec,
+                  sourceEndSec: iv.endSec,
+                  rawSourceStartSec: iv.startSec,
+                  rawSourceEndSec: iv.endSec,
+                  speechOnsetOffsetSec: fBounds.onsetOffsetSec,
+                  speechOffsetSec: fBounds.offsetSec,
+                  sourceAudioTrackId: fixTrack.id,
+                  sourceAudioPath: fixTrack.filePath,
+                  text: trSubs[idx]?.text || `Фраза фикса ${idx + 1}`,
+                  volumePercent: 100,
+                  isFix: true,
+                  offsetSec: 0
+                };
+              });
               updatedClips[fixTrack.id] = fixClips;
             }
           }
@@ -625,6 +636,9 @@ export function useTimingSilenceAndFixes({
                 ? excisedClips[0].clipStartSec
                 : targetInsertSec;
 
+              const splicedBounds = (fixClip.speechOnsetOffsetSec === undefined || fixClip.speechOffsetSec === undefined)
+                ? detectClipSpeechBounds(fixBuf, fixClip.sourceStartSec, fixClip.sourceEndSec)
+                : null;
               const splicedClip: AudioClip = {
                 ...fixClip,
                 id: `clip_${targetMainTrack.id}_spliced_${fixClip.id}_${fIdx}`,
@@ -639,7 +653,8 @@ export function useTimingSilenceAndFixes({
                 sourceEndSec: fixClip.sourceEndSec,
                 rawSourceStartSec: fixClip.rawSourceStartSec ?? fixClip.sourceStartSec,
                 rawSourceEndSec: fixClip.rawSourceEndSec ?? fixClip.sourceEndSec,
-                speechOnsetOffsetSec: fixClip.speechOnsetOffsetSec ?? detectSpeechOnsetOffsetSec(fixBuf, fixClip.sourceStartSec, fixClip.sourceEndSec),
+                speechOnsetOffsetSec: fixClip.speechOnsetOffsetSec ?? splicedBounds?.onsetOffsetSec ?? 0,
+                speechOffsetSec: fixClip.speechOffsetSec ?? splicedBounds?.offsetSec ?? fixClip.durationSec,
                 isFix: true,
                 isPhysics: false,
                 text: matchedSub?.text || excisedClips[0]?.text || fixClip.text,

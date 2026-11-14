@@ -7,7 +7,9 @@ import {
   TimingIssue,
   MissingSubtitleMarker,
   VoiceCollisionMarker,
-  formatSeconds
+  formatSeconds,
+  enforceSameTrackMinGapService,
+  TIMING_RULES
 } from "./timingAudioUtils";
 import { runStage1TimingAnalysisEngine } from "./timing.autoAlign.engine";
 
@@ -133,10 +135,10 @@ export function useTimingAutoAlign(params: {
           if ((shouldFixDesync || shouldFixOrphan) && typeof clip.targetSubStartSec === 'number') {
             const curStart = clip.clipStartSec + (clip.offsetSec || 0);
             const prevEnd = idx > 0
-              ? (clips[idx - 1].clipStartSec + (clips[idx - 1].offsetSec || 0) + clips[idx - 1].durationSec + 0.04)
+              ? (clips[idx - 1].clipStartSec + (clips[idx - 1].offsetSec || 0) + clips[idx - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
               : 0;
             const nextStart = idx + 1 < clips.length
-              ? (clips[idx + 1].clipStartSec + (clips[idx + 1].offsetSec || 0) - 0.04)
+              ? (clips[idx + 1].clipStartSec + (clips[idx + 1].offsetSec || 0) - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
               : Infinity;
 
             let safeStart = Math.max(curStart - 1.5, Math.min(curStart + 1.5, clip.targetSubStartSec));
@@ -164,7 +166,7 @@ export function useTimingAutoAlign(params: {
             }
           }
         }
-        updatedClips[trackId] = clips;
+        updatedClips[trackId] = enforceSameTrackMinGapService(clips, TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
       }
 
       if (typeFilter === 'all' || typeFilter === 'overlap') {
@@ -180,7 +182,7 @@ export function useTimingAutoAlign(params: {
 
             if (c1End > c2Start) {
               if (typeof c1.targetSubStartSec === 'number' && c1.clipStartSec > c1.targetSubStartSec) {
-                const prevLimit = i > 0 ? ((clips[i - 1].clipStartSec + (clips[i - 1].offsetSec || 0)) + clips[i - 1].durationSec + 0.04) : 0;
+                const prevLimit = i > 0 ? ((clips[i - 1].clipStartSec + (clips[i - 1].offsetSec || 0)) + clips[i - 1].durationSec + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) : 0;
                 const canMoveBack = Math.min(0.8, Math.max(0, c1.clipStartSec - Math.max(c1.targetSubStartSec, prevLimit)));
                 if (canMoveBack > 0.01) {
                   c1.clipStartSec = Number((c1.clipStartSec - canMoveBack).toFixed(3));
@@ -190,9 +192,9 @@ export function useTimingAutoAlign(params: {
               const newC1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
               if (newC1End > (c2.clipStartSec + (c2.offsetSec || 0))) {
                 const nextLimit = i + 2 < clips.length
-                  ? (clips[i + 2].clipStartSec + (clips[i + 2].offsetSec || 0) - c2.durationSec - 0.04)
+                  ? (clips[i + 2].clipStartSec + (clips[i + 2].offsetSec || 0) - c2.durationSec - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
                   : Infinity;
-                const rawShift = (newC1End - (c2.clipStartSec + (c2.offsetSec || 0))) + 0.04;
+                const rawShift = (newC1End - (c2.clipStartSec + (c2.offsetSec || 0))) + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC;
                 const clampedShift = Math.min(1.2, rawShift);
                 const targetC2Start = Math.min(nextLimit, c2.clipStartSec + clampedShift);
                 if (targetC2Start > c2.clipStartSec) {
@@ -210,7 +212,7 @@ export function useTimingAutoAlign(params: {
               addLog(`↔️ Хирургически раздвинут наезд в «${c1.dubberName}»: фраза #${i + 2} пододвинута на (${formatSeconds(c2.clipStartSec)})`, 'info');
             }
           }
-          updatedClips[trackId] = clips;
+          updatedClips[trackId] = enforceSameTrackMinGapService(clips, TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
         }
 
         for (const col of collisions) {
@@ -233,10 +235,10 @@ export function useTimingAutoAlign(params: {
             const c1End = (c1.clipStartSec + (c1.offsetSec || 0)) + c1.durationSec;
             const c2Start = c2.clipStartSec + (c2.offsetSec || 0);
             if (c1End > c2Start) {
-              const rawShift = (c1End - c2Start) + 0.04;
-              if (rawShift <= 1.25) {
+              const rawShift = (c1End - c2Start) + TIMING_RULES.MIN_INTER_TRACK_GAP_SEC;
+              if (rawShift <= TIMING_RULES.MAX_SAFE_SHIFT_WITH_VOCALS_SEC) {
                 const nextInTr2 = c2Idx + 1 < tr2.length
-                  ? (tr2[c2Idx + 1].clipStartSec + (tr2[c2Idx + 1].offsetSec || 0) - c2.durationSec - 0.04)
+                  ? (tr2[c2Idx + 1].clipStartSec + (tr2[c2Idx + 1].offsetSec || 0) - c2.durationSec - TIMING_RULES.MIN_SAME_TRACK_GAP_SEC)
                   : Infinity;
                 const safeC2Start = Math.min(nextInTr2, c2Start + rawShift);
                 if (safeC2Start > c2Start) {
@@ -253,6 +255,10 @@ export function useTimingAutoAlign(params: {
             }
           }
         }
+      }
+
+      for (const tId of Object.keys(updatedClips)) {
+        updatedClips[tId] = enforceSameTrackMinGapService(updatedClips[tId] || [], TIMING_RULES.MIN_SAME_TRACK_GAP_SEC);
       }
 
       setAudioClips(updatedClips);
@@ -298,7 +304,7 @@ export function useTimingAutoAlign(params: {
         }
         return c;
       });
-      return { ...prev, [trackId]: updated };
+      return { ...prev, [trackId]: enforceSameTrackMinGapService(updated, TIMING_RULES.MIN_SAME_TRACK_GAP_SEC) };
     });
     setTimingIssues(prev => prev.filter(i => i.clipId !== clipId));
     toast.success('Фраза точечно пододвинута к субтитру!');
@@ -335,7 +341,10 @@ export function useTimingAutoAlign(params: {
         const colEnd = (collidingClip.clipStartSec + (collidingClip.offsetSec || 0)) + collidingClip.durationSec;
         const curStart = targetClip.clipStartSec + (targetClip.offsetSec || 0);
         if (colEnd > curStart) {
-          const shift = (colEnd - curStart) + 0.04;
+          const gap = collidingClip.trackId !== targetTrackId
+            ? TIMING_RULES.MIN_INTER_TRACK_GAP_SEC
+            : TIMING_RULES.MIN_SAME_TRACK_GAP_SEC;
+          const shift = (colEnd - curStart) + gap;
           targetClip.clipStartSec = Number((targetClip.clipStartSec + shift).toFixed(3));
           targetClip.offsetSec = 0;
           targetClip.hasCollision = false;
@@ -353,7 +362,7 @@ export function useTimingAutoAlign(params: {
           const prevEnd = (prevClip.clipStartSec + (prevClip.offsetSec || 0)) + prevClip.durationSec;
           const curStart = targetClip.clipStartSec + (targetClip.offsetSec || 0);
           if (prevEnd > curStart) {
-            const shift = (prevEnd - curStart) + 0.04;
+            const shift = (prevEnd - curStart) + TIMING_RULES.MIN_SAME_TRACK_GAP_SEC;
             targetClip.clipStartSec = Number((targetClip.clipStartSec + shift).toFixed(3));
             targetClip.offsetSec = 0;
             targetClip.hasCollision = false;

@@ -1,6 +1,7 @@
 export type {
   NoiseCalibration,
   AudioClip,
+  OriginalStemsState,
   TimingIssueType,
   TimingIssue,
   MissingSubtitleMarker,
@@ -17,10 +18,25 @@ export {
   cleanDubberNick,
   isSubtitleForCharacter,
   getPlayableAudioUrl,
-  isPhraseTimingNotRequired,
 } from './timing.utils';
 
 export {
   analyzeTrackAudioNoiseFloor,
+  detectClipSpeechBounds,
   detectSpeechIntervals,
+  detectSpeechOnsetOffsetSec,
+  findOriginalVocalsAnchorForSub,
+  getAudioBufferRoomNoiseDb,
+  ensureOriginalVocalsBuffer,
+  enforceSameTrackMinGapService,
+  findOriginalVocalsBurstForPhysics,
+  findQuietValley40msInBuffer,
+  detectInternalPausesInClip,
+  checkOriginalVocalsPauseInWindow,
+  applyPhysicsSmartSyncOnMap,
+  applyAdaptiveInternalPauseRuleOnTrack,
+  applySoftTimeFitToTrackClips,
+  rescueCrossRoleMissingSubtitles,
 } from './timing.service';
+
+export * from './timing.rules';
