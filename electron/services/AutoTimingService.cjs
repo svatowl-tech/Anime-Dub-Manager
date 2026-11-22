@@ -24,6 +24,11 @@ function floatToPcm16(fVal) {
   return Math.max(-32768, Math.min(32767, Math.round(fVal * 32768.0)));
 }
 
+function floatToPcm24(fVal) {
+  if (Number.isNaN(fVal)) return 0;
+  return Math.max(-8388608, Math.min(8388607, Math.round(fVal * 8388608.0)));
+}
+
 /**
  * Нормализация строк для надежного сопоставления никнеймов и имен персонажей.
  */
@@ -1297,6 +1302,25 @@ class AutoTimingService {
 
       let remaining = minGapSec - gap;
 
+      const getPauseSaved = (ph) =>
+        (ph && ph.internalPauseEdit && ph.internalPauseEdit.pauseEndSec > ph.internalPauseEdit.pauseStartSec)
+          ? Math.max(0, (ph.internalPauseEdit.pauseEndSec - ph.internalPauseEdit.pauseStartSec) - (ph.internalPauseEdit.targetPauseSec ?? 0.12))
+          : 0;
+
+      const applyTrimToPhraseEnd = (ph, newDurSec) => {
+        const safeDur = Number(Math.max(0.05, newDurSec).toFixed(3));
+        const pauseSaved = getPauseSaved(ph);
+        let newSrcEnd = Number((ph.sourceStartSec + safeDur + pauseSaved).toFixed(3));
+        if (ph.internalPauseEdit && newSrcEnd <= ph.internalPauseEdit.pauseEndSec + 0.04) {
+          ph.internalPauseEdit = undefined;
+          newSrcEnd = Number((ph.sourceStartSec + safeDur).toFixed(3));
+        }
+        ph.durationSec = safeDur;
+        ph.unscaledDurationSec = safeDur;
+        ph.sourceEndSec = newSrcEnd;
+        ph.targetEndSec = Number((ph.targetStartSec + safeDur).toFixed(3));
+      };
+
       // 1. Срезаем только тихий post-roll хвост до speechOffsetSec + 25мс
       const speechEndFloor = typeof p1.speechOffsetSec === 'number' && p1.speechOffsetSec > 0
         ? Math.max(0.18, p1.speechOffsetSec + 0.025)
@@ -1304,9 +1328,7 @@ class AutoTimingService {
       const maxSafeTrim = Math.max(0, p1.durationSec - speechEndFloor);
       if (maxSafeTrim > 0.005) {
         const trim = Math.min(remaining, maxSafeTrim);
-        p1.durationSec = Number((p1.durationSec - trim).toFixed(3));
-        p1.sourceEndSec = Number((p1.sourceStartSec + p1.durationSec).toFixed(3));
-        p1.targetEndSec = Number((p1.targetStartSec + p1.durationSec).toFixed(3));
+        applyTrimToPhraseEnd(p1, p1.durationSec - trim);
         remaining -= trim;
       }
 
@@ -1346,13 +1368,11 @@ class AutoTimingService {
         }
       }
 
-      // 4. Жёсткая защита от наезда вплотную
+      // 4. Жёсткая защита от наезда вплотную (никогда не оставляем перекрытие targetEndSec > p2.targetStartSec)
       if (p1.targetEndSec > p2.targetStartSec - minGapSec) {
-        const safeEnd = Math.max(p1.targetStartSec + 0.14, p2.targetStartSec - minGapSec);
+        const safeEnd = Math.min(p2.targetStartSec, Math.max(p1.targetStartSec + 0.05, p2.targetStartSec - minGapSec));
         if (safeEnd < p1.targetEndSec) {
-          p1.durationSec = Number((safeEnd - p1.targetStartSec).toFixed(3));
-          p1.sourceEndSec = Number((p1.sourceStartSec + p1.durationSec).toFixed(3));
-          p1.targetEndSec = Number(safeEnd.toFixed(3));
+          applyTrimToPhraseEnd(p1, safeEnd - p1.targetStartSec);
         }
       }
     }
@@ -2014,6 +2034,8 @@ class AutoTimingService {
     let fitCount = 0;
     for (let i = 0; i < phrases.length; i++) {
       const p = phrases[i];
+      p.playbackRate = 1.0;
+      p.timeStretch = 1.0;
       if (p.isPhysics || p.isUnisonPhrase || p.isIntentionalSubOverlap || p.durationSec >= 25) {
         continue;
       }
@@ -2026,7 +2048,7 @@ class AutoTimingService {
       const nextIntraStart = i + 1 < phrases.length ? (phrases[i + 1].targetStartSec - minGapSec) : Infinity;
 
       let nextInterStart = Infinity;
-      for (const op of allProjectPhrases) {
+      for (const op of (allProjectPhrases || [])) {
         if (op.trackId === p.trackId || op.isPhysics || op.isIntentionalSubOverlap) continue;
         if (op.targetStartSec <= p.targetStartSec + interGapSec || op.targetStartSec >= p.targetEndSec + 0.5) continue;
         const ovKey = `${p.subId}:${op.subId}`;
@@ -2054,7 +2076,8 @@ class AutoTimingService {
       const canPullLeft = Math.max(0, p.targetStartSec - Math.max(prevIntraEnd, alignedStart - 0.06));
       if (canPullLeft > TIMING_RULES.TARGET_ATTACK_ACCURACY_SEC && !evalInitial.hasOverhangOver25) continue;
 
-      // Шаг 1: Подрезка пустого хвоста в конце до speechOffsetSec + 40мс
+      // Шаг 1: Подрезка только пустого тихого хвоста в конце до speechOffsetSec + 40мс
+      // (без изменения темпа/частот и без atempo-растяжения, чтобы исключить металлические призвуки)
       const pauseSaved = p.internalPauseEdit
         ? Math.max(0, (p.internalPauseEdit.pauseEndSec - p.internalPauseEdit.pauseStartSec) - p.internalPauseEdit.targetPauseSec)
         : 0;
@@ -2063,42 +2086,25 @@ class AutoTimingService {
         : Math.max(0.25, p.durationSec - 0.08);
 
       if ((p.sourceEndSec - p.sourceStartSec - pauseSaved) > tailFloor + 0.015) {
-        const newSrcEnd = Number((p.sourceStartSec + pauseSaved + tailFloor).toFixed(3));
+        let newSrcEnd = Number((p.sourceStartSec + pauseSaved + tailFloor).toFixed(3));
+        if (p.internalPauseEdit && newSrcEnd <= p.internalPauseEdit.pauseEndSec + 0.04) {
+          p.internalPauseEdit = undefined;
+          newSrcEnd = Number((p.sourceStartSec + tailFloor).toFixed(3));
+        }
         if (newSrcEnd < p.sourceEndSec) {
           p.sourceEndSec = newSrcEnd;
           p.unscaledDurationSec = Number(Math.max(0.20, tailFloor).toFixed(3));
-          const curRate = p.playbackRate || p.timeStretch || 1.0;
-          p.durationSec = Number((p.unscaledDurationSec / curRate).toFixed(3));
+          p.playbackRate = 1.0;
+          p.timeStretch = 1.0;
+          p.durationSec = p.unscaledDurationSec;
           p.targetEndSec = Number((p.targetStartSec + p.durationSec).toFixed(3));
+          fitCount++;
         }
       }
 
-      // Шаг 2: Безопасный pitch-preserving time compression [1.0x .. 1.18x] при вылете > 25% и наезде на следующую фразу
-      const unscaledDur = p.unscaledDurationSec ?? Math.max(0.25, (p.sourceEndSec - p.sourceStartSec) - pauseSaved);
-      const evalAfterTrim = evaluateSoftTimeFit({
-        curStartSec: p.targetStartSec,
-        clipDurationSec: p.durationSec,
-        unscaledDurationSec: unscaledDur,
-        anchorStartSec: anchorStart,
-        anchorEndSec: anchorEnd,
-        speechOffsetSec: p.speechOffsetSec,
-        nextPhraseCeilingSec: nextPhraseCeiling,
-        playbackRate: p.playbackRate || p.timeStretch || 1.0,
-      });
-
-      if (evalAfterTrim.shouldApply) {
-        const clampedRate = evalAfterTrim.recommendedRate;
-        p.unscaledDurationSec = Number(unscaledDur.toFixed(3));
-        p.playbackRate = clampedRate;
-        p.timeStretch = clampedRate;
-        p.durationSec = Number((unscaledDur / clampedRate).toFixed(3));
-        p.targetEndSec = Number((p.targetStartSec + p.durationSec).toFixed(3));
-        p.timeFitApplied = true;
-        fitCount++;
-        if (collisionLogs) {
-          collisionLogs.push(`[${formatSeconds(p.targetStartSec)}] ⏩ Soft Time-Fit ${clampedRate.toFixed(2)}x (${p.dubberNick}): длинный перевод сжат с ${unscaledDur.toFixed(2)}с до ${p.durationSec.toFixed(2)}с без изменения тона.`);
-        }
-      }
+      // Тайминг никогда не применяет автоматический atempo / pitch-time-stretch — тембр голоса остается на 100% нетронутым
+      p.playbackRate = 1.0;
+      p.timeStretch = 1.0;
     }
 
     return fitCount;
@@ -2574,8 +2580,17 @@ class AutoTimingService {
         const maxCurrentTrim = Math.max(0, current.durationSec - currentSpeechEndFloor);
         if (maxCurrentTrim > 0.005) {
           const trim = Math.min(remainingCollisionSec, maxCurrentTrim);
+          const curPauseSaved = (current.internalPauseEdit && current.internalPauseEdit.pauseEndSec > current.internalPauseEdit.pauseStartSec)
+            ? Math.max(0, (current.internalPauseEdit.pauseEndSec - current.internalPauseEdit.pauseStartSec) - (current.internalPauseEdit.targetPauseSec ?? 0.12))
+            : 0;
           current.durationSec = Number((current.durationSec - trim).toFixed(3));
-          current.sourceEndSec = Number((current.sourceStartSec + current.durationSec).toFixed(3));
+          current.unscaledDurationSec = current.durationSec;
+          let trimmedSrcEnd = Number((current.sourceStartSec + current.durationSec + curPauseSaved).toFixed(3));
+          if (current.internalPauseEdit && trimmedSrcEnd <= current.internalPauseEdit.pauseEndSec + 0.04) {
+            current.internalPauseEdit = undefined;
+            trimmedSrcEnd = Number((current.sourceStartSec + current.durationSec).toFixed(3));
+          }
+          current.sourceEndSec = trimmedSrcEnd;
           current.targetEndSec = Number((current.targetStartSec + current.durationSec).toFixed(3));
           remainingCollisionSec -= trim;
         }
@@ -2785,13 +2800,14 @@ class AutoTimingService {
               }
             }
           }
-        } else {
-          origPhrases.push({
+        } else if (actorOrigItems[0] && Array.isArray(actorOrigItems[0].phrases)) {
+          const fallbackOrigPhrases = actorOrigItems[0].phrases;
+          fallbackOrigPhrases.push({
             ...fixPhrase,
             sourceAudioPath: fixPhrase.trackPath,
             isReplacedByFix: true
           });
-          origPhrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
+          fallbackOrigPhrases.sort((a, b) => a.targetStartSec - b.targetStartSec);
           fixesAppliedCount++;
         }
       }
@@ -2814,22 +2830,130 @@ class AutoTimingService {
   }
 
   /**
-   * Декодирует аудиофайл во временный файл чистого 16-бит 48кГц стерео PCM на диск.
-   * Принудительно задает передискретизацию (-ar 48000 -ac 2 -f s16le -acodec pcm_s16le).
-   * Исключает выделение больших буферов в V8 Heap.
+   * Определяет нативную частоту дискретизации, число каналов и разрядность аудиофайла через ffprobe,
+   * чтобы тайминг не делал принудительный ресемплинг и не изменял частотную характеристику голоса.
    */
-  static decodeToPcmFile(audioPath, outRawPath, sampleRate = 48000, channels = 2) {
+  static probeAudioFormat(audioPath) {
+    return new Promise((resolve) => {
+      const fallback = { sampleRate: 48000, channels: 2, bitDepth: 16 };
+      if (!audioPath || !fs.existsSync(audioPath)) {
+        return resolve(fallback);
+      }
+
+      // 1. Быстрое чтение заголовков WAV (включая BWF/JUNK-чанки) и FLAC STREAMINFO без запуска дочернего процесса
+      try {
+        const fd = fs.openSync(audioPath, 'r');
+        const hdr = Buffer.alloc(4096);
+        const bytesRead = fs.readSync(fd, hdr, 0, hdr.length, 0);
+        fs.closeSync(fd);
+
+        // RIFF WAVE (сканируем чанки до 'fmt ')
+        if (bytesRead >= 36 && hdr.toString('ascii', 0, 4) === 'RIFF' && hdr.toString('ascii', 8, 12) === 'WAVE') {
+          let offset = 12;
+          while (offset + 8 <= bytesRead) {
+            const chunkId = hdr.toString('ascii', offset, offset + 4);
+            const chunkSize = hdr.readUInt32LE(offset + 4);
+            if (chunkId === 'fmt ' && offset + 24 <= bytesRead) {
+              const ch = hdr.readUInt16LE(offset + 10);
+              const sr = hdr.readUInt32LE(offset + 12);
+              const bits = hdr.readUInt16LE(offset + 22);
+              if (sr >= 8000 && sr <= 192000 && ch >= 1 && ch <= 2) {
+                return resolve({
+                  sampleRate: sr,
+                  channels: ch,
+                  bitDepth: bits >= 24 ? 24 : 16
+                });
+              }
+              break;
+            }
+            const nextOffset = offset + 8 + chunkSize + (chunkSize % 2);
+            if (nextOffset <= offset) break;
+            offset = nextOffset;
+          }
+        }
+
+        // FLAC STREAMINFO (bytes 0..3 = 'fLaC', block 0 type 0 = STREAMINFO at offset 8)
+        if (bytesRead >= 26 && hdr.toString('ascii', 0, 4) === 'fLaC' && (hdr[4] & 0x7f) === 0) {
+          const sr = (hdr[18] << 12) | (hdr[19] << 4) | (hdr[20] >> 4);
+          const ch = ((hdr[20] >> 1) & 0x07) + 1;
+          const bps = (((hdr[20] & 0x01) << 4) | (hdr[21] >> 4)) + 1;
+          if (sr >= 8000 && sr <= 192000 && ch >= 1 && ch <= 2) {
+            return resolve({
+              sampleRate: sr,
+              channels: ch,
+              bitDepth: bps >= 24 ? 24 : 16
+            });
+          }
+        }
+      } catch (e) {}
+
+      // 2. Fallback через ffmpeg -i stderr (работает даже когда установлен только ffmpeg-static без ffprobe)
+      const fallbackViaFfmpegStderr = () => {
+        try {
+          const { execFile } = require('child_process');
+          const bin = getFfmpegPath() || 'ffmpeg';
+          execFile(bin, ['-hide_banner', '-i', audioPath], { windowsHide: true, timeout: 10000 }, (_err, _stdout, stderr) => {
+            const text = String(stderr || '');
+            const streamMatch = text.match(/Audio:\s*[^\r\n]*?,\s*(\d{4,6})\s*Hz,\s*([^,\r\n]+)(?:,\s*([^,\r\n]+))?/i);
+            if (!streamMatch) return resolve(fallback);
+            const sr = parseInt(streamMatch[1], 10);
+            const chLayout = String(streamMatch[2] || '').toLowerCase();
+            const sampleFmt = String(streamMatch[3] || '').toLowerCase();
+            const ch = (chLayout.includes('mono') || chLayout.includes('1 channels')) ? 1 : 2;
+            const isHighBit = sampleFmt.includes('s32') || sampleFmt.includes('s24') || sampleFmt.includes('flt') || sampleFmt.includes('dbl') || text.includes('24 bit');
+            resolve({
+              sampleRate: (Number.isFinite(sr) && sr >= 8000 && sr <= 192000) ? sr : 48000,
+              channels: ch,
+              bitDepth: isHighBit ? 24 : 16
+            });
+          });
+        } catch (e) {
+          resolve(fallback);
+        }
+      };
+
+      // 3. Основной путь через ffprobe
+      try {
+        ffmpeg.ffprobe(audioPath, (err, metadata) => {
+          if (err || !metadata || !Array.isArray(metadata.streams)) {
+            return fallbackViaFfmpegStderr();
+          }
+          const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
+          if (!audioStream) return fallbackViaFfmpegStderr();
+          const sr = parseInt(audioStream.sample_rate, 10);
+          const ch = parseInt(audioStream.channels, 10);
+          const bitsRaw = parseInt(audioStream.bits_per_raw_sample || audioStream.bits_per_sample || 0, 10);
+          const sampleFmt = String(audioStream.sample_fmt || '').toLowerCase();
+          const isHighBit = bitsRaw >= 24 || sampleFmt.includes('32') || sampleFmt.includes('flt') || sampleFmt.includes('dbl');
+          resolve({
+            sampleRate: (Number.isFinite(sr) && sr >= 8000 && sr <= 192000) ? sr : 48000,
+            channels: (Number.isFinite(ch) && ch >= 1 && ch <= 2) ? ch : 2,
+            bitDepth: isHighBit ? 24 : 16
+          });
+        });
+      } catch (e) {
+        fallbackViaFfmpegStderr();
+      }
+    });
+  }
+
+  /**
+   * Декодирует аудиофайл во временный файл чистого 32-бит float PCM (f32le) на диск
+   * в точной нативной частоте дискретизации и числе каналов (без ресемплинга и потери разрядности).
+   */
+  static decodeToPcmFile(audioPath, outRawPath, sampleRate = 48000, channels = 2, format = 'f32le') {
     return new Promise((resolve, reject) => {
       let killed = false;
+      const isFloat = format === 'f32le';
       const ffmpegCmd = ffmpeg(audioPath)
         .noVideo()
-        .audioCodec('pcm_s16le')
+        .audioCodec(isFloat ? 'pcm_f32le' : 'pcm_s16le')
         .audioFrequency(sampleRate)
         .audioChannels(channels)
         .outputOptions([
           '-ar', String(sampleRate),
           '-ac', String(channels),
-          '-f', 's16le'
+          '-f', isFloat ? 'f32le' : 's16le'
         ])
         .output(outRawPath);
 
@@ -2928,18 +3052,19 @@ class AutoTimingService {
   /**
    * Декодирует срез аудиофайла с pitch-preserving изменением темпа (-af atempo=...) в .raw PCM файл.
    */
-  static decodeStretchedSliceToPcmFile(audioPath, startSec, durationSec, rate, outRawPath, sampleRate = 48000, channels = 2) {
+  static decodeStretchedSliceToPcmFile(audioPath, startSec, durationSec, rate, outRawPath, sampleRate = 48000, channels = 2, format = 'f32le') {
     return new Promise((resolve, reject) => {
       let killed = false;
+      const isFloat = format === 'f32le';
       const safeRate = Math.max(0.5, Math.min(2.0, Number(rate || 1.0)));
       const ffmpegCmd = ffmpeg(audioPath)
         .noVideo()
         .inputOptions(['-ss', String(Math.max(0, startSec)), '-t', String(Math.max(0.05, durationSec))])
         .audioFilters(`atempo=${safeRate.toFixed(4)}`)
-        .audioCodec('pcm_s16le')
+        .audioCodec(isFloat ? 'pcm_f32le' : 'pcm_s16le')
         .audioFrequency(sampleRate)
         .audioChannels(channels)
-        .outputOptions(['-ar', String(sampleRate), '-ac', String(channels), '-f', 's16le'])
+        .outputOptions(['-ar', String(sampleRate), '-ac', String(channels), '-f', isFloat ? 'f32le' : 's16le'])
         .output(outRawPath);
 
       const timeout = setTimeout(() => {
@@ -2962,59 +3087,196 @@ class AutoTimingService {
   }
 
   /**
-   * ПОТОКОВАЯ СБОРКА АУДИОДОРОЖКИ С МИНИМАЛЬНЫМ ПОТРЕБЛЕНИЕМ RAM (< 20 МБ):
-   * 1. Исходные файлы стримятся в 48kHz 16-bit stereo .raw файлы на диске.
-   * 2. Аудио рендерится блоками (чанками по 10 секунд) непосредственно в выходной WAV файл.
-   * 3. Поддерживает сжатие внутренних пауз (Rule 2B internalPauseEdit) и pitch-preserving atempo (Rule 3 playbackRate).
-   * 4. Адаптивный pre-roll / post-roll с Hann window fade-in / fade-out.
+   * Гарантирует строгую целостность сегментов внутри одной дорожки даббера перед сборкой:
+   * 1. Исключает повторное воспроизведение одного и того же исходного участка аудио («заевшая пластинка»).
+   * 2. Исключает наложения сегментов по целевому времени на одной дорожке (главная причина гребенчатой фильтрации / металлического призвука).
+   */
+  static sanitizeSingleTrackRenderSegments(rawSegments, defaultInputPath) {
+    if (!Array.isArray(rawSegments) || rawSegments.length === 0) return [];
+
+    const normalized = [];
+    for (const seg of rawSegments) {
+      if (!seg) continue;
+      const srcPath = seg.sourceAudioPath || defaultInputPath;
+      const srcStart = Number(typeof seg.sourceStartSec === 'number' ? seg.sourceStartSec : 0);
+      const rawDur = typeof seg.durationSec === 'number' && seg.durationSec > 0
+        ? seg.durationSec
+        : (typeof seg.sourceEndSec === 'number' ? Math.max(0, seg.sourceEndSec - srcStart) : 0);
+      const srcEnd = Number(typeof seg.sourceEndSec === 'number' ? seg.sourceEndSec : (srcStart + rawDur));
+      const srcSpan = srcEnd - srcStart;
+      if (!Number.isFinite(srcStart) || !Number.isFinite(srcEnd) || srcSpan < 0.02) continue;
+
+      const trgStart = Math.max(0, Number(typeof seg.targetStartSec === 'number' ? seg.targetStartSec : srcStart));
+      const effectiveDur = Math.min(srcSpan, rawDur > 0.01 ? rawDur : srcSpan);
+      const trgEnd = trgStart + effectiveDur;
+
+      normalized.push({
+        ...seg,
+        sourceAudioPath: srcPath,
+        sourceStartSec: Number(srcStart.toFixed(4)),
+        sourceEndSec: Number((srcStart + effectiveDur).toFixed(4)),
+        durationSec: Number(effectiveDur.toFixed(4)),
+        targetStartSec: Number(trgStart.toFixed(4)),
+        targetEndSec: Number(trgEnd.toFixed(4))
+      });
+    }
+
+    normalized.sort((a, b) => (a.targetStartSec - b.targetStartSec) || (a.sourceStartSec - b.sourceStartSec));
+
+    // 1. Защита от дублей и перекрытий исходного аудио (один и тот же файл источника, включая переупорядоченные дубли)
+    const seenBySource = new Map();
+    const dedupedBySource = [];
+    for (const seg of normalized) {
+      const srcKey = path.resolve(seg.sourceAudioPath || defaultInputPath || '');
+      const seenList = seenBySource.get(srcKey) || [];
+      let dropped = false;
+
+      for (let idx = 0; idx < seenList.length; idx++) {
+        const prev = seenList[idx];
+        const srcOverlap = Math.min(prev.sourceEndSec, seg.sourceEndSec) - Math.max(prev.sourceStartSec, seg.sourceStartSec);
+        if (srcOverlap <= 0.002) continue;
+
+        const shorterSpan = Math.max(0.02, Math.min(prev.durationSec, seg.durationSec));
+        // Если сегмент дублирует >= 50% того же исходного участка — это дубль («заевшая пластинка»)
+        // Предпочитаем фикс либо более полную (длинную) фразу вместо обрезанного дубликата
+        if (srcOverlap >= shorterSpan * 0.50) {
+          if ((seg.isFix && !prev.isFix) || (!prev.isFix && !seg.isFix && seg.durationSec > prev.durationSec + 0.05)) {
+            const prevIdx = dedupedBySource.indexOf(prev);
+            if (prevIdx >= 0) dedupedBySource[prevIdx] = seg;
+            seenList[idx] = seg;
+          }
+          dropped = true;
+          break;
+        }
+
+        // Частичное перекрытие с хвостом prev -> сдвигаем начало seg строго за конец prev
+        if (seg.sourceStartSec >= prev.sourceStartSec && seg.sourceStartSec < prev.sourceEndSec) {
+          const cutDelta = prev.sourceEndSec - seg.sourceStartSec;
+          const remainingDur = seg.sourceEndSec - prev.sourceEndSec;
+          if (remainingDur < 0.025) {
+            dropped = true;
+            break;
+          }
+          seg.sourceStartSec = Number(prev.sourceEndSec.toFixed(4));
+          seg.targetStartSec = Number((seg.targetStartSec + cutDelta).toFixed(4));
+          seg.durationSec = Number(remainingDur.toFixed(4));
+          seg.targetEndSec = Number((seg.targetStartSec + remainingDur).toFixed(4));
+        } else if (seg.sourceStartSec < prev.sourceStartSec && seg.sourceEndSec > prev.sourceStartSec) {
+          // Частичное перекрытие с началом prev -> обрезаем хвост seg до начала prev
+          const remainingDur = prev.sourceStartSec - seg.sourceStartSec;
+          if (remainingDur < 0.025) {
+            dropped = true;
+            break;
+          }
+          seg.sourceEndSec = Number(prev.sourceStartSec.toFixed(4));
+          seg.durationSec = Number(remainingDur.toFixed(4));
+          seg.targetEndSec = Number((seg.targetStartSec + remainingDur).toFixed(4));
+        }
+      }
+
+      if (dropped) continue;
+      dedupedBySource.push(seg);
+      seenList.push(seg);
+      seenBySource.set(srcKey, seenList);
+    }
+
+    // 2. Строгое устранение любых перекрытий по целевому времени на одной дорожке
+    dedupedBySource.sort((a, b) => (a.targetStartSec - b.targetStartSec) || (a.sourceStartSec - b.sourceStartSec));
+    const cleanSegments = [];
+    for (const seg of dedupedBySource) {
+      if (cleanSegments.length === 0) {
+        cleanSegments.push(seg);
+        continue;
+      }
+      const prev = cleanSegments[cleanSegments.length - 1];
+      if (prev.targetEndSec > seg.targetStartSec) {
+        const overlap = prev.targetEndSec - seg.targetStartSec;
+        const newPrevDur = prev.durationSec - overlap;
+        if (newPrevDur < 0.02) {
+          // Предыдущий фрагмент полностью перекрыт следующим — заменяем
+          cleanSegments[cleanSegments.length - 1] = seg;
+          continue;
+        }
+        prev.durationSec = Number(newPrevDur.toFixed(4));
+        prev.sourceEndSec = Number((prev.sourceStartSec + newPrevDur).toFixed(4));
+        prev.targetEndSec = Number(seg.targetStartSec.toFixed(4));
+      }
+      cleanSegments.push(seg);
+    }
+
+    return cleanSegments;
+  }
+
+  /**
+   * ПОТОКОВАЯ БИТ-ПРОЗРАЧНАЯ СБОРКА АУДИОДОРОЖКИ С МИНИМАЛЬНЫМ ПОТРЕБЛЕНИЕМ RAM:
+   * 1. Сохраняет точную нативную частоту дискретизации, канальность и разрядность исходника (без ресемплинга и частотных искажений).
+   * 2. Работает во внутреннем 32-bit float PCM без промежуточного квантования и без автоматического atempo.
+   * 3. Гарантирует отсутствие повторного воспроизведения одного и того же участка («заевшая пластинка»)
+   *    и отсутствие наложения/суммирования внутри одной дорожки (нулевая гребенчатая фильтрация).
    */
   static async assembleMultiSourceTrack(defaultInputPath, phrases, outputAudioPath, options = {}) {
-    const sampleRate = 48000;
-    const channels = 2;
-    const bytesPerSampleFrame = 4; // 2 канала * 2 байта (16-bit)
-    const bytesPerSec = sampleRate * bytesPerSampleFrame; // 192,000 байт/сек
+    const probedFormat = await this.probeAudioFormat(defaultInputPath);
+    const sampleRate = options.sampleRate || probedFormat.sampleRate || 48000;
+    const channels = options.channels || probedFormat.channels || 2;
+    const outputBitDepth = options.bitDepth || probedFormat.bitDepth || 16;
+    const outBytesPerSample = outputBitDepth / 8;
+    const outBytesPerFrame = channels * outBytesPerSample;
+    const floatBytesPerFrame = channels * 4; // 32-bit float PCM (f32le)
 
-    // 0. Раскрытие фраз с internalPauseEdit в два бесшовных склеиваемых суб-сегмента
-    const renderPhrases = [];
+    // 0. Раскрытие фраз с internalPauseEdit в два строго непересекающихся суб-сегмента
+    const expandedPhrases = [];
     for (const p of (phrases || [])) {
-      const rate = Number(p.playbackRate || p.timeStretch || 1.0);
       const srcStart = typeof p.sourceStartSec === 'number' ? p.sourceStartSec : 0;
       const srcEnd = typeof p.sourceEndSec === 'number' ? p.sourceEndSec : (srcStart + (p.durationSec || 1.0));
       const trgStart = typeof p.targetStartSec === 'number' ? p.targetStartSec : 0;
 
-      if (p.internalPauseEdit && p.internalPauseEdit.pauseEndSec > p.internalPauseEdit.pauseStartSec) {
-        const halfTargetPause = Math.max(0.02, (p.internalPauseEdit.targetPauseSec ?? 0.12) * 0.5);
-        const s1End = Math.min(srcEnd, p.internalPauseEdit.pauseStartSec + halfTargetPause);
-        const s2Start = Math.max(s1End, p.internalPauseEdit.pauseEndSec - halfTargetPause);
-        const s1Unscaled = Math.max(0.05, s1End - srcStart);
-        const s2Unscaled = Math.max(0.05, srcEnd - s2Start);
-        const s1Dur = Number((s1Unscaled / (rate > 1.005 ? rate : 1.0)).toFixed(3));
-        const s2Dur = Number((s2Unscaled / (rate > 1.005 ? rate : 1.0)).toFixed(3));
+      const pe = p.internalPauseEdit;
+      const isValidPauseEdit = Boolean(
+        pe &&
+        typeof pe.pauseStartSec === 'number' &&
+        typeof pe.pauseEndSec === 'number' &&
+        pe.pauseEndSec > pe.pauseStartSec + 0.04 &&
+        pe.pauseStartSec > srcStart + 0.04 &&
+        pe.pauseEndSec < srcEnd - 0.04
+      );
 
-        renderPhrases.push({
-          ...p,
-          id: `${p.id}_ps1`,
-          sourceStartSec: srcStart,
-          sourceEndSec: Number(s1End.toFixed(3)),
-          durationSec: s1Dur,
-          targetStartSec: trgStart,
-          targetEndSec: Number((trgStart + s1Dur).toFixed(3)),
-          suppressPostSafety: true
-        });
-        renderPhrases.push({
-          ...p,
-          id: `${p.id}_ps2`,
-          sourceStartSec: Number(s2Start.toFixed(3)),
-          sourceEndSec: srcEnd,
-          durationSec: s2Dur,
-          targetStartSec: Number((trgStart + s1Dur).toFixed(3)),
-          targetEndSec: Number((trgStart + s1Dur + s2Dur).toFixed(3)),
-          suppressPreSafety: true
-        });
-      } else {
-        renderPhrases.push({ ...p });
+      if (isValidPauseEdit) {
+        const halfTargetPause = Math.max(0.02, (pe.targetPauseSec ?? 0.12) * 0.5);
+        const s1End = Math.min(srcEnd - 0.04, pe.pauseStartSec + halfTargetPause);
+        const s2Start = Math.max(s1End + 0.01, pe.pauseEndSec - halfTargetPause);
+        const s1Dur = s1End - srcStart;
+        const s2Dur = srcEnd - s2Start;
+
+        if (s1Dur >= 0.04 && s2Dur >= 0.04) {
+          expandedPhrases.push({
+            ...p,
+            id: `${p.id}_ps1`,
+            sourceStartSec: Number(srcStart.toFixed(4)),
+            sourceEndSec: Number(s1End.toFixed(4)),
+            durationSec: Number(s1Dur.toFixed(4)),
+            targetStartSec: Number(trgStart.toFixed(4)),
+            targetEndSec: Number((trgStart + s1Dur).toFixed(4)),
+            suppressPostSafety: true
+          });
+          expandedPhrases.push({
+            ...p,
+            id: `${p.id}_ps2`,
+            sourceStartSec: Number(s2Start.toFixed(4)),
+            sourceEndSec: Number(srcEnd.toFixed(4)),
+            durationSec: Number(s2Dur.toFixed(4)),
+            targetStartSec: Number((trgStart + s1Dur).toFixed(4)),
+            targetEndSec: Number((trgStart + s1Dur + s2Dur).toFixed(4)),
+            suppressPreSafety: true
+          });
+          continue;
+        }
       }
+
+      expandedPhrases.push({ ...p });
     }
+
+    // 0B. Жесткая санитизация сегментов одной дорожки: ноль дублей исходника и ноль наложений по таймлайну
+    const renderPhrases = this.sanitizeSingleTrackRenderSegments(expandedPhrases, defaultInputPath);
 
     // 1. Сбор всех уникальных исходных путей
     const sourcePaths = new Set([defaultInputPath]);
@@ -3025,16 +3287,16 @@ class AutoTimingService {
     const tempDir = path.dirname(outputAudioPath);
     await fs.promises.mkdir(tempDir, { recursive: true });
 
-    // 2. Декодирование исходников во временные .raw файлы на диск через FFmpeg (без выделения RAM)
+    // 2. Декодирование исходников во временные 32-bit float .raw файлы в нативном sampleRate / channels
     const rawPcmFilesMap = new Map();
     const tempRawFilesToCleanup = [];
 
     try {
       for (const src of sourcePaths) {
-        if (fs.existsSync(src)) {
+        if (src && fs.existsSync(src)) {
           const tempRawPath = path.join(tempDir, `temp_src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.raw`);
           try {
-            await this.decodeToPcmFile(src, tempRawPath, sampleRate, channels);
+            await this.decodeToPcmFile(src, tempRawPath, sampleRate, channels, 'f32le');
             rawPcmFilesMap.set(src, tempRawPath);
             tempRawFilesToCleanup.push(tempRawPath);
           } catch (decErr) {
@@ -3043,38 +3305,41 @@ class AutoTimingService {
         }
       }
 
-      // 2B. Предрендеринг сегментов с pitch-preserving atempo (Rule 3: Soft Time-Fit [1.03..1.18])
-      for (let rIdx = 0; rIdx < renderPhrases.length; rIdx++) {
-        const seg = renderPhrases[rIdx];
-        const rate = Number(seg.playbackRate || seg.timeStretch || 1.0);
-        if (rate <= 1.005) continue;
+      // 2B. Pitch-preserving atempo ОТКЛЮЧЕН по умолчанию (разрешён только при явном options.allowTimeStretch === true),
+      // чтобы тайминг гарантированно не вносил металлических призвуков и фазовых искажений в голос.
+      if (options.allowTimeStretch === true) {
+        for (let rIdx = 0; rIdx < renderPhrases.length; rIdx++) {
+          const seg = renderPhrases[rIdx];
+          const rate = Number(seg.playbackRate || seg.timeStretch || 1.0);
+          if (rate <= 1.005) continue;
 
-        const origSrc = seg.sourceAudioPath || defaultInputPath;
-        if (!origSrc || !fs.existsSync(origSrc)) continue;
+          const origSrc = seg.sourceAudioPath || defaultInputPath;
+          if (!origSrc || !fs.existsSync(origSrc)) continue;
 
-        const sStart = typeof seg.sourceStartSec === 'number' ? seg.sourceStartSec : 0;
-        const sEnd = typeof seg.sourceEndSec === 'number' ? seg.sourceEndSec : (sStart + (seg.durationSec || 1.0));
-        const rawSliceDur = Math.max(0.05, sEnd - sStart);
-        const stretchedRawPath = path.join(tempDir, `temp_atempo_${Date.now()}_${rIdx}_${Math.random().toString(36).slice(2, 6)}.raw`);
+          const sStart = typeof seg.sourceStartSec === 'number' ? seg.sourceStartSec : 0;
+          const sEnd = typeof seg.sourceEndSec === 'number' ? seg.sourceEndSec : (sStart + (seg.durationSec || 1.0));
+          const rawSliceDur = Math.max(0.05, sEnd - sStart);
+          const stretchedRawPath = path.join(tempDir, `temp_atempo_${Date.now()}_${rIdx}_${Math.random().toString(36).slice(2, 6)}.raw`);
 
-        try {
-          await this.decodeStretchedSliceToPcmFile(origSrc, sStart, rawSliceDur, rate, stretchedRawPath, sampleRate, channels);
-          const statSize = fs.statSync(stretchedRawPath).size;
-          const actualStretchedSec = Math.floor(statSize / bytesPerSampleFrame) / sampleRate;
-          if (actualStretchedSec > 0.04) {
-            const syntheticKey = `__atempo_${rIdx}_${stretchedRawPath}`;
-            rawPcmFilesMap.set(syntheticKey, stretchedRawPath);
-            tempRawFilesToCleanup.push(stretchedRawPath);
-            seg.sourceAudioPath = syntheticKey;
-            seg.sourceStartSec = 0;
-            seg.sourceEndSec = Number(actualStretchedSec.toFixed(4));
-            seg.durationSec = Number(actualStretchedSec.toFixed(4));
-            seg.targetEndSec = Number(((seg.targetStartSec || 0) + actualStretchedSec).toFixed(4));
-            seg.suppressPreSafety = true;
-            seg.suppressPostSafety = true;
+          try {
+            await this.decodeStretchedSliceToPcmFile(origSrc, sStart, rawSliceDur, rate, stretchedRawPath, sampleRate, channels, 'f32le');
+            const statSize = fs.statSync(stretchedRawPath).size;
+            const actualStretchedSec = Math.floor(statSize / floatBytesPerFrame) / sampleRate;
+            if (actualStretchedSec > 0.04) {
+              const syntheticKey = `__atempo_${rIdx}_${stretchedRawPath}`;
+              rawPcmFilesMap.set(syntheticKey, stretchedRawPath);
+              tempRawFilesToCleanup.push(stretchedRawPath);
+              seg.sourceAudioPath = syntheticKey;
+              seg.sourceStartSec = 0;
+              seg.sourceEndSec = Number(actualStretchedSec.toFixed(4));
+              seg.durationSec = Number(actualStretchedSec.toFixed(4));
+              seg.targetEndSec = Number(((seg.targetStartSec || 0) + actualStretchedSec).toFixed(4));
+              seg.suppressPreSafety = true;
+              seg.suppressPostSafety = true;
+            }
+          } catch (atempoErr) {
+            log.warn(`[AutoTiming] Ошибка atempo x${rate} для сегмента ${seg.id}:`, atempoErr.message);
           }
-        } catch (atempoErr) {
-          log.warn(`[AutoTiming] Ошибка atempo x${rate} для сегмента ${seg.id}:`, atempoErr.message);
         }
       }
 
@@ -3094,7 +3359,7 @@ class AutoTimingService {
       }
 
       const defaultFdInfo = fdsMap.get(defaultInputPath);
-      const defaultDurationSec = defaultFdInfo ? (defaultFdInfo.size / bytesPerSec) : 0;
+      const defaultDurationSec = defaultFdInfo ? ((defaultFdInfo.size / floatBytesPerFrame) / sampleRate) : 0;
 
       // 3. Загрузка карты громкостей
       const searchDirs = [
@@ -3120,15 +3385,12 @@ class AutoTimingService {
       }
       maxSec = Math.max(maxSec + 1.0, 5.0);
 
-      // Проверка на непрерывную таймлайн-запись:
-      // При экспорте из тайминга или явном рендеринге из оттаймленных клипов (renderFromClips / exactTimelineRender)
-      // ВСЕГДА рендерится чистый мастер-трек из готовых оттаймленных фраз (isTimelineTrack = false).
       let isTimelineTrack = false;
       if (!options.renderFromClips && !options.exactTimelineRender && options.preserveBackgroundAudio) {
         if (defaultDurationSec >= 45.0) {
           isTimelineTrack = true;
-        } else if (phrases.length > 0) {
-          const span = Math.max(...phrases.map(p => p.sourceEndSec)) - Math.min(...phrases.map(p => p.sourceStartSec));
+        } else if (renderPhrases.length > 0) {
+          const span = Math.max(...renderPhrases.map(p => p.sourceEndSec)) - Math.min(...renderPhrases.map(p => p.sourceStartSec));
           if (span > 40.0) isTimelineTrack = true;
         }
       }
@@ -3137,44 +3399,88 @@ class AutoTimingService {
       const tempOut = path.join(tempDir, `temp_timed_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.wav`);
       const outFd = fs.openSync(tempOut, 'w');
 
-      // Резервируем место под 44-байтный заголовок WAV
-      const initialHeader = this.createWavHeader(0, sampleRate, channels, 16);
+      // Резервируем место под 44-байтный заголовок WAV (нативные sampleRate / channels / outputBitDepth)
+      const initialHeader = this.createWavHeader(0, sampleRate, channels, outputBitDepth);
       fs.writeSync(outFd, initialHeader, 0, 44, 0);
 
-      // 6. Потоковый рендеринг чанками по 10 секунд (Float32 микширование с нулевым искажением)
+      // 6. Потоковый рендеринг чанками по 10 секунд (чистый 32-битный Float без суммирования дублей)
       const CHUNK_DURATION_SEC = 10.0;
       const samplesPerChunk = Math.round(CHUNK_DURATION_SEC * sampleRate);
-      const bytesPerChunk = samplesPerChunk * bytesPerSampleFrame;
+      const outBytesPerChunk = samplesPerChunk * outBytesPerFrame;
       const totalChunks = Math.ceil(maxSec / CHUNK_DURATION_SEC);
-      const chunkBuffer = Buffer.alloc(bytesPerChunk, 0);
+      const chunkBuffer = Buffer.alloc(outBytesPerChunk, 0);
       const floatChunk = new Float32Array(samplesPerChunk * channels);
 
-      // Параметры атак и затуханий:
-      // При экспорте из тайминга (renderFromClips / exactTimelineRender) границы фраз УЖЕ точно выставлены
-      // пользователем/детектором тишины. Смещение назад (pre-roll) и вперед (post-roll) отключаются,
-      // чтобы фразы не наезжали друг на друга и не создавали искусственных перегрузок звука.
+      // По умолчанию расширение границ чтения фразы = 0:
+      // VAD и границы клипов УЖЕ включают pre-roll/post-roll.
+      // Примечание: options.safetyPaddingMs относится к зачистке старых хвостов при вшитии фиксов, а НЕ к расширению чтения соседних слогов!
+      const requestedSafetyPreSec = options.phrasePaddingMs !== undefined
+        ? Math.max(0.0, Number(options.phrasePaddingMs) / 1000.0)
+        : 0.0;
+      const requestedSafetyPostSec = options.phrasePaddingMs !== undefined
+        ? Math.max(0.0, (Number(options.phrasePaddingMs) * 1.5) / 1000.0)
+        : 0.0;
+      const tailMuteMarginSec = options.safetyPaddingMs !== undefined
+        ? Math.max(0.0, Math.min(0.25, Number(options.safetyPaddingMs) / 1000.0))
+        : 0.0;
+
       const isExactTimingExport = Boolean(options.renderFromClips || options.exactTimelineRender);
-      const customSafetySec = options.safetyPaddingMs !== undefined
-        ? Math.max(0.0, Number(options.safetyPaddingMs) / 1000.0)
-        : (isExactTimingExport ? 0.0 : 0.090);
-      const safetyPreSec = customSafetySec;
-      const safetyPostSec = options.safetyPaddingMs !== undefined
-        ? Math.max(0.0, (Number(options.safetyPaddingMs) * 1.8) / 1000.0)
-        : (isExactTimingExport ? 0.0 : 0.180);
       const customFadeSec = options.fadeDurationMs !== undefined
         ? Math.max(0.001, Number(options.fadeDurationMs) / 1000.0)
         : null;
       const fadeSamplesIn = customFadeSec !== null
-        ? Math.max(48, Math.floor(sampleRate * customFadeSec))
-        : (isExactTimingExport
-            ? Math.min(384, Math.floor(sampleRate * 0.008))
-            : Math.min(480, Math.floor(sampleRate * 0.010)));
+        ? Math.max(32, Math.floor(sampleRate * customFadeSec))
+        : Math.max(32, Math.floor(sampleRate * 0.006)); // 6 мс плавный вход без щелчков
       const fadeSamplesOut = customFadeSec !== null
-        ? Math.max(48, Math.floor(sampleRate * customFadeSec * 1.25))
-        : (isExactTimingExport
-            ? Math.min(384, Math.floor(sampleRate * 0.008))
-            : Math.min(720, Math.floor(sampleRate * 0.015)));
+        ? Math.max(32, Math.floor(sampleRate * customFadeSec * 1.25))
+        : Math.max(32, Math.floor(sampleRate * 0.008)); // 8 мс плавный выход без щелчков
       const cleanLeftoverTails = options.cleanLeftoverTails !== false;
+
+      // Предвычисляем безопасные (строго непересекающиеся) границы для каждого сегмента
+      const preparedRenderList = renderPhrases.map((p, idx) => {
+        const srcFdInfo = fdsMap.get(p.sourceAudioPath || defaultInputPath) || defaultFdInfo;
+        const srcTotalFrames = srcFdInfo ? Math.floor(srcFdInfo.size / floatBytesPerFrame) : 0;
+        const srcDurationSec = srcTotalFrames / sampleRate;
+        const srcStart = p.sourceStartSec;
+        const srcEnd = Math.min(srcDurationSec > 0 ? srcDurationSec : p.sourceEndSec, p.sourceEndSec);
+        const trgStart = p.targetStartSec;
+        const trgEnd = trgStart + Math.max(0, srcEnd - srcStart);
+
+        let availPre = p.suppressPreSafety ? 0 : Math.min(requestedSafetyPreSec, srcStart, trgStart);
+        let availPost = p.suppressPostSafety ? 0 : Math.min(requestedSafetyPostSec, Math.max(0, srcDurationSec - srcEnd));
+
+        // Жесткое ограничение по соседним фразам: запрещено залезать в диапазон соседа ни по source, ни по target!
+        if (idx > 0 && availPre > 0) {
+          const prev = renderPhrases[idx - 1];
+          const tgtGap = Math.max(0, trgStart - prev.targetEndSec);
+          const sameSrc = path.resolve(prev.sourceAudioPath || defaultInputPath || '') === path.resolve(p.sourceAudioPath || defaultInputPath || '');
+          const srcGap = sameSrc ? Math.max(0, srcStart - prev.sourceEndSec) : Infinity;
+          availPre = Math.min(availPre, tgtGap * 0.45, srcGap * 0.45);
+        }
+        if (idx + 1 < renderPhrases.length && availPost > 0) {
+          const next = renderPhrases[idx + 1];
+          const tgtGap = Math.max(0, next.targetStartSec - trgEnd);
+          const sameSrc = path.resolve(next.sourceAudioPath || defaultInputPath || '') === path.resolve(p.sourceAudioPath || defaultInputPath || '');
+          const srcGap = sameSrc ? Math.max(0, next.sourceStartSec - srcEnd) : Infinity;
+          availPost = Math.min(availPost, tgtGap * 0.45, srcGap * 0.45);
+        }
+
+        const rawSrcStartSec = srcStart - availPre;
+        const rawSrcEndSec = srcEnd + availPost;
+        const totalPhraseDuration = Math.max(0, rawSrcEndSec - rawSrcStartSec);
+        const phraseTargetStart = trgStart - availPre;
+        const phraseTargetEnd = phraseTargetStart + totalPhraseDuration;
+
+        return {
+          p,
+          srcFdInfo,
+          rawSrcStartSec,
+          totalPhraseDuration,
+          totalPhraseSamples: Math.round(totalPhraseDuration * sampleRate),
+          phraseTargetStart,
+          phraseTargetEnd
+        };
+      }).filter(item => item.srcFdInfo && item.totalPhraseSamples > 0);
 
       let totalPcmBytesWritten = 0;
 
@@ -3182,88 +3488,67 @@ class AutoTimingService {
         const chunkStartSec = cIdx * CHUNK_DURATION_SEC;
         const chunkEndSec = Math.min(maxSec, chunkStartSec + CHUNK_DURATION_SEC);
         const currentChunkSec = chunkEndSec - chunkStartSec;
-        const currentChunkBytes = Math.round(currentChunkSec * sampleRate) * bytesPerSampleFrame;
+        const totalFramesInChunk = Math.round(currentChunkSec * sampleRate);
+        const currentChunkBytes = totalFramesInChunk * outBytesPerFrame;
 
-        if (currentChunkBytes <= 0) break;
+        if (totalFramesInChunk <= 0) break;
 
-        // Очищаем плавающий и PCM буферы чанка
         chunkBuffer.fill(0, 0, currentChunkBytes);
         floatChunk.fill(0.0);
 
-        // Шаг А: Если таймлайн-дорожка, читаем базовый непрерывный PCM из файла и переводим в Float32
+        // Шаг А: Если таймлайн-дорожка, читаем базовый непрерывный Float32 PCM
         if (isTimelineTrack && defaultFdInfo) {
-          const startByteOffset = Math.floor(chunkStartSec * bytesPerSec);
-          const availableBytes = Math.max(0, Math.min(currentChunkBytes, defaultFdInfo.size - startByteOffset));
+          const startFrameOffset = Math.round(chunkStartSec * sampleRate);
+          const startByteOffset = startFrameOffset * floatBytesPerFrame;
+          const requestedFloatBytes = totalFramesInChunk * floatBytesPerFrame;
+          const availableBytes = Math.max(0, Math.min(requestedFloatBytes, defaultFdInfo.size - startByteOffset));
           if (availableBytes > 0) {
             const rawTimelineBuf = Buffer.alloc(availableBytes);
             fs.readSync(defaultFdInfo.fd, rawTimelineBuf, 0, availableBytes, startByteOffset);
-            const availableFrames = Math.floor(availableBytes / bytesPerSampleFrame);
+            const availableFrames = Math.floor(availableBytes / floatBytesPerFrame);
             for (let s = 0; s < availableFrames; s++) {
-              floatChunk[s * 2] = rawTimelineBuf.readInt16LE(s * 4) / 32768.0;
-              floatChunk[s * 2 + 1] = rawTimelineBuf.readInt16LE(s * 4 + 2) / 32768.0;
+              for (let ch = 0; ch < channels; ch++) {
+                floatChunk[s * channels + ch] = rawTimelineBuf.readFloatLE((s * channels + ch) * 4);
+              }
             }
           }
         }
 
         // Шаг Б: Зануление областей заменяемых правок в таймлайн-дорожках
         if (isTimelineTrack && cleanLeftoverTails) {
-          for (const p of phrases) {
+          for (const p of renderPhrases) {
             if (p.isReplacedByFix || (p.collisionResolved && Math.abs(p.shiftDeltaSec) > 0.03)) {
-              const oldStartSec = Math.max(0, (p.oldTargetStartSec ?? p.sourceStartSec) - safetyPreSec);
-              const oldEndSec = (p.oldTargetEndSec ?? p.sourceEndSec) + safetyPostSec;
+              const oldStartSec = Math.max(0, (p.oldTargetStartSec ?? p.sourceStartSec) - tailMuteMarginSec);
+              const oldEndSec = (p.oldTargetEndSec ?? p.sourceEndSec) + tailMuteMarginSec;
 
               if (oldEndSec > chunkStartSec && oldStartSec < chunkEndSec) {
                 const muteLocalStartSec = Math.max(0, oldStartSec - chunkStartSec);
                 const muteLocalEndSec = Math.min(currentChunkSec, oldEndSec - chunkStartSec);
                 const muteStartSample = Math.floor(muteLocalStartSec * sampleRate);
-                const muteEndSample = Math.min(samplesPerChunk, Math.ceil(muteLocalEndSec * sampleRate));
+                const muteEndSample = Math.min(totalFramesInChunk, Math.ceil(muteLocalEndSec * sampleRate));
 
                 for (let s = muteStartSample; s < muteEndSample; s++) {
-                  floatChunk[s * 2] = 0.0;
-                  floatChunk[s * 2 + 1] = 0.0;
+                  for (let ch = 0; ch < channels; ch++) {
+                    floatChunk[s * channels + ch] = 0.0;
+                  }
                 }
               }
             }
           }
         }
 
-        // Шаг В: Наложение фраз, пересекающих текущий чанк (в 32-битном Float формате)
-        for (const p of renderPhrases) {
+        // Шаг В: Чистая запись сегментов в текущий чанк (БЕЗ суммирования внутри одной дорожки!)
+        for (const item of preparedRenderList) {
+          const { p, srcFdInfo, rawSrcStartSec, totalPhraseSamples, phraseTargetStart, phraseTargetEnd } = item;
+
           if (isTimelineTrack && !p.isReplacedByFix && (!p.collisionResolved || Math.abs(p.shiftDeltaSec) <= 0.03)) {
-            // Фраза уже находится на своем месте в базовом таймлайн-аудио
             continue;
           }
 
-          const srcFdInfo = fdsMap.get(p.sourceAudioPath || defaultInputPath) || defaultFdInfo;
-          if (!srcFdInfo) continue;
-
-          // Расчет исходных границ считывания с учетом доступных пред- и пост-интервалов
-          const srcTotalFrames = Math.floor(srcFdInfo.size / bytesPerSampleFrame);
-          const srcDurationSec = srcTotalFrames / sampleRate;
-          const srcStart = typeof p.sourceStartSec === 'number' ? p.sourceStartSec : 0;
-          const srcEnd = typeof p.sourceEndSec === 'number' ? p.sourceEndSec : (srcStart + (p.durationSec || 1.0));
-          const trgStart = typeof p.targetStartSec === 'number' ? p.targetStartSec : 0;
-
-          const effPreSafety = p.suppressPreSafety ? 0 : safetyPreSec;
-          const effPostSafety = p.suppressPostSafety ? 0 : safetyPostSec;
-          const availablePreSec = Math.max(0, Math.min(effPreSafety, srcStart, trgStart));
-          const availablePostSec = Math.max(0, Math.min(effPostSafety, srcDurationSec - srcEnd));
-
-          const rawSrcStartSec = srcStart - availablePreSec;
-          const rawSrcEndSec = srcEnd + availablePostSec;
-          const totalPhraseDuration = Math.max(0, rawSrcEndSec - rawSrcStartSec);
-          const totalPhraseSamples = Math.round(totalPhraseDuration * sampleRate);
-          if (totalPhraseSamples <= 0) continue;
-
-          const phraseTargetStart = trgStart - availablePreSec;
-          const phraseTargetEnd = phraseTargetStart + totalPhraseDuration;
-
-          // Проверяем пересечение с текущим чанком
           if (phraseTargetEnd <= chunkStartSec || phraseTargetStart >= chunkEndSec) {
             continue;
           }
 
-          // Расчет относительного смещения внутри чанка (строго в целых сэмплах!)
           const overlapStartSec = Math.max(chunkStartSec, phraseTargetStart);
           const overlapEndSec = Math.min(chunkEndSec, phraseTargetEnd);
 
@@ -3272,27 +3557,22 @@ class AutoTimingService {
           const samplesToProcess = phraseSampleOffsetEnd - phraseSampleOffsetStart;
           if (samplesToProcess <= 0) continue;
 
-          // Строго фрейм-выровненный расчет байтов источника (кратно 4 байтам!)
-          // Исключает чтение через границу сэмпла (главная причина дисторсии и треска перегруза)
           const rawSrcStartSample = Math.max(0, Math.round(rawSrcStartSec * sampleRate));
           const srcGlobalFrameIdx = rawSrcStartSample + phraseSampleOffsetStart;
-          const srcStartByte = srcGlobalFrameIdx * bytesPerSampleFrame;
+          const srcStartByte = srcGlobalFrameIdx * floatBytesPerFrame;
 
           if (srcStartByte >= srcFdInfo.size) continue;
-          const bytesToRead = samplesToProcess * bytesPerSampleFrame;
           const availableBytes = srcFdInfo.size - srcStartByte;
-          const safeFramesToRead = Math.min(samplesToProcess, Math.floor(availableBytes / bytesPerSampleFrame));
+          const safeFramesToRead = Math.min(samplesToProcess, Math.floor(availableBytes / floatBytesPerFrame));
           if (safeFramesToRead <= 0) continue;
-          const actualBytesToRead = safeFramesToRead * bytesPerSampleFrame;
+          const actualBytesToRead = safeFramesToRead * floatBytesPerFrame;
 
-          // Временный буфер для одной обрабатываемой фразы
           const phraseTempBuf = Buffer.alloc(actualBytesToRead);
           fs.readSync(srcFdInfo.fd, phraseTempBuf, 0, actualBytesToRead, srcStartByte);
 
-          // Определение множителя громкости
-          // При экспорте из тайминга строго сохраняем исходный 100% уровень дорожек без нормализаций и изменений
+          // При автотайминге/экспорте строго сохраняем исходный 100% уровень без скрытой нормализации
           let volScale = 1.0;
-          if (!isExactTimingExport && !options.timingExport) {
+          if (!isExactTimingExport && !options.timingExport && options.applyVolumeMap === true) {
             let volPct = p.volumePercent;
             if (volPct === undefined || volPct === null) {
               if (p.id && volumeMap[p.id] !== undefined) {
@@ -3310,17 +3590,13 @@ class AutoTimingService {
 
           const curFadeIn = Math.min(fadeSamplesIn, Math.floor(totalPhraseSamples / 8));
           const curFadeOut = Math.min(fadeSamplesOut, Math.floor(totalPhraseSamples / 6));
-
           const chunkLocalStartSample = Math.max(0, Math.round((overlapStartSec - chunkStartSec) * sampleRate));
 
           for (let s = 0; s < safeFramesToRead; s++) {
             const globalPhraseSampleIdx = phraseSampleOffsetStart + s;
-            const srcOffset = s * bytesPerSampleFrame;
             const dstSampleIdx = chunkLocalStartSample + s;
+            if (dstSampleIdx >= totalFramesInChunk) break;
 
-            if (srcOffset + 4 > actualBytesToRead || dstSampleIdx >= samplesPerChunk) break;
-
-            // S-образное окно (Hann window) для атак и затуханий:
             let fade = 1.0;
             if (curFadeIn > 0 && globalPhraseSampleIdx < curFadeIn) {
               fade = 0.5 * (1 - Math.cos((Math.PI * globalPhraseSampleIdx) / curFadeIn));
@@ -3329,46 +3605,49 @@ class AutoTimingService {
               fade = 0.5 * (1 + Math.cos((Math.PI * outIdx) / curFadeOut));
             }
 
-            const rawLeft = phraseTempBuf.readInt16LE(srcOffset);
-            const rawRight = phraseTempBuf.readInt16LE(srcOffset + 2);
-            
-            const fLeft = (rawLeft / 32768.0) * fade * volScale;
-            const fRight = (rawRight / 32768.0) * fade * volScale;
-
-            const dstOffset = dstSampleIdx * 2;
-            if (isTimelineTrack) {
-              floatChunk[dstOffset] = fLeft;
-              floatChunk[dstOffset + 1] = fRight;
-            } else if (isExactTimingExport || options.timingExport) {
-              // Внутри отдельной дорожки не суммируем амплитуды, чтобы избежать клиппинга и искажений
-              floatChunk[dstOffset] = fLeft;
-              floatChunk[dstOffset + 1] = fRight;
-            } else {
-              floatChunk[dstOffset] += fLeft;
-              floatChunk[dstOffset + 1] += fRight;
+            const gain = fade * volScale;
+            const srcFrameBase = s * floatBytesPerFrame;
+            const dstFrameBase = dstSampleIdx * channels;
+            for (let ch = 0; ch < channels; ch++) {
+              const fVal = phraseTempBuf.readFloatLE(srcFrameBase + ch * 4) * gain;
+              // Никогда не суммируем (+=) внутри одной дорожки — исключает гребенчатую фильтрацию и удвоение амплитуды
+              floatChunk[dstFrameBase + ch] = fVal;
             }
           }
         }
 
-        // Конвертация Float32 -> 16-bit PCM (Int16LE) с безопасным ограничением
-        const totalFramesInChunk = Math.floor(currentChunkBytes / bytesPerSampleFrame);
-        for (let s = 0; s < totalFramesInChunk; s++) {
-          const pcmL = floatToPcm16(floatChunk[s * 2]);
-          const pcmR = floatToPcm16(floatChunk[s * 2 + 1]);
-          chunkBuffer.writeInt16LE(pcmL, s * bytesPerSampleFrame);
-          chunkBuffer.writeInt16LE(pcmR, s * bytesPerSampleFrame + 2);
+        // Конвертация Float32 -> нативный PCM (16-bit или 24-bit)
+        if (outputBitDepth === 24) {
+          for (let s = 0; s < totalFramesInChunk; s++) {
+            const outBase = s * outBytesPerFrame;
+            const inBase = s * channels;
+            for (let ch = 0; ch < channels; ch++) {
+              const pcm24 = floatToPcm24(floatChunk[inBase + ch]);
+              const off = outBase + ch * 3;
+              chunkBuffer[off] = pcm24 & 0xff;
+              chunkBuffer[off + 1] = (pcm24 >> 8) & 0xff;
+              chunkBuffer[off + 2] = (pcm24 >> 16) & 0xff;
+            }
+          }
+        } else {
+          for (let s = 0; s < totalFramesInChunk; s++) {
+            const outBase = s * outBytesPerFrame;
+            const inBase = s * channels;
+            for (let ch = 0; ch < channels; ch++) {
+              const pcm16 = floatToPcm16(floatChunk[inBase + ch]);
+              chunkBuffer.writeInt16LE(pcm16, outBase + ch * 2);
+            }
+          }
         }
 
-        // Записываем срендеренный чанк на диск
-        fs.writeSync(outFd, chunkBuffer, 0, currentChunkBytes);
+        fs.writeSync(outFd, chunkBuffer, 0, currentChunkBytes, 44 + totalPcmBytesWritten);
         totalPcmBytesWritten += currentChunkBytes;
       }
 
-      // 7. Обновляем итоговый 44-байтный заголовок WAV с точным размером
-      const finalHeader = this.createWavHeader(totalPcmBytesWritten, sampleRate, channels, 16);
+      // 7. Обновляем итоговый 44-байтный заголовок WAV с точным размером и нативными параметрами
+      const finalHeader = this.createWavHeader(totalPcmBytesWritten, sampleRate, channels, outputBitDepth);
       fs.writeSync(outFd, finalHeader, 0, 44, 0);
 
-      // Закрываем дескриптор записи
       fs.closeSync(outFd);
 
       // Закрываем дескрипторы исходников

@@ -171,8 +171,16 @@ export function separateOverlappingClipPairService(params: {
     const maxSafeTrim = Math.min(0.10, earlyClip.durationSec - 0.28);
     const trim = Math.min(remaining, maxSafeTrim);
     if (trim >= 0.015) {
+      const pauseSaved = earlyClip.internalPauseEdit && earlyClip.internalPauseEdit.pauseEndSec > earlyClip.internalPauseEdit.pauseStartSec
+        ? Math.max(0, (earlyClip.internalPauseEdit.pauseEndSec - earlyClip.internalPauseEdit.pauseStartSec) - (earlyClip.internalPauseEdit.targetPauseSec ?? 0.12))
+        : 0;
       earlyClip.durationSec = Number((earlyClip.durationSec - trim).toFixed(3));
-      earlyClip.sourceEndSec = Number((earlyClip.sourceStartSec + earlyClip.durationSec).toFixed(3));
+      let newSrcEnd = Number((earlyClip.sourceStartSec + earlyClip.durationSec + pauseSaved).toFixed(3));
+      if (earlyClip.internalPauseEdit && newSrcEnd <= earlyClip.internalPauseEdit.pauseEndSec + 0.04) {
+        earlyClip.internalPauseEdit = undefined;
+        newSrcEnd = Number((earlyClip.sourceStartSec + earlyClip.durationSec).toFixed(3));
+      }
+      earlyClip.sourceEndSec = newSrcEnd;
       remaining -= trim;
       movedOrTrimmed = true;
     }
@@ -545,8 +553,16 @@ export function enforceSameTrackMinGapService(
     const maxSafeTrim = Math.max(0, c1.durationSec - speechEndFloor);
     if (maxSafeTrim > 0.005) {
       const trim = Math.min(remaining, maxSafeTrim);
+      const pauseSaved = c1.internalPauseEdit && c1.internalPauseEdit.pauseEndSec > c1.internalPauseEdit.pauseStartSec
+        ? Math.max(0, (c1.internalPauseEdit.pauseEndSec - c1.internalPauseEdit.pauseStartSec) - (c1.internalPauseEdit.targetPauseSec ?? 0.12))
+        : 0;
       c1.durationSec = Number((c1.durationSec - trim).toFixed(3));
-      c1.sourceEndSec = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
+      let newSrcEnd = Number((c1.sourceStartSec + c1.durationSec + pauseSaved).toFixed(3));
+      if (c1.internalPauseEdit && newSrcEnd <= c1.internalPauseEdit.pauseEndSec + 0.04) {
+        c1.internalPauseEdit = undefined;
+        newSrcEnd = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
+      }
+      c1.sourceEndSec = newSrcEnd;
       remaining -= trim;
     }
 
@@ -595,10 +611,18 @@ export function enforceSameTrackMinGapService(
     const finalC1Start = c1.clipStartSec + (c1.offsetSec || 0);
     const finalC2Start = c2.clipStartSec + (c2.offsetSec || 0);
     if (finalC1Start + c1.durationSec > finalC2Start - minGapSec) {
-      const safeEnd = Math.max(finalC1Start + 0.14, finalC2Start - minGapSec);
+      const safeEnd = Math.min(finalC2Start, Math.max(finalC1Start + 0.05, finalC2Start - minGapSec));
       if (safeEnd < finalC1Start + c1.durationSec) {
+        const pauseSaved = c1.internalPauseEdit && c1.internalPauseEdit.pauseEndSec > c1.internalPauseEdit.pauseStartSec
+          ? Math.max(0, (c1.internalPauseEdit.pauseEndSec - c1.internalPauseEdit.pauseStartSec) - (c1.internalPauseEdit.targetPauseSec ?? 0.12))
+          : 0;
         c1.durationSec = Number((safeEnd - finalC1Start).toFixed(3));
-        c1.sourceEndSec = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
+        let newSrcEnd = Number((c1.sourceStartSec + c1.durationSec + pauseSaved).toFixed(3));
+        if (c1.internalPauseEdit && newSrcEnd <= c1.internalPauseEdit.pauseEndSec + 0.04) {
+          c1.internalPauseEdit = undefined;
+          newSrcEnd = Number((c1.sourceStartSec + c1.durationSec).toFixed(3));
+        }
+        c1.sourceEndSec = newSrcEnd;
       }
     }
   }

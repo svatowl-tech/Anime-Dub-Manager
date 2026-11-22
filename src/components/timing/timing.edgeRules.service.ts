@@ -362,6 +362,7 @@ export function applySoftTimeFitToTrackClips(params: {
 
   for (let i = 0; i < sorted.length; i++) {
     const clip = sorted[i];
+    clip.playbackRate = 1.0;
     if (
       clip.isPhysics ||
       clip.isSplitContinuation ||
@@ -442,53 +443,25 @@ export function applySoftTimeFitToTrackClips(params: {
       : Math.max(0.25, clip.durationSec - 0.08);
 
     if ((clip.sourceEndSec - clip.sourceStartSec - pauseSaved) > tailFloor + 0.015) {
-      const newSourceEnd = Number((clip.sourceStartSec + pauseSaved + tailFloor).toFixed(3));
+      let newSourceEnd = Number((clip.sourceStartSec + pauseSaved + tailFloor).toFixed(3));
+      if (clip.internalPauseEdit && newSourceEnd <= clip.internalPauseEdit.pauseEndSec + 0.04) {
+        clip.internalPauseEdit = undefined;
+        newSourceEnd = Number((clip.sourceStartSec + tailFloor).toFixed(3));
+      }
       if (newSourceEnd < clip.sourceEndSec) {
         clip.sourceEndSec = newSourceEnd;
         clip.unscaledDurationSec = Number(Math.max(0.20, tailFloor).toFixed(3));
-        const rate = clip.playbackRate && clip.playbackRate > 1.005 ? clip.playbackRate : 1.0;
-        clip.durationSec = Number((clip.unscaledDurationSec / rate).toFixed(3));
+        clip.playbackRate = 1.0;
+        clip.durationSec = clip.unscaledDurationSec;
         trimmedCount++;
       }
     }
 
-    // Step 2: Re-evaluate unified Soft Time-Fit rule (>25% overhang AND collides next, range 1.0x–1.18x)
-    const unscaledDur = clip.unscaledDurationSec ?? Math.max(0.25, (clip.sourceEndSec - clip.sourceStartSec) - pauseSaved);
-    const postEval = evaluateSoftTimeFit({
-      curStartSec: curStart,
-      clipDurationSec: clip.durationSec,
-      unscaledDurationSec: unscaledDur,
-      anchorStartSec: anchorStart,
-      anchorEndSec: anchorEnd,
-      speechOffsetSec: typeof clip.speechOffsetSec === 'number' && clip.speechOffsetSec > 0
-        ? (clip.speechOffsetSec / (clip.playbackRate || 1))
-        : undefined,
-      nextPhraseCeilingSec: nextPhraseCeiling,
-      playbackRate: clip.playbackRate || 1.0,
-    });
-
-    if (postEval.shouldApply) {
-      const clampedRate = postEval.recommendedRate;
-      clip.unscaledDurationSec = Number(unscaledDur.toFixed(3));
-      clip.playbackRate = clampedRate;
-      clip.durationSec = Number((unscaledDur / clampedRate).toFixed(3));
-      clip.timeFitApplied = true;
-      clip.timingNotRequired = false;
-
-      // Keep vocal attack locked on anchorStart even after compression
-      const adjustedStart = Number(
-        Math.max(prevIntraEnd, Math.max(0, anchorStart - (onsetOffset / clampedRate))).toFixed(3)
-      );
-      if (Math.abs(adjustedStart - curStart) >= 0.01 && adjustedStart + clip.durationSec <= nextIntraStart) {
-        clip.clipStartSec = adjustedStart;
-        clip.offsetSec = 0;
-        clip.targetSubStartSec = adjustedStart;
-      }
-      stretchedCount++;
-      addLog?.(
-        `⏩ [Soft Time-Fit ${clampedRate.toFixed(2)}x] «${clip.text.slice(0, 26)}» (${clip.dubberName}): длинный перевод сжат с ${unscaledDur.toFixed(2)}с до ${clip.durationSec.toFixed(2)}с без изменения тона`,
-        'info'
-      );
+    // Automatic atempo / playbackRate time-stretching is intentionally disabled:
+    // timing only shifts/trims phrases without altering pitch, formants, or frequencies.
+    if (clip.playbackRate && clip.playbackRate !== 1.0) {
+      clip.playbackRate = 1.0;
+      clip.timeFitApplied = false;
     }
   }
 
