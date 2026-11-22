@@ -310,6 +310,52 @@ const MODULE_DATABASE = [
     ]
   },
   {
+    id: 'inworld_voice_isolator',
+    name: 'Inworld Voice Isolator v1 (48 kHz AI)',
+    title: 'Inworld Voice Isolator v1 (48 kHz Изоляция голоса AI)',
+    filename: 'denoiser.safetensors',
+    category: 'denoise',
+    description: 'Открытая 48 кГц нейросеть от Inworld AI (64M параметров) для студийной изоляции речи от фонового шума, музыки и посторонних голосов с бережным сохранением естественного тембра, вдохов и смеха.',
+    size_mb: 256.0,
+    recommended_for: 'Максимально чистая изоляция диалогов и дубляжа с сохранением живой актёрской подачи (вдохи, шёпот, смех)',
+    urls: [
+      'https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser.safetensors'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'safetensors',
+    engineArchitecture: 'Inworld 48kHz STFT + Attention/Mamba Dual-Path (64M)',
+    defaultPrefix: 'inworld_iso_',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      isolatorMode: 'offline',
+      lookaheadFrames: 2,
+      wetDryBlend: 100.0,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'inworld_studio_offline',
+        title: '🎙 Студийный Offline v1 (64M, окно 8с, Wet 100%)',
+        description: 'Максимальное студийное качество изоляции речи с сохранением вдохов, смеха и живых формант',
+        params: { isolatorMode: 'offline', lookaheadFrames: 2, wetDryBlend: 100.0, autoDownloadModel: true }
+      },
+      {
+        id: 'inworld_natural_blend',
+        title: '🍃 Мягкая изоляция (Offline v1, Wet 85%)',
+        description: 'Сохраняет 15% естественного воздуха комнаты для максимально органичного звучания',
+        params: { isolatorMode: 'offline', lookaheadFrames: 2, wetDryBlend: 85.0, autoDownloadModel: true }
+      },
+      {
+        id: 'inworld_realtime_fast',
+        title: '⚡ Быстрый Realtime v1 (58M, потоковый режим)',
+        description: 'Облегченная каузальная модель с малым окном опережения (lookahead 2 кадра) для ускоренной обработки на CPU',
+        params: { isolatorMode: 'streaming', lookaheadFrames: 2, wetDryBlend: 100.0, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
     id: 'uvr_denoise_full',
     name: 'UVR-DeNoise Full (Глубокое подавление)',
     title: 'UVR-DeNoise Full (Глубокое подавление)',
@@ -2621,7 +2667,7 @@ class MixingPipelineService {
 
     return this.moduleDatabase.map(mod => {
       const inputSlotsSummary = this._getModuleSlotsSummary(mod.id, false);
-      if (mod.filename && /\.(pth|ckpt|onnx|bin)$/i.test(mod.filename)) {
+      if (mod.filename && /\.(pth|ckpt|onnx|bin|safetensors)$/i.test(mod.filename)) {
         const localModelFile = path.join(uvrModelsDir, mod.filename);
         const isInstalled = fsSync.existsSync(localModelFile);
         let bytes = null;
@@ -3682,7 +3728,8 @@ class MixingPipelineService {
         autoApplyFixes,
         includeSubtitles,
         autoTiming,
-        selectedTrackIds
+        selectedTrackIds,
+        forMixing: true
       },
       selectedTrackIds,
       config,
@@ -4859,6 +4906,9 @@ class MixingPipelineService {
         case 'deepfilternet3':
         case 'uvr_denoise_full':
           resultFiles = await this._execUvrDenoiseLite({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
+          break;
+        case 'inworld_voice_isolator':
+          resultFiles = await this._execInworldVoiceIsolator({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
           break;
         case 'ffmpeg_denoise':
           resultFiles = await this._execFfmpegDenoise({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
@@ -6302,6 +6352,101 @@ class MixingPipelineService {
       const st = fsSync.statSync(outPath);
       results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
       logFn(`✓ Дорожка «${nick}» успешно очищена нейросетью «${modelName}» -> ${outName} (${(st.size / (1024*1024)).toFixed(1)} МБ)`);
+    }
+
+    return results;
+  }
+
+  /**
+   * EXEC: Inworld Voice Isolator v1 (48 kHz Neural Speech Isolation & Denoising)
+   * https://github.com/inworld-ai/voice-isolator
+   */
+  async _execInworldVoiceIsolator({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const isolatorMode = params.isolatorMode === 'streaming' ? 'streaming' : 'offline';
+    const rawLa = Number(params.lookaheadFrames ?? 2);
+    const lookaheadFrames = [0, 2, 4].reduce((best, cand) =>
+      Math.abs(cand - rawLa) < Math.abs(best - rawLa) ? cand : best
+    , 2);
+    const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 100.0)));
+    const autoDownload = params.autoDownloadModel !== false;
+
+    const isRealtime = isolatorMode === 'streaming';
+    const downloadId = isRealtime ? 'inworld_voice_isolator_realtime' : 'inworld_voice_isolator';
+    const filename = isRealtime ? 'denoiser_realtime.safetensors' : 'denoiser.safetensors';
+    const modelName = isRealtime
+      ? 'Inworld Voice Isolator v1 Realtime (58M)'
+      : 'Inworld Voice Isolator v1 Offline (64M)';
+
+    if (inputFiles.length === 0) {
+      throw new Error(`Нет входных дорожек для применения модели ${modelName}.`);
+    }
+
+    logFn(`[${modelName}] Запуск 48 кГц нейросетевой изоляции голоса (веса: ${filename})...`);
+    logFn(`Параметры: Режим=${isolatorMode}, Lookahead=${lookaheadFrames} кадр., Wet/Dry=${wetDryBlend}%`);
+
+    const rootUserData = app ? app.getPath('userData') : process.cwd();
+    const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
+    await fs.mkdir(uvrModelsDir, { recursive: true });
+    const localModelFile = path.join(uvrModelsDir, filename);
+
+    let modelInstalled = fsSync.existsSync(localModelFile) && fsSync.statSync(localModelFile).size > 5 * 1024 * 1024;
+    if (!modelInstalled && autoDownload) {
+      logFn(`Файл весов ${filename} не обнаружен локально. Запуск загрузки с Hugging Face (inworld/voice-isolator)...`);
+      try {
+        await this.downloadUvrModel({
+          modelId: downloadId,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка ${modelName}: ${p.percent}%` });
+            }
+          },
+          onLog: logFn
+        });
+        modelInstalled = fsSync.existsSync(localModelFile) && fsSync.statSync(localModelFile).size > 5 * 1024 * 1024;
+      } catch (err) {
+        logFn(`Предупреждение при предварительном скачивании ${filename}: ${err.message}. Python-движок попробует загрузить веса напрямую через Hugging Face Hub.`, 'warn');
+      }
+    }
+
+    if (modelInstalled) {
+      const st = fsSync.statSync(localModelFile);
+      logFn(`✓ Задействованы локальные веса Inworld: ${filename} (${(st.size / (1024 * 1024)).toFixed(1)} МБ)`);
+    }
+
+    const results = [];
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      logFn(`[${i + 1}/${inputFiles.length}] Изоляция голоса «${modelName}» для дорожки «${nick}»...`);
+      const neuralRes = await AudioNeuralService.isolateVoiceInworld({
+        inputPath: track.path,
+        outputPath: outPath,
+        modelPath: modelInstalled ? localModelFile : null,
+        modelId: downloadId,
+        isolatorMode,
+        lookaheadFrames,
+        wetDryBlend,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
+          }
+        },
+        onLog: logFn
+      });
+
+      if (!neuralRes || !fsSync.existsSync(outPath)) {
+        throw new Error(`Модель «${modelName}» не создала выходной файл для дорожки «${nick}».`);
+      }
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ Дорожка «${nick}» успешно изолирована нейросетью «${modelName}» -> ${outName} (${(st.size / (1024 * 1024)).toFixed(1)} МБ)`);
     }
 
     return results;
@@ -8740,7 +8885,22 @@ class MixingPipelineService {
   async checkUvrModelStatus({ modelId = 'uvr_denoise_lite' } = {}) {
     const rootUserData = app ? app.getPath('userData') : process.cwd();
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
-    const modelDef = this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
+    const auxWeightsMap = {
+      inworld_voice_isolator_realtime: {
+        id: 'inworld_voice_isolator_realtime',
+        name: 'Inworld Voice Isolator v1 Realtime (58M)',
+        title: 'Inworld Voice Isolator v1 Realtime (58M)',
+        filename: 'denoiser_realtime.safetensors',
+        category: 'denoise',
+        description: 'Потоковая 48 кГц версия Inworld Voice Isolator v1 Realtime (58M параметров).',
+        size_mb: 233.0,
+        recommended_for: 'Быстрая 48 кГц изоляция голоса',
+        format: 'safetensors',
+        engineArchitecture: 'Inworld 48kHz Causal Streaming (58M)',
+        urls: ['https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser_realtime.safetensors']
+      }
+    };
+    const modelDef = auxWeightsMap[modelId] || this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
     const filename = modelDef?.filename || (modelId === 'uvr_deecho_normal' ? 'UVR-De-Echo-Normal.pth' : 'UVR-DeNoise-Lite.pth');
     const localModelFile = path.join(uvrModelsDir, filename);
     const isInstalled = fsSync.existsSync(localModelFile);
@@ -8778,7 +8938,20 @@ class MixingPipelineService {
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
     await fs.mkdir(uvrModelsDir, { recursive: true });
 
-    const modelDef = this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
+    const auxWeightsMap = {
+      inworld_voice_isolator_realtime: {
+        id: 'inworld_voice_isolator_realtime',
+        name: 'Inworld Voice Isolator v1 Realtime (58M)',
+        title: 'Inworld Voice Isolator v1 Realtime (58M)',
+        filename: 'denoiser_realtime.safetensors',
+        category: 'denoise',
+        size_mb: 233.0,
+        format: 'safetensors',
+        engineArchitecture: 'Inworld 48kHz Causal Streaming (58M)',
+        urls: ['https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser_realtime.safetensors']
+      }
+    };
+    const modelDef = auxWeightsMap[modelId] || this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
     const filename = modelDef?.filename || (modelId === 'uvr_deecho_normal' ? 'UVR-De-Echo-Normal.pth' : 'UVR-DeNoise-Lite.pth');
     const localModelFile = path.join(uvrModelsDir, filename);
     const metaFile = `${localModelFile}.meta.json`;

@@ -338,14 +338,112 @@ function registerExportHandlers(getData, mainWindow) {
         ? new Set(selectedTrackIds.map(String))
         : null;
 
+      const epFromProject = project
+        ? (project.episodes || []).find(e => e.id === episode.id || e.number === episode.number)
+        : null;
+      const allEpisodeUploads = (() => {
+        const seen = new Set();
+        const combined = [];
+        for (const u of [...(episode.uploads || []), ...(epFromProject?.uploads || [])]) {
+          if (!u || !u.path) continue;
+          const key = `${u.id || ''}|${u.path}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            combined.push(u);
+          }
+        }
+        return combined;
+      })();
+      const effectiveAssignments = assignments.length > 0
+        ? assignments
+        : (epFromProject?.assignments || []);
+
+      const compactNorm = (s) =>
+        String(s || '')
+          .toLowerCase()
+          .replace(/ё/g, 'е')
+          .replace(/[`'"[\](){}\-_.,!?~@#$%^&*+=:;\/\\\s]/g, '')
+          .trim();
+
       const getCleanNick = (rawNick) => {
         if (!rawNick) return 'dubber';
         const clean = String(rawNick)
           .replace(/\[.*\]/g, '')
           .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
+          .replace(/[`'"]/g, '')
           .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
           .trim();
         return clean || 'dubber';
+      };
+
+      const resolveTimingTrackSourceFile = (tr, nick, charName, fullFixTrack) => {
+        const fsSyncLocal = require('fs');
+        const directCandidates = [
+          fullFixTrack?.filePath,
+          tr.filePath,
+          ...(Array.isArray(tr.files)
+            ? [
+                tr.files.find(f => f && f.id === tr.selectedFileId)?.path,
+                ...tr.files.map(f => f?.path)
+              ]
+            : [])
+        ].filter(Boolean);
+
+        for (const cand of directCandidates) {
+          if (fsSyncLocal.existsSync(cand)) return cand;
+        }
+
+        if (allEpisodeUploads.length === 0) return null;
+
+        const targetNickCompact = compactNorm(nick);
+        const trIdStr = String(tr.id || '');
+        const dubberIdFromTrackId = trIdStr.includes('__') ? trIdStr.split('__')[0] : null;
+        const participant = (participantsData || []).find(p =>
+          (dubberIdFromTrackId && String(p.id) === String(dubberIdFromTrackId)) ||
+          (targetNickCompact && (compactNorm(p.nickname) === targetNickCompact || compactNorm(p.name) === targetNickCompact))
+        );
+        const candidateDubberIds = new Set(
+          [dubberIdFromTrackId, participant?.id, tr.dubberId].filter(Boolean).map(String)
+        );
+        const charNames = new Set(
+          String(charName || '')
+            .split(/[,;\/]/)
+            .map(c => compactNorm(c))
+            .filter(c => c.length >= 3)
+        );
+        for (const a of effectiveAssignments) {
+          const effId = a.substituteId || a.dubberId;
+          if (effId && candidateDubberIds.has(String(effId)) && a.characterName) {
+            const cn = compactNorm(a.characterName);
+            if (cn.length >= 3) charNames.add(cn);
+          }
+        }
+
+        const audioUploads = allEpisodeUploads.filter(u =>
+          (u.type === 'DUBBER_FILE' || u.type === 'FIXES') &&
+          u.path &&
+          fsSyncLocal.existsSync(u.path) &&
+          !u.path.toLowerCase().includes('slice')
+        );
+
+        const matchedUploads = audioUploads.filter(u => {
+          const uDubberId = u.uploadedById || u.participantId || u.dubberId;
+          if (uDubberId && candidateDubberIds.has(String(uDubberId))) return true;
+          const uNick = compactNorm(u.dubberNick || u.dubberName || u.uploadedBy?.nickname || '');
+          if (uNick && targetNickCompact && uNick === targetNickCompact) return true;
+          const bnCompact = compactNorm(path.basename(u.path, path.extname(u.path)));
+          if (targetNickCompact.length >= 4 && bnCompact.includes(targetNickCompact)) return true;
+          for (const cn of charNames) {
+            if (cn.length >= 4 && bnCompact.includes(cn)) return true;
+          }
+          return false;
+        });
+
+        if (matchedUploads.length === 0) return null;
+        const idx = Number(tr.subTrackIndex) > 0 ? Number(tr.subTrackIndex) - 1 : 0;
+        const originals = matchedUploads.filter(u => u.type !== 'FIXES' && !u.isFix);
+        const pool = originals.length > 0 ? originals : matchedUploads;
+        return (pool[idx] || pool[pool.length - 1]).path;
       };
 
       const isFixTr = (t) =>
@@ -431,16 +529,7 @@ function registerExportHandlers(getData, mainWindow) {
           const outFilePath = path.join(exportDir, outFilename);
 
           const fullFixTrack = fullReplacementFixes.get(tr.id);
-          let sourceFile = fullFixTrack?.filePath || tr.filePath;
-          if ((!sourceFile || !require('fs').existsSync(sourceFile)) && episode.uploads) {
-            const matchingUpload = episode.uploads.find(u =>
-              (u.type === 'DUBBER_FILE' || u.type === 'FIXES') &&
-              (u.uploadedById === tr.id || u.participantId === tr.id || (u.fileName && u.fileName.includes(nick)))
-            );
-            if (matchingUpload && matchingUpload.path && require('fs').existsSync(matchingUpload.path)) {
-              sourceFile = matchingUpload.path;
-            }
-          }
+          let sourceFile = resolveTimingTrackSourceFile(tr, nick, characterName, fullFixTrack);
 
           let primarySourceFile = sourceFile;
           const rawClips = (fullFixTrack && clipsMap[fullFixTrack.id]?.length > 0)
@@ -585,25 +674,34 @@ function registerExportHandlers(getData, mainWindow) {
 
           if (cleanPhrases.length > 0 && primarySourceFile && require('fs').existsSync(primarySourceFile)) {
             log.info(`[ExportController] Рендеринг чистой оттаймленной дорожки для ЗР: ${outFilename} (${cleanPhrases.length} фраз)...`);
-            await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, cleanPhrases, outFilePath, {
-              targetDir: exportDir,
-              timingMetadata,
-              renderFromClips: true,
-              exactTimelineRender: true,
-              timingExport: true
-            });
+            try {
+              await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, cleanPhrases, outFilePath, {
+                targetDir: exportDir,
+                timingMetadata,
+                renderFromClips: true,
+                exactTimelineRender: true,
+                timingExport: true
+              });
+            } catch (renderErr) {
+              log.error(`[ExportController] Ошибка рендеринга ${outFilename}, выполняется резервное копирование оригинала:`, renderErr);
+              await fs.copyFile(primarySourceFile, outFilePath);
+            }
           } else if (primarySourceFile && require('fs').existsSync(primarySourceFile)) {
             await fs.copyFile(primarySourceFile, outFilePath);
+          } else {
+            log.warn(`[ExportController] Пропущена дорожка «${nick}» (${outFilename}): исходный аудиофайл не найден на диске (filePath=${tr.filePath || 'пусто'}).`);
           }
 
-          renderedTracks.push({
-            dubberNick: isMultiTrack ? `${nick} (Дорожка ${trackNum})` : nick,
-            baseNick: nick,
-            trackIndex: trackNum,
-            characterName,
-            outputPath: outFilePath,
-            phrasesCount: cleanPhrases.length
-          });
+          if (require('fs').existsSync(outFilePath)) {
+            renderedTracks.push({
+              dubberNick: isMultiTrack ? `${nick} (Дорожка ${trackNum})` : nick,
+              baseNick: nick,
+              trackIndex: trackNum,
+              characterName,
+              outputPath: outFilePath,
+              phrasesCount: cleanPhrases.length
+            });
+          }
         }
 
         const audioProgress = 35 + Math.round(((aIdx + 1) / Math.max(1, actorEntries.length)) * 55);
@@ -837,14 +935,113 @@ function registerExportHandlers(getData, mainWindow) {
     const volsMap = volumes || {};
     const renderedTracks = [];
 
+    const participantsData = await getData('participants.json').catch(() => []);
+    const epFromProject = project
+      ? (project.episodes || []).find(e => e.id === episode.id || e.number === episode.number)
+      : null;
+    const allEpisodeUploads = (() => {
+      const seen = new Set();
+      const combined = [];
+      for (const u of [...(episode.uploads || []), ...(epFromProject?.uploads || [])]) {
+        if (!u || !u.path) continue;
+        const key = `${u.id || ''}|${u.path}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          combined.push(u);
+        }
+      }
+      return combined;
+    })();
+    const effectiveAssignments = (episode.assignments && episode.assignments.length > 0)
+      ? episode.assignments
+      : (epFromProject?.assignments || []);
+
+    const compactNorm = (s) =>
+      String(s || '')
+        .toLowerCase()
+        .replace(/ё/g, 'е')
+        .replace(/[`'"[\](){}\-_.,!?~@#$%^&*+=:;\/\\\s]/g, '')
+        .trim();
+
     const getCleanNick = (rawNick) => {
       if (!rawNick) return 'dubber';
       let clean = String(rawNick)
         .replace(/\[.*\]/g, '')
         .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
+        .replace(/[`'"]/g, '')
         .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
         .trim();
       return clean || 'dubber';
+    };
+
+    const resolveMixingTrackSourceFile = (tr, nick, charName, fullFixTrack) => {
+      const fsSyncLocal = require('fs');
+      const directCandidates = [
+        fullFixTrack?.filePath,
+        tr.filePath,
+        ...(Array.isArray(tr.files)
+          ? [
+              tr.files.find(f => f && f.id === tr.selectedFileId)?.path,
+              ...tr.files.map(f => f?.path)
+            ]
+          : [])
+      ].filter(Boolean);
+
+      for (const cand of directCandidates) {
+        if (fsSyncLocal.existsSync(cand)) return cand;
+      }
+
+      if (allEpisodeUploads.length === 0) return null;
+
+      const targetNickCompact = compactNorm(nick);
+      const trIdStr = String(tr.id || '');
+      const dubberIdFromTrackId = trIdStr.includes('__') ? trIdStr.split('__')[0] : null;
+      const participant = (participantsData || []).find(p =>
+        (dubberIdFromTrackId && String(p.id) === String(dubberIdFromTrackId)) ||
+        (targetNickCompact && (compactNorm(p.nickname) === targetNickCompact || compactNorm(p.name) === targetNickCompact))
+      );
+      const candidateDubberIds = new Set(
+        [dubberIdFromTrackId, participant?.id, tr.dubberId].filter(Boolean).map(String)
+      );
+      const charNames = new Set(
+        String(charName || '')
+          .split(/[,;\/]/)
+          .map(c => compactNorm(c))
+          .filter(c => c.length >= 3)
+      );
+      for (const a of effectiveAssignments) {
+        const effId = a.substituteId || a.dubberId;
+        if (effId && candidateDubberIds.has(String(effId)) && a.characterName) {
+          const cn = compactNorm(a.characterName);
+          if (cn.length >= 3) charNames.add(cn);
+        }
+      }
+
+      const audioUploads = allEpisodeUploads.filter(u =>
+        (u.type === 'DUBBER_FILE' || u.type === 'FIXES') &&
+        u.path &&
+        fsSyncLocal.existsSync(u.path) &&
+        !u.path.toLowerCase().includes('slice')
+      );
+
+      const matchedUploads = audioUploads.filter(u => {
+        const uDubberId = u.uploadedById || u.participantId || u.dubberId;
+        if (uDubberId && candidateDubberIds.has(String(uDubberId))) return true;
+        const uNick = compactNorm(u.dubberNick || u.dubberName || u.uploadedBy?.nickname || '');
+        if (uNick && targetNickCompact && uNick === targetNickCompact) return true;
+        const bnCompact = compactNorm(path.basename(u.path, path.extname(u.path)));
+        if (targetNickCompact.length >= 4 && bnCompact.includes(targetNickCompact)) return true;
+        for (const cn of charNames) {
+          if (cn.length >= 4 && bnCompact.includes(cn)) return true;
+        }
+        return false;
+      });
+
+      if (matchedUploads.length === 0) return null;
+      const idx = Number(tr.subTrackIndex) > 0 ? Number(tr.subTrackIndex) - 1 : 0;
+      const originals = matchedUploads.filter(u => u.type !== 'FIXES' && !u.isFix);
+      const pool = originals.length > 0 ? originals : matchedUploads;
+      return (pool[idx] || pool[pool.length - 1]).path;
     };
 
     // Group all tracks by unique actor
@@ -936,16 +1133,7 @@ function registerExportHandlers(getData, mainWindow) {
         const outRawFilePath = path.join(rawDir, outFilename);
 
         const fullFixTrack = fullReplacementFixes.get(tr.id);
-        let sourceFile = fullFixTrack?.filePath || tr.filePath;
-        if ((!sourceFile || !require('fs').existsSync(sourceFile)) && episode.uploads) {
-          const matchingUpload = episode.uploads.find(u => 
-            (u.type === 'DUBBER_FILE' || u.type === 'FIXES') && 
-            (u.uploadedById === tr.id || u.participantId === tr.id || (u.fileName && u.fileName.includes(nick)))
-          );
-          if (matchingUpload && matchingUpload.path && require('fs').existsSync(matchingUpload.path)) {
-            sourceFile = matchingUpload.path;
-          }
-        }
+        let sourceFile = resolveMixingTrackSourceFile(tr, nick, characterName, fullFixTrack);
 
         let primarySourceFile = sourceFile;
 
@@ -1094,31 +1282,37 @@ function registerExportHandlers(getData, mainWindow) {
         if (cleanPhrases.length > 0 && primarySourceFile && require('fs').existsSync(primarySourceFile)) {
           const trackTitle = isMultiTrack ? `«${nick}» (дорожка ${trackNum})` : `«${nick}»`;
           log.info(`[ExportController] Рендеринг оттаймленной дорожки для даббера ${trackTitle} (${cleanPhrases.length} фраз, без нормализаций и искажений)...`);
-          await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, cleanPhrases, outFilePath, { 
-            targetDir: exportDir, 
-            timingMetadata,
-            renderFromClips: true,
-            exactTimelineRender: true,
-            timingExport: true
-          });
+          try {
+            await AutoTimingService.assembleMultiSourceTrack(primarySourceFile, cleanPhrases, outFilePath, { 
+              targetDir: exportDir, 
+              timingMetadata,
+              renderFromClips: true,
+              exactTimelineRender: true,
+              timingExport: true
+            });
+          } catch (renderErr) {
+            log.error(`[ExportController] Ошибка рендеринга ${outFilename} для Сведения, выполняется резервное копирование оригинала:`, renderErr);
+            await fs.copyFile(primarySourceFile, outFilePath);
+          }
         } else if (primarySourceFile && require('fs').existsSync(primarySourceFile)) {
           await fs.copyFile(primarySourceFile, outFilePath);
+        } else {
+          log.warn(`[ExportController] Пропущена дорожка «${nick}» (${outFilename}) при передаче в Сведение: исходный аудиофайл не найден на диске (filePath=${tr.filePath || 'пусто'}).`);
         }
 
         if (require('fs').existsSync(outFilePath)) {
           try {
             await fs.copyFile(outFilePath, outRawFilePath);
           } catch (e) {}
+          renderedTracks.push({
+            dubberNick: isMultiTrack ? `${nick} (Дорожка ${trackNum})` : nick,
+            baseNick: nick,
+            trackIndex: trackNum,
+            characterName,
+            outputPath: outFilePath,
+            phrasesCount: cleanPhrases.length
+          });
         }
-
-        renderedTracks.push({
-          dubberNick: isMultiTrack ? `${nick} (Дорожка ${trackNum})` : nick,
-          baseNick: nick,
-          trackIndex: trackNum,
-          characterName,
-          outputPath: outFilePath,
-          phrasesCount: cleanPhrases.length
-        });
       }
 
       onProgress({ percent: Math.round(((aIdx + 1) / Math.max(1, actorEntries.length)) * 100) });

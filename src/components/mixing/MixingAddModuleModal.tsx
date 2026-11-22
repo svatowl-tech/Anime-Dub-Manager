@@ -165,7 +165,7 @@ export const MixingAddModuleModal: React.FC<MixingAddModuleModalProps> = ({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Поиск по названию, архитектуре (DeepFilterNet, Demucs, Pedalboard, VST3, LUFS, EQ)..."
+                placeholder="Поиск по названию, архитектуре (Inworld, DeepFilterNet, Demucs, Pedalboard, VST3, LUFS, EQ)..."
                 className="w-full pl-9 pr-8 py-2 bg-neutral-900 border border-neutral-800 rounded-xl text-xs text-neutral-100 placeholder-neutral-500 focus:outline-none focus:border-purple-500 transition"
                 autoFocus
               />
@@ -243,7 +243,7 @@ export const MixingAddModuleModal: React.FC<MixingAddModuleModalProps> = ({
                   badgeClass: 'bg-neutral-800 text-neutral-300 border-neutral-700'
                 };
                 const existingCount = countInPipelineByModId[mod.id] || 0;
-                const hasWeightsFile = Boolean(mod.filename && /\.(pth|ckpt|onnx|bin)$/i.test(mod.filename));
+                const hasWeightsFile = Boolean(mod.filename && /\.(pth|ckpt|onnx|bin|safetensors)$/i.test(mod.filename));
 
                 return (
                   <div

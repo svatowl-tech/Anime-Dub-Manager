@@ -531,6 +531,9 @@ class MixingStepRunner {
         case 'uvr_denoise_full':
           resultFiles = await this._execUvrDenoiseLite({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
           break;
+        case 'inworld_voice_isolator':
+          resultFiles = await this._execInworldVoiceIsolator({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: { modelId: step.moduleId, ...step.params }, logFn, onProgress });
+          break;
         case 'ffmpeg_denoise':
           resultFiles = await this._execFfmpegDenoise({ workingDir, stepFolder, prefix: step.prefix, inputFiles, params: step.params, logFn, onProgress });
           break;

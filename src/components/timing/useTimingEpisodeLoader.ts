@@ -215,15 +215,74 @@ export function useTimingEpisodeLoader({
             addLog(`💾 Загружено сохраненное состояние тайминга из «${savedStateRes.timingDir || 'Тайминг'}» (${st.updatedAt ? new Date(st.updatedAt).toLocaleString('ru-RU') : ''}). Восстановление...`, 'info');
             updateProcess('Загрузка проекта тайминга', 'Восстановление сохраненного таймлайна и декодирование аудиоволн...', 25, 3, 5);
 
-            const restoredTracks: Track[] = st.tracks;
-            const catalogTracks: Track[] = Array.isArray(st.allCatalogTracks) && st.allCatalogTracks.length > 0
-              ? st.allCatalogTracks
-              : restoredTracks;
+            let restoredTracks: Track[] = [...st.tracks];
+            let catalogTracks: Track[] = Array.isArray(st.allCatalogTracks) && st.allCatalogTracks.length > 0
+              ? [...st.allCatalogTracks]
+              : [...restoredTracks];
+            let mergedAudioClips: Record<string, AudioClip[]> = { ...(st.audioClips || {}) };
+            let mergedSubLinesMap: Record<string, any[]> = { ...(st.trackSubLinesMap || {}) };
+
+            // Сверяем сохраненный timing_state.json со свежими загрузками из QA:
+            // 1) Дозаполняем пустые/устаревшие filePath у ранее сохраненных дорожек
+            // 2) Добавляем новые дорожки, загруженные в QA уже после сохранения timing_state.json
+            const freshQaTracks = prepareQATracksForTiming(currentEpisode, [], true);
+            const normTrackMatchKey = (tr: Track) => {
+              const baseNick = String(tr.dubberName || tr.participant || '')
+                .replace(/\(.*?\)/g, '')
+                .replace(/[^\w\d\u0400-\u04FF]/g, '')
+                .toLowerCase();
+              const subIdx = (tr as any).subTrackIndex || 1;
+              const isFixFlag = tr.role === 'fix' || (tr as any).isFix === true || String(tr.id || '').includes('_fix');
+              return `${baseNick}__${subIdx}__${isFixFlag ? 'fix' : 'main'}`;
+            };
+
+            const newlyAddedTracks: Track[] = [];
+            const hydratedTracks: Track[] = [];
+
+            const hydrateTrackFromFresh = (existing: Track, fresh: Track): Track => ({
+              ...existing,
+              filePath: fresh.filePath || existing.filePath,
+              files: (fresh.files && fresh.files.length > 0) ? fresh.files : existing.files,
+              selectedFileId: fresh.selectedFileId || existing.selectedFileId,
+              fileSize: fresh.fileSize || existing.fileSize,
+              character: fresh.character || existing.character,
+              characterName: fresh.characterName || existing.characterName,
+              patchSnippet: (fresh as any).patchSnippet || (existing as any).patchSnippet,
+              patchSnippets: (fresh as any).patchSnippets || (existing as any).patchSnippets
+            });
+
+            for (const freshTr of freshQaTracks) {
+              if (!freshTr.filePath) continue;
+              const freshKey = normTrackMatchKey(freshTr);
+
+              const findMatchingIndex = (list: Track[]) =>
+                list.findIndex(t => t.id === freshTr.id || normTrackMatchKey(t) === freshKey);
+
+              const rIdx = findMatchingIndex(restoredTracks);
+              if (rIdx >= 0) {
+                if (!restoredTracks[rIdx].filePath) {
+                  restoredTracks[rIdx] = hydrateTrackFromFresh(restoredTracks[rIdx], freshTr);
+                  hydratedTracks.push(restoredTracks[rIdx]);
+                }
+              } else {
+                restoredTracks.push(freshTr);
+                newlyAddedTracks.push(freshTr);
+              }
+
+              const cIdx = findMatchingIndex(catalogTracks);
+              if (cIdx >= 0) {
+                if (!catalogTracks[cIdx].filePath) {
+                  catalogTracks[cIdx] = hydrateTrackFromFresh(catalogTracks[cIdx], freshTr);
+                }
+              } else {
+                catalogTracks.push(freshTr);
+              }
+            }
 
             allCatalogTracksRef.current = catalogTracks;
             setTracks(restoredTracks);
-            setAudioClips(st.audioClips || {});
-            if (st.trackSubLinesMap) setTrackSubLinesMap(st.trackSubLinesMap);
+            setAudioClips(mergedAudioClips);
+            if (Object.keys(mergedSubLinesMap).length > 0) setTrackSubLinesMap(mergedSubLinesMap);
             setIsSilenceRemoved(Boolean(st.isSilenceRemoved));
             setIsFixesStitched(Boolean(st.isFixesStitched));
             setIsTimingAnalyzed(Boolean(st.isTimingAnalyzed));
@@ -260,7 +319,7 @@ export function useTimingEpisodeLoader({
 
             const computedNormMetrics = await decodeSavedStateAudioSources({
               catalogTracks,
-              savedAudioClips: st.audioClips as Record<string, AudioClip[]>,
+              savedAudioClips: mergedAudioClips,
               setImportDecodedTracks,
               updateProcess,
               audioElementsRef,
@@ -271,9 +330,31 @@ export function useTimingEpisodeLoader({
               setDuration
             });
 
+            // Инициализируем клипы и субтитры для вновь подхваченных / дозаполненных дорожек QA
+            const tracksNeedingInit = [...newlyAddedTracks, ...hydratedTracks].filter(
+              t => !mergedAudioClips[t.id] || mergedAudioClips[t.id].length === 0
+            );
+            if (tracksNeedingInit.length > 0) {
+              const { initialClips: extraClips, trackSubMap: extraSubMap } = mapSubtitlesAndBuildInitialClips({
+                currentEpisode,
+                fetchedTracks: tracksNeedingInit,
+                parsedLines,
+                audioBuffersRef,
+                addLog
+              });
+              mergedAudioClips = { ...mergedAudioClips, ...extraClips };
+              mergedSubLinesMap = { ...mergedSubLinesMap, ...extraSubMap };
+              setAudioClips(mergedAudioClips);
+              setTrackSubLinesMap(mergedSubLinesMap);
+              addLog(
+                `🔄 Синхронизировано с QA: подхвачено новых/обновлённых дорожек — ${tracksNeedingInit.length} (${tracksNeedingInit.map(t => t.participant).join(', ')}).`,
+                'success'
+              );
+            }
+
             setNormalizationMetrics(computedNormMetrics);
             isStateRestoredRef.current = true;
-            addLog(`✓ Состояние вкладки «Тайминг» успешно восстановлено из файла! Загружено ${restoredTracks.length} дорожек, клипов: ${Object.values(st.audioClips).flat().length}. Повторный автотайминг/нарезка не требуются.`, 'success');
+            addLog(`✓ Состояние вкладки «Тайминг» успешно восстановлено из файла! Загружено ${restoredTracks.length} дорожек, клипов: ${Object.values(mergedAudioClips).flat().length}. Повторный автотайминг/нарезка не требуются.`, 'success');
             toast.success(`Тайминг серии успешно загружен из сохраненного файла («Тайминг»)! 💾`);
             return;
           }
@@ -314,7 +395,7 @@ export function useTimingEpisodeLoader({
         if (/^(0[1-9]|1[0-9])_(denoise|deepfilter|glue|compress|master|video_mux|eq|limiter|reverb|delay|mix)/i.test(base) || /^[\d\s._-]+$/.test(base.replace(/\.[^.]+$/, ''))) {
           return false;
         }
-        if (/master|glue|denoise|deepfilter|mix|compress|release|original_audio/i.test(base)) {
+        if (/(?:^|[_-])(?:master|glue|denoise|deepfilter|mix|compress|release|original_audio|original_vocals|original_instrumental)(?:[_.-]|$)/i.test(base)) {
           return false;
         }
         const nick = (dt.dubberNick || '').trim();

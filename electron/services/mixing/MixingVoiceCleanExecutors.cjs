@@ -118,6 +118,101 @@ class MixingVoiceCleanExecutors {
   }
 
   /**
+   * EXEC: Inworld Voice Isolator v1 (48 kHz Neural Speech Isolation & Denoising)
+   * https://github.com/inworld-ai/voice-isolator
+   */
+  async _execInworldVoiceIsolator({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {
+    const isolatorMode = params.isolatorMode === 'streaming' ? 'streaming' : 'offline';
+    const rawLa = Number(params.lookaheadFrames ?? 2);
+    const lookaheadFrames = [0, 2, 4].reduce((best, cand) =>
+      Math.abs(cand - rawLa) < Math.abs(best - rawLa) ? cand : best
+    , 2);
+    const wetDryBlend = Math.max(10, Math.min(100, Number(params.wetDryBlend ?? 100.0)));
+    const autoDownload = params.autoDownloadModel !== false;
+
+    const isRealtime = isolatorMode === 'streaming';
+    const downloadId = isRealtime ? 'inworld_voice_isolator_realtime' : 'inworld_voice_isolator';
+    const filename = isRealtime ? 'denoiser_realtime.safetensors' : 'denoiser.safetensors';
+    const modelName = isRealtime
+      ? 'Inworld Voice Isolator v1 Realtime (58M)'
+      : 'Inworld Voice Isolator v1 Offline (64M)';
+
+    if (inputFiles.length === 0) {
+      throw new Error(`Нет входных дорожек для применения модели ${modelName}.`);
+    }
+
+    logFn(`[${modelName}] Запуск 48 кГц нейросетевой изоляции голоса (веса: ${filename})...`);
+    logFn(`Параметры: Режим=${isolatorMode}, Lookahead=${lookaheadFrames} кадр., Wet/Dry=${wetDryBlend}%`);
+
+    const rootUserData = app ? app.getPath('userData') : process.cwd();
+    const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
+    await fs.mkdir(uvrModelsDir, { recursive: true });
+    const localModelFile = path.join(uvrModelsDir, filename);
+
+    let modelInstalled = fsSync.existsSync(localModelFile) && fsSync.statSync(localModelFile).size > 5 * 1024 * 1024;
+    if (!modelInstalled && autoDownload) {
+      logFn(`Файл весов ${filename} не обнаружен локально. Запуск загрузки с Hugging Face (inworld/voice-isolator)...`);
+      try {
+        await this.downloadUvrModel({
+          modelId: downloadId,
+          onProgress: (p) => {
+            if (onProgress && p && typeof p.percent === 'number') {
+              onProgress({ percent: Math.round(p.percent * 0.15), message: `Загрузка ${modelName}: ${p.percent}%` });
+            }
+          },
+          onLog: logFn
+        });
+        modelInstalled = fsSync.existsSync(localModelFile) && fsSync.statSync(localModelFile).size > 5 * 1024 * 1024;
+      } catch (err) {
+        logFn(`Предупреждение при предварительном скачивании ${filename}: ${err.message}. Python-движок попробует загрузить веса напрямую через Hugging Face Hub.`, 'warn');
+      }
+    }
+
+    if (modelInstalled) {
+      const st = fsSync.statSync(localModelFile);
+      logFn(`✓ Задействованы локальные веса Inworld: ${filename} (${(st.size / (1024 * 1024)).toFixed(1)} МБ)`);
+    }
+
+    const results = [];
+    for (let i = 0; i < inputFiles.length; i++) {
+      const track = inputFiles[i];
+      const nick = this._resolveTrackNick(track, inputFiles, i);
+      const outName = this._resolveTrackOutName(track, inputFiles, i, prefix);
+      const outPath = path.join(stepFolder, outName);
+      const trackStartPct = Math.round((i / inputFiles.length) * 100);
+      const trackEndPct = Math.round(((i + 1) / inputFiles.length) * 100);
+
+      logFn(`[${i + 1}/${inputFiles.length}] Изоляция голоса «${modelName}» для дорожки «${nick}»...`);
+      const neuralRes = await AudioNeuralService.isolateVoiceInworld({
+        inputPath: track.path,
+        outputPath: outPath,
+        modelPath: modelInstalled ? localModelFile : null,
+        modelId: downloadId,
+        isolatorMode,
+        lookaheadFrames,
+        wetDryBlend,
+        onProgress: (p) => {
+          if (onProgress && p && typeof p.percent === 'number') {
+            const current = trackStartPct + Math.round((p.percent / 100) * (trackEndPct - trackStartPct));
+            onProgress({ percent: current, message: `${modelName} [${nick}]: ${p.percent}%` });
+          }
+        },
+        onLog: logFn
+      });
+
+      if (!neuralRes || !fsSync.existsSync(outPath)) {
+        throw new Error(`Модель «${modelName}» не создала выходной файл для дорожки «${nick}».`);
+      }
+
+      const st = fsSync.statSync(outPath);
+      results.push({ name: outName, path: outPath, size: st.size, dubberNick: nick });
+      logFn(`✓ Дорожка «${nick}» успешно изолирована нейросетью «${modelName}» -> ${outName} (${(st.size / (1024 * 1024)).toFixed(1)} МБ)`);
+    }
+
+    return results;
+  }
+
+  /**
    * EXEC: FFmpeg Spectral Denoise (Dedicated standalone FFmpeg afftdn module)
    */
   async _execFfmpegDenoise({ workingDir, stepFolder, prefix, inputFiles, params, logFn, onProgress }) {

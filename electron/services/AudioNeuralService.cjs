@@ -66,7 +66,9 @@ class AudioNeuralService {
               content.includes('--noise_reduction_db') &&
               content.includes('vst3_open_editor') &&
               content.includes('VST3_WAVESHELL_V7') &&
-              content.includes('HTDEMUCS_SAFE_SEGMENT_V8')
+              content.includes('HTDEMUCS_SAFE_SEGMENT_V8') &&
+              content.includes('INWORLD_VOICE_ISOLATOR_V9') &&
+              content.includes('INWORLD_NATIVE_CHUNK_V10')
             ) {
               sourceContent = content;
               break;
@@ -130,7 +132,9 @@ class AudioNeuralService {
         !code.includes('--post_filter') ||
         !code.includes('parse_known_args') ||
         !code.includes('VST3_WAVESHELL_V7') ||
-        !code.includes('HTDEMUCS_SAFE_SEGMENT_V8')
+        !code.includes('HTDEMUCS_SAFE_SEGMENT_V8') ||
+        !code.includes('INWORLD_VOICE_ISOLATOR_V9') ||
+        !code.includes('INWORLD_NATIVE_CHUNK_V10')
       ) {
         const bundledCandidates = [
           path.join(__dirname, 'audio_ai_processor.py'),
@@ -151,7 +155,9 @@ class AudioNeuralService {
                 fresh &&
                 !fresh.includes('_TorchTestingFinder') &&
                 fresh.includes('VST3_WAVESHELL_V7') &&
-                fresh.includes('HTDEMUCS_SAFE_SEGMENT_V8')
+                fresh.includes('HTDEMUCS_SAFE_SEGMENT_V8') &&
+                fresh.includes('INWORLD_VOICE_ISOLATOR_V9') &&
+                fresh.includes('INWORLD_NATIVE_CHUNK_V10')
               ) {
                 fs.writeFileSync(scriptPath, fresh, 'utf8');
                 log.info(`[AudioNeuralService] Скрипт ${scriptPath} обновлен на актуальную версию.`);
@@ -258,7 +264,8 @@ class AudioNeuralService {
         PYTHONUNBUFFERED: '1',
         PYTHONIOENCODING: 'utf-8',
         PYTHONUTF8: '1',
-        TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch')
+        TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch'),
+        HF_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'huggingface')
       };
 
       // Determine safe working directory: NEVER use a path inside an app.asar
@@ -426,6 +433,8 @@ class AudioNeuralService {
         deepfilternet: false,
         demucs: false,
         onnxruntime: false,
+        safetensors: false,
+        inworld_voice_isolator: false,
         error: e.message
       };
     }
@@ -462,6 +471,58 @@ class AudioNeuralService {
       onLog,
       abortSignal,
       operationName: `Neural Denoise [${modelId}]`
+    });
+
+    return outputPath;
+  }
+
+  /**
+   * Neural AI 48 kHz Voice Isolation & Speech Denoising (Inworld Voice Isolator v1)
+   * https://github.com/inworld-ai/voice-isolator
+   */
+  async isolateVoiceInworld({
+    inputPath,
+    outputPath,
+    modelPath = null,
+    modelId = 'inworld_voice_isolator',
+    isolatorMode = 'offline',
+    lookaheadFrames = 2,
+    wetDryBlend = 100.0,
+    onProgress,
+    onLog,
+    abortSignal
+  }) {
+    if (!fs.existsSync(inputPath)) {
+      throw new Error(`Входной файл не существует: ${inputPath}`);
+    }
+
+    await fsPromises.mkdir(path.dirname(outputPath), { recursive: true });
+
+    const safeMode = isolatorMode === 'streaming' ? 'streaming' : 'offline';
+    const rawLa = Number(lookaheadFrames ?? 2);
+    const allowedLookahead = [0, 2, 4];
+    const safeLookahead = allowedLookahead.reduce((best, cand) =>
+      Math.abs(cand - rawLa) < Math.abs(best - rawLa) ? cand : best
+    , 2);
+    const args = [
+      '--mode', 'inworld_voice_isolator',
+      '--input', inputPath,
+      '--output', outputPath,
+      '--model_id', String(modelId),
+      '--isolator_mode', safeMode,
+      '--lookahead_frames', String(safeLookahead),
+      '--wet_dry_blend', String(Math.max(10, Math.min(100, Number(wetDryBlend ?? 100.0))))
+    ];
+
+    if (modelPath && fs.existsSync(modelPath)) {
+      args.push('--model_path', modelPath);
+    }
+
+    await this._runPythonSidecar(args, {
+      onProgress,
+      onLog,
+      abortSignal,
+      operationName: `Inworld Voice Isolator [${safeMode}]`
     });
 
     return outputPath;

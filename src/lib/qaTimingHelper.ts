@@ -149,9 +149,11 @@ export function prepareQATracksForTiming(
   // 2. Collect actors from uploads
   uploads.forEach(u => {
     if ((u.type === 'DUBBER_FILE' || u.type === 'FIXES') && u.path) {
-      const rawNick = u.uploadedBy?.nickname || '';
-      if (rawNick) {
-        registerActor(rawNick, u.uploadedById, undefined, u.assignmentId);
+      const anyU = u as UploadedFile & { dubberNick?: string; dubberName?: string; participantId?: string };
+      const rawNick = anyU.uploadedBy?.nickname || anyU.dubberNick || anyU.dubberName || '';
+      const dId = anyU.uploadedById || anyU.participantId || anyU.dubberId;
+      if (rawNick || dId) {
+        registerActor(rawNick, dId, undefined, u.assignmentId);
       }
     }
   });
@@ -160,17 +162,27 @@ export function prepareQATracksForTiming(
 
   Array.from(actorMap.values()).forEach(actor => {
     const { normKey, dubberNick, dubberId, assignmentIds } = actor;
-    const charStr = Array.from(actor.characters).filter(Boolean).join(', ') || dubberNick;
+    const charList = Array.from(actor.characters).filter(Boolean);
+    const charStr = charList.join(', ') || dubberNick;
+    const charNormKeys = charList.map(c => normalizeKey(c)).filter(c => c.length >= 4);
 
     // Filter uploads for this actor
     const actorUploads = uploads.filter(u => {
       if (!u.path || (u.type !== 'DUBBER_FILE' && u.type !== 'FIXES')) return false;
       const lowerP = u.path.toLowerCase();
       if (lowerP.includes('slice') || lowerP.includes('temp_')) return false;
+      const anyU = u as UploadedFile & { dubberNick?: string; dubberName?: string; participantId?: string };
       if (u.assignmentId && assignmentIds.has(u.assignmentId)) return true;
-      if (dubberId && (u.uploadedById === dubberId || u.dubberId === dubberId)) return true;
-      const uNick = normalizeKey(cleanDubberNick(u.uploadedBy?.nickname || ''));
-      return Boolean(uNick && uNick === normKey);
+      const uDubberId = anyU.uploadedById || anyU.participantId || anyU.dubberId;
+      if (dubberId && uDubberId && String(uDubberId) === String(dubberId)) return true;
+      const uNick = normalizeKey(cleanDubberNick(anyU.uploadedBy?.nickname || anyU.dubberNick || anyU.dubberName || ''));
+      if (uNick && uNick === normKey) return true;
+      // Безопасный фоллбэк по имени персонажа в названии файла, если у загрузки отсутствуют ID и никнейм
+      if (!uDubberId && !uNick && charNormKeys.length > 0) {
+        const fileNorm = normalizeKey(getFileBaseName(u.path));
+        if (charNormKeys.some(cn => fileNorm.includes(cn))) return true;
+      }
+      return false;
     }).sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
 
     // Filter manifest files for this actor
@@ -180,7 +192,11 @@ export function prepareQATracksForTiming(
       const lowerB = base.toLowerCase();
       if (lowerB.includes('slice') || lowerB.includes('temp_')) return false;
       const mtNick = normalizeKey(cleanDubberNick(mt.dubberNick || base));
-      return Boolean(mtNick && (mtNick === normKey || mtNick.includes(normKey) || normKey.includes(mtNick)));
+      if (!mtNick || !normKey) return false;
+      if (mtNick === normKey) return true;
+      // Защита от ложного совпадения коротких ников (например, «РИ») с подстроками других ников
+      const shorterLen = Math.min(mtNick.length, normKey.length);
+      return shorterLen >= 5 && (mtNick.includes(normKey) || normKey.includes(mtNick));
     });
 
     // Helper to extract explicit track index (e.g. дорожка1, дорожка2, track1, layer2, фикс1, fix2)

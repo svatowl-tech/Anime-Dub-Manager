@@ -599,7 +599,22 @@ class MixingMasterExecutors {
   async checkUvrModelStatus({ modelId = 'uvr_denoise_lite' } = {}) {
     const rootUserData = app ? app.getPath('userData') : process.cwd();
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
-    const modelDef = this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
+    const auxWeightsMap = {
+      inworld_voice_isolator_realtime: {
+        id: 'inworld_voice_isolator_realtime',
+        name: 'Inworld Voice Isolator v1 Realtime (58M)',
+        title: 'Inworld Voice Isolator v1 Realtime (58M)',
+        filename: 'denoiser_realtime.safetensors',
+        category: 'denoise',
+        description: 'Потоковая 48 кГц версия Inworld Voice Isolator v1 Realtime (58M параметров).',
+        size_mb: 233.0,
+        recommended_for: 'Быстрая 48 кГц изоляция голоса',
+        format: 'safetensors',
+        engineArchitecture: 'Inworld 48kHz Causal Streaming (58M)',
+        urls: ['https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser_realtime.safetensors']
+      }
+    };
+    const modelDef = auxWeightsMap[modelId] || this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
     const filename = modelDef?.filename || (modelId === 'uvr_deecho_normal' ? 'UVR-De-Echo-Normal.pth' : 'UVR-DeNoise-Lite.pth');
     const localModelFile = path.join(uvrModelsDir, filename);
     const isInstalled = fsSync.existsSync(localModelFile);
@@ -637,7 +652,20 @@ class MixingMasterExecutors {
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
     await fs.mkdir(uvrModelsDir, { recursive: true });
 
-    const modelDef = this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
+    const auxWeightsMap = {
+      inworld_voice_isolator_realtime: {
+        id: 'inworld_voice_isolator_realtime',
+        name: 'Inworld Voice Isolator v1 Realtime (58M)',
+        title: 'Inworld Voice Isolator v1 Realtime (58M)',
+        filename: 'denoiser_realtime.safetensors',
+        category: 'denoise',
+        size_mb: 233.0,
+        format: 'safetensors',
+        engineArchitecture: 'Inworld 48kHz Causal Streaming (58M)',
+        urls: ['https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser_realtime.safetensors']
+      }
+    };
+    const modelDef = auxWeightsMap[modelId] || this.moduleDatabase.find(m => m.id === modelId) || this.moduleDatabase.find(m => m.id === 'uvr_denoise_lite');
     const filename = modelDef?.filename || (modelId === 'uvr_deecho_normal' ? 'UVR-De-Echo-Normal.pth' : 'UVR-DeNoise-Lite.pth');
     const localModelFile = path.join(uvrModelsDir, filename);
     const metaFile = `${localModelFile}.meta.json`;

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AI Environment Builder for Anime Dub Manager (ADM)
-Creates a portable, self-contained Python AI runtime (DeepFilterNet3, Demucs v4, PyTorch, NumPy 1.26.4)
+Creates a portable, self-contained Python AI runtime (DeepFilterNet3, Demucs v4, Inworld Voice Isolator v1, PyTorch 2.2.2, NumPy 1.26.4)
 and packages it into lightweight cross-platform zip archives for GitHub Releases CI/CD (<2GB limit).
 """
 
@@ -156,9 +156,9 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
             dir_lower = name.lower()
             norm_root = root.replace("\\", "/").lower()
 
-            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm'
-            # Subpackages such as 'torch/cuda', 'torch/testing', 'torchaudio/compliance' are required at runtime!
-            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm']):
+            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'inworld', 'safetensors', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm'
+            # Subpackages such as 'torch/cuda', 'torch/testing', 'torchaudio/compliance', 'inworld/voice_isolation' are required at runtime!
+            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'inworld', 'safetensors', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm']):
                 continue
 
             # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
@@ -282,7 +282,8 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "numba==0.59.1\n"
         "librosa>=0.10.0,<0.11.0\n"
         "onnxruntime==1.16.3\n"
-        "rotary-embedding-torch>=0.5.0,<0.9.0\n",
+        "rotary-embedding-torch>=0.5.0,<0.9.0\n"
+        "safetensors==0.4.3\n",
         encoding="utf-8"
     )
 
@@ -336,6 +337,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "librosa>=0.10.0,<0.11.0",
         "onnxruntime==1.16.3",
         "huggingface-hub>=0.20.0",
+        "safetensors==0.4.3",
         "tqdm>=4.65.0",
         "einops>=0.7.0",
         "rotary-embedding-torch>=0.5.0,<0.9.0",
@@ -350,6 +352,17 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     # Install VoiceFixer with --no-deps to prevent streamlit bloat
     print("  [VOICEFIXER] Installing VoiceFixer package (--no-deps)...")
     run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--no-deps", "voicefixer>=0.1.3"])
+
+    # Install Inworld Voice Isolator (https://github.com/inworld-ai/voice-isolator) with --no-deps
+    # All runtime dependencies (torch==2.2.2, torchaudio==2.2.2, numpy==1.26.4, soundfile, safetensors==0.4.3, huggingface-hub)
+    # are already pinned above, so --no-deps guarantees zero transitive upgrades or breakage of existing neural networks.
+    # Note: optional CUDA-only [fast] extra (mamba-ssm / causal-conv1d) is intentionally omitted for portable cross-platform builds.
+    print("  [INWORLD] Installing inworld-voice-isolation (--no-deps, pure PyTorch fallback)...")
+    try:
+        run_cmd([str(venv_python), "-m", "pip", "install", "--no-cache-dir", "--prefer-binary", "--no-deps", "inworld-voice-isolation"])
+        print("  [INWORLD] inworld-voice-isolation installed successfully without modifying core pins.")
+    except Exception as inworld_err:
+        print(f"  [WARN] inworld-voice-isolation install warning: {inworld_err}. Runtime will attempt on-demand installation if needed.")
 
     # Install Aeneas Forced Alignment package in a dedicated isolated step
     # AENEAS_WITH_CEW=False disables compilation of optional cew C-extensions that fail on Windows MSVC without espeak.lib
@@ -582,6 +595,18 @@ try:
     print("  [VERIFY OK] VoiceFixer import succeeded.", flush=True)
 except Exception as e:
     print(f"  [VERIFY WARN] VoiceFixer check: {e}", flush=True)
+
+try:
+    import safetensors
+    print(f"  [VERIFY OK] Safetensors: {safetensors.__version__}", flush=True)
+except Exception as e:
+    print(f"  [VERIFY WARN] Safetensors check: {e}", flush=True)
+
+try:
+    from inworld import voice_isolation
+    print("  [VERIFY OK] Inworld Voice Isolator (inworld.voice_isolation) import succeeded.", flush=True)
+except Exception as e:
+    print(f"  [VERIFY WARN] Inworld Voice Isolator check: {e}", flush=True)
 
 print("  [VERIFY COMPLETE] All required neural audio processing modules verified successfully!", flush=True)
 """
@@ -834,7 +859,7 @@ except Exception as e:
     # 9. Create portable launcher / environment marker
     version_info_path = build_temp_dir / "env_info.json"
     with open(version_info_path, "w", encoding="utf-8") as f:
-        f.write(f'{{\n  "platform": "{tag}",\n  "python_version": "{platform.python_version()}",\n  "numpy_version": "1.26.4",\n  "deepfilternet": true,\n  "demucs": true\n}}\n')
+        f.write(f'{{\n  "platform": "{tag}",\n  "python_version": "{platform.python_version()}",\n  "numpy_version": "1.26.4",\n  "deepfilternet": true,\n  "demucs": true,\n  "inworld_voice_isolator": true\n}}\n')
 
     # 10. Prune bloat
     prune_unneeded_files(build_temp_dir, strip_cuda=(use_cpu_wheels and (is_win or is_linux)))
@@ -863,6 +888,12 @@ try:
     import soundfile
     import scipy
     import onnxruntime
+    import safetensors
+    try:
+        from inworld import voice_isolation
+        inworld_status = "OK"
+    except Exception as iw_e:
+        inworld_status = f"WARN ({iw_e})"
     
     pb_ver = "unsupported on host"
     try:
@@ -872,7 +903,7 @@ try:
     except Exception:
         pass
 
-    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Pedalboard {pb_ver}, Numba {numba.__version__}")
+    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Safetensors {safetensors.__version__}, Inworld {inworld_status}, Pedalboard {pb_ver}, Numba {numba.__version__}")
 except Exception as e:
     sys.stderr.write(f"  [POST-PRUNE ERROR] Crucial AI package was damaged by cleanup: {e}\\n")
     traceback.print_exc()

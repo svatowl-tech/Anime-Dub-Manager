@@ -242,7 +242,7 @@ class MixingManifestRouter {
     const uvrModelsDir = path.join(rootUserData, 'models', 'uvr');
 
     return this.moduleDatabase.map(mod => {
-      if (mod.filename && /\.(pth|ckpt|onnx|bin)$/i.test(mod.filename)) {
+      if (mod.filename && /\.(pth|ckpt|onnx|bin|safetensors)$/i.test(mod.filename)) {
         const localModelFile = path.join(uvrModelsDir, mod.filename);
         const isInstalled = fsSync.existsSync(localModelFile);
         let bytes = null;
@@ -834,21 +834,26 @@ class MixingManifestRouter {
         
         let dubberNick = f;
         const bracketMatch = f.match(/\[(.*?)\]/);
-        const trackMatch = f.match(/_дорожка(\d+)/i) || f.match(/_layer(\d+)/i) || f.match(/_take(\d+)/i);
+        const legacyTimedNumMatch = f.startsWith('00_timed_') ? baseNoExt.match(/_(\d+)$/) : null;
+        const trackMatch = f.match(/_дорожка(\d+)/i) || f.match(/_layer(\d+)/i) || f.match(/_take(\d+)/i) || legacyTimedNumMatch;
         const trackNum = trackMatch ? trackMatch[1] : null;
 
         if (f.startsWith('00_timed_')) {
           dubberNick = f.replace(/^00_timed_/, '').replace(audioExts, '');
+          if (legacyTimedNumMatch && !/_(?:дорожка|layer|take)\d+$/i.test(dubberNick)) {
+            dubberNick = dubberNick.replace(/_\d+$/, '');
+          }
         } else if (bracketMatch && bracketMatch[1]) {
           dubberNick = bracketMatch[1];
         } else {
           dubberNick = baseNoExt.replace(/^dub_/i, '').replace(/^.*?_/, '');
         }
 
-        // Clean out track/layer/fix suffixes from base nickname
+        // Clean out track/layer/fix suffixes and backticks from base nickname
         dubberNick = dubberNick
           .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
           .replace(/_дорожка\d+/gi, '')
+          .replace(/[`'"]/g, '')
           .replace(/[_\s-]+$/, '')
           .trim();
 
@@ -948,6 +953,7 @@ class MixingManifestRouter {
           .replace(/\[?(дорожка|слой|take|layer|фикс|fix)\s*\d*\]?/gi, '')
           .replace(/^00_timed_/i, '')
           .replace(/\.wav$/i, '')
+          .replace(/[`'"]/g, '')
           .trim() || 'Даббер';
         const key = String(u.uploadedById || baseNick).toLowerCase();
         const isFix = u.type === 'FIXES' || /(?:^|[_[\s-])(?:fix|фикс)\d*(?:[_\]\s.-]|$)/i.test(f);
@@ -1174,25 +1180,27 @@ class MixingManifestRouter {
 
     logFn(`Запуск экспорта звукорежиссеру в папку сведения: ${workingDir}`);
 
-    await ExportService.exportSoundEngineerFiles(
+    await ExportService.exportSoundEngineerFiles({
       episode,
-      workingDir,
-      skipConversion,
-      smartExport,
-      additionalProcessing,
-      autoApplyFixes,
+      targetDir: workingDir,
+      options: {
+        skipConversion,
+        smartExport,
+        additionalProcessing,
+        autoApplyFixes,
+        includeSubtitles,
+        autoTiming,
+        forMixing: true
+      },
       config,
       projectsData,
       participantsData,
-      (p) => {
+      onProgress: (p) => {
         if (onProgress && p && typeof p.percent === 'number') {
           onProgress({ percent: Math.round(p.percent * 0.85), message: p.message || 'Экспорт дорожек...' });
         }
-      },
-      undefined,
-      includeSubtitles,
-      autoTiming
-    );
+      }
+    });
 
     logFn('Экспорт завершен. Анализ полученных дорожек...');
 

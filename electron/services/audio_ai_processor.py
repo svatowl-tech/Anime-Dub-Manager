@@ -7,7 +7,8 @@ Production-Grade Audio DSP & Deep Learning Inference Engine:
 2. Demucs v4 (Hybrid Transformer Music & Speech Stem Separation) [Official `demucs` package, Native 44.1kHz Stereo -> 48kHz]
 3. Spotify Pedalboard (Studio-grade Vocal Post-Processing DSP) [Official `pedalboard` C++ engine: EQ, Compressor, De-Esser, Reverb, Limiter]
 4. VoiceFixer (Neural Harmonic Restorer & Speech Super-Resolution) [Official `voicefixer` package]
-5. Whisper & PyAnnote Diarization (Speech-to-Text & Speaker Segmentation)
+5. Inworld Voice Isolator v1 (48 kHz Neural Speech Isolation & Denoising) [Official `inworld-voice-isolation` package]
+6. Whisper & PyAnnote Diarization (Speech-to-Text & Speaker Segmentation)
 
 Audio Conditioning & Memory Management:
 - Polyphase resampling via scipy.signal.resample_poly to exact model sample rates
@@ -15,6 +16,8 @@ Audio Conditioning & Memory Management:
 - True-peak headroom management (-0.5 dBFS soft protection)
 - Sample-accurate length preservation & 24-bit PCM broadcast WAV output
 """
+
+from __future__ import annotations
 
 import sys
 import os
@@ -627,6 +630,470 @@ def process_deepfilternet(args):
 
     emit_progress(100.0, "Шумоподавление DeepFilterNet3 успешно завершено!")
     sys.stdout.write(f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'deepfilternet3'})}\n")
+    sys.stdout.flush()
+
+
+# ------------------------------------------------------------------------------
+# 4B. INWORLD VOICE ISOLATOR v1 (48kHz NEURAL VOICE ISOLATION - INWORLD_VOICE_ISOLATOR_V9)
+# ------------------------------------------------------------------------------
+def _ensure_inworld_packages_installed():
+    """
+    INWORLD_VOICE_ISOLATOR_V9
+    Ensures `safetensors` and `inworld.voice_isolation` are available in the current Python runtime.
+    If missing on an older pre-existing `ai_env`, installs ONLY those two lightweight packages using
+    `--no-deps` so pinned `torch==2.2.2`, `torchaudio==2.2.2`, `numpy==1.26.4`, `packaging`,
+    `deepfilternet`, `demucs`, and `onnxruntime` are NEVER modified or upgraded.
+    """
+    import importlib
+
+    def _try_import():
+        import safetensors  # noqa: F401
+        from inworld import voice_isolation
+        return voice_isolation
+
+    try:
+        return _try_import()
+    except ImportError:
+        pass
+
+    missing = []
+    try:
+        import safetensors  # noqa: F401
+    except ImportError:
+        missing.append("safetensors==0.4.3")
+    try:
+        from inworld import voice_isolation  # noqa: F401
+    except ImportError:
+        missing.append("inworld-voice-isolation")
+
+    if missing:
+        emit_progress(8.0, f"Доустановка пакетов Inworld Voice Isolator ({', '.join(missing)}) без изменения PyTorch/NumPy...")
+        try:
+            for pkg in missing:
+                cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--prefer-binary", "--no-deps", pkg]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                if res.returncode != 0:
+                    err_tail = (res.stderr or res.stdout or "").strip()[-400:]
+                    raise RuntimeError(f"pip install --no-deps {pkg} завершился с кодом {res.returncode}: {err_tail}")
+            importlib.invalidate_caches()
+            return _try_import()
+        except Exception as install_err:
+            raise ImportError(
+                "Библиотека Inworld Voice Isolator (`inworld-voice-isolation`) не установлена в текущем AI-окружении "
+                f"и не удалось выполнить автоматическую доустановку: {install_err}. "
+                "Обновите AI_env в настройках или выполните вручную: "
+                "pip install --no-deps safetensors==0.4.3 inworld-voice-isolation"
+            ) from install_err
+
+    return _try_import()
+
+
+def _resolve_inworld_device(torch_mod):
+    """
+    Selects the safest accelerator for Inworld Voice Isolator.
+    Note: official `inworld-voice-isolation` requires PyTorch >= 2.6 for Apple Silicon MPS;
+    on PyTorch 2.2.x MPS falls back safely to CPU while CUDA runs natively on GPU.
+    """
+    device = get_optimal_device()
+    dev_str = str(device)
+    if dev_str.startswith("mps"):
+        try:
+            ver_parts = torch_mod.__version__.split("+")[0].split(".")
+            major, minor = int(ver_parts[0]), int(ver_parts[1])
+            if (major, minor) < (2, 6):
+                sys.stdout.write(
+                    f"LOG:[Inworld Voice Isolator] PyTorch {torch_mod.__version__} < 2.6 на Apple MPS — "
+                    "переключение на CPU для полной стабильности.\n"
+                )
+                sys.stdout.flush()
+                return torch_mod.device("cpu")
+        except Exception:
+            return torch_mod.device("cpu")
+    return device
+
+
+def _normalize_inworld_lookahead(value, allowed=(0, 2, 4)) -> int:
+    """
+    INWORLD_NATIVE_CHUNK_V10
+    Snaps requested `lookahead_frames` to the nearest trained causal position supported
+    by `voice-isolator-v1-realtime` (`(0, 2, 4)` -> 0 ms, 20 ms, 40 ms at 10 ms/frame).
+    Passing an untrained value (e.g. 1, 3, 5..8) causes `VoiceIsolator` to raise ValueError.
+    """
+    try:
+        v = int(round(float(value)))
+    except Exception:
+        v = 2
+    choices = tuple(int(c) for c in allowed) if allowed else (0, 2, 4)
+    return min(choices, key=lambda c: (abs(c - v), c))
+
+
+def _init_inworld_isolator(voice_isolation_mod, model_path, isolator_mode: str, lookahead_frames: int, device):
+    """
+    INWORLD_NATIVE_CHUNK_V10
+    Instantiates `voice_isolation.VoiceIsolator` defensively across minor API variations,
+    supporting local `.safetensors` checkpoint files and Hugging Face repo (`inworld/voice-isolator`).
+    """
+    import inspect
+
+    cls = voice_isolation_mod.VoiceIsolator
+    sig = inspect.signature(cls.__init__)
+    params = sig.parameters
+    accepts_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    safe_lookahead = _normalize_inworld_lookahead(lookahead_frames, allowed=(0, 2, 4))
+    base_kwargs = {}
+    if accepts_kwargs or "device" in params:
+        base_kwargs["device"] = str(device)
+    if isolator_mode == "streaming":
+        if accepts_kwargs or "mode" in params:
+            base_kwargs["mode"] = "streaming"
+        if accepts_kwargs or "lookahead_frames" in params:
+            base_kwargs["lookahead_frames"] = safe_lookahead
+    else:
+        if accepts_kwargs or "mode" in params:
+            base_kwargs["mode"] = "offline"
+        if accepts_kwargs or "lookahead_frames" in params:
+            base_kwargs["lookahead_frames"] = 0
+
+    candidates = []
+    if model_path and os.path.isfile(model_path) and os.path.getsize(model_path) > 5 * 1024 * 1024:
+        candidates.append((model_path, dict(base_kwargs)))
+    candidates.append(("inworld/voice-isolator", dict(base_kwargs)))
+    # Minimal-kwargs fallback if a future release renames constructor options
+    if isolator_mode == "offline":
+        if model_path and os.path.isfile(model_path) and os.path.getsize(model_path) > 5 * 1024 * 1024:
+            candidates.append((model_path, {}))
+        candidates.append(("inworld/voice-isolator", {}))
+
+    last_err = None
+    for src, kw in candidates:
+        try:
+            sys.stdout.write(f"LOG:[Inworld Voice Isolator] Загрузка модели из: {src} (mode={isolator_mode}, lookahead={kw.get('lookahead_frames', 0)})\n")
+            sys.stdout.flush()
+            isolator = cls(src, **kw)
+            # If the loaded checkpoint exposes explicit trained lookahead_choices, ensure alignment
+            if isolator_mode == "streaming":
+                choices = getattr(isolator, "lookahead_choices", None)
+                if choices and getattr(isolator, "lookahead_frames", None) not in choices:
+                    isolator.lookahead_frames = _normalize_inworld_lookahead(lookahead_frames, allowed=choices)
+            return isolator, src
+        except Exception as e:
+            last_err = e
+            sys.stdout.write(f"LOG:[Inworld Voice Isolator] Вариант загрузки '{src}' не подошел ({e}), пробуем следующий...\n")
+            sys.stdout.flush()
+
+    raise RuntimeError(f"Не удалось инициализировать модель Inworld Voice Isolator: {last_err}")
+
+
+def _prepare_inworld_channel_tensor(ch_1d_np: np.ndarray, torch_mod):
+    """
+    Prepares a single mono channel strictly matching `inworld.voice_isolation.load_audio()`:
+    1D C-contiguous CPU `torch.float32` tensor `[T]` with guaranteed finite values (zero NaN/Inf).
+    """
+    arr = np.asarray(ch_1d_np, dtype=np.float32).reshape(-1)
+    if not np.isfinite(arr).all():
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    # Guard against corrupted upstream spikes while preserving normal floating-point headroom
+    if arr.size > 0:
+        max_abs = float(np.max(np.abs(arr)))
+        if max_abs > 10.0:
+            arr = np.clip(arr, -10.0, 10.0)
+    arr = np.ascontiguousarray(arr, dtype=np.float32)
+    return torch_mod.from_numpy(arr)
+
+
+def _resolve_inworld_offline_window(isolator, model_sr: int):
+    """
+    Reads exact native `(chunk_samples, overlap_samples, hop_length)` from the loaded
+    Inworld checkpoint (`model.default_window()` -> 8.0s chunk, 2.0s overlap at 48 kHz =
+    384,000 / 96,000 samples, hop_length = 480). Guarantees overlap <= chunk // 2 and
+    chunk >= hop_length so `model.enhance()` never double-chunks or rejects window size.
+    """
+    default_chunk_sec = 8.0
+    default_overlap_sec = 2.0
+    hop_length = 480
+
+    model_obj = getattr(isolator, "model", None)
+    if model_obj is not None:
+        default_win_fn = getattr(model_obj, "default_window", None)
+        if callable(default_win_fn):
+            try:
+                c_sec, o_sec = default_win_fn()
+                if c_sec and float(c_sec) > 0:
+                    default_chunk_sec = float(c_sec)
+                if o_sec is not None and float(o_sec) >= 0:
+                    default_overlap_sec = float(o_sec)
+            except Exception:
+                pass
+        cfg = getattr(model_obj, "config", None)
+        if cfg is not None:
+            try:
+                h = int(getattr(cfg, "hop_length", 480))
+                if h > 0:
+                    hop_length = h
+            except Exception:
+                pass
+
+    chunk_samples = max(hop_length, int(round(default_chunk_sec * model_sr)))
+    overlap_samples = max(0, min(int(round(default_overlap_sec * model_sr)), chunk_samples // 2))
+    return chunk_samples, overlap_samples, hop_length, default_chunk_sec, default_overlap_sec
+
+
+def _call_inworld_isolate_1d(isolator, wav_1d_tensor, model_sr: int, expected_len: int) -> np.ndarray:
+    """
+    Calls `isolator.isolate(wav_1d_tensor, model_sr)` using the exact official contract
+    (1D float32 CPU torch.Tensor `[T]` + int `sample_rate`) and returns 1D float32 numpy `[expected_len]`.
+    """
+    out = isolator.isolate(wav_1d_tensor, int(model_sr))
+    out_np = to_numpy_array(out).reshape(-1)
+    if not np.isfinite(out_np).all():
+        out_np = np.nan_to_num(out_np, nan=0.0, posinf=0.0, neginf=0.0)
+    return _match_audio_length(out_np[np.newaxis, :], expected_len)[0]
+
+
+def _isolate_inworld_offline_channel(
+    isolator,
+    ch_1d_np: np.ndarray,
+    model_sr: int,
+    torch_mod,
+    prog_start: float,
+    prog_end: float,
+    ch_label: str,
+) -> np.ndarray:
+    """
+    Offline isolation using Inworld's EXACT native sliding-window overlap-add algorithm
+    (identical to `VoiceIsolatorNetwork.enhance()` in `inworld/voice_isolation/model.py`):
+    - Clips `<= chunk_samples` (8.0s): single direct pass.
+    - Clips `> chunk_samples`: every slice has EXACT native length `chunk_samples` (384,000 = 8.0s),
+      including the final tail which reaches backward for full 8.0s acoustic context and linearly
+      crossfades over the exact `overlap_samples` (96,000 = 2.0s) overlap region.
+    Because each slice has `len == chunk_samples`, `model.enhance()` executes a single forward pass
+    with ZERO double-chunking, constant bounded memory, and smooth per-window progress reporting.
+    """
+    n = int(ch_1d_np.shape[-1])
+    if n <= 0:
+        return np.zeros((0,), dtype=np.float32)
+
+    chunk_samples, overlap_samples, _hop, chunk_sec, overlap_sec = _resolve_inworld_offline_window(isolator, model_sr)
+
+    if n <= chunk_samples:
+        emit_progress(prog_start, f"[Inworld Offline] {ch_label}: прямой проход ({n / float(model_sr):.1f}с)...")
+        wav_t = _prepare_inworld_channel_tensor(ch_1d_np, torch_mod)
+        out_1d = _call_inworld_isolate_1d(isolator, wav_t, model_sr, n)
+        emit_progress(prog_end, f"[Inworld Offline] {ch_label}: готово.")
+        return out_1d
+
+    step = max(1, chunk_samples - overlap_samples)
+    starts = list(range(0, n - chunk_samples, step)) + [n - chunk_samples]
+    total_windows = len(starts)
+
+    sys.stdout.write(
+        f"LOG:[Inworld Offline] {ch_label}: нативное чэнкование {total_windows} окон "
+        f"(окно {chunk_sec:.1f}с / {chunk_samples} сэмплов, перекрытие {overlap_sec:.1f}с / {overlap_samples} сэмплов)\n"
+    )
+    sys.stdout.flush()
+
+    out = np.zeros(n, dtype=np.float32)
+    weight = np.zeros(n, dtype=np.float32)
+    prog_span = max(1.0, float(prog_end) - float(prog_start))
+
+    for idx, start in enumerate(starts):
+        end = start + chunk_samples
+        emit_progress(
+            prog_start + (idx / max(1, total_windows)) * prog_span,
+            f"[Inworld Offline] {ch_label}: окно {idx + 1}/{total_windows} ({chunk_sec:.0f}с)...",
+        )
+
+        seg_t = _prepare_inworld_channel_tensor(ch_1d_np[start:end], torch_mod)
+        seg_out = _call_inworld_isolate_1d(isolator, seg_t, model_sr, chunk_samples)
+
+        w = np.ones(chunk_samples, dtype=np.float32)
+        if idx > 0:
+            fade_in = starts[idx - 1] + chunk_samples - overlap_samples - start
+            if fade_in > 0:
+                w[:fade_in] = 0.0
+            if overlap_samples > 0:
+                fi_start = max(0, fade_in)
+                fi_end = min(chunk_samples, fi_start + overlap_samples)
+                fi_len = fi_end - fi_start
+                if fi_len > 0:
+                    w[fi_start:fi_end] = np.linspace(0.0, 1.0, fi_len, dtype=np.float32)
+        if overlap_samples > 0 and end < n:
+            w[-overlap_samples:] = np.linspace(1.0, 0.0, overlap_samples, dtype=np.float32)
+
+        out[start:end] += seg_out * w
+        weight[start:end] += w
+
+    out = out / np.maximum(weight, 1e-6)
+    emit_progress(prog_end, f"[Inworld Offline] {ch_label}: все {total_windows} окон собраны.")
+    return np.ascontiguousarray(out, dtype=np.float32)
+
+
+def _isolate_inworld_streaming_channel(
+    isolator,
+    ch_1d_np: np.ndarray,
+    model_sr: int,
+    torch_mod,
+    prog_start: float,
+    prog_end: float,
+    ch_label: str,
+) -> np.ndarray:
+    """
+    Realtime streaming isolation using Inworld's native stateful `session = isolator.stream()` API.
+    Feeds continuous 0.5-second (24,000-sample) 1D float32 CPU tensors matching official
+    `VoiceIsolator._stream_render()` (`STREAM_PIECE_SECONDS = 0.5`) and finishes with `session.flush()`.
+    Preserves continuous recurrent/attention state and native 6s/2s dual-lane windowing with zero seams.
+    """
+    n = int(ch_1d_np.shape[-1])
+    if n <= 0:
+        return np.zeros((0,), dtype=np.float32)
+
+    stream_fn = getattr(isolator, "stream", None)
+    if not callable(stream_fn):
+        wav_t = _prepare_inworld_channel_tensor(ch_1d_np, torch_mod)
+        return _call_inworld_isolate_1d(isolator, wav_t, model_sr, n)
+
+    piece_samples = max(480, int(round(0.5 * model_sr)))  # Official STREAM_PIECE_SECONDS = 0.5s (24,000 samples @ 48kHz)
+    total_pieces = (n + piece_samples - 1) // piece_samples
+    prog_span = max(1.0, float(prog_end) - float(prog_start))
+    report_stride = max(1, total_pieces // 30)
+
+    sys.stdout.write(
+        f"LOG:[Inworld Realtime] {ch_label}: непрерывный потоковый проход "
+        f"({total_pieces} блоков по {piece_samples / float(model_sr):.2f}с / {piece_samples} сэмплов)\n"
+    )
+    sys.stdout.flush()
+
+    session = stream_fn()
+    collected = []
+    for piece_idx, start in enumerate(range(0, n, piece_samples)):
+        end = min(n, start + piece_samples)
+        piece_t = _prepare_inworld_channel_tensor(ch_1d_np[start:end], torch_mod)
+        out_piece = session.push(piece_t)
+        if out_piece is not None:
+            piece_np = to_numpy_array(out_piece).reshape(-1)
+            if piece_np.size > 0:
+                collected.append(piece_np)
+
+        if piece_idx == 0 or (piece_idx + 1) % report_stride == 0 or piece_idx + 1 == total_pieces:
+            emit_progress(
+                prog_start + ((piece_idx + 1) / max(1, total_pieces)) * prog_span,
+                f"[Inworld Realtime] {ch_label}: поток {piece_idx + 1}/{total_pieces} ({end / float(model_sr):.1f}с)...",
+            )
+
+    tail = session.flush()
+    if tail is not None:
+        tail_np = to_numpy_array(tail).reshape(-1)
+        if tail_np.size > 0:
+            collected.append(tail_np)
+
+    if not collected:
+        return np.zeros((n,), dtype=np.float32)
+
+    merged = np.concatenate(collected, axis=0)
+    if not np.isfinite(merged).all():
+        merged = np.nan_to_num(merged, nan=0.0, posinf=0.0, neginf=0.0)
+    return _match_audio_length(merged[np.newaxis, :], n)[0]
+
+
+def process_inworld_voice_isolator(args):
+    """
+    48 kHz Full-Band Neural Voice Isolation & Speech Denoising using official `inworld-voice-isolation`
+    (https://github.com/inworld-ai/voice-isolator).
+    Preserves natural timbre, breaths, laughter, and emotional dynamics while removing noise, music, and chatter.
+    Uses strict 1D float32 CPU torch.Tensor preparation + model-native chunking (8s/2s offline, 0.5s stateful stream).
+    """
+    input_path = args.input
+    output_path = args.output
+    if not output_path:
+        base, _ext = os.path.splitext(input_path)
+        output_path = f"{base}_inworld_isolated.wav"
+
+    isolator_mode = str(getattr(args, "isolator_mode", "offline") or "offline").strip().lower()
+    if isolator_mode not in ["offline", "streaming"]:
+        isolator_mode = "offline"
+    raw_lookahead = getattr(args, "lookahead_frames", 2)
+    lookahead_frames = _normalize_inworld_lookahead(2 if raw_lookahead is None else raw_lookahead, allowed=(0, 2, 4))
+    wet_dry_blend = float(args.wet_dry_blend) if args.wet_dry_blend is not None else 100.0
+    model_path = getattr(args, "model_path", None) or ""
+
+    mode_label = f"Realtime v1 (58M, LA={lookahead_frames})" if isolator_mode == "streaming" else "Offline v1 (64M)"
+    emit_progress(5.0, f"Инициализация Inworld Voice Isolator {mode_label}...")
+    warnings.filterwarnings("ignore", category=UserWarning)
+
+    torch = _safe_import_torch()
+    voice_isolation = _ensure_inworld_packages_installed()
+    device = _resolve_inworld_device(torch)
+
+    emit_progress(14.0, f"Загрузка весов Inworld Voice Isolator ({mode_label}, устройство={device})...")
+    isolator, loaded_source = _init_inworld_isolator(
+        voice_isolation, model_path, isolator_mode, lookahead_frames, device
+    )
+
+    target_sr = int(getattr(isolator, "sample_rate", 48000) or 48000)
+    emit_progress(24.0, f"Загрузка и приведение аудио к нативным {target_sr} Гц (float32)...")
+    audio_data, current_sr, orig_channels, _ = AudioConditioner.load_audio(
+        input_path, target_sr=target_sr, force_stereo=False, remove_dc=True
+    )
+    # Sanitize NaN/Inf globally before inference (VoiceIsolator._prepare strictly rejects non-finite samples)
+    if not np.isfinite(audio_data).all():
+        audio_data = np.nan_to_num(audio_data, nan=0.0, posinf=0.0, neginf=0.0)
+    audio_data = np.ascontiguousarray(audio_data, dtype=np.float32)
+    orig_num_samples = int(audio_data.shape[-1])
+    num_channels = int(audio_data.shape[0])
+
+    if orig_num_samples == 0:
+        emit_progress(95.0, "Входной файл пустой (0 сэмплов), сохранение без изменений...")
+        AudioConditioner.save_audio(
+            output_path, audio_data, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+        )
+        emit_progress(100.0, f"Изоляция голоса Inworld Voice Isolator ({mode_label}) завершена.")
+        sys.stdout.write(
+            f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'inworld_voice_isolator', 'mode': isolator_mode, 'source': str(loaded_source)})}\n"
+        )
+        sys.stdout.flush()
+        return
+
+    total_duration_sec = orig_num_samples / float(target_sr)
+    emit_progress(30.0, f"Нейросетевая изоляция голоса Inworld {mode_label} ({total_duration_sec:.1f}с, {num_channels} кан.)...")
+
+    # Process each channel as strict 1D mono float32 tensor (preserves true stereo instead of collapsing via to_mono)
+    ch_outputs = []
+    prog_base = 30.0
+    prog_ceil = 92.0
+    ch_span = (prog_ceil - prog_base) / max(1, num_channels)
+
+    for ch in range(num_channels):
+        ch_start = prog_base + ch * ch_span
+        ch_end = prog_base + (ch + 1) * ch_span
+        ch_label = f"Кан. {ch + 1}/{num_channels}" if num_channels > 1 else "Моно"
+        if isolator_mode == "streaming":
+            ch_out = _isolate_inworld_streaming_channel(
+                isolator, audio_data[ch], target_sr, torch, ch_start, ch_end, ch_label
+            )
+        else:
+            ch_out = _isolate_inworld_offline_channel(
+                isolator, audio_data[ch], target_sr, torch, ch_start, ch_end, ch_label
+            )
+        ch_outputs.append(ch_out[np.newaxis, :])
+
+    isolated_audio = np.concatenate(ch_outputs, axis=0)
+    isolated_audio = _match_audio_length(isolated_audio, orig_num_samples)
+
+    if wet_dry_blend < 100.0:
+        wet_w = max(0.0, min(1.0, wet_dry_blend / 100.0))
+        dry_w = 1.0 - wet_w
+        isolated_audio = (isolated_audio * wet_w) + (audio_data * dry_w)
+
+    emit_progress(94.0, f"Экспорт в студийный 24-бит 48 кГц WAV: {os.path.basename(output_path)}...")
+    AudioConditioner.save_audio(
+        output_path, isolated_audio, current_sr=target_sr, target_sr=48000, orig_channels=orig_channels, bit_depth='PCM_24'
+    )
+
+    emit_progress(100.0, f"Изоляция голоса Inworld Voice Isolator ({mode_label}) успешно завершена!")
+    sys.stdout.write(
+        f"RESULT:{json.dumps({'success': True, 'output': output_path, 'engine': 'inworld_voice_isolator', 'mode': isolator_mode, 'source': str(loaded_source)})}\n"
+    )
     sys.stdout.flush()
 
 # ------------------------------------------------------------------------------
@@ -2156,6 +2623,8 @@ def check_env():
         "pedalboard": False,
         "voicefixer": False,
         "onnxruntime": False,
+        "safetensors": False,
+        "inworld_voice_isolator": False,
         "soundfile": False,
         "scipy": False,
         "aeneas": False,
@@ -2204,6 +2673,14 @@ def check_env():
     try:
         import pyloudnorm
         env_status["pyloudnorm"] = True
+    except Exception: pass
+    try:
+        import safetensors
+        env_status["safetensors"] = True
+    except Exception: pass
+    try:
+        from inworld import voice_isolation
+        env_status["inworld_voice_isolator"] = True
     except Exception: pass
     try:
         mfa_check = subprocess.run(["mfa", "version"], capture_output=True, timeout=5)
@@ -2733,7 +3210,11 @@ def download_model_cli(args):
         "voicefixer_fe": "https://huggingface.co/cqchangm/voicefixer/resolve/main/vf.ckpt",
         "voicefixer_vocoder": "https://huggingface.co/cqchangm/voicefixer/resolve/main/model.ckpt-1490000_trimed.pt",
         "vf.ckpt": "https://huggingface.co/cqchangm/voicefixer/resolve/main/vf.ckpt",
-        "model.ckpt-1490000_trimed.pt": "https://huggingface.co/cqchangm/voicefixer/resolve/main/model.ckpt-1490000_trimed.pt"
+        "model.ckpt-1490000_trimed.pt": "https://huggingface.co/cqchangm/voicefixer/resolve/main/model.ckpt-1490000_trimed.pt",
+        "inworld_voice_isolator": "https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser.safetensors",
+        "inworld_voice_isolator_realtime": "https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser_realtime.safetensors",
+        "denoiser.safetensors": "https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser.safetensors",
+        "denoiser_realtime.safetensors": "https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser_realtime.safetensors"
     }
 
     url = url_map.get(args.model_id or "") or url_map.get(os.path.basename(target_path), "")
@@ -4025,7 +4506,7 @@ def main():
     parser.add_argument("--output", help="Path to output audio file")
     parser.add_argument("--output_dir", help="Directory for multi-stem separation outputs")
     parser.add_argument("--prefix", default="", help="Prefix for exported filenames")
-    parser.add_argument("--model_path", help="Local model weights file path (.onnx, .pth, .ckpt)")
+    parser.add_argument("--model_path", help="Local model weights file path (.onnx, .pth, .ckpt, .safetensors)")
     parser.add_argument("--model_id", help="Module ID from MODULE_DATABASE")
     parser.add_argument("--params_json", help="Serialized JSON dictionary of DSP / neural parameters")
     parser.add_argument("--subtitles_json", help="JSON array or path to JSON file containing subtitle entries [{id, text, startSec, endSec}]")
@@ -4066,6 +4547,10 @@ def main():
     parser.add_argument("--stationarity_weight", type=float, default=0.85)
     parser.add_argument("--frequency_smoothing_hz", type=float, default=120.0)
     parser.add_argument("--preserve_voice_formants", default="true")
+
+    # Inworld Voice Isolator v1 (48 kHz Neural Speech Isolation)
+    parser.add_argument("--isolator_mode", default="offline", help="Inworld Voice Isolator mode: offline (64M) or streaming (58M realtime)")
+    parser.add_argument("--lookahead_frames", type=int, default=2, help="Lookahead frames for Inworld streaming/realtime mode (0..8)")
 
     # Demucs & Separation
     parser.add_argument("--model_name", default="htdemucs")
@@ -4144,6 +4629,10 @@ def main():
         if args.mode in ["voice_timbre_match", "timbre_match"]:
             process_voice_timbre_match(args)
 
+        # 1B. Inworld Voice Isolator v1 (48 kHz Neural Speech Isolation)
+        elif args.mode in ["inworld_voice_isolator", "inworld_isolate"]:
+            process_inworld_voice_isolator(args)
+
         # 2. Denoise / Dereverb / UVR / DeepFilterNet Neural Processing
         elif args.mode in [
             "denoise", "dereverb", "deepfilternet",
@@ -4153,20 +4642,23 @@ def main():
             model_path = getattr(args, "model_path", None) or ""
             mode = args.mode.lower()
 
-            is_deepfilter = ("deepfilter" in model_id) or (mode == "deepfilternet") or (
-                mode == "denoise" and not model_id and not model_path
-            )
-            is_uvr = (
-                mode in ["uvr_inference", "uvr_neural", "uvr_deecho", "uvr_denoise"]
-                or any(k in model_id for k in ["uvr", "deecho", "echo", "foxjoy", "reverb", "mdx"])
-                or any(model_path.lower().endswith(ext) for ext in [".pth", ".onnx", ".ckpt"])
-                or (mode == "dereverb" and "deepfilter" not in model_id)
-            )
-
-            if is_uvr and not is_deepfilter:
-                process_uvr_inference(args)
+            if "inworld" in model_id or model_path.lower().endswith(".safetensors"):
+                process_inworld_voice_isolator(args)
             else:
-                process_deepfilternet(args)
+                is_deepfilter = ("deepfilter" in model_id) or (mode == "deepfilternet") or (
+                    mode == "denoise" and not model_id and not model_path
+                )
+                is_uvr = (
+                    mode in ["uvr_inference", "uvr_neural", "uvr_deecho", "uvr_denoise"]
+                    or any(k in model_id for k in ["uvr", "deecho", "echo", "foxjoy", "reverb", "mdx"])
+                    or any(model_path.lower().endswith(ext) for ext in [".pth", ".onnx", ".ckpt"])
+                    or (mode == "dereverb" and "deepfilter" not in model_id)
+                )
+
+                if is_uvr and not is_deepfilter:
+                    process_uvr_inference(args)
+                else:
+                    process_deepfilternet(args)
 
         elif args.mode in ["separate", "separate_stems", "demucs"]:
             process_demucs(args)

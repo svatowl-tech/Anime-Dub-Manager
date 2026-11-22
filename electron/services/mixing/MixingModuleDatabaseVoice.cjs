@@ -294,6 +294,52 @@ const MODULE_DATABASE_VOICE = [
     ]
   },
   {
+    id: 'inworld_voice_isolator',
+    name: 'Inworld Voice Isolator v1 (48 kHz AI)',
+    title: 'Inworld Voice Isolator v1 (48 kHz Изоляция голоса AI)',
+    filename: 'denoiser.safetensors',
+    category: 'denoise',
+    description: 'Открытая 48 кГц нейросеть от Inworld AI (64M параметров) для студийной изоляции речи от фонового шума, музыки и посторонних голосов с бережным сохранением естественного тембра, вдохов и смеха.',
+    size_mb: 256.0,
+    recommended_for: 'Максимально чистая изоляция диалогов и дубляжа с сохранением живой актёрской подачи (вдохи, шёпот, смех)',
+    urls: [
+      'https://huggingface.co/inworld/voice-isolator/resolve/main/denoiser.safetensors'
+    ],
+    is_installed: false,
+    installed_bytes: null,
+    local_path: null,
+    format: 'safetensors',
+    engineArchitecture: 'Inworld 48kHz STFT + Attention/Mamba Dual-Path (64M)',
+    defaultPrefix: 'inworld_iso_',
+    icon: 'ShieldCheck',
+    defaultParams: {
+      isolatorMode: 'offline',
+      lookaheadFrames: 2,
+      wetDryBlend: 100.0,
+      autoDownloadModel: true
+    },
+    presets: [
+      {
+        id: 'inworld_studio_offline',
+        title: '🎙 Студийный Offline v1 (64M, окно 8с, Wet 100%)',
+        description: 'Максимальное студийное качество изоляции речи с сохранением вдохов, смеха и живых формант',
+        params: { isolatorMode: 'offline', lookaheadFrames: 2, wetDryBlend: 100.0, autoDownloadModel: true }
+      },
+      {
+        id: 'inworld_natural_blend',
+        title: '🍃 Мягкая изоляция (Offline v1, Wet 85%)',
+        description: 'Сохраняет 15% естественного воздуха комнаты для максимально органичного звучания',
+        params: { isolatorMode: 'offline', lookaheadFrames: 2, wetDryBlend: 85.0, autoDownloadModel: true }
+      },
+      {
+        id: 'inworld_realtime_fast',
+        title: '⚡ Быстрый Realtime v1 (58M, потоковый режим)',
+        description: 'Облегченная каузальная модель с малым окном опережения (lookahead 2 кадра) для ускоренной обработки на CPU',
+        params: { isolatorMode: 'streaming', lookaheadFrames: 2, wetDryBlend: 100.0, autoDownloadModel: true }
+      }
+    ]
+  },
+  {
     id: 'uvr_denoise_full',
     name: 'UVR-DeNoise Full (Глубокое подавление)',
     title: 'UVR-DeNoise Full (Глубокое подавление)',

@@ -24,7 +24,9 @@ function sanitizeProjectTitle(str, fallback = 'Project') {
 }
 
 function sanitizeDubberNick(str, fallback = 'Dabber') {
-  return sanitizeFileNamePart(str, fallback);
+  if (!str || typeof str !== 'string') return fallback;
+  const withoutQuotes = str.replace(/[`'"]/g, '');
+  return sanitizeFileNamePart(withoutQuotes, fallback);
 }
 
 function sanitizePath(fullPath) {

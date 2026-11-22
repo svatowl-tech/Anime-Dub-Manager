@@ -91,19 +91,23 @@ export const MixingStepCard: React.FC<MixingStepCardProps> = ({
                 </span>
               )}
               {/* Active model badge */}
-              {(step.params?.modelId || step.params?.modelName || step.moduleId === 'uvr_deecho_normal' || step.moduleId === 'uvr_deecho_aggressive' || step.moduleId === 'deepfilternet3') && (
+              {(step.params?.modelId || step.params?.modelName || step.moduleId === 'uvr_deecho_normal' || step.moduleId === 'uvr_deecho_aggressive' || step.moduleId === 'deepfilternet3' || step.moduleId === 'inworld_voice_isolator') && (
                 <span className="text-[10px] px-2 py-0.5 bg-indigo-950/80 text-indigo-300 font-mono font-semibold rounded-md border border-indigo-700/60 flex items-center gap-1 shadow-sm">
                   <Radio className="w-2.5 h-2.5 text-indigo-400" />
                   <span>
-                    {step.params?.modelId === 'uvr_deecho_aggressive' || step.moduleId === 'uvr_deecho_aggressive'
-                      ? 'UVR De-Echo Aggressive'
-                      : step.params?.modelId === 'uvr_deecho_normal' || step.moduleId === 'uvr_deecho_normal'
-                        ? 'UVR De-Echo Normal'
-                        : step.params?.modelId === 'deepfilternet3' || step.moduleId === 'deepfilternet3'
-                          ? 'DeepFilterNet 3'
-                          : step.params?.modelId === 'reverb_foxjoy'
-                            ? 'Reverb HQ FoxJoy'
-                            : step.params?.modelName || step.params?.modelId || meta?.name || meta?.title}
+                    {step.params?.modelId === 'inworld_voice_isolator' || step.moduleId === 'inworld_voice_isolator'
+                      ? (step.params?.isolatorMode === 'streaming'
+                          ? 'Inworld Voice Isolator v1 (Realtime 58M)'
+                          : 'Inworld Voice Isolator v1 (Offline 64M)')
+                      : step.params?.modelId === 'uvr_deecho_aggressive' || step.moduleId === 'uvr_deecho_aggressive'
+                        ? 'UVR De-Echo Aggressive'
+                        : step.params?.modelId === 'uvr_deecho_normal' || step.moduleId === 'uvr_deecho_normal'
+                          ? 'UVR De-Echo Normal'
+                          : step.params?.modelId === 'deepfilternet3' || step.moduleId === 'deepfilternet3'
+                            ? 'DeepFilterNet 3'
+                            : step.params?.modelId === 'reverb_foxjoy'
+                              ? 'Reverb HQ FoxJoy'
+                              : step.params?.modelName || step.params?.modelId || meta?.name || meta?.title}
                   </span>
                 </span>
               )}

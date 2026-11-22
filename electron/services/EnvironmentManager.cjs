@@ -757,6 +757,7 @@ amp = _Amp()
       PYTHONIOENCODING: 'utf-8',
       PYTHONUTF8: '1',
       TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch'),
+      HF_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'huggingface'),
       ...(options.env || {})
     };
 

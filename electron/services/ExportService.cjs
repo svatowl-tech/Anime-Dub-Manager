@@ -710,8 +710,17 @@ class ExportService {
 
         const rawDubberUploads = activeTracks.map(t => ({
           ...t.rawUpload,
+          id: t.id || t.rawUpload?.id,
+          uploadId: t.uploadId || t.rawUpload?.id,
           path: t.path,
+          dubberId: t.dubberId || t.rawUpload?.uploadedById || t.rawUpload?.participantId || t.rawUpload?.dubberId,
           dubberNick: t.dubberNick,
+          safeNick: t.safeNick,
+          trackNumber: t.trackNumber,
+          subTrackIndex: t.trackNumber,
+          totalOriginalsForDubber: t.totalOriginalsForDubber,
+          isFix: Boolean(t.isFix),
+          type: t.type || (t.isFix ? 'FIXES' : 'DUBBER_FILE'),
           exportFileName: t.exportFileName
         }));
         await logStep(`[Бэкап] Сохранение ${activeTracks.length} выбранных исходных дорожек до автотайминга в «бэкап»...`, 'info', 33);
@@ -768,7 +777,7 @@ class ExportService {
             mergedResult, 
             targetDir, 
             baseVideoName, 
-            { targetDir }, 
+            { targetDir, useMixingPrefix: Boolean(opts?.forMixing || opts?.useMixingPrefix) }, 
             onProgress, 
             logStep
           );

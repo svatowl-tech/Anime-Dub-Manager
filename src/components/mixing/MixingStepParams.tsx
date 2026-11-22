@@ -28,7 +28,8 @@ export const MixingStepParams: React.FC<MixingStepParamsProps> = ({
           paramKey === 'totalParameters' ||
           paramKey === 'vst3Path' ||
           paramKey === 'pluginName' ||
-          paramKey === 'subPluginName'
+          paramKey === 'subPluginName' ||
+          (paramKey === 'lookaheadFrames' && params.isolatorMode !== 'streaming')
         ) {
           return null;
         }
@@ -71,6 +72,49 @@ export const MixingStepParams: React.FC<MixingStepParamsProps> = ({
           );
         }
 
+        // Mode selector for Inworld Voice Isolator v1
+        if (paramKey === 'isolatorMode') {
+          return (
+            <div key={paramKey} className="col-span-2 space-y-1">
+              <label className="text-[11px] text-neutral-400 block mb-1">
+                Режим нейросети Inworld Voice Isolator v1:
+              </label>
+              <select
+                value={String(val)}
+                onChange={(e) => onUpdateParams(paramKey, e.target.value)}
+                className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
+              >
+                <option value="offline">Offline v1 — 64M (Студийное качество, окно 8с)</option>
+                <option value="streaming">Realtime v1 — 58M (Быстрый потоковый режим)</option>
+              </select>
+            </div>
+          );
+        }
+
+        // Trained look-ahead selector for Inworld Voice Isolator v1 Realtime (strictly 0, 2, or 4 frames)
+        if (paramKey === 'lookaheadFrames') {
+          const numVal = Number(val);
+          const safeVal = [0, 2, 4].reduce((best, cand) =>
+            Math.abs(cand - numVal) < Math.abs(best - numVal) ? cand : best
+          , 2);
+          return (
+            <div key={paramKey} className="col-span-2 space-y-1">
+              <label className="text-[11px] text-neutral-400 block mb-1">
+                Опережение потокового режима (Lookahead):
+              </label>
+              <select
+                value={String(safeVal)}
+                onChange={(e) => onUpdateParams(paramKey, Number(e.target.value))}
+                className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
+              >
+                <option value="0">0 кадров — 0 мс (Минимальная задержка)</option>
+                <option value="2">2 кадра — 20 мс (Рекомендуемый баланс)</option>
+                <option value="4">4 кадра — 40 мс (Максимальное качество потока)</option>
+              </select>
+            </div>
+          );
+        }
+
         // Model selector for Neural Dereverb / Denoise
         if (paramKey === 'modelId') {
           return (
@@ -83,6 +127,7 @@ export const MixingStepParams: React.FC<MixingStepParamsProps> = ({
                 onChange={(e) => onUpdateParams(paramKey, e.target.value)}
                 className="w-full px-2 py-1 bg-neutral-900 border border-neutral-800 rounded text-xs text-neutral-200"
               >
+                <option value="inworld_voice_isolator">Inworld Voice Isolator v1 (48 kHz AI)</option>
                 <option value="uvr_denoise_lite">UVR Denoise Lite (Быстрая очистка)</option>
                 <option value="uvr_deecho_normal">UVR De-Echo Normal (Умеренное эхо)</option>
                 <option value="uvr_deecho_aggressive">UVR De-Echo Aggressive (Сильное эхо)</option>

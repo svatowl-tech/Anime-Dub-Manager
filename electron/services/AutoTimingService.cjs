@@ -31,8 +31,18 @@ function normalizeName(str) {
   if (!str || typeof str !== 'string') return '';
   return str
     .toLowerCase()
+    .replace(/ё/g, 'е')
     .replace(/[\[\]\(\)\{\}\-_.,!?'"~`@#$%^&*+=:;\/\\]/g, ' ')
     .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeCompactName(str) {
+  if (!str || typeof str !== 'string') return '';
+  return str
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[\[\]\(\)\{\}\-_.,!?'"~`@#$%^&*+=:;\/\\\s]/g, '')
     .trim();
 }
 
@@ -102,12 +112,34 @@ function isNameMatch(candidate, target) {
   if (!cNorm || !tNorm) return false;
 
   if (cNorm === tNorm) return true;
-  if (cNorm.includes(tNorm) || tNorm.includes(cNorm)) return true;
 
-  const cWords = cNorm.split(' ');
-  const tWords = tNorm.split(' ');
+  const cCompact = normalizeCompactName(candidate);
+  const tCompact = normalizeCompactName(target);
+  if (cCompact && tCompact && cCompact === tCompact) return true;
+
+  const cWords = cNorm.split(' ').filter(Boolean);
+  const tWords = tNorm.split(' ').filter(Boolean);
+
+  // Точное совпадение отдельного слова (защита от ложного попадания коротких ников типа «РИ» внутрь «Сидзури»)
+  if (tWords.length === 1 && cWords.includes(tWords[0])) return true;
+  if (cWords.length === 1 && tWords.includes(cWords[0])) return true;
+
   for (const cw of cWords) {
     if (cw.length >= 3 && tWords.includes(cw)) return true;
+  }
+
+  // Подстрочное совпадение разрешаем только для достаточно длинных имен (>= 4 символов)
+  // и только на границе слова / при близкой длине, чтобы короткие ники не перехватывали чужих персонажей
+  const shorterLen = Math.min(cCompact.length, tCompact.length);
+  if (shorterLen >= 4) {
+    const cBounded = ` ${cNorm} `;
+    const tBounded = ` ${tNorm} `;
+    if (cBounded.includes(` ${tNorm} `) || tBounded.includes(` ${cNorm} `)) {
+      return true;
+    }
+    if (shorterLen >= 5 && (cCompact.includes(tCompact) || tCompact.includes(cCompact))) {
+      return true;
+    }
   }
 
   return false;
@@ -320,54 +352,223 @@ class AutoTimingService {
       return [];
     };
 
-    // 1. Сопоставление по назначениям
-    for (const assignment of existingAssignments) {
-      if (!assignment.dubberId) continue;
-      const participant = participantsData.find(p => p.id === assignment.dubberId);
-      const nick = participant?.nickname || participant?.name;
-      const charName = assignment.characterName;
+    const getEffectiveDubberId = (assignment) =>
+      assignment?.substituteId || assignment?.dubberId || null;
 
-      for (const track of (audioFiles || [])) {
-        if (usedTrackPaths.has(track.path)) continue;
+    const findParticipantById = (id) => {
+      if (!id) return null;
+      return participantsData.find(p => String(p.id) === String(id)) || null;
+    };
 
-        let matched = false;
-        if (track.uploadedById === assignment.dubberId) {
-          matched = true;
-        } else {
-          const candidates = extractNicknamesFromFilename(track.path);
-          if (nick && candidates.some(c => isNameMatch(c, nick))) {
-            matched = true;
+    const findParticipantByNick = (rawNick) => {
+      if (!rawNick) return null;
+      const targetCompact = normalizeCompactName(rawNick);
+      if (!targetCompact) return null;
+      return participantsData.find(p =>
+        normalizeCompactName(p.nickname) === targetCompact ||
+        normalizeCompactName(p.name) === targetCompact
+      ) || null;
+    };
+
+    const resolveAssignmentsForDubber = (dubberId, dubberNick) => {
+      const matched = [];
+      for (const a of (existingAssignments || [])) {
+        const effId = getEffectiveDubberId(a);
+        if (dubberId && effId && String(effId) === String(dubberId)) {
+          matched.push(a);
+          continue;
+        }
+        if (dubberNick) {
+          const p = findParticipantById(effId);
+          const aNick = a.substitute?.nickname || a.dubber?.nickname || p?.nickname || p?.name || '';
+          if (aNick && normalizeCompactName(aNick) === normalizeCompactName(dubberNick)) {
+            matched.push(a);
           }
         }
+      }
+      return matched;
+    };
 
-        if (matched) {
-          usedTrackPaths.add(track.path);
-          const isFix = isTrackFix(track);
-          if (!isFix) usedCharacters.add(charName);
-          const fixTargetLines = isFix ? extractFixTargets(assignment) : [];
-          matchedTracks.push({
-            trackPath: track.path,
-            trackId: track.id || path.basename(track.path),
-            dubberId: assignment.dubberId,
-            dubberNick: nick || 'Даббер',
-            characterName: charName,
-            isFix,
-            type: isFix ? 'FIXES' : 'DUBBER_FILE',
-            matchMethod: 'assignment_and_nick',
-            confidence: 1.0,
-            lines: charactersMap.get(charName)?.lines || [],
-            fixTargetLines
-          });
+    const buildAggregatedRoleInfo = (assignmentsList, preferredCharName, filenameCandidates = []) => {
+      const uniqueCharNames = [];
+      const addChar = (cn) => {
+        if (!cn || typeof cn !== 'string') return;
+        const canonical = aliases[cn] || cn;
+        if (!uniqueCharNames.includes(canonical)) {
+          uniqueCharNames.push(canonical);
         }
+      };
+
+      // Если имя персонажа явно присутствует в названии файла — ставим его первым
+      if (filenameCandidates.length > 0) {
+        for (const a of assignmentsList) {
+          if (a.characterName && filenameCandidates.some(c => isNameMatch(c, a.characterName))) {
+            addChar(a.characterName);
+          }
+        }
+      }
+      if (preferredCharName) addChar(preferredCharName);
+      for (const a of assignmentsList) {
+        if (a.characterName) addChar(a.characterName);
+      }
+
+      const combinedLines = [];
+      const seenLineKeys = new Set();
+      for (const cName of uniqueCharNames) {
+        let charInfo = charactersMap.get(cName);
+        if (!charInfo) {
+          for (const [mapChar, info] of charactersMap.entries()) {
+            if (isNameMatch(cName, mapChar)) {
+              charInfo = info;
+              break;
+            }
+          }
+        }
+        if (charInfo && Array.isArray(charInfo.lines)) {
+          for (const ln of charInfo.lines) {
+            const key = `${ln.id ?? ''}_${ln.rawLineIndex ?? ''}_${ln.startSec}_${ln.endSec}_${ln.text || ''}`;
+            if (!seenLineKeys.has(key)) {
+              seenLineKeys.add(key);
+              combinedLines.push(ln);
+            }
+          }
+        }
+      }
+      combinedLines.sort((a, b) => a.startSec - b.startSec);
+
+      const fixTargets = [];
+      for (const a of assignmentsList) {
+        fixTargets.push(...extractFixTargets(a));
+      }
+      fixTargets.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+
+      return {
+        characterNames: uniqueCharNames,
+        characterName: uniqueCharNames.join(', ') || preferredCharName || 'Персонаж',
+        lines: combinedLines,
+        fixTargets
+      };
+    };
+
+    const resolveSubTrackIndex = (track) => {
+      if (track.subTrackIndex && Number(track.subTrackIndex) > 0) return Number(track.subTrackIndex);
+      if (track.trackNumber && Number(track.trackNumber) > 0) return Number(track.trackNumber);
+      const m = path.basename(track.path || '').match(/(?:дорожка|слой|track|take|layer)[_\s-]*(\d+)/i);
+      return m ? parseInt(m[1], 10) : undefined;
+    };
+
+    // 1. Приоритетное сопоставление по явным метаданным дорожки (assignmentId / dubberId / uploadedById / dubberNick)
+    for (const track of (audioFiles || [])) {
+      if (!track || !track.path || usedTrackPaths.has(track.path)) continue;
+      const isFix = isTrackFix(track);
+      const candidates = extractNicknamesFromFilename(track.path);
+
+      let resolvedDubberId = track.dubberId || track.uploadedById || track.participantId || null;
+      let resolvedParticipant = findParticipantById(resolvedDubberId);
+      let resolvedNick = track.dubberNick || track.uploadedBy?.nickname || resolvedParticipant?.nickname || resolvedParticipant?.name || '';
+      if (!resolvedParticipant && resolvedNick) {
+        resolvedParticipant = findParticipantByNick(resolvedNick);
+        if (resolvedParticipant && !resolvedDubberId) {
+          resolvedDubberId = resolvedParticipant.id;
+        }
+      }
+
+      let relatedAssignments = [];
+      if (track.assignmentId) {
+        const directAssign = (existingAssignments || []).find(a => String(a.id) === String(track.assignmentId));
+        if (directAssign) {
+          if (!resolvedDubberId) resolvedDubberId = getEffectiveDubberId(directAssign);
+          if (!resolvedParticipant && resolvedDubberId) resolvedParticipant = findParticipantById(resolvedDubberId);
+          if (!resolvedNick) {
+            resolvedNick = directAssign.substitute?.nickname || directAssign.dubber?.nickname || resolvedParticipant?.nickname || resolvedParticipant?.name || '';
+          }
+          relatedAssignments.push(directAssign);
+        }
+      }
+
+      const dubberAssignments = resolveAssignmentsForDubber(resolvedDubberId, resolvedNick);
+      for (const da of dubberAssignments) {
+        if (!relatedAssignments.includes(da)) relatedAssignments.push(da);
+      }
+
+      if (relatedAssignments.length > 0 || (resolvedDubberId && resolvedNick)) {
+        // Если назначений не нашлось по ID, пробуем найти персонажа по имени файла
+        let preferredChar = track.characterName || null;
+        if (!preferredChar && relatedAssignments.length === 0) {
+          for (const [cName] of charactersMap.entries()) {
+            if (candidates.some(c => isNameMatch(c, cName))) {
+              preferredChar = cName;
+              break;
+            }
+          }
+        }
+        const roleInfo = buildAggregatedRoleInfo(relatedAssignments, preferredChar, candidates);
+        usedTrackPaths.add(track.path);
+        if (!isFix) roleInfo.characterNames.forEach(c => usedCharacters.add(c));
+
+        matchedTracks.push({
+          trackPath: track.path,
+          trackId: track.id || path.basename(track.path),
+          dubberId: resolvedDubberId || null,
+          dubberNick: resolvedNick || resolvedParticipant?.nickname || 'Даббер',
+          characterName: roleInfo.characterName,
+          subTrackIndex: resolveSubTrackIndex(track),
+          isFix,
+          type: isFix ? 'FIXES' : 'DUBBER_FILE',
+          matchMethod: 'assignment_and_nick',
+          confidence: 1.0,
+          lines: roleInfo.lines,
+          fixTargetLines: isFix ? roleInfo.fixTargets : []
+        });
       }
     }
 
-    // 2. Сопоставление по никнеймам в названии файлов
+    // 2. Сопоставление по персонажу в имени файла -> назначению даббера (ПРИОРИТЕТНЕЕ, чем поиск короткого ника по подстроке!)
     for (const track of (audioFiles || [])) {
-      if (usedTrackPaths.has(track.path)) continue;
+      if (!track || !track.path || usedTrackPaths.has(track.path)) continue;
       const candidates = extractNicknamesFromFilename(track.path);
       const isFix = isTrackFix(track);
-      
+
+      // 2a. Ищем назначение, чей персонаж указан в названии файла (например, dub_...Сидзури Мугино...)
+      let matchedAssignmentByChar = null;
+      for (const a of (existingAssignments || [])) {
+        if (a.characterName && candidates.some(c => isNameMatch(c, a.characterName))) {
+          matchedAssignmentByChar = a;
+          break;
+        }
+      }
+
+      if (matchedAssignmentByChar) {
+        const effDubberId = getEffectiveDubberId(matchedAssignmentByChar);
+        const participant = findParticipantById(effDubberId);
+        const nick = track.dubberNick || matchedAssignmentByChar.substitute?.nickname || matchedAssignmentByChar.dubber?.nickname || participant?.nickname || participant?.name || 'Даббер';
+        const allDubberAssignments = resolveAssignmentsForDubber(effDubberId, nick);
+        if (!allDubberAssignments.includes(matchedAssignmentByChar)) {
+          allDubberAssignments.unshift(matchedAssignmentByChar);
+        }
+        const roleInfo = buildAggregatedRoleInfo(allDubberAssignments, matchedAssignmentByChar.characterName, candidates);
+
+        usedTrackPaths.add(track.path);
+        if (!isFix) roleInfo.characterNames.forEach(c => usedCharacters.add(c));
+
+        matchedTracks.push({
+          trackPath: track.path,
+          trackId: track.id || path.basename(track.path),
+          dubberId: effDubberId,
+          dubberNick: nick,
+          characterName: roleInfo.characterName,
+          subTrackIndex: resolveSubTrackIndex(track),
+          isFix,
+          type: isFix ? 'FIXES' : 'DUBBER_FILE',
+          matchMethod: 'filename_character_assignment',
+          confidence: 0.98,
+          lines: roleInfo.lines,
+          fixTargetLines: isFix ? roleInfo.fixTargets : []
+        });
+        continue;
+      }
+
+      // 2b. Сопоставление по никнейму даббера в названии файла (строгий матч, без ложных подстрок)
       let matchedParticipant = null;
       for (const p of participantsData) {
         if (candidates.some(c => isNameMatch(c, p.nickname) || isNameMatch(c, p.name))) {
@@ -377,50 +578,42 @@ class AutoTimingService {
       }
 
       if (matchedParticipant) {
-        let targetChar = null;
-        for (const [cName, cInfo] of charactersMap.entries()) {
+        const dubberAssignments = resolveAssignmentsForDubber(matchedParticipant.id, matchedParticipant.nickname);
+        let preferredChar = null;
+        for (const [cName] of charactersMap.entries()) {
           if (!usedCharacters.has(cName) || isFix) {
             if (candidates.some(c => isNameMatch(c, cName)) || isNameMatch(matchedParticipant.nickname, cName)) {
-              targetChar = cName;
+              preferredChar = cName;
               break;
             }
           }
         }
-
-        if (!targetChar) {
-          const epAssign = existingAssignments.find(a => a.dubberId === matchedParticipant.id);
-          if (epAssign && (!usedCharacters.has(epAssign.characterName) || isFix)) {
-            targetChar = epAssign.characterName;
-          }
-        }
-
-        if (targetChar) {
+        if (dubberAssignments.length > 0 || preferredChar) {
+          const roleInfo = buildAggregatedRoleInfo(dubberAssignments, preferredChar, candidates);
           usedTrackPaths.add(track.path);
-          if (!isFix) usedCharacters.add(targetChar);
-          const relatedAssign = existingAssignments.find(a => 
-            a.dubberId === matchedParticipant.id || a.characterName === targetChar
-          );
-          const fixTargetLines = isFix ? extractFixTargets(relatedAssign) : [];
+          if (!isFix) roleInfo.characterNames.forEach(c => usedCharacters.add(c));
+
           matchedTracks.push({
             trackPath: track.path,
             trackId: track.id || path.basename(track.path),
             dubberId: matchedParticipant.id,
             dubberNick: matchedParticipant.nickname,
-            characterName: targetChar,
+            characterName: roleInfo.characterName,
+            subTrackIndex: resolveSubTrackIndex(track),
             isFix,
             type: isFix ? 'FIXES' : 'DUBBER_FILE',
             matchMethod: 'filename_nick_matched',
             confidence: 0.95,
-            lines: charactersMap.get(targetChar)?.lines || [],
-            fixTargetLines
+            lines: roleInfo.lines,
+            fixTargetLines: isFix ? roleInfo.fixTargets : []
           });
           continue;
         }
       }
 
-      // 3. Сопоставление имени файла с персонажем из субтитров
+      // 3. Сопоставление имени файла напрямую с персонажем из субтитров
       let matchedDirectChar = null;
-      for (const [cName, cInfo] of charactersMap.entries()) {
+      for (const [cName] of charactersMap.entries()) {
         if (!usedCharacters.has(cName) || isFix) {
           if (candidates.some(c => isNameMatch(c, cName))) {
             matchedDirectChar = cName;
@@ -432,16 +625,21 @@ class AutoTimingService {
       if (matchedDirectChar) {
         usedTrackPaths.add(track.path);
         if (!isFix) usedCharacters.add(matchedDirectChar);
-        const relatedAssign = existingAssignments.find(a => 
-          a.characterName === matchedDirectChar || (track.uploadedById && a.dubberId === track.uploadedById)
+        const relatedAssign = (existingAssignments || []).find(a =>
+          isNameMatch(a.characterName, matchedDirectChar) ||
+          (track.uploadedById && String(getEffectiveDubberId(a)) === String(track.uploadedById))
         );
+        const effDubberId = relatedAssign ? getEffectiveDubberId(relatedAssign) : (track.dubberId || track.uploadedById || null);
+        const p = findParticipantById(effDubberId);
+        const resolvedNick = track.dubberNick || relatedAssign?.substitute?.nickname || relatedAssign?.dubber?.nickname || p?.nickname || candidates[0] || matchedDirectChar;
         const fixTargetLines = isFix ? extractFixTargets(relatedAssign) : [];
         matchedTracks.push({
           trackPath: track.path,
           trackId: track.id || path.basename(track.path),
-          dubberId: track.uploadedById || null,
-          dubberNick: candidates[0] || matchedDirectChar,
+          dubberId: effDubberId,
+          dubberNick: resolvedNick,
           characterName: matchedDirectChar,
+          subTrackIndex: resolveSubTrackIndex(track),
           isFix,
           type: isFix ? 'FIXES' : 'DUBBER_FILE',
           matchMethod: 'filename_character_direct',
@@ -459,9 +657,9 @@ class AutoTimingService {
       if (usedTrackPaths.has(track.path)) continue;
       usedTrackPaths.add(track.path);
 
-      let nick = 'Даббер';
-      if (track.uploadedById) {
-        const p = participantsData.find(part => part.id === track.uploadedById);
+      let nick = track.dubberNick || 'Даббер';
+      if (nick === 'Даббер' && (track.dubberId || track.uploadedById)) {
+        const p = findParticipantById(track.dubberId || track.uploadedById);
         if (p) nick = p.nickname || p.name;
       }
       if (nick === 'Даббер') {
@@ -3267,29 +3465,39 @@ class AutoTimingService {
         : '  • Наложений и коллизий между дорожками не обнаружено (все фразы звучат чисто).\n') +
       `\n\nДЕТАЛИЗАЦИЯ ПО ДОРОЖКАМ:\n`;
 
-    const rawDir = path.join(targetDir, '00_исходные');
-    if (fs.existsSync(targetDir)) {
+    const useMixingPrefix = Boolean(options?.forMixing || options?.useMixingPrefix || !baseVideoName);
+    const rawDir = useMixingPrefix ? path.join(targetDir, '00_исходные') : null;
+    if (rawDir && fs.existsSync(targetDir)) {
       try { fs.mkdirSync(rawDir, { recursive: true }); } catch (e) {}
     }
+
+    const { sanitizeDubberNick } = require('../lib/pathSanitizer.cjs');
+
+    const getCleanTrackNick = (rawNick) => {
+      const stripped = String(rawNick || 'Даббер')
+        .replace(/\[.*\]/g, '')
+        .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
+        .replace(/[`'"]/g, '')
+        .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
+        .trim();
+      return sanitizeDubberNick(stripped || 'dubber', 'dubber');
+    };
 
     for (let tIdx = 0; tIdx < tracksToRender.length; tIdx++) {
       const item = tracksToRender[tIdx];
       const { track, phrases } = item;
       const nick = track.dubberNick || 'Даббер';
-      const cleanNick = String(nick)
-        .replace(/\[.*\]/g, '')
-        .replace(/_?(дорожка|слой|take|layer|фикс|fix)\s*\d*/gi, '')
-        .replace(/[^\w\d\s\u0400-\u04FF_-]/g, '')
-        .trim() || 'dubber';
+      const cleanNick = getCleanTrackNick(nick);
 
-      const sameNickTracks = tracksToRender.filter(t => (t.track.dubberNick || 'Даббер') === nick);
+      const sameNickTracks = tracksToRender.filter(t => getCleanTrackNick(t.track?.dubberNick || 'Даббер').toLowerCase() === cleanNick.toLowerCase());
       const isMultiTrack = sameNickTracks.length > 1;
       const subIdx = track.subTrackIndex || (sameNickTracks.indexOf(item) + 1);
-      const trackSuffix = isMultiTrack ? `_${subIdx}` : '';
 
-      const outFilename = `00_timed_${cleanNick}${trackSuffix}.wav`;
+      const outFilename = useMixingPrefix
+        ? (isMultiTrack ? `00_timed_${cleanNick}_дорожка${subIdx}.wav` : `00_timed_${cleanNick}.wav`)
+        : (isMultiTrack ? `${baseVideoName}_[${cleanNick}]_дорожка${subIdx}.wav` : `${baseVideoName}_[${cleanNick}].wav`);
       const outFilePath = path.join(targetDir, outFilename);
-      const outRawFilePath = path.join(rawDir, outFilename);
+      const outRawFilePath = rawDir ? path.join(rawDir, outFilename) : null;
 
       const trackProgressPercent = 70 + Math.round(((tIdx + 1) / tracksToRender.length) * 28);
       const logMsg = `Сборка мастер-дорожки [${tIdx + 1}/${tracksToRender.length}]: «${nick}» (${track.characterName}) — фраз: ${phrases.length}`;
@@ -3305,7 +3513,9 @@ class AutoTimingService {
 
       if (phrases.length === 0) {
         await fs.promises.copyFile(track.trackPath, outFilePath);
-        try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
+        if (outRawFilePath) {
+          try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
+        }
         renderedTracks.push({
           dubberNick: nick,
           characterName: track.characterName,
@@ -3317,7 +3527,9 @@ class AutoTimingService {
 
       try {
         await this.assembleMultiSourceTrack(track.trackPath, phrases, outFilePath, { ...options, targetDir });
-        try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
+        if (outRawFilePath) {
+          try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
+        }
         renderedTracks.push({
           dubberNick: nick,
           characterName: track.characterName,
@@ -3329,7 +3541,9 @@ class AutoTimingService {
         log.error(`[AutoTiming Render] Ошибка потоковой сборки для ${nick}, резервное копирование оригинала:`, renderErr);
         if (onLog) onLog(`[Предупреждение] Ошибка сборки ${nick}: ${renderErr.message}. Скопирован оригинал.`, 'warn');
         await fs.promises.copyFile(track.trackPath, outFilePath);
-        try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
+        if (outRawFilePath) {
+          try { await fs.promises.copyFile(outFilePath, outRawFilePath); } catch (e) {}
+        }
         renderedTracks.push({
           dubberNick: nick,
           characterName: track.characterName,
@@ -3347,7 +3561,7 @@ class AutoTimingService {
     }
 
     // Clean up temporary slice micro-files from export directory and 00_исходные
-    const cleanupDirs = [targetDir, rawDir];
+    const cleanupDirs = [targetDir, rawDir].filter(Boolean);
     for (const cDir of cleanupDirs) {
       if (fs.existsSync(cDir)) {
         try {
@@ -3386,7 +3600,7 @@ class AutoTimingService {
         } catch (e) {}
       }
 
-      const intentionalOverlaps = (timingResult.intentionalOverlaps || []).map(ov => ({
+      const intentionalOverlaps = (mergedResult.intentionalOverlaps || []).map(ov => ({
         ...ov,
         priorityTrackKey: ov.priorityTrackKey || existingPriorities[ov.id] || null,
         attenuationDb: -10
@@ -3396,7 +3610,7 @@ class AutoTimingService {
         version: '1.0',
         updatedAt: new Date().toISOString(),
         baseVideoName,
-        unisonPhrasesCount: timingResult.unisonPhrasesCount || 0,
+        unisonPhrasesCount: mergedResult.unisonPhrasesCount || 0,
         intentionalOverlaps,
         rolesVolumeMap: tracksToRender.reduce((acc, tr) => {
           const nick = tr.track?.dubberNick || 'Даббер';
