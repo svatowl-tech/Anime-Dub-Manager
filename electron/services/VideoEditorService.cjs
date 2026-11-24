@@ -834,6 +834,18 @@ async function renderOverlaidSourceSlice(sourcePath, slice, sourceInfo, outputPa
   );
 }
 
+function getStandardChannelLayout(channels) {
+  const ch = parseInt(channels, 10) || 2;
+  if (ch === 1) return 'mono';
+  if (ch === 2) return 'stereo';
+  if (ch === 3) return '3.0';
+  if (ch === 4) return 'quad';
+  if (ch === 5) return '5.0';
+  if (ch === 6) return '5.1';
+  if (ch === 8) return '7.1';
+  return 'stereo';
+}
+
 /**
  * Generates a video clip segment from a still image matching the source video's resolution, FPS, and audio parameters.
  */
@@ -843,6 +855,7 @@ async function renderImageClipSegment(imageBlock, sourceInfo, outputPath, onProg
   const dur = Math.max(0.1, Number(imageBlock.durationSec) || 3);
   const fpsStr = sourceInfo.fpsStr || '24';
   const vEncoder = sourceInfo.videoCodec === 'hevc' ? 'libx265' : 'libx264';
+  const targetChLayout = getStandardChannelLayout(sourceInfo.channels || 2);
 
   const args = [
     '-y',
@@ -855,14 +868,13 @@ async function renderImageClipSegment(imageBlock, sourceInfo, outputPath, onProg
   ];
 
   if (sourceInfo.hasAudio) {
-    const chLayout = sourceInfo.channels === 1 ? 'mono' : 'stereo';
     args.push(
       '-f',
       'lavfi',
       '-t',
       dur.toFixed(3),
       '-i',
-      `anullsrc=channel_layout=${chLayout}:sample_rate=${sourceInfo.sampleRate || 48000}`
+      `anullsrc=channel_layout=${targetChLayout}:sample_rate=${sourceInfo.sampleRate || 48000}`
     );
   }
 
@@ -877,12 +889,12 @@ async function renderImageClipSegment(imageBlock, sourceInfo, outputPath, onProg
       '0:v:0',
       '-map',
       '1:a:0',
+      '-af',
+      `aformat=channel_layouts=${targetChLayout}`,
       '-c:a',
       aCodec,
       '-ar',
       String(sourceInfo.sampleRate || 48000),
-      '-ac',
-      String(sourceInfo.channels || 2),
       '-shortest'
     );
   } else {
@@ -957,15 +969,16 @@ async function renderExternalVideoSegment(extBlock, sourceInfo, outputPath, onPr
 
   const args = ['-y', '-i', extBlock.filePath];
 
+  const targetChLayout = getStandardChannelLayout(sourceInfo.channels || 2);
+
   if (sourceInfo.hasAudio && !extInfo.hasAudio) {
-    const chLayout = sourceInfo.channels === 1 ? 'mono' : 'stereo';
     args.push(
       '-f',
       'lavfi',
       '-t',
       dur.toFixed(3),
       '-i',
-      `anullsrc=channel_layout=${chLayout}:sample_rate=${sourceInfo.sampleRate || 48000}`
+      `anullsrc=channel_layout=${targetChLayout}:sample_rate=${sourceInfo.sampleRate || 48000}`
     );
   }
 
@@ -979,12 +992,12 @@ async function renderExternalVideoSegment(extBlock, sourceInfo, outputPath, onPr
         '0:v:0',
         '-map',
         '0:a:0',
+        '-af',
+        `aformat=channel_layouts=${targetChLayout}`,
         '-c:a',
         aCodec,
         '-ar',
-        String(sourceInfo.sampleRate || 48000),
-        '-ac',
-        String(sourceInfo.channels || 2)
+        String(sourceInfo.sampleRate || 48000)
       );
     } else {
       args.push(
@@ -992,12 +1005,12 @@ async function renderExternalVideoSegment(extBlock, sourceInfo, outputPath, onPr
         '0:v:0',
         '-map',
         '1:a:0',
+        '-af',
+        `aformat=channel_layouts=${targetChLayout}`,
         '-c:a',
         aCodec,
         '-ar',
         String(sourceInfo.sampleRate || 48000),
-        '-ac',
-        String(sourceInfo.channels || 2),
         '-shortest'
       );
     }

@@ -8625,7 +8625,7 @@ class MixingPipelineService {
     if (audioBitrate === 'flac') {
       outputOpts.push('-c:a flac');
     } else {
-      outputOpts.push('-c:a aac', `-b:a ${audioBitrate || '320k'}`);
+      outputOpts.push('-af aformat=channel_layouts=7.1|5.1|stereo|mono', '-c:a aac', `-b:a ${audioBitrate || '320k'}`);
     }
 
     if (finalVideoPath.toLowerCase().endsWith('.mp4') && params.fastStart !== false) {

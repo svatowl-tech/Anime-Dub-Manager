@@ -141,6 +141,103 @@ function calculateProgressPercent(progress, totalDurationSec) {
   return undefined;
 }
 
+function isAudioEncoderOrMuxError(errStr) {
+  const lower = String(errStr || '').toLowerCase();
+  return (
+    lower.includes('unsupported channel layout') ||
+    lower.includes('error while opening encoder') ||
+    lower.includes('aac_adtstoasc') ||
+    lower.includes('malformed aac bitstream') ||
+    lower.includes('could not find tag for codec') ||
+    (lower.includes('aost#') && lower.includes('invalid argument')) ||
+    (lower.includes('[aac') && (lower.includes('invalid argument') || lower.includes('not supported')))
+  );
+}
+
+/**
+ * Подбирает безопасные аудио-параметры FFmpeg для MP4-вывода, исключая ошибку FFmpeg 6.1+
+ * `Unsupported channel layout "6 channels"` (и аналогичные проблемы с многоканальным/нестандартным звуком).
+ * - Если исходный звук уже AAC/MP3 в совместимом контейнере и копирование разрешено -> `-c:a copy` (без потерь и быстрее).
+ * - При перекодировании в AAC всегда задаётся валидная именованная схема каналов (`mono`/`stereo` или `5.1`/`7.1`).
+ */
+function resolveSafeMp4AudioOptions(meta, videoPath, options = {}) {
+  const streams = Array.isArray(meta?.streams) ? meta.streams : [];
+  let audioStream = null;
+  if (options.audioStreamIndex !== undefined && options.audioStreamIndex !== null) {
+    audioStream = streams.find(
+      (s) => s.codec_type === 'audio' && Number(s.index) === Number(options.audioStreamIndex)
+    ) || null;
+  }
+  if (!audioStream) {
+    audioStream = streams.find((s) => s.codec_type === 'audio') || null;
+  }
+
+  // Если аудиодорожка отсутствует (и метаданные действительно получены) — аудио-флаги не нужны
+  if (streams.length > 0 && !audioStream) {
+    return { hasAudio: false, outputOptions: [] };
+  }
+
+  // Безопасный фоллбэк: гарантированный стерео AAC (работает на любых сборках FFmpeg и любых исходниках)
+  if (options.forceStereoAac) {
+    return {
+      hasAudio: true,
+      mode: 'force-stereo-aac',
+      outputOptions: ['-c:a', 'aac', '-ac', '2', '-ar', '48000', '-b:a', '192k']
+    };
+  }
+
+  const codec = String(audioStream?.codec_name || '').toLowerCase();
+  const channels = parseInt(audioStream?.channels, 10) || 0;
+  const ext = path.extname(String(videoPath || '')).toLowerCase();
+  const allowCopy = options.allowAudioCopy !== false && !options.forceAudioEncode;
+  const isMp4CompatibleCodec = codec === 'aac' || codec === 'mp3';
+  const isSafeCopyContainer = ['.mp4', '.m4v', '.mov', '.mkv', '.ts', '.m2ts', '.mts'].includes(ext);
+
+  if (allowCopy && isMp4CompatibleCodec && isSafeCopyContainer) {
+    const outOpts = ['-c:a', 'copy'];
+    if (codec === 'aac' && ['.ts', '.m2ts', '.mts'].includes(ext)) {
+      outOpts.push('-bsf:a', 'aac_adtstoasc');
+    }
+    return {
+      hasAudio: true,
+      mode: 'copy',
+      outputOptions: outOpts
+    };
+  }
+
+  // Перекодирование в AAC с явной валидной раскладкой каналов (исключает "Unsupported channel layout 6 channels")
+  if (channels === 1) {
+    return {
+      hasAudio: true,
+      mode: 'aac-mono',
+      outputOptions: ['-c:a', 'aac', '-ac', '1', '-b:a', '128k']
+    };
+  }
+
+  if (options.preserveMultichannel && channels === 6) {
+    return {
+      hasAudio: true,
+      mode: 'aac-5.1',
+      outputOptions: ['-af', 'aformat=channel_layouts=5.1', '-c:a', 'aac', '-b:a', '384k']
+    };
+  }
+
+  if (options.preserveMultichannel && channels === 8) {
+    return {
+      hasAudio: true,
+      mode: 'aac-7.1',
+      outputOptions: ['-af', 'aformat=channel_layouts=7.1', '-c:a', 'aac', '-b:a', '448k']
+    };
+  }
+
+  const bitrate = channels > 2 ? '256k' : '192k';
+  return {
+    hasAudio: true,
+    mode: 'aac-stereo',
+    outputOptions: ['-c:a', 'aac', '-ac', '2', '-b:a', bitrate]
+  };
+}
+
 /**
  * Функция для хардсаба субтитров в видеофайл (Main Process).
  * Использует fluent-ffmpeg для наложения .ass файла на видео.
@@ -162,8 +259,26 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
     const oPath = path.resolve(outputPath);
     await fs.promises.mkdir(path.dirname(oPath), { recursive: true }).catch(() => {});
 
-    // Pre-calculate duration for reliable progress calculation
-    const totalDurationSec = await getDurationSec(vPath);
+    // Single metadata probe for duration, dimensions, and audio stream layout
+    let meta = null;
+    try {
+      meta = await getVideoMetadata(vPath);
+    } catch (e) {
+      log.warn(`[bakeSubtitles] Could not probe metadata for ${vPath}:`, e.message);
+    }
+
+    let totalDurationSec = 0;
+    if (meta?.format?.duration) {
+      const d = parseFloat(meta.format.duration);
+      if (!isNaN(d) && d > 0) totalDurationSec = d;
+    }
+    if (!totalDurationSec && Array.isArray(meta?.streams)) {
+      const vStream = meta.streams.find(s => s.codec_type === 'video');
+      if (vStream?.duration) {
+        const d = parseFloat(vStream.duration);
+        if (!isNaN(d) && d > 0) totalDurationSec = d;
+      }
+    }
 
     let currentCommandLine = '';
     let processId = null;
@@ -198,15 +313,10 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
     if (options.additionalProcessing) {
       let origW = 1920;
       let origH = 1080;
-      try {
-        const meta = await getVideoMetadata(vPath);
-        const videoStream = meta && meta.streams ? meta.streams.find(s => s.codec_type === 'video') : null;
-        if (videoStream && videoStream.width && videoStream.height) {
-          origW = videoStream.width;
-          origH = videoStream.height;
-        }
-      } catch (e) {
-        log.error('Error fetching video dimensions for bakeSubtitles:', e);
+      const videoStream = meta && meta.streams ? meta.streams.find(s => s.codec_type === 'video') : null;
+      if (videoStream && videoStream.width && videoStream.height) {
+        origW = videoStream.width;
+        origH = videoStream.height;
       }
       
       const scaledW = Math.round((origW * 1.02) / 2) * 2;
@@ -217,10 +327,22 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
     }
     filters.push(`ass=filename='${escapedAssPath}'`);
 
+    const audioPlan = resolveSafeMp4AudioOptions(meta, vPath, {
+      ...options,
+      allowAudioCopy: true
+    });
+    log.info(`[bakeSubtitles] Audio plan: ${audioPlan.mode || 'none'} (${audioPlan.outputOptions.join(' ')})`);
+
     command
       .videoFilters(filters)
       .output(oPath)
-      .format('mp4')
+      .format('mp4');
+
+    if (audioPlan.outputOptions.length > 0) {
+      command.outputOptions(audioPlan.outputOptions);
+    }
+
+    command
       .outputOptions('-pix_fmt yuv420p')
       .outputOptions('-strict -2') // For compatibility with some AAC encoders
       .on('start', (commandLine) => {
@@ -248,7 +370,8 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
         if (processId) removeProcess(processId);
         
         const errStr = (err?.message || '') + ' ' + (stderr || '');
-        const isNvencError = options.useNvenc && (
+        const isAudioErr = !options.forceStereoAac && isAudioEncoderOrMuxError(errStr);
+        const isNvencError = !isAudioErr && options.useNvenc && (
           errStr.toLowerCase().includes('nvenc') || 
           errStr.toLowerCase().includes('cuda') || 
           errStr.toLowerCase().includes('nvidia') || 
@@ -258,7 +381,13 @@ function bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onComman
           errStr.toLowerCase().includes('function not implemented')
         );
 
-        if (isNvencError) {
+        if (isAudioErr) {
+          log.warn('[FFmpeg] Audio channel layout/codec error detected in bakeSubtitles. Retrying with safe stereo AAC (-ac 2)...');
+          const fallbackOptions = { ...options, forceStereoAac: true };
+          bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onCommand, fallbackOptions)
+            .then(resolve)
+            .catch(reject);
+        } else if (isNvencError) {
           log.warn('[FFmpeg] GPU NVENC error detected. Automatically retrying with safe CPU (libx264) transcoding...');
           const fallbackOptions = { ...options, useNvenc: false };
           bakeSubtitles(videoPath, finalAssPath, outputPath, onProgress, onCommand, fallbackOptions)
@@ -291,8 +420,26 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
     const oPath = path.resolve(outputPath);
     await fs.promises.mkdir(path.dirname(oPath), { recursive: true }).catch(() => {});
 
-    // Pre-calculate duration for reliable progress percentage calculation on MKV/MP4 files
-    const totalDurationSec = await getDurationSec(vPath);
+    // Single metadata probe for duration, dimensions, and safe audio layout handling
+    let meta = null;
+    try {
+      meta = await getVideoMetadata(vPath);
+    } catch (e) {
+      log.warn(`[transcodeToMp4] Could not probe metadata for ${vPath}:`, e.message);
+    }
+
+    let totalDurationSec = 0;
+    if (meta?.format?.duration) {
+      const d = parseFloat(meta.format.duration);
+      if (!isNaN(d) && d > 0) totalDurationSec = d;
+    }
+    if (!totalDurationSec && Array.isArray(meta?.streams)) {
+      const vStream = meta.streams.find(s => s.codec_type === 'video');
+      if (vStream?.duration) {
+        const d = parseFloat(vStream.duration);
+        if (!isNaN(d) && d > 0) totalDurationSec = d;
+      }
+    }
 
     let currentCommandLine = '';
     let processId = null;
@@ -316,15 +463,10 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
     if (options.additionalProcessing) {
       let origW = 1920;
       let origH = 1080;
-      try {
-        const meta = await getVideoMetadata(vPath);
-        const videoStream = meta && meta.streams ? meta.streams.find(s => s.codec_type === 'video') : null;
-        if (videoStream && videoStream.width && videoStream.height) {
-          origW = videoStream.width;
-          origH = videoStream.height;
-        }
-      } catch (e) {
-        log.error('Error fetching video dimensions for transcodeToMp4:', e);
+      const videoStream = meta && meta.streams ? meta.streams.find(s => s.codec_type === 'video') : null;
+      if (videoStream && videoStream.width && videoStream.height) {
+        origW = videoStream.width;
+        origH = videoStream.height;
       }
       
       const scaledW = Math.round((origW * 1.02) / 2) * 2;
@@ -338,10 +480,21 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
         .outputOptions(`-map 0:${options.audioStreamIndex}`);
     }
 
+    const audioPlan = resolveSafeMp4AudioOptions(meta, vPath, {
+      ...options,
+      allowAudioCopy: true
+    });
+    log.info(`[transcodeToMp4] Audio plan: ${audioPlan.mode || 'none'} (${audioPlan.outputOptions.join(' ')})`);
+
     command
       .output(oPath)
-      .format('mp4')
-      .audioCodec('aac')
+      .format('mp4');
+
+    if (audioPlan.outputOptions.length > 0) {
+      command.outputOptions(audioPlan.outputOptions);
+    }
+
+    command
       .outputOptions('-pix_fmt yuv420p')
       .outputOptions('-strict -2')
       .on('start', (commandLine) => {
@@ -369,7 +522,8 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
         if (processId) removeProcess(processId);
 
         const errStr = (err?.message || '') + ' ' + (stderr || '');
-        const isNvencError = options.useNvenc && (
+        const isAudioErr = !options.forceStereoAac && isAudioEncoderOrMuxError(errStr);
+        const isNvencError = !isAudioErr && options.useNvenc && (
           errStr.toLowerCase().includes('nvenc') || 
           errStr.toLowerCase().includes('cuda') || 
           errStr.toLowerCase().includes('nvidia') || 
@@ -379,7 +533,13 @@ function transcodeToMp4(videoPath, outputPath, onProgress, onCommand, options = 
           errStr.toLowerCase().includes('function not implemented')
         );
 
-        if (isNvencError) {
+        if (isAudioErr) {
+          log.warn('[FFmpeg] Audio channel layout/codec error detected in transcodeToMp4. Retrying with safe stereo AAC (-ac 2)...');
+          const fallbackOptions = { ...options, forceStereoAac: true };
+          transcodeToMp4(videoPath, outputPath, onProgress, onCommand, fallbackOptions)
+            .then(resolve)
+            .catch(reject);
+        } else if (isNvencError) {
           log.warn('[FFmpeg] GPU NVENC transcode error detected. Automatically retrying with safe CPU (libx264) transcoding...');
           const fallbackOptions = { ...options, useNvenc: false };
           transcodeToMp4(videoPath, outputPath, onProgress, onCommand, fallbackOptions)
@@ -414,7 +574,7 @@ function setCustomFfmpegPath(path) {
  * @param onProgress Коллбэк для прогресса
  * @returns Promise с путем к готовому файлу
  */
-function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, onCommand) {
+function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, onCommand, options = {}) {
   return new Promise(async (resolve, reject) => {
     const vPath = path.resolve(videoPath);
     const aPath = path.resolve(audioPath);
@@ -451,6 +611,9 @@ function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, 
       '-map 0:v:0',
       '-map 1:a:0',
       '-pix_fmt yuv420p',
+      ...(options.forceStereoAac
+        ? ['-ac 2', '-ar 48000']
+        : ['-af aformat=channel_layouts=7.1|5.1|stereo|mono']),
       '-c:a aac',
       '-b:a 320k'
     ];
@@ -484,6 +647,14 @@ function muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, 
         log.error('Muxing error: ', err);
         log.error('FFmpeg stderr: ', stderr);
         if (processId) removeProcess(processId);
+        const errStr = (err?.message || '') + ' ' + (stderr || '');
+        if (!options.forceStereoAac && isAudioEncoderOrMuxError(errStr)) {
+          log.warn('[FFmpeg] Audio channel layout error in muxRelease. Retrying with safe stereo AAC (-ac 2)...');
+          muxRelease(videoPath, audioPath, signsAssPath, outputPath, onProgress, onCommand, { ...options, forceStereoAac: true })
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
         reject(new Error(`Muxing Error: ${err.message}\n\nCommand: ${currentCommandLine}\n\nStderr: ${stderr}`));
       })
       .save(oPath);
@@ -526,25 +697,51 @@ function takeScreenshot(videoPath, timestamp, outputPath) {
 }
 
 function getVideoMetadataFallback(videoPath) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const { execFile } = require('child_process');
-    const child = execFile(ffmpegPath, ['-i', videoPath], (err, stdout, stderr) => {
-      const output = stdout + '\n' + stderr;
+    const child = execFile(ffmpegPath, ['-hide_banner', '-i', videoPath], { windowsHide: true }, (_err, stdout, stderr) => {
+      const output = `${stdout || ''}\n${stderr || ''}`;
       const streams = [];
-      const lines = output.split('\n');
-      
+      const format = {};
+      const lines = output.split(/\r?\n/);
+
+      const durMatch = output.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+      if (durMatch) {
+        const secs = parseInt(durMatch[1], 10) * 3600 + parseInt(durMatch[2], 10) * 60 + parseFloat(durMatch[3]);
+        if (Number.isFinite(secs) && secs > 0) format.duration = secs;
+      }
+
       for (const line of lines) {
-        if (line.includes('Stream #')) {
-          if (line.includes('Audio:')) {
-            streams.push({ codec_type: 'audio' });
-          } else if (line.includes('Video:')) {
-            streams.push({ codec_type: 'video' });
-          } else if (line.includes('Subtitle:')) {
-            streams.push({ codec_type: 'subtitle' });
-          }
+        const idxMatch = line.match(/Stream #\d+:(\d+)/);
+        const idx = idxMatch ? parseInt(idxMatch[1], 10) : streams.length;
+        if (line.includes('Audio:')) {
+          const audioMatch = line.match(/Audio:\s*([a-zA-Z0-9_]+)(?:[^,\r\n]*),\s*(\d{4,6})\s*Hz,\s*([^,\r\n]+)/i);
+          const codec_name = audioMatch ? audioMatch[1].toLowerCase() : undefined;
+          const sample_rate = audioMatch ? parseInt(audioMatch[2], 10) : undefined;
+          const layoutStr = audioMatch ? String(audioMatch[3]).trim().toLowerCase() : '';
+          let channels = 2;
+          const chNumMatch = layoutStr.match(/(\d+)\s*channels?/);
+          if (layoutStr.includes('mono')) channels = 1;
+          else if (layoutStr.includes('stereo')) channels = 2;
+          else if (layoutStr.includes('5.1')) channels = 6;
+          else if (layoutStr.includes('7.1')) channels = 8;
+          else if (chNumMatch) channels = parseInt(chNumMatch[1], 10) || 2;
+          streams.push({ index: idx, codec_type: 'audio', codec_name, sample_rate, channels, channel_layout: layoutStr || undefined });
+        } else if (line.includes('Video:')) {
+          const vMatch = line.match(/Video:\s*([a-zA-Z0-9_]+)/i);
+          const dimMatch = line.match(/,\s*(\d{3,5})x(\d{3,5})(?:\s|\[|,|$)/);
+          streams.push({
+            index: idx,
+            codec_type: 'video',
+            codec_name: vMatch ? vMatch[1].toLowerCase() : undefined,
+            width: dimMatch ? parseInt(dimMatch[1], 10) : undefined,
+            height: dimMatch ? parseInt(dimMatch[2], 10) : undefined
+          });
+        } else if (line.includes('Subtitle:')) {
+          streams.push({ index: idx, codec_type: 'subtitle' });
         }
       }
-      resolve({ streams });
+      resolve({ streams, format });
     });
     trackProcess(child);
   });
@@ -1125,6 +1322,7 @@ function createVideoProxy(inputPath, outputPath = null, onProgress = null) {
           '-crf 26',
           '-vf scale=-2:720',
           '-c:a aac',
+          '-ac 2',
           '-b:a 128k',
           '-pix_fmt yuv420p',
           '-movflags +faststart'
@@ -1157,6 +1355,8 @@ module.exports = {
   transcodeToMp4,
   createVideoProxy,
   muxRelease,
+  resolveSafeMp4AudioOptions,
+  isAudioEncoderOrMuxError,
   takeScreenshot,
   getVideoMetadata,
   extractSubtitleTrack,

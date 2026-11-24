@@ -244,8 +244,8 @@ describe('AutoTiming audio quality: zero metallic artifacts & zero phrase doubli
 
     // 2. Frontend applySoftTimeFitToTrackClips must never produce playbackRate > 1.0
     const subs: SubtitleLine[] = [
-      { id: 's1', start: '0:00:01.00', end: '0:00:02.50', startSec: 1.0, endSec: 2.5, style: 'Default', name: 'A', text: 'Line 1', rawLineIndex: 0 },
-      { id: 's2', start: '0:00:02.70', end: '0:00:04.20', startSec: 2.7, endSec: 4.2, style: 'Default', name: 'A', text: 'Line 2', rawLineIndex: 1 },
+      { id: 1, start: '0:00:01.00', end: '0:00:02.50', startSec: 1.0, endSec: 2.5, style: 'Default', name: 'A', text: 'Line 1', rawLineIndex: 0 },
+      { id: 2, start: '0:00:02.70', end: '0:00:04.20', startSec: 2.7, endSec: 4.2, style: 'Default', name: 'A', text: 'Line 2', rawLineIndex: 1 },
     ];
     const clips: AudioClip[] = [
       {
@@ -257,7 +257,7 @@ describe('AutoTiming audio quality: zero metallic artifacts & zero phrase doubli
         durationSec: 2.0,
         unscaledDurationSec: 2.0,
         playbackRate: 1.16,
-        matchedSubId: 's1',
+        matchedSubId: '1',
         targetSubEndSec: 2.5,
         speechOffsetSec: 1.95,
       } as AudioClip,
@@ -269,7 +269,7 @@ describe('AutoTiming audio quality: zero metallic artifacts & zero phrase doubli
         sourceEndSec: 4.5,
         durationSec: 1.5,
         unscaledDurationSec: 1.5,
-        matchedSubId: 's2',
+        matchedSubId: '2',
         targetSubEndSec: 4.2,
         speechOffsetSec: 1.4,
       } as AudioClip,
