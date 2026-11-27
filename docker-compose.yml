@@ -1,0 +1,27 @@
+services:
+  anime-dub-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/svatowl/anime-dub-manager:latest
+    container_name: anime-dub-manager
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      ADM_SERVER_MODE: "true"
+      ADM_DATA_DIR: "/data"
+      ADM_AI_ENV_DIR: "/opt/ai_env"
+      ADM_ACCESS_TOKEN: "${ADM_ACCESS_TOKEN:-}"
+      ADM_AGENT_TOKEN: "${ADM_AGENT_TOKEN:-}"
+      ADM_CURATOR_TELEGRAM_CHAT_ID: "${ADM_CURATOR_TELEGRAM_CHAT_ID:-}"
+      ADM_TELEGRAM_BOT_TOKEN: "${ADM_TELEGRAM_BOT_TOKEN:-}"
+    volumes:
+      - ./server_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

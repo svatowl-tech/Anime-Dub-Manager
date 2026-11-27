@@ -1,0 +1,27 @@
+manifestVersion: 1
+id: anime-dub-manager
+category: Media
+name: Anime Dub Manager
+version: "1.2.0"
+tagline: Серверная студия фандаба с AI-агентом и мобильным управлением
+description: >-
+  Полнофункциональный сервер для студии озвучки и фандаба на базе Umbrel OS.
+  Переносит скачивание релизов (Nyaa/торренты, Anime365, YouTube), разделение дорожек (Demucs v4,
+  DeepFilterNet3, VoiceFixer, Inworld Voice Isolator), VAD-автотайминг, сведение и финальный рендер
+  FFmpeg на домашний сервер, предоставляя тонкий веб-интерфейс для ПК и смартфона.
+  Включает встроенный MCP-сервер (/mcp, /sse), REST API (/api/v1), CLI и Входящие куратора
+  с двусторонним Telegram-ботом для работы с локальными AI-агентами.
+developer: SvatOwl
+website: https://github.com/SvatOwl/anime-dub-manager
+dependencies: []
+repo: https://github.com/SvatOwl/anime-dub-manager
+support: https://github.com/SvatOwl/anime-dub-manager/issues
+port: 3000
+gallery: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+permissions:
+  - STORAGE
+submitter: SvatOwl
+submission: https://github.com/SvatOwl/anime-dub-manager

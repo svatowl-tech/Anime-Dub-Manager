@@ -108,6 +108,8 @@ def get_platform_tag():
             return "macos_arm64"
         return "macos_x64"
     elif system == "linux":
+        if "arm" in machine or "aarch" in machine:
+            return "linux_arm64"
         return "linux_x64"
     return f"{system}_{machine}"
 
@@ -208,7 +210,7 @@ def make_zip(source_dir, output_zip_path, root_folder_name="ai_env"):
         raise ValueError(f"CRITICAL: Archive size {size_mb:.2f} MB exceeds GitHub Release 2GB limit!")
 
 
-def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
+def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True, install_dir=None, skip_zip=False, skip_system_deps=False):
     root_dir = Path(__file__).resolve().parent.parent
     build_temp_dir = root_dir / "build_temp_ai_env"
     env_dir = build_temp_dir / "python_env"
@@ -218,15 +220,16 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     is_win = "windows" in tag or platform.system().lower() == "windows"
     is_mac = "macos" in tag or platform.system().lower() == "darwin"
     is_linux = "linux" in tag or platform.system().lower() == "linux"
+    is_arm64 = "arm64" in tag or "aarch64" in tag or platform.machine().lower() in ("arm64", "aarch64")
 
     # Set AENEAS_WITH_CEW=False globally to disable optional C-extension compilation during setup.py wheel builds
     # This prevents MSVC espeak.lib unresolved external symbol (LNK2001) errors on Windows while keeping full pure Python functionality
     os.environ["AENEAS_WITH_CEW"] = "False"
 
     print("=" * 60)
-    print(f"[BUILD] Building AI_env for platform tag: {tag}")
+    print(f"[BUILD] Building AI_env for platform tag: {tag} (arm64={is_arm64})")
     print(f"[PATH] Project Root: {root_dir}")
-    print(f"[PATH] Output Directory: {out_dir}")
+    print(f"[PATH] Output Directory: {install_dir or out_dir}")
     print("=" * 60)
 
     # 1. Clean previous temp builds
@@ -266,8 +269,11 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
 
     # Determine CPU wheel versioning
     is_cpu_build = use_cpu_wheels and (is_win or is_linux)
-    torch_pkg = "torch==2.2.2+cpu" if is_cpu_build else "torch==2.2.2"
-    torchaudio_pkg = "torchaudio==2.2.2+cpu" if is_cpu_build else "torchaudio==2.2.2"
+    # PyTorch CPU index uses +cpu suffixes on Windows/Linux x86_64, whereas Linux aarch64 and macOS use standard version tags
+    use_plus_cpu_tag = is_cpu_build and not is_arm64
+    torch_pkg = "torch==2.2.2+cpu" if use_plus_cpu_tag else "torch==2.2.2"
+    torchaudio_pkg = "torchaudio==2.2.2+cpu" if use_plus_cpu_tag else "torchaudio==2.2.2"
+    onnxruntime_pkg = "onnxruntime>=1.16.3,<1.19.0" if is_arm64 else "onnxruntime==1.16.3"
 
     # Create constraints file to prevent transitive upgrades of numpy, packaging, torch, and torchaudio
     constraints_file = build_temp_dir / "constraints.txt"
@@ -281,7 +287,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "llvmlite==0.42.0\n"
         "numba==0.59.1\n"
         "librosa>=0.10.0,<0.11.0\n"
-        "onnxruntime==1.16.3\n"
+        f"{onnxruntime_pkg}\n"
         "rotary-embedding-torch>=0.5.0,<0.9.0\n"
         "safetensors==0.4.3\n",
         encoding="utf-8"
@@ -335,7 +341,7 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
         "soundfile>=0.12.1",
         "scipy>=1.10.0,<1.14.0",
         "librosa>=0.10.0,<0.11.0",
-        "onnxruntime==1.16.3",
+        onnxruntime_pkg,
         "huggingface-hub>=0.20.0",
         "safetensors==0.4.3",
         "tqdm>=4.65.0",
@@ -394,7 +400,11 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True):
     # System Dependencies for Aeneas Forced Alignment (espeak / espeak-ng)
     print("\n[STEP 4.1] Checking system dependencies for Aeneas (espeak / espeak-ng / ffmpeg)...")
     try:
-        if is_linux:
+        has_espeak = bool(shutil.which("espeak-ng") or shutil.which("espeak"))
+        has_ffmpeg = bool(shutil.which("ffmpeg"))
+        if skip_system_deps or (has_espeak and has_ffmpeg):
+            print("  [INFO] System dependencies already available or skipped.")
+        elif is_linux:
             sudo_prefix = ["sudo", "-n"] if (hasattr(os, "geteuid") and os.geteuid() != 0 and shutil.which("sudo")) else []
             run_cmd(sudo_prefix + ["apt-get", "update"], check=False)
             run_cmd(sudo_prefix + ["apt-get", "install", "-y", "--no-install-recommends", "espeak", "espeak-ng", "ffmpeg"], check=False)
@@ -916,27 +926,56 @@ except Exception as e:
         try: os.remove(post_py_file)
         except Exception: pass
 
-    # 11. Package zip archives
-    print("\n[STEP 9] Archiving AI_env bundle with maximum compression...")
-    primary_zip_name = f"ai_env_{tag}.zip"
-    primary_zip_path = out_dir / primary_zip_name
-    make_zip(str(build_temp_dir), str(primary_zip_path), root_folder_name="ai_env")
+    # 11. Install directly to directory (Docker/Server) and/or package zip archives
+    if install_dir:
+        dest_dir = Path(install_dir).resolve()
+        print(f"\n[STEP 9a] Installing AI_env directly to '{dest_dir}'...")
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir, ignore_errors=True)
+        dest_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(build_temp_dir, dest_dir, dirs_exist_ok=True, symlinks=False)
+        if is_linux or is_mac:
+            for py_bin in (dest_dir / "python_env" / "bin").glob("python*"):
+                try:
+                    os.chmod(py_bin, 0o755)
+                except Exception:
+                    pass
+        print(f"  [INSTALL OK] AI_env installed directly to: {dest_dir}")
 
-    # If windows, also produce generic ai_env.zip for backward compatibility
-    if "windows" in tag:
-        compat_zip_path = out_dir / "ai_env.zip"
-        shutil.copyfile(primary_zip_path, compat_zip_path)
-        print(f"  [OK] Created backward-compatible alias: {compat_zip_path}")
+    if not skip_zip:
+        print("\n[STEP 9b] Archiving AI_env bundle with maximum compression...")
+        primary_zip_name = f"ai_env_{tag}.zip"
+        primary_zip_path = out_dir / primary_zip_name
+        make_zip(str(build_temp_dir), str(primary_zip_path), root_folder_name="ai_env")
 
-    print("\n[SUCCESS] Portable AI_env build completed successfully!")
-    print(f"  Primary Archive: {primary_zip_path}")
+        # If windows, also produce generic ai_env.zip for backward compatibility
+        if "windows" in tag:
+            compat_zip_path = out_dir / "ai_env.zip"
+            shutil.copyfile(primary_zip_path, compat_zip_path)
+            print(f"  [OK] Created backward-compatible alias: {compat_zip_path}")
+
+        print("\n[SUCCESS] Portable AI_env build completed successfully!")
+        print(f"  Primary Archive: {primary_zip_path}")
+    else:
+        shutil.rmtree(build_temp_dir, ignore_errors=True)
+        print("\n[SUCCESS] Direct AI_env build completed (--skip-zip enabled)!")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build portable AI_env for Anime Dub Manager")
     parser.add_argument("--out", "--out-dir", dest="out", default="out", help="Output directory for zipped packages")
-    parser.add_argument("--tag", default=None, help="Custom platform tag (e.g. windows_x64, macos_arm64, macos_x64, linux_x64)")
+    parser.add_argument("--tag", default=None, help="Custom platform tag (e.g. windows_x64, macos_arm64, macos_x64, linux_x64, linux_arm64)")
     parser.add_argument("--cuda", action="store_true", help="Build with CUDA wheels instead of CPU wheels")
+    parser.add_argument("--install-dir", dest="install_dir", default=None, help="Install built AI_env directly to this directory (e.g. /opt/ai_env)")
+    parser.add_argument("--skip-zip", dest="skip_zip", action="store_true", help="Skip zip archive creation (useful in Docker builds)")
+    parser.add_argument("--skip-system-deps", dest="skip_system_deps", action="store_true", help="Skip apt-get/brew system dependency installation")
     args = parser.parse_args()
     
-    build_ai_env(output_dir=args.out, custom_tag=args.tag, use_cpu_wheels=not args.cuda)
+    build_ai_env(
+        output_dir=args.out,
+        custom_tag=args.tag,
+        use_cpu_wheels=not args.cuda,
+        install_dir=args.install_dir,
+        skip_zip=args.skip_zip,
+        skip_system_deps=args.skip_system_deps
+    )

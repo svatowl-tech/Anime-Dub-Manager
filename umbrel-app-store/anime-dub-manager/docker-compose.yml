@@ -1,0 +1,23 @@
+services:
+  app_proxy:
+    environment:
+      APP_HOST: anime-dub-manager_web_1
+      APP_PORT: 3000
+
+  web:
+    image: ghcr.io/svatowl/anime-dub-manager:latest
+    restart: on-failure
+    init: true
+    environment:
+      ADM_SERVER_MODE: "true"
+      ADM_DATA_DIR: "/data"
+      ADM_AI_ENV_DIR: "/opt/ai_env"
+      TORCH_HOME: "/data/models/torch"
+      HF_HOME: "/data/models/huggingface"
+      DEEPFILTERNET_CACHE: "/data/models/deepfilternet"
+      ADM_ACCESS_TOKEN: "${ADM_ACCESS_TOKEN:-}"
+      ADM_AGENT_TOKEN: "${ADM_AGENT_TOKEN:-}"
+      ADM_CURATOR_TELEGRAM_CHAT_ID: "${ADM_CURATOR_TELEGRAM_CHAT_ID:-}"
+      ADM_TELEGRAM_BOT_TOKEN: "${ADM_TELEGRAM_BOT_TOKEN:-}"
+    volumes:
+      - ${APP_DATA_DIR}/data:/data

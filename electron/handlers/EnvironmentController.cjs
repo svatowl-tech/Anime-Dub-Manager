@@ -20,7 +20,9 @@ function registerEnvironmentHandlers() {
           ? `${repoBase}/ai_env_macos_arm64.zip`
           : `${repoBase}/ai_env_macos_x64.zip`;
       } else if (isLinux) {
-        targetUrl = `${repoBase}/ai_env_linux_x64.zip`;
+        targetUrl = isArm
+          ? `${repoBase}/ai_env_linux_arm64.zip`
+          : `${repoBase}/ai_env_linux_x64.zip`;
       } else {
         // Windows (x64)
         targetUrl = `${repoBase}/ai_env_windows_x64.zip`;
@@ -29,12 +31,10 @@ function registerEnvironmentHandlers() {
 
     log.info(`[EnvironmentController] IPC requesting AI environment download from: ${targetUrl}`);
     
-    // Получаем BrowserWindow по sender (отправителю IPC-сообщения)
-    const window = BrowserWindow.fromWebContents(event.sender);
-    
-    if (!window) {
-      throw new Error('Не удалось определить целевое окно для отправки прогресса загрузки.');
-    }
+    // Получаем BrowserWindow по sender (отправителю IPC-сообщения), в серверном режиме может отсутствовать
+    const window = (event?.sender ? BrowserWindow.fromWebContents(event.sender) : null) || {
+      webContents: { send: (ch, data) => event?.sender?.send?.(ch, data) },
+    };
 
     // Запускаем процесс скачивания и распаковки
     await EnvironmentManager.downloadAndInstall(targetUrl, window);

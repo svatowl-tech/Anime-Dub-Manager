@@ -218,12 +218,17 @@ export const TelegramTracksTab: React.FC<TelegramTracksTabProps> = ({
 
   const handleSelectFolder = async () => {
     try {
-      const folder = await ipcSafe.invoke('select-directory');
+      const selected = await ipcSafe.invoke('select-directory');
+      const folder = typeof selected === 'string'
+        ? selected
+        : selected?.filePaths?.[0] || selected?.path || '';
       if (folder) {
         setTargetDir(folder);
       }
     } catch (err: any) {
-      toast.error(`Ошибка выбора папки: ${err.message}`);
+      if (err?.message !== 'Selection canceled') {
+        toast.error(`Ошибка выбора папки: ${err.message}`);
+      }
     }
   };
 

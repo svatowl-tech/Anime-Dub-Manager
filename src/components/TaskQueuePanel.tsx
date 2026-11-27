@@ -99,14 +99,14 @@ export default function TaskQueuePanel() {
   };
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+    <div className="fixed bottom-20 md:bottom-6 right-3 sm:right-6 z-50 flex flex-col items-end gap-3">
       <AnimatePresence>
         {isOpen && (
           <motion.div
             initial={{ opacity: 0, y: 20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
-            className="w-96 md:w-[440px] bg-slate-900 border border-slate-800 rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[520px]"
+            className="w-[calc(100vw-1.5rem)] sm:w-96 md:w-[440px] bg-slate-900 border border-slate-800 rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[65dvh] md:max-h-[520px]"
           >
             <div className="p-3 border-b border-slate-800 bg-slate-900/70 flex items-center justify-between">
               <div className="flex items-center gap-2">

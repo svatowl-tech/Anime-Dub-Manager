@@ -19,6 +19,11 @@ function resolveWlkPythonPath() {
   candidateDirs.push(path.join(cwd, 'whisperlivekit'));
   candidateDirs.push(cwd);
 
+  if (process.env.ADM_AI_ENV_DIR) {
+    candidateDirs.push(path.join(process.env.ADM_AI_ENV_DIR, 'whisperlivekit'));
+    candidateDirs.push(process.env.ADM_AI_ENV_DIR);
+  }
+
   if (typeof app !== 'undefined' && app.getPath) {
     try {
       const userData = app.getPath('userData');
@@ -90,18 +95,22 @@ class WhisperLiveKitService {
 
     this.serverPort = port;
 
-    const isWin = process.platform === 'win32';
-    const winPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python.exe');
-    const unixPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'bin', 'python');
-    const unixPythonAlt = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python');
-    
-    let pythonPath = winPython;
-    if (!isWin) {
-      try {
-        await fs.access(unixPython);
-        pythonPath = unixPython;
-      } catch {
-        pythonPath = unixPythonAlt;
+    const EnvironmentManager = require('./EnvironmentManager.cjs');
+    let pythonPath = EnvironmentManager.getPythonPath();
+    if (!pythonPath || !fsSync.existsSync(pythonPath)) {
+      const isWin = process.platform === 'win32';
+      const winPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python.exe');
+      const unixPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'bin', 'python');
+      const unixPythonAlt = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python');
+
+      pythonPath = winPython;
+      if (!isWin) {
+        try {
+          await fs.access(unixPython);
+          pythonPath = unixPython;
+        } catch {
+          pythonPath = unixPythonAlt;
+        }
       }
     }
 

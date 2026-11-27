@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "tsx server.ts",
+    "server:prod": "tsx server.ts --server --prod",
+    "mcp:stdio": "tsx server/mcpStdio.ts",
+    "cli": "tsx server/cli.ts",
     "electron:dev": "concurrently \"vite\" \"electron .\"",
     "generate:icons": "node scripts/generate-icons.cjs",
     "prepare:sidecars": "node scripts/prepare-sidecars.js",
@@ -26,6 +29,8 @@
   "main": "electron/main.cjs",
   "dependencies": {
     "@huggingface/transformers": "^3.8.1",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@types/multer": "^2.3.0",
     "@xenova/transformers": "^2.17.2",
     "adm-zip": "^0.5.17",
     "ass-compiler": "^0.1.16",
@@ -44,6 +49,7 @@
     "jschardet": "^3.1.4",
     "lucide-react": "^0.474.0",
     "motion": "^12.0.1",
+    "multer": "^2.5.0",
     "onnxruntime-web": "^1.20.1",
     "qrcode": "^1.5.4",
     "react": "^19.0.0",

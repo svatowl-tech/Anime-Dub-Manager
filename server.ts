@@ -5,32 +5,26 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs/promises';
 import dotenv from 'dotenv';
-
 import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
 
 import { handleWebProxy } from './server/webProxyHandler.ts';
+import { resolveServerConfig } from './server/serverConfig.ts';
+import { ServerAuthManager, resolveConfinedPath } from './server/authMiddleware.ts';
+import { CuratorInboxService } from './server/curatorInboxService.ts';
+import { createWebFilesRouter } from './server/webFilesRouter.ts';
+import { AgentToolsEngine } from './server/agentToolsEngine.ts';
+import { createInboxRouter, createRestAgentRouter } from './server/restAgentRouter.ts';
+import { mountMcpRoutes } from './server/mcpServer.ts';
+
+dotenv.config();
+
+const require = createRequire(import.meta.url);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const runtimeConfig = resolveServerConfig(__dirname);
 
 const { killAllTrackedProcesses } = require('./electron/lib/ProcessTracker.cjs');
-
-// Handle server shutdown gracefully
-process.on('SIGINT', () => {
-  killAllTrackedProcesses();
-  process.exit(0);
-});
-process.on('SIGTERM', () => {
-  killAllTrackedProcesses();
-  process.exit(0);
-});
-process.on('exit', () => {
-  killAllTrackedProcesses();
-});
-process.on('uncaughtException', (err) => {
-  console.error('[Server] Uncaught Exception:', err);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[Server] Unhandled Rejection:', reason);
-});
 
 // Mock Electron Environment State
 const mockIpcHandlers = new Map<string, Function>();
@@ -42,133 +36,109 @@ export function broadcastIpcEvent(channel: string, data: any) {
   for (const client of sseClients) {
     try {
       client.write(`data: ${payload}\n\n`);
-    } catch (e) {
+    } catch {
       sseClients.delete(client);
     }
   }
 }
 
-// Monkey-patch require to mock 'electron'
+// Monkey-patch require to mock 'electron' for shared controllers
 const Module = require('module');
 const originalRequire = Module.prototype.require;
-Module.prototype.require = function(id: string) {
+Module.prototype.require = function (id: string) {
   if (id === 'electron') {
-    // console.log('[MonkeyPatch] Providing mock electron to:', this.filename || 'unknown');
     return {
       ipcMain: {
         handle: (channel: string, fn: Function) => {
-          console.log(`[MonkeyPatch] Registering handler for: ${channel}`);
           mockIpcHandlers.set(channel, fn);
         },
-        on: (channel: string, fn: Function) => {}
+        on: () => {},
       },
       app: {
-        getPath: (name: string) => path.join(__dirname, 'mock_user_data'),
+        getPath: (name: string) => {
+          if (name === 'temp') return require('os').tmpdir();
+          return runtimeConfig.dataDir;
+        },
         getAppPath: () => __dirname,
         on: () => {},
         whenReady: () => Promise.resolve(),
         isPackaged: false,
       },
-      BrowserWindow: class { 
+      BrowserWindow: class {
         webContents = { send: (channel: string, data: any) => broadcastIpcEvent(channel, data) };
+        static fromWebContents() {
+          return {
+            webContents: { send: (channel: string, data: any) => broadcastIpcEvent(channel, data) },
+            isDestroyed: () => false,
+          };
+        }
+        static getFocusedWindow() {
+          return null;
+        }
+        static getAllWindows() {
+          return [];
+        }
         on() {}
       },
       session: {
         defaultSession: {
           cookies: {
-            get: async () => []
-          }
-        }
+            get: async () => [],
+            set: async () => {},
+          },
+        },
       },
       dialog: {
-        showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+        showOpenDialog: async () => ({ canceled: true, filePaths: [], needsBrowserPicker: true }),
         showSaveDialog: async (window: any, options: any) => {
           const opts = options || window || {};
           const defaultPath = opts.defaultPath || 'character_subtitles.ass';
-          return { canceled: false, filePath: path.join(process.cwd(), 'mock_user_data', defaultPath) };
-        }
+          return { canceled: false, filePath: path.join(runtimeConfig.dataDir, defaultPath) };
+        },
       },
-      globalShortcut: { register: () => {} }
+      shell: {
+        openExternal: async () => {},
+        openPath: async () => {},
+      },
+      clipboard: {
+        writeText: () => {},
+      },
+      globalShortcut: { register: () => {} },
     };
   }
   return originalRequire.apply(this, arguments as any);
 };
 
-dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
 async function startServer() {
   const app = express();
   const httpServer = http.createServer(app);
-  const portArgIdx = process.argv.indexOf('--port');
-  const portEqArg = process.argv.find((arg) => arg.startsWith('--port='));
-  const rawCliPort = portEqArg
-    ? portEqArg.slice('--port='.length)
-    : (portArgIdx !== -1 ? process.argv[portArgIdx + 1] : undefined);
-  const cliPort = rawCliPort !== undefined ? Number(rawCliPort) : NaN;
-  const rawEnvPort = process.env.APP_PORT || (process.env.PORT && process.env.PORT !== '8080' ? process.env.PORT : undefined);
-  const envPort = rawEnvPort !== undefined ? Number(rawEnvPort) : NaN;
-  const PORT = (!Number.isNaN(cliPort) && cliPort > 0)
-    ? cliPort
-    : ((!Number.isNaN(envPort) && envPort > 0) ? envPort : 3000);
+  const PORT = runtimeConfig.port;
 
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  // Mock Electron Object for registration calls
-  const mockElectron = {
-    ipcMain: {
-      handle: (channel: string, fn: Function) => mockIpcHandlers.set(channel, fn),
-      on: (channel: string, fn: Function) => {}
-    },
-    app: {
-      getPath: (name: string) => path.join(__dirname, 'mock_user_data'),
-      getAppPath: () => __dirname,
-      on: () => {},
-      whenReady: () => Promise.resolve(),
-      isPackaged: false,
-    },
-    BrowserWindow: class { 
-      webContents = { send: () => {} };
-      on() {}
-    },
-    dialog: {
-      showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
-      showSaveDialog: async (window: any, options: any) => {
-        const opts = options || window || {};
-        const defaultPath = opts.defaultPath || 'character_subtitles.ass';
-        return { canceled: false, filePath: path.join(process.cwd(), 'mock_user_data', defaultPath) };
-      }
-    },
-    globalShortcut: { register: () => {} }
-  };
+  await fs.mkdir(runtimeConfig.dataDir, { recursive: true });
 
-  // Create mock user data dir
-  const userDataPath = path.join(__dirname, 'mock_user_data');
-  await fs.mkdir(userDataPath, { recursive: true });
+  // Initialize Auth Manager
+  const authManager = new ServerAuthManager(runtimeConfig);
+  await authManager.init();
 
   // DataManager Setup
   const DataManager = require('./electron/lib/DataManager.cjs');
-  const dataManager = new DataManager(userDataPath);
+  const dataManager = new DataManager(runtimeConfig.dataDir);
   await dataManager.init();
 
-  const getData = (filename: string) => {
-    // console.log(`[DataManager] Reading: ${filename}`);
-    return dataManager.getData(filename);
-  };
-  const saveData = (filename: string, data: any) => {
-    // console.log(`[DataManager] Writing: ${filename}`);
-    return dataManager.saveData(filename, data);
-  };
+  const getData = (filename: string) => dataManager.getData(filename);
+  const saveData = (filename: string, data: any) => dataManager.saveData(filename, data);
 
   // TaskQueue Setup
   const TaskQueue = require('./electron/lib/TaskQueue.cjs');
   const taskQueue = new TaskQueue();
 
-  // Register Handlers
-  console.log('[IPC Server] Starting handler registration...');
-  
+  console.log(
+    `[IPC Server] Booting (mode=${runtimeConfig.isServerMode ? 'UMBREL_SERVER' : 'WEB_PREVIEW'}, dataDir=${runtimeConfig.dataDir}, aiEnvDir=${runtimeConfig.aiEnvDir})`
+  );
+
   const ProjectController = require('./electron/handlers/ProjectController.cjs');
   const EpisodeHandlers = require('./electron/handlers/episodeHandlers.cjs');
   const ApiController = require('./electron/handlers/ApiController.cjs');
@@ -184,34 +154,33 @@ async function startServer() {
   const TelegramController = require('./electron/handlers/TelegramController.cjs');
   const AudioAnalysisController = require('./electron/handlers/AudioAnalysisController.cjs');
   const MixingController = require('./electron/handlers/MixingController.cjs');
+  const EnvironmentController = require('./electron/handlers/EnvironmentController.cjs');
   const { handleWebProxyRequest, handleWebProxyAgentRequest } = require('./electron/services/webProxyService.cjs');
 
   const getMainWindow = () => ({
     webContents: {
-      send: (channel: string, data: any) => broadcastIpcEvent(channel, data)
+      send: (channel: string, data: any) => broadcastIpcEvent(channel, data),
     },
-    isDestroyed: () => false
+    isDestroyed: () => false,
   });
 
   taskQueue.on('queue-updated', (summary: any) => {
     broadcastIpcEvent('task-queue-updated', summary);
   });
-
   taskQueue.on('task-progress', (data: any) => {
     broadcastIpcEvent('task-progress', data);
     broadcastIpcEvent('ffmpeg-progress', data.progress);
   });
-
   taskQueue.on('task-completed', async (data: any) => {
     broadcastIpcEvent('task-completed', data);
-
-    // Auto-update episode rawPath when MKV transcoding finishes
     if (data.task && data.task.type === 'transcode-video' && data.task.metadata && data.task.metadata.episodeId) {
       try {
         const episodes = await getData('episodes.json');
         let epIndex = episodes.findIndex((e: any) => e.id === data.task.metadata.episodeId);
         if (epIndex === -1 && data.task.metadata.projectId && data.task.metadata.episodeNumber) {
-          epIndex = episodes.findIndex((e: any) => e.projectId === data.task.metadata.projectId && e.number === data.task.metadata.episodeNumber);
+          epIndex = episodes.findIndex(
+            (e: any) => e.projectId === data.task.metadata.projectId && e.number === data.task.metadata.episodeNumber
+          );
         }
         if (epIndex !== -1) {
           const outputPath = data.result || data.task.metadata.outputPath;
@@ -223,35 +192,176 @@ async function startServer() {
           }
         }
       } catch (e) {
-        console.error('Failed to update episode in web server:', e);
+        console.error('Failed to update episode in server:', e);
       }
     }
   });
-
   taskQueue.on('task-failed', (data: any) => {
     broadcastIpcEvent('task-failed', data);
   });
 
   ProjectController.registerProjectHandlers(getData, saveData, getMainWindow);
   EpisodeHandlers.registerEpisodeHandlers(getData, saveData);
-  ApiController.registerApiHandlers(getData, saveData);
-  SyncController.registerSyncHandlers(getData, saveData, userDataPath);
+  ApiController.registerApiHandlers(getData, saveData, getMainWindow, taskQueue);
+  SyncController.registerSyncHandlers(getData, saveData, runtimeConfig.dataDir);
   MediaController.registerMediaHandlers(getData, getMainWindow, taskQueue, saveData);
   ExportController.registerExportHandlers(getData, getMainWindow);
   SystemController.registerSystemHandlers(getData, saveData, getMainWindow, taskQueue);
   SubtitleController.registerSubtitleHandlers(getData);
-  WhisperController.registerWhisperHandlers();
+  WhisperController.registerWhisperHandlers(getData);
   LocalTranslateController.registerLocalTranslateHandlers();
   DiarizationController.registerDiarizationHandlers(getData);
   YoutubeController.registerYoutubeHandlers(getData, getMainWindow, taskQueue);
-  TelegramController.registerTelegramHandlers(getData, saveData, userDataPath);
+  TelegramController.registerTelegramHandlers(getData, saveData, runtimeConfig.dataDir);
   AudioAnalysisController.registerAudioAnalysisHandlers();
   MixingController.registerMixingHandlers(getData, getMainWindow);
-  
-  console.log('[IPC Server] Handler registration complete.');
+  EnvironmentController.registerEnvironmentHandlers();
 
-  // SSE endpoint for web clients to receive IPC events in real time
-  app.get('/api/ipc/events', (req, res) => {
+  const getTelegramService = () => TelegramController.getTelegramService(getData, saveData, runtimeConfig.dataDir);
+
+  const inboxService = new CuratorInboxService({
+    getData,
+    saveData,
+    broadcast: broadcastIpcEvent,
+    getTelegramService,
+    defaultCuratorChatId: runtimeConfig.curatorTelegramChatId,
+  });
+
+  if (runtimeConfig.isServerMode) {
+    inboxService.startTelegramBotPoller();
+  }
+
+  const invokeIpc = async (channel: string, ...args: any[]) => {
+    const handler = mockIpcHandlers.get(channel);
+    if (!handler) {
+      throw new Error(`Handler for channel "${channel}" is not registered`);
+    }
+    return await handler(
+      {
+        sender: {
+          send: (evChannel: string, evData: any) => broadcastIpcEvent(evChannel, evData),
+        },
+      },
+      ...args
+    );
+  };
+
+  const toolsEngine = new AgentToolsEngine({
+    config: runtimeConfig,
+    getData,
+    saveData,
+    invokeIpc,
+    getAvailableIpcChannels: () => Array.from(mockIpcHandlers.keys()),
+    taskQueue,
+    inboxService,
+    getTelegramService,
+  });
+
+  console.log(`[IPC Server] Registered ${mockIpcHandlers.size} handlers.`);
+
+  // Health endpoint for Docker / Umbrel healthchecks
+  app.get('/api/health', async (_req, res) => {
+    const summary = await inboxService.getUnreadSummary().catch(() => ({ unreadCount: 0, pendingCount: 0, total: 0 }));
+    res.json({
+      ok: true,
+      serverMode: runtimeConfig.isServerMode,
+      arch: process.arch,
+      platform: process.platform,
+      dataDir: runtimeConfig.dataDir,
+      inbox: summary,
+    });
+  });
+
+  // Auth Endpoints for Web/Mobile Thin Client
+  app.get('/api/auth/status', (req, res) => {
+    res.json({
+      success: true,
+      data: {
+        serverMode: runtimeConfig.isServerMode,
+        authRequired: authManager.isUiAuthEnabled(),
+        needsSetup: authManager.needsInitialSetup(),
+        authenticated: authManager.isRequestAuthenticatedForUi(req),
+        dataDir: runtimeConfig.dataDir,
+        arch: process.arch,
+      },
+    });
+  });
+
+  app.post('/api/auth/setup', async (req, res) => {
+    try {
+      if (!authManager.needsInitialSetup()) {
+        return res.status(403).json({ success: false, error: 'Сервер уже настроен' });
+      }
+      const mode = req.body?.mode === 'password' ? 'password' : 'open';
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      await authManager.configureAuth(mode, password);
+      if (mode === 'password') {
+        authManager.setSessionCookie(res);
+      }
+      res.json({ success: true, data: { mode } });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err?.message || String(err) });
+    }
+  });
+
+  app.post('/api/auth/login', async (req, res) => {
+    const secret = String(req.body?.password || req.body?.token || '').trim();
+    if (!authManager.isUiAuthEnabled()) {
+      return res.json({ success: true, data: { authenticated: true } });
+    }
+    if (!authManager.verifyCuratorSecret(secret) && !authManager.verifyAgentToken(secret)) {
+      return res.status(401).json({ success: false, error: 'Неверный пароль или токен доступа' });
+    }
+    authManager.setSessionCookie(res);
+    res.json({ success: true, data: { authenticated: true } });
+  });
+
+  app.post('/api/auth/logout', (_req, res) => {
+    authManager.clearSessionCookie(res);
+    res.json({ success: true });
+  });
+
+  app.post('/api/auth/configure', authManager.requireUiAuth, async (req, res) => {
+    try {
+      const mode = req.body?.mode === 'password' ? 'password' : 'open';
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      await authManager.configureAuth(mode, password);
+      if (mode === 'password') {
+        authManager.setSessionCookie(res);
+      } else {
+        authManager.clearSessionCookie(res);
+      }
+      res.json({ success: true, data: { authRequired: authManager.isUiAuthEnabled() } });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err?.message || String(err) });
+    }
+  });
+
+  app.get('/api/auth/agent-token', authManager.requireUiAuth, (_req, res) => {
+    res.json({
+      success: true,
+      data: {
+        agentToken: authManager.getAgentToken(),
+        managedByEnv: authManager.isAgentTokenManagedByEnv(),
+        mcpUrl: '/mcp',
+        sseUrl: '/sse',
+        restBaseUrl: '/api/v1',
+        openApiUrl: '/api/v1/openapi.json',
+      },
+    });
+  });
+
+  app.post('/api/auth/regenerate-agent-token', authManager.requireUiAuth, async (_req, res) => {
+    try {
+      const nextToken = await authManager.regenerateAgentToken();
+      res.json({ success: true, data: { agentToken: nextToken } });
+    } catch (err: any) {
+      res.status(409).json({ success: false, error: err?.message || String(err) });
+    }
+  });
+
+  // SSE endpoint for web clients to receive IPC & Inbox events in real time
+  app.get('/api/ipc/events', authManager.requireUiAuth, (req, res) => {
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
@@ -263,81 +373,75 @@ async function startServer() {
     });
   });
 
-  // Proxy endpoint for web preview to bypass iframe restrictions
-  app.get('/api/web-proxy', handleWebProxyRequest);
-  app.get('/api/web-proxy/asset', handleWebProxyAgentRequest);
+  // Web Proxy endpoints (protected in server mode)
+  app.get('/api/web-proxy', authManager.requireUiAuth, handleWebProxyRequest);
+  app.get('/api/web-proxy/asset', authManager.requireUiAuth, handleWebProxyAgentRequest);
 
-  // Media file serving endpoint for web preview mode (audio/video streaming)
-  app.get('/api/media-file', async (req, res) => {
+  // Web/Mobile Browser File Bridge (/api/files/browse, /api/files/upload, /api/files/download, /api/files/mkdir)
+  app.use('/api/files', authManager.requireUiAuth, createWebFilesRouter({ config: runtimeConfig, getData }));
+
+  // Curator Web Inbox routes (/api/inbox/*)
+  app.use('/api/inbox', createInboxRouter({ authManager, inboxService }));
+
+  // REST + OpenAPI v3.1 Agent API (/api/v1/*)
+  app.use('/api/v1', createRestAgentRouter({ config: runtimeConfig, authManager, toolsEngine }));
+
+  // MCP Server endpoints (Streamable HTTP /mcp + Legacy SSE /sse & /messages)
+  mountMcpRoutes({ app, authManager, toolsEngine });
+
+  // Media file serving endpoint for web/mobile streaming with Range support & path confinement
+  async function resolveMediaFilePath(rawPath: string): Promise<string | null> {
+    let filePath = rawPath;
+    if (filePath.startsWith('file://')) {
+      try {
+        filePath = fileURLToPath(filePath);
+      } catch {
+        filePath = filePath.replace(/^file:\/\//, '');
+      }
+    }
+
+    const appCfg = (await getData('config.json').catch(() => ({}))) || {};
+    const baseDir = String(appCfg.baseDir || '').trim() || runtimeConfig.dataDir;
+    const allowedRoots = Array.from(new Set([runtimeConfig.dataDir, baseDir]));
+
+    const candidates = [
+      filePath,
+      path.join(baseDir, filePath),
+      path.join(runtimeConfig.dataDir, filePath),
+      ...(runtimeConfig.isServerMode ? [] : [path.join(process.cwd(), filePath), path.join(__dirname, filePath)]),
+    ];
+
+    for (const cand of candidates) {
+      try {
+        const resolved = runtimeConfig.isServerMode
+          ? resolveConfinedPath(cand, baseDir, allowedRoots)
+          : path.resolve(cand);
+        const stat = await fs.stat(resolved);
+        if (stat.isFile()) {
+          return resolved;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  app.get('/api/media-file', authManager.requireUiAuth, async (req, res) => {
     try {
       const rawPath = req.query.path as string;
       if (!rawPath) return res.status(400).send('Missing path parameter');
-      
-      let filePath = rawPath;
-      if (filePath.startsWith('file://')) {
-        try {
-          filePath = fileURLToPath(filePath);
-        } catch {
-          filePath = filePath.replace(/^file:\/\//, '');
-        }
-      }
-
-      // Check candidates on server filesystem
-      const candidates = [
-        filePath,
-        path.join(process.cwd(), filePath),
-        path.join(__dirname, 'mock_user_data', filePath),
-        path.join(process.cwd(), 'mock_user_data', filePath),
-        path.join(__dirname, filePath)
-      ];
-
-      let foundPath: string | null = null;
-      for (const cand of candidates) {
-        try {
-          const stat = await fs.stat(cand);
-          if (stat.isFile()) {
-            foundPath = cand;
-            break;
-          }
-        } catch {}
-      }
-
-      if (!foundPath) {
-        return res.status(404).send('File not found');
-      }
-
-      // Stream file with Range support
+      const foundPath = await resolveMediaFilePath(rawPath);
+      if (!foundPath) return res.status(404).send('File not found');
       res.sendFile(path.resolve(foundPath));
     } catch (err: any) {
       res.status(500).send(err.message);
     }
   });
 
-  app.head('/api/media-file', async (req, res) => {
+  app.head('/api/media-file', authManager.requireUiAuth, async (req, res) => {
     try {
       const rawPath = req.query.path as string;
       if (!rawPath) return res.status(400).end();
-      let filePath = rawPath;
-      if (filePath.startsWith('file://')) {
-        try { filePath = fileURLToPath(filePath); } catch { filePath = filePath.replace(/^file:\/\//, ''); }
-      }
-      const candidates = [
-        filePath,
-        path.join(process.cwd(), filePath),
-        path.join(__dirname, 'mock_user_data', filePath),
-        path.join(process.cwd(), 'mock_user_data', filePath),
-        path.join(__dirname, filePath)
-      ];
-      let foundPath: string | null = null;
-      for (const cand of candidates) {
-        try {
-          const stat = await fs.stat(cand);
-          if (stat.isFile()) {
-            foundPath = cand;
-            break;
-          }
-        } catch {}
-      }
+      const foundPath = await resolveMediaFilePath(rawPath);
       if (!foundPath) return res.status(404).end();
       res.status(200).end();
     } catch {
@@ -346,337 +450,173 @@ async function startServer() {
   });
 
   // API Route to call IPC handlers from the browser frontend
-  app.post('/api/ipc/:channel', async (req, res) => {
-    const { channel } = req.params;
+  app.post('/api/ipc/:channel', authManager.requireUiAuth, async (req, res) => {
+    const channel = Array.isArray(req.params.channel) ? req.params.channel[0] : String(req.params.channel || '');
     const args = req.body.args || [];
     const handler = mockIpcHandlers.get(channel);
 
-    console.log(`[IPC Server] Called channel: ${channel}, handler found: ${!!handler}`);
-
-    // Intercept heavy ML models to prevent dev server OOM crashes
-    const mockHeavyModels = ['load-local-translate-model', 'translate-local', 'load-diarization-model', 'run-diarization', 'check-local-translate-status', 'check-diarization-status', 'ai-process-subtitles'];
-    if (mockHeavyModels.includes(channel)) {
-      console.log(`[IPC Server] Intercepted heavy ML call "${channel}" to prevent OOM crash.`);
-      
-      if (channel === 'check-diarization-status') {
-        return res.json({
-          success: true,
-          data: {
-            isLoaded: true,
-            isLoading: false,
-            modelName: 'WhisperX',
-            downloadProgress: 100,
-            loadingStatus: 'Готова к работе (Эмуляция веб-превью)'
-          }
-        });
-      }
-      
-      if (channel === 'check-local-translate-status') {
-        return res.json({
-          success: true,
-          data: {
-            isLoaded: true,
-            isLoading: false,
-            modelName: 'Xenova/m2m100_418m',
-            downloadProgress: 100,
-            loadingStatus: 'Готова к работе (Эмуляция веб-превью)'
-          }
-        });
-      }
-
-      if (channel === 'run-diarization') {
-        // Dynamically assign subtitle lines to mock speakers so user can test assignments
-        const inputData = args[0] || {};
-        const lines = inputData.subtitleLines || [];
-        const mapping: Record<string, string> = {};
-        
-        lines.forEach((line: any, idx: number) => {
-          if (line && line.id) {
-            // Alternate speakers
-            mapping[line.id] = `Speaker ${(idx % 2) + 1}`;
-          }
-        });
-
-        return res.json({
-          success: true,
-          data: {
-            speakerMapping: mapping,
-            detectedSpeakersCount: 2
-          }
-        });
-      }
-
-      if (channel === 'translate-local') {
-        const inputData = args[0] || {};
-        const text = inputData.text || '';
-        const destLang = inputData.destLang || 'ru';
-        
-        let translatedText = text;
-        if (destLang === 'ru') {
-          translatedText = `[Перевод]: ${text}`;
-        } else {
-          translatedText = `[Translated to ${destLang}]: ${text}`;
+    // In local non-server web-preview mode (e.g. AI Studio dev preview), avoid OOM from heavy ML models
+    if (!runtimeConfig.isServerMode) {
+      const mockHeavyModels = [
+        'load-local-translate-model',
+        'translate-local',
+        'load-diarization-model',
+        'run-diarization',
+        'check-local-translate-status',
+        'check-diarization-status',
+        'ai-process-subtitles',
+      ];
+      if (mockHeavyModels.includes(channel)) {
+        if (channel === 'check-diarization-status') {
+          return res.json({
+            success: true,
+            data: {
+              isLoaded: true,
+              isLoading: false,
+              modelName: 'WhisperX',
+              downloadProgress: 100,
+              loadingStatus: 'Готова к работе (Эмуляция веб-превью)',
+            },
+          });
         }
-
-        return res.json({
-          success: true,
-          data: translatedText
-        });
-      }
-
-      if (channel === 'load-local-translate-model' || channel === 'load-diarization-model') {
-        return res.json({
-          success: true,
-          data: { success: true }
-        });
-      }
-
-      return res.json({
-        success: true,
-        data: {
-          success: true,
-          data: { message: "Mocked response for web preview" }
+        if (channel === 'check-local-translate-status') {
+          return res.json({
+            success: true,
+            data: {
+              isLoaded: true,
+              isLoading: false,
+              modelName: 'Xenova/m2m100_418m',
+              downloadProgress: 100,
+              loadingStatus: 'Готова к работе (Эмуляция веб-превью)',
+            },
+          });
         }
-      });
+        if (channel === 'run-diarization') {
+          const inputData = args[0] || {};
+          const lines = inputData.subtitleLines || [];
+          const mapping: Record<string, string> = {};
+          lines.forEach((line: any, idx: number) => {
+            if (line && line.id) mapping[line.id] = `Speaker ${(idx % 2) + 1}`;
+          });
+          return res.json({
+            success: true,
+            data: { speakerMapping: mapping, detectedSpeakersCount: 2 },
+          });
+        }
+        if (channel === 'translate-local') {
+          const inputData = args[0] || {};
+          const text = inputData.text || '';
+          const destLang = inputData.destLang || 'ru';
+          return res.json({
+            success: true,
+            data: destLang === 'ru' ? `[Перевод]: ${text}` : `[Translated to ${destLang}]: ${text}`,
+          });
+        }
+        if (channel === 'load-local-translate-model' || channel === 'load-diarization-model') {
+          return res.json({ success: true, data: { success: true } });
+        }
+        return res.json({
+          success: true,
+          data: { success: true, data: { message: 'Mocked response for web preview' } },
+        });
+      }
+
+      if (channel === 'get-whisper-system-status') {
+        const requestedModel = (args[0] && args[0].model) || 'small';
+        return res.json({
+          success: true,
+          data: {
+            isReady: true,
+            canLoadModel: true,
+            statusText: 'Система Whisper готова к загрузке модели',
+            backendType: 'server',
+            availableModels: ['small', 'base', 'tiny'],
+            activeModel: requestedModel,
+            modelsDir: path.join(runtimeConfig.dataDir, 'models', 'whisper'),
+            details: `Движок Whisper готов принимать аудиодорожки. Выбранная модель «${requestedModel}» готова к загрузке в память.`,
+          },
+        });
+      }
+      if (channel === 'get-downloaded-whisper-models') {
+        return res.json({ success: true, data: ['small', 'base', 'tiny'] });
+      }
+      if (channel === 'qa-whisper-check-lines') {
+        const inputData = args[0] || {};
+        const lines = inputData.lines || [];
+        const results = lines.map((line: any, idx: number) => {
+          let recognizedText = line.text;
+          if (idx % 6 === 2 && line.text.length > 20) {
+            const words = line.text.split(' ');
+            if (words.length > 4) recognizedText = words.slice(0, words.length - 2).join(' ') + ' ладно';
+          } else if (idx % 8 === 4 && line.text.length > 15) {
+            recognizedText = line.text.split(' ')[0] + '... ' + line.text;
+          }
+          return { lineIndex: line.lineIndex, expectedText: line.text, recognizedText };
+        });
+        return res.json({ success: true, data: { results } });
+      }
     }
 
     if (channel === 'get-episode-title') {
-      const input = args[0] || {};
       let titleRes = '';
       if (handler) {
         try {
           const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000));
-          const res = await Promise.race([handler({ sender: { send: () => {} } }, ...args), timeoutPromise]);
-          if (res && typeof res === 'object' && res.data) {
-            titleRes = res.data;
-          } else if (typeof res === 'string') {
-            titleRes = res;
+          const resVal = await Promise.race([
+            handler({ sender: { send: (ev: string, d: any) => broadcastIpcEvent(ev, d) } }, ...args),
+            timeoutPromise,
+          ]);
+          if (resVal && typeof resVal === 'object' && resVal.data) {
+            titleRes = resVal.data;
+          } else if (typeof resVal === 'string') {
+            titleRes = resVal;
           }
-        } catch (e: any) {
-          console.warn('[IPC Server] get-episode-title timed out or failed:', e?.message || e);
-        }
+        } catch {}
       }
-      return res.json({
-        success: true,
-        data: titleRes || ''
-      });
-    }
-
-    if (channel === 'get-whisper-system-status') {
-      const requestedModel = (args[0] && args[0].model) || 'small';
-      console.log(`[IPC Server] Whisper system status check requested (model: ${requestedModel})`);
-      return res.json({
-        success: true,
-        data: {
-          isReady: true,
-          canLoadModel: true,
-          statusText: 'Система Whisper готова к загрузке модели',
-          backendType: 'server',
-          availableModels: ['small', 'base', 'tiny'],
-          activeModel: requestedModel,
-          modelsDir: path.join(__dirname, 'mock_user_data', 'models', 'whisper'),
-          details: `Движок Whisper готов принимать аудиодорожки. Выбранная модель «${requestedModel}» готова к загрузке в память.`
-        }
-      });
-    }
-
-    if (channel === 'get-downloaded-whisper-models') {
-      return res.json({
-        success: true,
-        data: ['small', 'base', 'tiny']
-      });
-    }
-
-    if (channel === 'transcribe-whisper-snippet') {
-      const input = args[0] || {};
-      const { videoPath, startSec, endSec, language = 'ja', model = 'small' } = input;
-      console.log(`[IPC Server] Whisper snippet requested: ${startSec}s - ${endSec}s (${language})`);
-      
-      let resText = '';
-      if (handler) {
-        try {
-          const handlerResult = await handler({ sender: { send: () => {} } }, ...args);
-          if (handlerResult && handlerResult.text) {
-            resText = handlerResult.text;
-          }
-        } catch (e: any) {
-          console.warn('[IPC Server] transcribe-whisper-snippet handler error:', e?.message || e);
-        }
-      }
-
-      // If video file wasn't present on disk or returned empty in web container preview:
-      if (!resText) {
-        const samplePhrases: Record<string, string[]> = {
-          'ja': [
-            '何これ？信じられない...',
-            'ちょっと待って、本当にそれでいいの？',
-            '大丈夫、俺が何とかしてみせるよ。',
-            'そんなはずはない！確かめてみよう。',
-            'ありがとう、助かったよ。',
-            '今すぐ行かないと間に合わない！'
-          ],
-          'en': [
-            'Wait, what did you just say?',
-            'I cannot believe this is happening right now.',
-            'Don\'t worry, I will handle this.',
-            'Are you sure that is going to work?',
-            'Thank you so much for your help.'
-          ],
-          'ru': [
-            'Подожди, что ты только что сказал?',
-            'Не могу поверить, что это происходит сейчас.',
-            'Не переживай, я со всем разберусь.',
-            'Ты уверен, что это сработает?'
-          ]
-        };
-        const pool = samplePhrases[language] || samplePhrases['ja'];
-        const hash = Math.abs(Math.round((Number(startSec) || 1) * 7)) % pool.length;
-        resText = pool[hash];
-      }
-
-      return res.json({
-        success: true,
-        data: {
-          text: resText,
-          startSec: Number(startSec),
-          endSec: Number(endSec),
-          language,
-          model
-        }
-      });
-    }
-
-    if (channel === 'timing-whisper-transcribe-clips') {
-      const inputData = args[0] || {};
-      const clips = inputData.clips || [];
-      const model = inputData.model || 'tiny';
-      console.log(`[IPC Server] Timing Whisper transcribe requested for ${clips.length} clips with model ${model}`);
-
-      let handlerResults: any = null;
-      if (handler) {
-        try {
-          const res = await handler({ sender: { send: () => {} } }, ...args);
-          if (res && Array.isArray(res.results) && res.results.length > 0) {
-            handlerResults = res.results;
-          }
-        } catch (e: any) {
-          console.warn('[IPC Server] timing-whisper-transcribe-clips handler error:', e?.message || e);
-        }
-      }
-
-      if (handlerResults) {
-        return res.json({
-          success: true,
-          data: { results: handlerResults }
-        });
-      }
-
-      // Fallback for web mode / mock audio files:
-      // Return plausible recognized text matching clip hints or realistic dubber speech
-      const results = clips.map((clip: any) => {
-        let text = clip.hint || '';
-        // If hint exists, normalize slightly as real Whisper output (e.g. no trailing period, lowercase letters)
-        if (text) {
-          text = text.replace(/^[«"-]+|[»".!?]+$/g, '').trim();
-        } else {
-          text = `Реплика ${clip.id.split('_').pop() || '1'}`;
-        }
-        return {
-          id: clip.id,
-          text
-        };
-      });
-
-      return res.json({
-        success: true,
-        data: { results }
-      });
-    }
-
-    if (channel === 'qa-whisper-check-lines') {
-      const inputData = args[0] || {};
-      const lines = inputData.lines || [];
-      const model = inputData.model || 'small';
-      console.log(`[IPC Server] Whisper QA check requested for ${lines.length} lines with model ${model}`);
-
-      const results = lines.map((line: any, idx: number) => {
-        let recognizedText = line.text;
-        if (idx % 6 === 2 && line.text.length > 20) {
-          const words = line.text.split(' ');
-          if (words.length > 4) {
-            recognizedText = words.slice(0, words.length - 2).join(' ') + ' ладно';
-          }
-        } else if (idx % 8 === 4 && line.text.length > 15) {
-          recognizedText = line.text.split(' ')[0] + '... ' + line.text;
-        }
-        return {
-          lineIndex: line.lineIndex,
-          expectedText: line.text,
-          recognizedText
-        };
-      });
-
-      return res.json({
-        success: true,
-        data: { results }
-      });
+      return res.json({ success: true, data: titleRes || '' });
     }
 
     if (handler) {
       const startTime = Date.now();
       try {
-        let argsPreview = '';
-        try {
-          argsPreview = JSON.stringify(args).slice(0, 300);
-        } catch (e) {
-          argsPreview = '[Complex or Non-Serializable Args]';
-        }
-        console.log(`[IPC Server ▶] Executing channel "${channel}" ${argsPreview}`);
-        const result = await handler({ sender: { send: () => {} } }, ...args);
+        const result = await handler(
+          { sender: { send: (ev: string, d: any) => broadcastIpcEvent(ev, d) } },
+          ...args
+        );
         const elapsed = Date.now() - startTime;
-        
-        // If the response is wrapped by wrapIpcHandler and has success === false, log details
         if (result && typeof result === 'object' && result.success === false) {
-          console.error(`[IPC Server ❌ Error Response] channel: ${channel} (${elapsed}ms), error:`, result.error);
-          if (result.stderr) console.error(`[IPC Server Error stderr]:`, result.stderr);
-          if (result.stdout) console.error(`[IPC Server Error stdout]:`, result.stdout);
-          if (result.stack) console.error(`[IPC Server Error stack]:`, result.stack);
-        } else {
-          console.log(`[IPC Server ✓ Success] channel: ${channel} (${elapsed}ms)`);
+          console.error(`[IPC Server Error] channel: ${channel} (${elapsed}ms):`, result.error);
         }
-        
         res.json({ success: true, data: result });
       } catch (error: any) {
         const elapsed = Date.now() - startTime;
-        console.error(`[IPC Server 💥 Crash] channel: ${channel} (${elapsed}ms), crash error:`, error.stack || error.message || error);
-        res.json({ 
-          success: false, 
-          error: error.message || String(error),
-          stack: error.stack || null,
-          stderr: error.stderr || null,
-          stdout: error.stdout || null,
-          code: error.code || null
+        console.error(`[IPC Server Crash] channel: ${channel} (${elapsed}ms):`, error?.stack || error?.message || error);
+        res.json({
+          success: false,
+          error: error?.message || String(error),
+          stack: error?.stack || null,
+          stderr: error?.stderr || null,
+          stdout: error?.stdout || null,
+          code: error?.code || null,
         });
       }
     } else {
-      console.warn(`[IPC Server 404] channel: ${channel} not found in registered handlers. Available:`, Array.from(mockIpcHandlers.keys()));
       res.status(404).json({ success: false, error: `Handler for ${channel} not found` });
     }
   });
 
-  // Smart Web Proxy Route for Web Preview Mode
-  app.get('/api/web-proxy', handleWebProxy);
+  app.get('/api/web-proxy-legacy', authManager.requireUiAuth, handleWebProxy);
 
   // OAuth Callback Handler
   app.get(['/auth/callback', '/auth/callback/'], async (req, res) => {
-    const { code } = req.query;
-    
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const safeCodeJson = JSON.stringify(code);
     res.send(`
       <html>
         <body>
           <script>
             if (window.opener) {
-              window.opener.postMessage({ type: 'YANDEX_AUTH_SUCCESS', code: '${code}' }, '*');
+              window.opener.postMessage({ type: 'YANDEX_AUTH_SUCCESS', code: ${safeCodeJson} }, '*');
               window.close();
             } else {
               window.location.href = '/';
@@ -688,7 +628,7 @@ async function startServer() {
     `);
   });
 
-  // Vite middleware for development
+  // Vite middleware for development or static build in production
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: {
@@ -701,20 +641,42 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.use((req, res) => {
+    app.use((_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+
+  const shutdown = () => {
+    inboxService.stopTelegramBotPoller();
+    killAllTrackedProcesses();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  process.on('exit', () => {
+    inboxService.stopTelegramBotPoller();
+    killAllTrackedProcesses();
+  });
 
   httpServer.on('error', (err) => {
     console.error('[Server] HTTP listen error:', err);
     process.exit(1);
   });
 
-  httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+  httpServer.listen(PORT, runtimeConfig.host, () => {
+    console.log(`Anime Dub Manager server running on http://${runtimeConfig.host}:${PORT}`);
+    if (runtimeConfig.isServerMode) {
+      console.log(`[Umbrel Mode] MCP Streamable HTTP: http://localhost:${PORT}/mcp | SSE: /sse | REST: /api/v1`);
+    }
   });
 }
+
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[Server] Unhandled Rejection:', reason);
+});
 
 startServer().catch((err) => {
   console.error('[Server] Fatal startup error:', err);

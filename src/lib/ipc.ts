@@ -1,6 +1,8 @@
 import { readFromLocalFolder, writeToLocalFolder } from './webFileSystem';
 import { handleProjectsAndMediaIpcMock } from './ipc/ipcProjectsAndMediaMock.service';
 import { handleIntegrationsIpcMock } from './ipc/ipcIntegrationsMock.service';
+import { getServerAuthStatus, isCachedServerMode, probeServerCapabilities } from './serverClient';
+import { isServerFilePickerMounted, requestServerFilePicker } from '../components/files/serverFilePickerBridge';
 
 export const ipcRenderer: {
   invoke: (channel: string, ...args: any[]) => Promise<any>;
@@ -12,6 +14,64 @@ export const ipcRenderer: {
     // If running inside Electron desktop app, ALWAYS route exclusively via Electron IPC
     if (typeof window !== 'undefined' && (window as any).electronAPI && (window as any).electronAPI.invoke) {
       return await (window as any).electronAPI.invoke(channel, ...args);
+    }
+
+    // Intercept OS file/folder/open-path dialogs when running in Browser/Mobile Server Mode
+    if (
+      channel === 'select-file' ||
+      channel === 'dialog:openFile' ||
+      channel === 'dialog:showOpenDialog' ||
+      channel === 'select-folder' ||
+      channel === 'select-directory' ||
+      channel === 'open-path'
+    ) {
+      const caps = await probeServerCapabilities();
+      if (caps.liveServer && isServerFilePickerMounted()) {
+        const opts = (args[0] && typeof args[0] === 'object' ? args[0] : {}) as any;
+        if (channel === 'open-path') {
+          const target = typeof args[0] === 'string' ? args[0] : undefined;
+          await requestServerFilePicker({
+            mode: 'browse',
+            defaultPath: target,
+            title: 'Файлы на сервере',
+          });
+          return true;
+        }
+        if (channel === 'select-folder') {
+          const picked = await requestServerFilePicker({
+            mode: 'folder',
+            defaultPath: opts.defaultPath,
+            title: 'Выбор папки на сервере',
+          });
+          if (picked.canceled) return { canceled: true, filePaths: [] };
+          const paths = picked.filePaths || (picked.path ? [picked.path] : []);
+          return { canceled: false, path: picked.path, filePath: picked.path, filePaths: paths };
+        }
+        if (channel === 'select-directory') {
+          const picked = await requestServerFilePicker({
+            mode: 'directory',
+            defaultPath: opts.defaultPath,
+            title: 'Выбор каталога на сервере',
+          });
+          if (picked.canceled) throw new Error('Selection canceled');
+          const paths = picked.filePaths || (picked.path ? [picked.path] : []);
+          return { canceled: false, filePaths: paths, path: picked.path, filePath: picked.path };
+        }
+        const picked = await requestServerFilePicker({
+          mode: 'file',
+          defaultPath: opts.defaultPath,
+          filters: Array.isArray(opts.filters) ? opts.filters : undefined,
+          title: 'Выбор или загрузка файла на сервер',
+        });
+        if (picked.canceled) return { canceled: true, filePaths: [] };
+        const filePath = picked.filePath || picked.path;
+        return {
+          canceled: false,
+          path: picked.path,
+          filePath,
+          filePaths: picked.filePaths || (filePath ? [filePath] : []),
+        };
+      }
     }
 
     // Browser fallback for AI Studio preview - Try calling the server API with AbortController timeout
@@ -72,9 +132,11 @@ export const ipcRenderer: {
         console.warn(`Server IPC fallback failed for "${channel}":`, e);
       }
 
-      // If we are on the web and the server call failed (offline static preview), check mock services
-      const mockedResult = handleIpcMock(channel, args);
-      if (mockedResult !== undefined) return mockedResult;
+      // Only use static-preview mocks when NOT connected to a real Umbrel/production server
+      if (!isCachedServerMode()) {
+        const mockedResult = handleIpcMock(channel, args);
+        if (mockedResult !== undefined) return mockedResult;
+      }
 
       throw e;
     } finally {
@@ -137,9 +199,27 @@ export const ipcRenderer: {
 
 const listenerCleanups = new Map<string, Map<Function, () => void>>();
 
-if (typeof window !== 'undefined' && !(window as any).electronAPI && typeof EventSource !== 'undefined') {
+let activeEventSource: EventSource | null = null;
+
+function disconnectIpcEventStream() {
+  if (activeEventSource) {
+    try {
+      activeEventSource.close();
+    } catch {}
+    activeEventSource = null;
+  }
+}
+
+function connectIpcEventStream() {
+  if (typeof window === 'undefined' || (window as any).electronAPI || typeof EventSource === 'undefined') {
+    return;
+  }
+  if (activeEventSource && activeEventSource.readyState !== EventSource.CLOSED) {
+    return;
+  }
+  disconnectIpcEventStream();
   try {
-    const sse = new EventSource('/api/ipc/events');
+    const sse = new EventSource('/api/ipc/events', { withCredentials: true });
     sse.onmessage = (event) => {
       try {
         const payload = JSON.parse(event.data);
@@ -150,9 +230,24 @@ if (typeof window !== 'undefined' && !(window as any).electronAPI && typeof Even
         console.debug('[IPC SSE] Malformed event payload:', err);
       }
     };
+    activeEventSource = sse;
   } catch (err) {
     console.debug('[IPC SSE] EventSource initialization skipped:', err);
   }
+}
+
+if (typeof window !== 'undefined' && !(window as any).electronAPI && typeof EventSource !== 'undefined') {
+  window.addEventListener('adm-auth-authenticated', () => {
+    connectIpcEventStream();
+  });
+  window.addEventListener('adm-auth-logout', () => {
+    disconnectIpcEventStream();
+  });
+  void getServerAuthStatus().then((auth) => {
+    if (auth.reachable && !auth.needsSetup && (!auth.authRequired || auth.authenticated)) {
+      connectIpcEventStream();
+    }
+  });
 }
 
 export let isStorageSynced = false;

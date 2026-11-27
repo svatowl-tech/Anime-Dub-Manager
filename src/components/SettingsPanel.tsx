@@ -1,6 +1,37 @@
 import { useState, useEffect } from 'react';
-import { Settings, Save, Folder, Cpu, Key, Terminal, Cloud, RefreshCw, ExternalLink, X, Send } from 'lucide-react';
+import {
+  Settings,
+  Save,
+  Folder,
+  Cpu,
+  Terminal,
+  Cloud,
+  RefreshCw,
+  ExternalLink,
+  X,
+  Send,
+  Bot,
+  Copy,
+  Check,
+  Shield,
+  LogOut,
+  Eye,
+  EyeOff,
+  FolderOpen,
+} from 'lucide-react';
+import { toast } from 'sonner';
 import { ipcSafe } from '../lib/ipcSafe';
+import { safeCopyToClipboard } from '../lib/clipboard';
+import {
+  getServerAuthStatus,
+  getAgentConnectionInfo,
+  regenerateAgentToken,
+  configureServerAuth,
+  logoutServerAuth,
+  ServerAuthStatus,
+  AgentConnectionInfo,
+} from '../lib/serverClient';
+import { requestServerFilePicker } from './files/serverFilePickerBridge';
 import { TelegramClientPanel } from './TelegramClientPanel';
 import { Project } from '../types';
 
@@ -16,7 +47,10 @@ export default function SettingsPanel() {
     transformersModelDownloaded: false,
     yandexClientId: 'ba2d620516e94f91b713e1afaa74283e',
     yandexClientSecret: 'd7bf8221a1a74aeea750887581de5ea6',
-    hfToken: ''
+    hfToken: '',
+    telegramBotToken: '',
+    curatorTelegramChatId: '',
+    curatorTelegramBotPolling: true,
   });
 
   const [syncStatus, setSyncStatus] = useState({ connected: false, enabled: false });
@@ -25,6 +59,13 @@ export default function SettingsPanel() {
   const [authCode, setAuthCode] = useState('');
   const [isTelegramModalOpen, setIsTelegramModalOpen] = useState(false);
   const [allProjects, setAllProjects] = useState<Project[]>([]);
+
+  const [serverStatus, setServerStatus] = useState<ServerAuthStatus | null>(null);
+  const [agentInfo, setAgentInfo] = useState<AgentConnectionInfo | null>(null);
+  const [showAgentToken, setShowAgentToken] = useState(false);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [newServerPassword, setNewServerPassword] = useState('');
+  const [securityBusy, setSecurityBusy] = useState(false);
 
   const loadProjects = async () => {
     try {
@@ -54,7 +95,10 @@ export default function SettingsPanel() {
           translationModel: data.translationModel || 'Xenova/nllb-200-distilled-600M',
           yandexClientId: data.yandexClientId || 'ba2d620516e94f91b713e1afaa74283e',
           yandexClientSecret: data.yandexClientSecret || 'd7bf8221a1a74aeea750887581de5ea6',
-          hfToken: data.hfToken || ''
+          hfToken: data.hfToken || '',
+          telegramBotToken: data.telegramBotToken || '',
+          curatorTelegramChatId: data.curatorTelegramChatId || '',
+          curatorTelegramBotPolling: data.curatorTelegramBotPolling !== false,
         }));
       }
     });
@@ -62,6 +106,16 @@ export default function SettingsPanel() {
     ipcSafe.invoke('get-gpus').then(setGpus);
     ipcSafe.invoke('cloud-sync-status').then(setSyncStatus);
     loadProjects();
+
+    void getServerAuthStatus().then(async (st) => {
+      setServerStatus(st);
+      if (st.reachable && (!st.authRequired || st.authenticated)) {
+        try {
+          const info = await getAgentConnectionInfo();
+          setAgentInfo(info);
+        } catch {}
+      }
+    });
   }, []);
 
   const handleConnectYandex = async () => {
@@ -142,13 +196,77 @@ export default function SettingsPanel() {
     }
   };
 
+  const handleCopyField = async (key: string, value: string) => {
+    const ok = await safeCopyToClipboard(value);
+    if (ok) {
+      setCopiedKey(key);
+      toast.success('Скопировано в буфер обмена');
+      setTimeout(() => setCopiedKey(null), 1800);
+    } else {
+      toast.error('Не удалось скопировать в буфер обмена');
+    }
+  };
+
+  const handleRegenerateAgentToken = async () => {
+    setSecurityBusy(true);
+    try {
+      const res = await regenerateAgentToken();
+      setAgentInfo((prev) => (prev ? { ...prev, agentToken: res.agentToken } : prev));
+      toast.success('Токен AI-агента перевыпущен');
+    } catch (err: any) {
+      toast.error(err?.message || 'Не удалось обновить токен');
+    } finally {
+      setSecurityBusy(false);
+    }
+  };
+
+  const handleSetServerPassword = async () => {
+    if (newServerPassword.trim().length < 4) {
+      toast.error('Введите пароль длиной не менее 4 символов');
+      return;
+    }
+    setSecurityBusy(true);
+    try {
+      await configureServerAuth('password', newServerPassword.trim());
+      setNewServerPassword('');
+      const nextStatus = await getServerAuthStatus();
+      setServerStatus(nextStatus);
+      toast.success('Пароль входа на сервер обновлён');
+    } catch (err: any) {
+      toast.error(err?.message || 'Ошибка настройки пароля');
+    } finally {
+      setSecurityBusy(false);
+    }
+  };
+
+  const handleSwitchToOpenLan = async () => {
+    setSecurityBusy(true);
+    try {
+      await configureServerAuth('open');
+      const nextStatus = await getServerAuthStatus();
+      setServerStatus(nextStatus);
+      toast.success('Включён открытый доступ в локальной сети');
+    } catch (err: any) {
+      toast.error(err?.message || 'Ошибка переключения режима доступа');
+    } finally {
+      setSecurityBusy(false);
+    }
+  };
+
+  const handleLogoutServer = async () => {
+    await logoutServerAuth();
+    window.location.reload();
+  };
+
+  const serverOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+
   return (
-    <div className="p-8 max-w-4xl w-full mx-auto space-y-8">
-      <div className="flex items-center gap-3 mb-8">
+    <div className="p-4 sm:p-8 max-w-4xl w-full mx-auto space-y-8">
+      <div className="flex items-center gap-3 mb-6 sm:mb-8">
         <div className="w-10 h-10 bg-neutral-800 rounded-xl flex items-center justify-center shadow-lg">
           <Settings className="w-5 h-5 text-neutral-400" />
         </div>
-        <h1 className="text-3xl font-bold text-white tracking-tight">Настройки</h1>
+        <h1 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">Настройки</h1>
       </div>
 
       <div className="bg-neutral-900 border border-neutral-800 rounded-xl shadow-xl p-6 space-y-8">
@@ -520,6 +638,205 @@ export default function SettingsPanel() {
               <Send className="w-4 h-4" />
               <span>Открыть Telegram MTProto Client & Настройки</span>
             </button>
+          </div>
+        </section>
+
+        {/* Umbrel Server, AI Agent MCP & Curator Inbox Notifications */}
+        <section>
+          <h2 className="text-lg font-bold text-white mb-4 flex items-center gap-2">
+            <Bot className="w-5 h-5 text-emerald-400" />
+            Umbrel Сервер, AI-агент и Уведомления
+          </h2>
+          <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4 sm:p-6 space-y-6">
+            {/* Telegram Bot Alerts for Curator Inbox */}
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Telegram-уведомления для куратора</h3>
+                  <p className="text-xs text-neutral-400 mt-0.5">
+                    Бот пересылает запросы AI-агента с кнопками «✅ Одобрить» и «❌ Отклонить» и принимает ответы в чат.
+                  </p>
+                </div>
+                {serverStatus?.reachable && (
+                  <button
+                    type="button"
+                    onClick={() => void requestServerFilePicker({ mode: 'browse', title: 'Файлы на сервере' })}
+                    className="min-h-[40px] px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs font-medium text-neutral-100 inline-flex items-center gap-2 transition-colors"
+                  >
+                    <FolderOpen className="w-4 h-4 text-blue-400" />
+                    <span>Файлы сервера</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs text-neutral-400 mb-1.5">Telegram Bot Token</label>
+                  <input
+                    type="password"
+                    value={settings.telegramBotToken}
+                    onChange={(e) => setSettings({ ...settings, telegramBotToken: e.target.value })}
+                    placeholder="123456789:ABC..."
+                    className="w-full min-h-[42px] bg-neutral-900 border border-neutral-800 rounded-lg px-3.5 py-2 text-sm text-white focus:border-emerald-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-neutral-400 mb-1.5">Telegram Chat ID куратора</label>
+                  <input
+                    type="text"
+                    value={settings.curatorTelegramChatId}
+                    onChange={(e) => setSettings({ ...settings, curatorTelegramChatId: e.target.value })}
+                    placeholder="Например: 123456789 или @username"
+                    className="w-full min-h-[42px] bg-neutral-900 border border-neutral-800 rounded-lg px-3.5 py-2 text-sm text-white focus:border-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
+
+              <label className="flex items-center gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={settings.curatorTelegramBotPolling}
+                  onChange={(e) => setSettings({ ...settings, curatorTelegramBotPolling: e.target.checked })}
+                  className="w-4 h-4 rounded border-neutral-700 bg-neutral-900 text-emerald-500"
+                />
+                <span className="text-xs text-neutral-300">
+                  Включить двусторонний приём команд (/approve, /reject, /note, /inbox) и нажатий кнопок от Telegram-бота
+                </span>
+              </label>
+            </div>
+
+            {/* AI Agent MCP & REST Endpoints */}
+            {serverStatus?.reachable && agentInfo && (
+              <div className="pt-5 border-t border-neutral-800 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">Подключение локального AI-агента (MCP / REST / CLI)</h3>
+                    <p className="text-xs text-neutral-400 mt-0.5 tabular-nums">
+                      Данные сервера: {serverStatus.dataDir || '/data'} · Архитектура: {serverStatus.arch || 'linux'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={securityBusy || Boolean(agentInfo.managedByEnv)}
+                    onClick={() => void handleRegenerateAgentToken()}
+                    title={agentInfo.managedByEnv ? 'Токен задан через переменную окружения ADM_AGENT_TOKEN' : 'Создать новый токен агента'}
+                    className="min-h-[38px] px-3 py-1.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-xs font-medium text-neutral-200 inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{agentInfo.managedByEnv ? 'Задан в ENV' : 'Перевыпустить токен'}</span>
+                  </button>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-neutral-400 mb-1.5">
+                    Bearer / x-agent-token (AGENT_TOKEN)
+                    {agentInfo.managedByEnv && (
+                      <span className="ml-2 text-[11px] text-amber-400">· управляется через ADM_AGENT_TOKEN</span>
+                    )}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type={showAgentToken ? 'text' : 'password'}
+                      readOnly
+                      value={agentInfo.agentToken}
+                      className="flex-1 min-h-[42px] bg-neutral-900 border border-neutral-800 rounded-lg px-3.5 font-mono text-xs text-emerald-300 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAgentToken((v) => !v)}
+                      className="min-h-[42px] min-w-[42px] rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 flex items-center justify-center"
+                      aria-label="Показать токен"
+                    >
+                      {showAgentToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyField('token', agentInfo.agentToken)}
+                      className="min-h-[42px] px-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-xs font-medium text-neutral-100 inline-flex items-center gap-1.5"
+                    >
+                      {copiedKey === 'token' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                      <span className="hidden sm:inline">Копировать</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {[
+                    { key: 'mcp', label: 'MCP Streamable HTTP', url: `${serverOrigin}${agentInfo.mcpUrl}` },
+                    { key: 'sse', label: 'MCP Legacy SSE', url: `${serverOrigin}${agentInfo.sseUrl}` },
+                    { key: 'openapi', label: 'REST OpenAPI 3.1', url: `${serverOrigin}${agentInfo.openApiUrl}` },
+                  ].map((ep) => (
+                    <div key={ep.key} className="p-3 rounded-lg bg-neutral-900 border border-neutral-800 space-y-1.5">
+                      <div className="text-[11px] font-semibold text-neutral-400">{ep.label}</div>
+                      <div className="flex items-center justify-between gap-2">
+                        <code className="text-xs font-mono text-neutral-200 truncate">{ep.url}</code>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopyField(ep.key, ep.url)}
+                          className="p-1.5 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-300 shrink-0"
+                          title="Копировать URL"
+                        >
+                          {copiedKey === ep.key ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Server UI Security Controls */}
+            {serverStatus?.reachable && (
+              <div className="pt-5 border-t border-neutral-800 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Shield className="w-4 h-4 text-blue-400" />
+                    <span className="text-sm font-semibold text-white">Защита веб-интерфейса сервера</span>
+                  </div>
+                  <span className="text-xs text-neutral-400">
+                    {serverStatus.authRequired ? 'Защищено паролем куратора' : 'Открытый доступ в локальной сети'}
+                  </span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="password"
+                    value={newServerPassword}
+                    onChange={(e) => setNewServerPassword(e.target.value)}
+                    placeholder="Новый пароль доступа (от 4 символов)"
+                    className="flex-1 min-h-[42px] bg-neutral-900 border border-neutral-800 rounded-lg px-3.5 text-sm text-white focus:border-blue-500 outline-none"
+                  />
+                  <button
+                    type="button"
+                    disabled={securityBusy}
+                    onClick={() => void handleSetServerPassword()}
+                    className="min-h-[42px] px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-xs font-semibold text-white whitespace-nowrap"
+                  >
+                    Установить пароль
+                  </button>
+                  {serverStatus.authRequired && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={securityBusy}
+                        onClick={() => void handleSwitchToOpenLan()}
+                        className="min-h-[42px] px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-xs font-medium text-neutral-200 whitespace-nowrap"
+                      >
+                        Убрать пароль
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleLogoutServer()}
+                        className="min-h-[42px] px-3.5 py-2 rounded-lg bg-neutral-800 hover:bg-red-950/60 hover:text-red-300 text-xs font-medium text-neutral-300 inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                      >
+                        <LogOut className="w-4 h-4" />
+                        <span>Выйти</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </section>
 

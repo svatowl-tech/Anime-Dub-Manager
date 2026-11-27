@@ -24,8 +24,8 @@ class EnvironmentManager {
     }
 
     // Получаем защищенную директорию пользователя и определяем целевую папку
-    const userDataPath = typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd();
-    const targetDir = path.join(userDataPath, 'ai_env');
+    const userDataPath = process.env.ADM_DATA_DIR || (typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd());
+    const targetDir = process.env.ADM_AI_ENV_DIR || path.join(userDataPath, 'ai_env');
     const zipPath = path.join(userDataPath, 'ai_env_temp.zip');
 
     try {
@@ -410,7 +410,9 @@ class EnvironmentManager {
       const siteCandidates = [
         path.join(envDir, 'Lib', 'site-packages'),
         path.join(envDir, 'lib', 'site-packages'),
-        path.join(envDir, 'lib', 'python3.10', 'site-packages')
+        path.join(envDir, 'lib', 'python3.10', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.11', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.12', 'site-packages')
       ];
       const snippet = `\n# Auto-injected highest_precision_float compatibility shim for PyTorch 2.x
 def highest_precision_float(device=None):
@@ -524,6 +526,8 @@ amp = _Amp()
         path.join(envDir, 'Lib', 'site-packages'),
         path.join(envDir, 'lib', 'site-packages'),
         path.join(envDir, 'lib', 'python3.10', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.11', 'site-packages'),
+        path.join(envDir, 'lib', 'python3.12', 'site-packages'),
         path.join(envDir, 'site-packages')
       ];
       for (const siteDir of siteCandidates) {
@@ -565,34 +569,59 @@ amp = _Amp()
         path.join(pyDir, 'Lib', 'site-packages'),
         path.join(pyDir, 'lib', 'site-packages'),
         path.join(pyDir, 'lib', 'python3.10', 'site-packages'),
+        path.join(pyDir, 'lib', 'python3.11', 'site-packages'),
+        path.join(pyDir, 'lib', 'python3.12', 'site-packages'),
         path.join(pyParent, 'Lib', 'site-packages'),
         path.join(pyParent, 'lib', 'site-packages'),
         path.join(pyParent, 'lib', 'python3.10', 'site-packages'),
+        path.join(pyParent, 'lib', 'python3.11', 'site-packages'),
+        path.join(pyParent, 'lib', 'python3.12', 'site-packages'),
         path.join(pyParent, 'python_env', 'Lib', 'site-packages'),
-        path.join(pyParent, 'python_env', 'lib', 'site-packages')
+        path.join(pyParent, 'python_env', 'lib', 'site-packages'),
+        path.join(pyParent, 'python_env', 'lib', 'python3.10', 'site-packages'),
+        path.join(pyParent, 'python_env', 'lib', 'python3.11', 'site-packages')
       ];
       for (const c of pyCandidates) {
         if (fs.existsSync(c)) dirs.push(c);
       }
     }
 
-    // 2. Проверяем стандартные корни userData и cwd
+    // 2. Проверяем явные серверные пути (ADM_AI_ENV_DIR / /opt/ai_env) и стандартные корни userData/cwd
+    const aiEnvRoots = [];
+    if (process.env.ADM_AI_ENV_DIR) aiEnvRoots.push(process.env.ADM_AI_ENV_DIR);
+    if (process.platform !== 'win32' && fs.existsSync('/opt/ai_env')) aiEnvRoots.push('/opt/ai_env');
+    if (process.env.ADM_DATA_DIR) aiEnvRoots.push(path.join(process.env.ADM_DATA_DIR, 'ai_env'));
     for (const r of roots) {
-      const aiEnv = path.join(r, 'ai_env');
+      aiEnvRoots.push(path.join(r, 'ai_env'));
+    }
+
+    for (const aiEnv of aiEnvRoots) {
       const candidates = [
         path.join(aiEnv, 'python_env', 'Lib', 'site-packages'),
         path.join(aiEnv, 'python_env', 'lib', 'site-packages'),
         path.join(aiEnv, 'python_env', 'lib', 'python3.10', 'site-packages'),
+        path.join(aiEnv, 'python_env', 'lib', 'python3.11', 'site-packages'),
+        path.join(aiEnv, 'python_env', 'lib', 'python3.12', 'site-packages'),
         path.join(aiEnv, 'Lib', 'site-packages'),
         path.join(aiEnv, 'lib', 'site-packages'),
         path.join(aiEnv, 'lib', 'python3.10', 'site-packages'),
+        path.join(aiEnv, 'lib', 'python3.11', 'site-packages'),
         path.join(aiEnv, 'ai_env', 'python_env', 'Lib', 'site-packages'),
         path.join(aiEnv, 'ai_env', 'python_env', 'lib', 'site-packages'),
         path.join(aiEnv, 'ai_env', 'python_env', 'lib', 'python3.10', 'site-packages'),
+        path.join(aiEnv, 'ai_env', 'python_env', 'lib', 'python3.11', 'site-packages')
+      ];
+      for (const c of candidates) {
+        if (fs.existsSync(c)) dirs.push(c);
+      }
+    }
+
+    for (const r of roots) {
+      const wlkCandidates = [
         path.join(r, 'whisperlivekit', 'venv', 'Lib', 'site-packages'),
         path.join(r, 'whisperlivekit', 'venv', 'lib', 'site-packages')
       ];
-      for (const c of candidates) {
+      for (const c of wlkCandidates) {
         if (fs.existsSync(c)) dirs.push(c);
       }
     }
@@ -607,18 +636,24 @@ amp = _Amp()
     const candidatePaths = [];
     let userData = null;
 
-    if (customEnvDir) {
+    const envDirsToCheck = [];
+    if (customEnvDir) envDirsToCheck.push(customEnvDir);
+    if (process.env.ADM_AI_ENV_DIR) envDirsToCheck.push(process.env.ADM_AI_ENV_DIR);
+    if (!isWin && fs.existsSync('/opt/ai_env')) envDirsToCheck.push('/opt/ai_env');
+    if (process.env.ADM_DATA_DIR) envDirsToCheck.push(path.join(process.env.ADM_DATA_DIR, 'ai_env'));
+
+    for (const dir of envDirsToCheck) {
       if (isWin) {
-        candidatePaths.push(path.join(customEnvDir, 'Scripts', 'python.exe'));
-        candidatePaths.push(path.join(customEnvDir, 'python.exe'));
-        candidatePaths.push(path.join(customEnvDir, 'python_env', 'Scripts', 'python.exe'));
-        candidatePaths.push(path.join(customEnvDir, 'python_env', 'python.exe'));
+        candidatePaths.push(path.join(dir, 'python_env', 'Scripts', 'python.exe'));
+        candidatePaths.push(path.join(dir, 'python_env', 'python.exe'));
+        candidatePaths.push(path.join(dir, 'Scripts', 'python.exe'));
+        candidatePaths.push(path.join(dir, 'python.exe'));
       } else {
-        candidatePaths.push(path.join(customEnvDir, 'bin', 'python'));
-        candidatePaths.push(path.join(customEnvDir, 'bin', 'python3'));
-        candidatePaths.push(path.join(customEnvDir, 'python_env', 'bin', 'python'));
-        candidatePaths.push(path.join(customEnvDir, 'python_env', 'bin', 'python3'));
-        candidatePaths.push(path.join(customEnvDir, 'python'));
+        candidatePaths.push(path.join(dir, 'python_env', 'bin', 'python'));
+        candidatePaths.push(path.join(dir, 'python_env', 'bin', 'python3'));
+        candidatePaths.push(path.join(dir, 'bin', 'python'));
+        candidatePaths.push(path.join(dir, 'bin', 'python3'));
+        candidatePaths.push(path.join(dir, 'python'));
       }
     }
 
@@ -747,6 +782,7 @@ amp = _Amp()
       ? `${sitePackages.join(delimiter)}${delimiter}${existingPythonPath}`
       : existingPythonPath;
 
+    const persistentModelsBase = process.env.ADM_DATA_DIR || (typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd());
     const env = {
       ...process.env,
       SystemRoot: process.env.SystemRoot || (process.platform === 'win32' ? 'C:\\Windows' : undefined),
@@ -756,8 +792,9 @@ amp = _Amp()
       PYTHONUNBUFFERED: '1',
       PYTHONIOENCODING: 'utf-8',
       PYTHONUTF8: '1',
-      TORCH_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'torch'),
-      HF_HOME: path.join(typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd(), 'models', 'huggingface'),
+      TORCH_HOME: process.env.TORCH_HOME || path.join(persistentModelsBase, 'models', 'torch'),
+      HF_HOME: process.env.HF_HOME || path.join(persistentModelsBase, 'models', 'huggingface'),
+      DEEPFILTERNET_CACHE: process.env.DEEPFILTERNET_CACHE || path.join(persistentModelsBase, 'models', 'deepfilternet'),
       ...(options.env || {})
     };
 

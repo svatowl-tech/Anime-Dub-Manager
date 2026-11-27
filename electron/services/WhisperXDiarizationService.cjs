@@ -37,18 +37,21 @@ class WhisperXDiarizationService {
       }
 
       // 2. Проверка наличия локальной среды Python с WhisperX
-      const isWin = process.platform === 'win32';
-      const winPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python.exe');
-      const unixPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'bin', 'python');
-      const unixPythonAlt = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python');
-      
-      let pythonPath = winPython;
-      if (!isWin) {
-        try {
-          await fs.access(unixPython);
-          pythonPath = unixPython;
-        } catch {
-          pythonPath = unixPythonAlt;
+      const EnvironmentManager = require('./EnvironmentManager.cjs');
+      let pythonPath = EnvironmentManager.getPythonPath();
+      if (!pythonPath || !require('fs').existsSync(pythonPath)) {
+        const isWin = process.platform === 'win32';
+        const winPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python.exe');
+        const unixPython = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'bin', 'python');
+        const unixPythonAlt = path.join(app.getPath('userData'), 'ai_env', 'python_env', 'python');
+        pythonPath = winPython;
+        if (!isWin) {
+          try {
+            await fs.access(unixPython);
+            pythonPath = unixPython;
+          } catch {
+            pythonPath = unixPythonAlt;
+          }
         }
       }
 

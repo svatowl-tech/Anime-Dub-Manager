@@ -82,25 +82,61 @@ function killAllProcesses() {
   activeProcesses = [];
 }
 
-if (ffmpegPath) {
-  if (fs.existsSync(ffmpegPath)) {
-    log.info('FFmpeg found at:', ffmpegPath);
-    ffmpeg.setFfmpegPath(ffmpegPath);
-  } else {
+let ffprobePath = null;
+if (fs.existsSync(bundledFfprobePath)) {
+  ffprobePath = bundledFfprobePath;
+}
+
+if (ffmpegPath && fs.existsSync(ffmpegPath)) {
+  log.info('FFmpeg found at:', ffmpegPath);
+  ffmpeg.setFfmpegPath(ffmpegPath);
+} else {
+  if (ffmpegPath) {
     log.error('FFmpeg NOT found at:', ffmpegPath, '- attempting to use system ffmpeg');
-    // Fallback to system ffmpeg if static binary is missing
-    try {
-      const { execSync } = require('child_process');
-      const isWin = process.platform === 'win32';
-      const cmd = isWin ? 'where ffmpeg' : 'which ffmpeg';
-      const systemFfmpeg = execSync(cmd, { windowsHide: true, timeout: 2500, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().split('\n')[0].trim();
-      if (systemFfmpeg && fs.existsSync(systemFfmpeg)) {
-        log.info('Using system FFmpeg at:', systemFfmpeg);
-        ffmpeg.setFfmpegPath(systemFfmpeg);
-        ffmpegPath = systemFfmpeg;
-      }
-    } catch (e) {
+  } else {
+    log.info('ffmpeg-static returned null for current arch/platform - attempting to use system ffmpeg');
+  }
+  try {
+    const { execSync } = require('child_process');
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? 'where ffmpeg' : 'which ffmpeg';
+    const systemFfmpeg = execSync(cmd, { windowsHide: true, timeout: 2500, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().split('\n')[0].trim();
+    if (systemFfmpeg && fs.existsSync(systemFfmpeg)) {
+      log.info('Using system FFmpeg at:', systemFfmpeg);
+      ffmpeg.setFfmpegPath(systemFfmpeg);
+      ffmpegPath = systemFfmpeg;
+    } else if (!isWin && fs.existsSync('/usr/bin/ffmpeg')) {
+      ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+      ffmpegPath = '/usr/bin/ffmpeg';
+    }
+  } catch (e) {
+    if (process.platform !== 'win32' && fs.existsSync('/usr/bin/ffmpeg')) {
+      ffmpeg.setFfmpegPath('/usr/bin/ffmpeg');
+      ffmpegPath = '/usr/bin/ffmpeg';
+    } else {
       log.warn('System FFmpeg not found in path, will use custom configuration if set.');
+    }
+  }
+}
+
+if (!ffprobePath) {
+  try {
+    const { execSync } = require('child_process');
+    const isWin = process.platform === 'win32';
+    const cmd = isWin ? 'where ffprobe' : 'which ffprobe';
+    const systemFfprobe = execSync(cmd, { windowsHide: true, timeout: 2500, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim().split('\n')[0].trim();
+    if (systemFfprobe && fs.existsSync(systemFfprobe)) {
+      log.info('Using system FFprobe at:', systemFfprobe);
+      ffmpeg.setFfprobePath(systemFfprobe);
+      ffprobePath = systemFfprobe;
+    } else if (!isWin && fs.existsSync('/usr/bin/ffprobe')) {
+      ffmpeg.setFfprobePath('/usr/bin/ffprobe');
+      ffprobePath = '/usr/bin/ffprobe';
+    }
+  } catch (e) {
+    if (process.platform !== 'win32' && fs.existsSync('/usr/bin/ffprobe')) {
+      ffmpeg.setFfprobePath('/usr/bin/ffprobe');
+      ffprobePath = '/usr/bin/ffprobe';
     }
   }
 }

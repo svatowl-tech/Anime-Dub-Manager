@@ -103,8 +103,11 @@ export const MixingImportModal: React.FC<MixingImportModalProps> = ({
                 onClick={async () => {
                   try {
                     const selected = await ipcSafe.invoke('select-directory');
-                    if (selected) {
-                      setCustomTargetDir(selected);
+                    const dirPath = typeof selected === 'string'
+                      ? selected
+                      : selected?.filePaths?.[0] || selected?.path || '';
+                    if (dirPath) {
+                      setCustomTargetDir(dirPath);
                     }
                   } catch (err) {}
                 }}
