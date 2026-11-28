@@ -16,7 +16,9 @@ import {
   Mic,
   Flame,
   UserCheck,
-  Terminal
+  Terminal,
+  Activity,
+  BookOpen
 } from 'lucide-react';
 import { DefectCategory, QAScanReport } from '../../../lib/qa/missingLinesDetector';
 import { AudioArtifactType } from '../../../lib/qa/artifactDetector';
@@ -30,6 +32,7 @@ export interface MissingLinesFilterToolbarProps {
   handleSaveToTiming: (navigateToTiming?: boolean) => Promise<void>;
   isSavingToTiming: boolean;
   onOpenScanConfig?: () => void;
+  onOpenDictionaryDrawer?: () => void;
   activeReport?: QAScanReport;
   setIsLogModalOpen: (val: boolean) => void;
   onClose: () => void;
@@ -57,6 +60,11 @@ export interface MissingLinesFilterToolbarProps {
   plosivesCount: number;
   cutoffsCount: number;
   textMismatchCount: number;
+  disfluencyCount?: number;
+  dictionCount?: number;
+  emotionCount?: number;
+  stressCount?: number;
+  personaCount?: number;
 }
 
 export const MissingLinesFilterToolbar: React.FC<MissingLinesFilterToolbarProps> = ({
@@ -68,6 +76,7 @@ export const MissingLinesFilterToolbar: React.FC<MissingLinesFilterToolbarProps>
   handleSaveToTiming,
   isSavingToTiming,
   onOpenScanConfig,
+  onOpenDictionaryDrawer,
   activeReport,
   setIsLogModalOpen,
   onClose,
@@ -94,7 +103,12 @@ export const MissingLinesFilterToolbar: React.FC<MissingLinesFilterToolbarProps>
   clicksCount,
   plosivesCount,
   cutoffsCount,
-  textMismatchCount
+  textMismatchCount,
+  disfluencyCount = 0,
+  dictionCount = 0,
+  emotionCount = 0,
+  stressCount = 0,
+  personaCount = 0
 }) => {
   return (
     <div className="shrink-0 space-y-3 p-5 border-b border-neutral-800 bg-neutral-900/95">
@@ -166,15 +180,28 @@ export const MissingLinesFilterToolbar: React.FC<MissingLinesFilterToolbarProps>
             <span>Записать в тайминг (свожу сам)</span>
           </button>
 
-          {/* Re-Analyze Button */}
+          {/* Dictionary & Profiles Button */}
+          {onOpenDictionaryDrawer && (
+            <button
+              type="button"
+              onClick={onOpenDictionaryDrawer}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-neutral-800 hover:bg-neutral-700 text-amber-200 border border-neutral-700 transition-all flex items-center gap-1.5 whitespace-nowrap"
+              title="Открыть словарь ударений и профили персонажей"
+            >
+              <BookOpen className="w-3.5 h-3.5 text-amber-400" />
+              <span>Словарь и роли</span>
+            </button>
+          )}
+
+          {/* Re-Analyze / Settings Button */}
           {onOpenScanConfig && (
             <button
               onClick={onOpenScanConfig}
               disabled={isAnalyzing}
-              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition-all flex items-center gap-1.5 disabled:opacity-50"
+              className="px-3 py-1.5 rounded-lg text-xs font-bold bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 transition-all flex items-center gap-1.5 disabled:opacity-50 whitespace-nowrap"
             >
               <RotateCcw className={`w-3.5 h-3.5 ${isAnalyzing ? 'animate-spin' : ''}`} />
-              <span>Пересканировать</span>
+              <span>Настройки / Пересканировать</span>
             </button>
           )}
 
@@ -343,6 +370,111 @@ export const MissingLinesFilterToolbar: React.FC<MissingLinesFilterToolbarProps>
             <Mic className="w-3.5 h-3.5 text-purple-400" />
             <span>Расхождения текста</span>
             <span className="px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 text-[10px] font-mono font-bold">{textMismatchCount}</span>
+          </button>
+        )}
+
+        {shortTimingCount > 0 && (
+          <button
+            onClick={() => setSelectedCategoryTab('timing_too_short')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 shrink-0 border whitespace-nowrap ${
+              selectedCategoryTab === 'timing_too_short'
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-sm'
+                : 'bg-neutral-950/40 text-neutral-400 border-neutral-800/80 hover:bg-neutral-900 hover:text-neutral-200'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Короткие / хвосты</span>
+            <span className="px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-mono font-bold tabular-nums">{shortTimingCount}</span>
+          </button>
+        )}
+
+        {longTimingCount > 0 && (
+          <button
+            onClick={() => setSelectedCategoryTab('timing_too_long')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 shrink-0 border whitespace-nowrap ${
+              selectedCategoryTab === 'timing_too_long'
+                ? 'bg-purple-500/20 text-purple-300 border-purple-500/50 shadow-sm'
+                : 'bg-neutral-950/40 text-neutral-400 border-neutral-800/80 hover:bg-neutral-900 hover:text-neutral-200'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5 text-purple-400" />
+            <span>Вылеты за саб</span>
+            <span className="px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 text-[10px] font-mono font-bold tabular-nums">{longTimingCount}</span>
+          </button>
+        )}
+
+        {disfluencyCount > 0 && (
+          <button
+            onClick={() => setSelectedCategoryTab('speech_disfluency')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 shrink-0 border whitespace-nowrap ${
+              selectedCategoryTab === 'speech_disfluency'
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/50 shadow-sm'
+                : 'bg-neutral-950/40 text-neutral-400 border-neutral-800/80 hover:bg-neutral-900 hover:text-neutral-200'
+            }`}
+          >
+            <Mic className="w-3.5 h-3.5 text-amber-400" />
+            <span>Сбивки и кашель</span>
+            <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[10px] font-mono font-bold tabular-nums">{disfluencyCount}</span>
+          </button>
+        )}
+
+        {dictionCount > 0 && (
+          <button
+            onClick={() => setSelectedCategoryTab('diction_clarity')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 shrink-0 border whitespace-nowrap ${
+              selectedCategoryTab === 'diction_clarity'
+                ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50 shadow-sm'
+                : 'bg-neutral-950/40 text-neutral-400 border-neutral-800/80 hover:bg-neutral-900 hover:text-neutral-200'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Дикция и темп</span>
+            <span className="px-1.5 py-0.2 rounded bg-cyan-500/20 text-cyan-300 text-[10px] font-mono font-bold tabular-nums">{dictionCount}</span>
+          </button>
+        )}
+
+        {emotionCount > 0 && (
+          <button
+            onClick={() => setSelectedCategoryTab('emotion_mismatch')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 shrink-0 border whitespace-nowrap ${
+              selectedCategoryTab === 'emotion_mismatch'
+                ? 'bg-rose-500/20 text-rose-300 border-rose-500/50 shadow-sm'
+                : 'bg-neutral-950/40 text-neutral-400 border-neutral-800/80 hover:bg-neutral-900 hover:text-neutral-200'
+            }`}
+          >
+            <Flame className="w-3.5 h-3.5 text-rose-400" />
+            <span>Эмоции</span>
+            <span className="px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-300 text-[10px] font-mono font-bold tabular-nums">{emotionCount}</span>
+          </button>
+        )}
+
+        {stressCount > 0 && (
+          <button
+            onClick={() => setSelectedCategoryTab('stress_error')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 shrink-0 border whitespace-nowrap ${
+              selectedCategoryTab === 'stress_error'
+                ? 'bg-yellow-500/20 text-yellow-300 border-yellow-500/50 shadow-sm'
+                : 'bg-neutral-950/40 text-neutral-400 border-neutral-800/80 hover:bg-neutral-900 hover:text-neutral-200'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5 text-yellow-400" />
+            <span>Ударения</span>
+            <span className="px-1.5 py-0.2 rounded bg-yellow-500/20 text-yellow-300 text-[10px] font-mono font-bold tabular-nums">{stressCount}</span>
+          </button>
+        )}
+
+        {personaCount > 0 && (
+          <button
+            onClick={() => setSelectedCategoryTab('persona_mismatch')}
+            className={`px-3 py-1.5 rounded-lg font-medium transition-all flex items-center gap-1.5 shrink-0 border whitespace-nowrap ${
+              selectedCategoryTab === 'persona_mismatch'
+                ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/50 shadow-sm'
+                : 'bg-neutral-950/40 text-neutral-400 border-neutral-800/80 hover:bg-neutral-900 hover:text-neutral-200'
+            }`}
+          >
+            <UserCheck className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Образ и возраст</span>
+            <span className="px-1.5 py-0.2 rounded bg-indigo-500/20 text-indigo-300 text-[10px] font-mono font-bold tabular-nums">{personaCount}</span>
           </button>
         )}
 

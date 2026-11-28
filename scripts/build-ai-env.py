@@ -161,9 +161,13 @@ def prune_unneeded_files(target_dir, strip_cuda=True):
             dir_lower = name.lower()
             norm_root = root.replace("\\", "/").lower()
 
-            # CRITICAL: NEVER prune ANY directory inside 'torch', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'inworld', 'safetensors', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm'
-            # Subpackages such as 'torch/cuda', 'torch/testing', 'torchaudio/compliance', 'inworld/voice_isolation' are required at runtime!
-            if any(core_pkg in norm_root for core_pkg in ['/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df', 'inworld', 'safetensors', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa', 'pedalboard', 'pyloudnorm']):
+            # CRITICAL: NEVER prune ANY directory inside core AI runtime packages
+            if any(core_pkg in norm_root for core_pkg in [
+                '/torch', '\\torch', 'torch/', 'torch\\', 'torchaudio', 'deepfilternet', 'demucs', 'df',
+                'inworld', 'safetensors', 'soundfile', 'scipy', 'numpy', 'numba', 'llvmlite', 'librosa',
+                'pedalboard', 'pyloudnorm', 'transformers', 'ctranslate2', 'faster_whisper', 'speechbrain',
+                'ruaccent', 'tokenizers', 'huggingface_hub', 'sentencepiece'
+            ]):
                 continue
 
             # NEVER prune testing / tests if inside torch, torchaudio, onnx, or site-packages core
@@ -400,6 +404,28 @@ def build_ai_env(output_dir="out", custom_tag=None, use_cpu_wheels=True, install
         except Exception as aeneas_err2:
             print(f"  [WARN] Aeneas could not be installed: {aeneas_err2}. AutoTimingService will fallback to Whisper auto-timing.")
 
+    # Install local Acting, Diction, Stress & Persona QA dependencies locked to Torch 2.2.2 + NumPy 1.26.4
+    print("  [QA-ACTING] Installing local QA Acting stack (transformers, faster-whisper, ruaccent, speechbrain)...")
+    qa_acting_stack = [
+        "transformers==4.40.0",
+        "faster-whisper==1.2.1",
+        "ctranslate2>=4.0.0,<5.0.0",
+        "ruaccent>=1.5.7,<1.7.0",
+        "speechbrain==1.0.2",
+        "sentencepiece>=0.1.99",
+        "python-crfsuite>=0.9.9",
+    ]
+    try:
+        run_cmd([
+            str(venv_python), "-m", "pip", "install",
+            "--no-cache-dir",
+            "--prefer-binary",
+            "-c", str(constraints_file)
+        ] + extra_index_args + qa_acting_stack)
+        print("  [QA-ACTING] Local QA Acting stack installed successfully.")
+    except Exception as qa_err:
+        print(f"  [WARN] QA Acting stack install warning: {qa_err}")
+
     # System Dependencies for Aeneas Forced Alignment (espeak / espeak-ng)
     print("\n[STEP 4.1] Checking system dependencies for Aeneas (espeak / espeak-ng / ffmpeg)...")
     try:
@@ -621,6 +647,15 @@ try:
 except Exception as e:
     print(f"  [VERIFY WARN] Inworld Voice Isolator check: {e}", flush=True)
 
+try:
+    import transformers
+    import faster_whisper
+    import speechbrain
+    import ruaccent
+    print(f"  [VERIFY OK] Acting QA stack: transformers {transformers.__version__}, faster_whisper {faster_whisper.__version__}, speechbrain {speechbrain.__version__}", flush=True)
+except Exception as e:
+    print(f"  [VERIFY WARN] Acting QA stack check: {e}", flush=True)
+
 print("  [VERIFY COMPLETE] All required neural audio processing modules verified successfully!", flush=True)
 """
     verify_script_path.write_text(verify_script_content, encoding="utf-8")
@@ -832,13 +867,14 @@ except Exception as e:
             pass
 
     # 8. Copy sidecars into environment bundle for self-containment
-    print("\n[STEP 8] Bundling audio_ai_processor sidecar script...")
-    sidecar_src = root_dir / "electron" / "sidecars" / "audio_ai_processor.py"
+    print("\n[STEP 8] Bundling audio_ai_processor and qa_acting_analyzer sidecar scripts...")
     sidecar_dst_dir = build_temp_dir / "sidecars"
     sidecar_dst_dir.mkdir(parents=True, exist_ok=True)
-    if sidecar_src.exists():
-        shutil.copy2(sidecar_src, sidecar_dst_dir / "audio_ai_processor.py")
-        print(f"  [OK] Copied audio_ai_processor.py to {sidecar_dst_dir}")
+    for sc_name in ("audio_ai_processor.py", "qa_acting_analyzer.py"):
+        sidecar_src = root_dir / "electron" / "sidecars" / sc_name
+        if sidecar_src.exists():
+            shutil.copy2(sidecar_src, sidecar_dst_dir / sc_name)
+            print(f"  [OK] Copied {sc_name} to {sidecar_dst_dir}")
 
     # 8b. Setup Airwindows VST3 DSP Suite plugins bundle directory
     print("\n[STEP 8b] Setting up Airwindows VST3 DSP Suite plugins directory...")
@@ -941,7 +977,16 @@ try:
     except Exception:
         pass
 
-    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Safetensors {safetensors.__version__}, Inworld {inworld_status}, Pedalboard {pb_ver}, Numba {numba.__version__}")
+    qa_qa_status = "OK"
+    try:
+        import transformers
+        import faster_whisper
+        import speechbrain
+        import ruaccent
+    except Exception as qa_e:
+        qa_qa_status = f"WARN ({qa_e})"
+
+    print(f"  [POST-PRUNE OK] All core packages intact: NumPy {np.__version__}, PyTorch {torch.__version__}, TorchAudio {torchaudio.__version__}, Safetensors {safetensors.__version__}, Inworld {inworld_status}, QA_Acting {qa_qa_status}, Pedalboard {pb_ver}, Numba {numba.__version__}")
 except Exception as e:
     sys.stderr.write(f"  [POST-PRUNE ERROR] Crucial AI package was damaged by cleanup: {e}\\n")
     traceback.print_exc()

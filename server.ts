@@ -157,6 +157,7 @@ async function startServer() {
   const AudioAnalysisController = require('./electron/handlers/AudioAnalysisController.cjs');
   const MixingController = require('./electron/handlers/MixingController.cjs');
   const EnvironmentController = require('./electron/handlers/EnvironmentController.cjs');
+  const QAActingController = require('./electron/handlers/QAActingController.cjs');
   const { handleWebProxyRequest, handleWebProxyAgentRequest } = require('./electron/services/webProxyService.cjs');
 
   const getMainWindow = () => ({
@@ -218,6 +219,7 @@ async function startServer() {
   AudioAnalysisController.registerAudioAnalysisHandlers();
   MixingController.registerMixingHandlers(getData, getMainWindow);
   EnvironmentController.registerEnvironmentHandlers();
+  QAActingController.registerQAActingHandlers(getData, saveData, getMainWindow);
 
   const getTelegramService = () => TelegramController.getTelegramService(getData, saveData, runtimeConfig.dataDir);
 

@@ -1,38 +1,63 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  X, 
-  Sparkles, 
-  CheckSquare, 
-  Square, 
-  Sliders, 
-  VolumeX, 
-  MessageSquareOff, 
-  Users, 
-  Layers, 
-  Clock, 
-  Radio, 
-  FileText, 
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  X,
+  Sparkles,
+  CheckSquare,
+  Square,
+  Sliders,
+  VolumeX,
+  MessageSquareOff,
+  Users,
+  Layers,
+  Clock,
+  Radio,
+  FileText,
   AlertCircle,
-  HelpCircle,
   Cpu,
   RefreshCw,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  Mic,
+  Activity,
+  Flame,
+  BookOpen,
+  UserCheck,
+  ChevronDown,
+  ChevronRight,
+  Download,
+  RotateCcw,
+  Save,
 } from 'lucide-react';
-import { GapDetectionOptions } from '../../lib/qa/missingLinesDetector';
+import { toast } from 'sonner';
+import {
+  ActingModelsStatus,
+  ActingResourceProfile,
+  DEFAULT_QA_DETECTION_SETTINGS,
+  GapDetectionOptions,
+  OriginalStemMode,
+  OriginalStemModel,
+  QADetectionSettings,
+  QAPresetId,
+  QA_PRESET_SOFT,
+  QA_PRESET_STANDARD,
+  QA_PRESET_STRICT,
+  StressCheckMode,
+} from '../../lib/qa/detector/missingLinesTypes';
 import { checkWhisperSystemReadiness, WhisperReadinessResult } from '../../lib/qa/whisperTextChecker';
+import { qaActingService } from '../../services/qaActingService';
 
 interface QAScanConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
   onStartScan: (options: GapDetectionOptions) => void;
+  onSaveOptions?: (options: QADetectionSettings) => void;
   initialOptions?: Partial<GapDetectionOptions>;
   totalDubbers: number;
   totalSubLines: number;
 }
 
 export interface QACheckItem {
-  key: keyof GapDetectionOptions;
+  key: keyof QADetectionSettings;
   title: string;
   subtitle: string;
   category: string;
@@ -45,12 +70,12 @@ export interface QACheckItem {
 export const QA_CHECK_ITEMS: QACheckItem[] = [
   {
     key: 'scanMissingLines',
-    title: 'Пропуски реплик',
-    subtitle: 'Поиск реплик персонажей, где дабер промолчал или оставил только тишину/статичный шум',
+    title: 'Пропуски реплик и тишина',
+    subtitle: 'Поиск реплик персонажей, где дабер промолчал или оставил только статичный шум',
     category: 'Реплики',
     icon: VolumeX,
     color: 'text-red-400 bg-red-950/40 border-red-500/30',
-    defaultChecked: true
+    defaultChecked: true,
   },
   {
     key: 'scanUnwantedSpeech',
@@ -59,96 +84,211 @@ export const QA_CHECK_ITEMS: QACheckItem[] = [
     category: 'Реплики',
     icon: MessageSquareOff,
     color: 'text-amber-400 bg-amber-950/40 border-amber-500/30',
-    defaultChecked: true
+    defaultChecked: true,
   },
   {
     key: 'scanCollisions',
     title: 'Конфликты дубляжа (два дабера)',
-    subtitle: 'Выявление реплик, где оба дабера озвучили одну и ту же фразу на протяжении всего саба',
+    subtitle: 'Выявление реплик, где оба дабера озвучили одну и ту же фразу',
     category: 'Стыки и тайминги',
     icon: Users,
     color: 'text-orange-400 bg-orange-950/40 border-orange-500/30',
-    defaultChecked: true
+    defaultChecked: true,
   },
   {
     key: 'scanOverlaps',
     title: 'Наезды хвостов реплик',
-    subtitle: 'Хвост фразы одного дабера наезжает на начало фразы другого (при отсутствии наезда сабов)',
+    subtitle: 'Хвост фразы одного дабера наезжает на начало фразы другого без наезда сабов',
     category: 'Стыки и тайминги',
     icon: Layers,
     color: 'text-purple-400 bg-purple-950/40 border-purple-500/30',
-    defaultChecked: true
+    defaultChecked: true,
   },
   {
     key: 'scanTimingMismatches',
     title: 'Рассинхрон и вылет из тайминга',
-    subtitle: 'Фразы короче саба (>30%, висит хвост оригинала) или длиннее саба (>40%, вылет за саб)',
+    subtitle: 'Фразы короче саба (висит японский хвост) или длиннее саба (вылет за границу)',
     category: 'Стыки и тайминги',
     icon: Clock,
     color: 'text-sky-400 bg-sky-950/40 border-sky-500/30',
-    defaultChecked: true
+    defaultChecked: true,
   },
   {
     key: 'scanArtifacts',
     title: 'Акустический брак и артефакты',
-    subtitle: 'Клиппинг/перегруз (0 dBFS), щелчки мыши, задувы микрофона (П/Б), резкие обрывы гейтом',
+    subtitle: 'Клиппинг/перегруз, щелчки мыши, задувы микрофона (П/Б), обрывы гейтом',
     category: 'Качество записи',
     icon: Radio,
     color: 'text-rose-400 bg-rose-950/40 border-rose-500/30',
-    defaultChecked: true
+    defaultChecked: true,
   },
   {
     key: 'scanWhisperText',
     title: 'Сверка текста через Whisper ASR',
-    subtitle: 'Сверка произнесённых слов со сценарием с передачей подсказок (prompt) для поиска оговорок',
+    subtitle: 'Сверка произнесённых слов со сценарием для поиска пропущенных или заменённых слов',
     category: 'Текст и ASR',
     icon: FileText,
     color: 'text-emerald-400 bg-emerald-950/40 border-emerald-500/30',
-    badge: 'Whisper AI',
-    defaultChecked: false
-  }
+    badge: 'Whisper',
+    defaultChecked: true,
+  },
+  {
+    key: 'scanSpeechDisfluencies',
+    title: 'Сбивки, оговорки, кашель и вздохи',
+    subtitle: 'Повторы слов, обрывы посередине фразы, затянутые паузы, кашель/вздохи (с кросс-чеком оригинала)',
+    category: 'Дикция и подача',
+    icon: Mic,
+    color: 'text-amber-300 bg-amber-950/40 border-amber-500/30',
+    badge: 'AI_env',
+    defaultChecked: true,
+  },
+  {
+    key: 'scanDictionClarity',
+    title: 'Чёткость дикции, комканье и темп речи',
+    subtitle: 'Анализ чёткости согласных/гласных (GOP) и сопоставление скорости речи с оригиналом',
+    category: 'Дикция и подача',
+    icon: Activity,
+    color: 'text-cyan-400 bg-cyan-950/40 border-cyan-500/30',
+    badge: 'AI_env',
+    defaultChecked: true,
+  },
+  {
+    key: 'scanEmotionMismatch',
+    title: 'Эмоции, энергетика и монотонность',
+    subtitle: 'Сравнение эмоциональной подачи (arousal/valence) и интонационного диапазона F0 с оригиналом',
+    category: 'Актёрская подача',
+    icon: Flame,
+    color: 'text-rose-300 bg-rose-950/40 border-rose-500/30',
+    badge: 'AI_env',
+    defaultChecked: true,
+  },
+  {
+    key: 'scanStressErrors',
+    title: 'Ошибки ударений в именах и словах',
+    subtitle: 'Проверка ударений по словарю проекта и RUAccent + акустическое подтверждение по слогам',
+    category: 'Актёрская подача',
+    icon: BookOpen,
+    color: 'text-yellow-300 bg-yellow-950/40 border-yellow-500/30',
+    badge: 'AI_env',
+    defaultChecked: true,
+  },
+  {
+    key: 'scanPersonaMismatch',
+    title: 'Попадание в образ, возраст и тембр',
+    subtitle: 'Сверка возраста/пола голоса и сходства тембра (ECAPA + F0) с профилем персонажа',
+    category: 'Актёрская подача',
+    icon: UserCheck,
+    color: 'text-indigo-300 bg-indigo-950/40 border-indigo-500/30',
+    badge: 'AI_env',
+    defaultChecked: true,
+  },
 ];
+
+interface NumberParamProps {
+  label: string;
+  hint?: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  unit?: string;
+  onChange: (val: number) => void;
+}
+
+const NumberParamRow: React.FC<NumberParamProps> = ({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  step,
+  unit,
+  onChange,
+}) => (
+  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 py-1.5">
+    <div className="min-w-0 flex-1">
+      <div className="text-xs font-medium text-neutral-200">{label}</div>
+      {hint && <div className="text-[11px] text-neutral-500 leading-snug">{hint}</div>}
+    </div>
+    <div className="flex items-center gap-2.5 shrink-0">
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="w-28 sm:w-32 accent-amber-500 cursor-pointer"
+      />
+      <div className="flex items-center gap-1">
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => {
+            const parsed = parseFloat(e.target.value);
+            if (!isNaN(parsed)) onChange(parsed);
+          }}
+          className="w-20 bg-neutral-950 border border-neutral-700 rounded px-2 py-1 text-right text-xs font-mono tabular-nums text-neutral-100 focus:outline-none focus:border-amber-500"
+        />
+        {unit && <span className="text-[11px] font-mono text-neutral-400 w-7">{unit}</span>}
+      </div>
+    </div>
+  </div>
+);
 
 export const QAScanConfigModal: React.FC<QAScanConfigModalProps> = ({
   isOpen,
   onClose,
   onStartScan,
+  onSaveOptions,
   initialOptions,
   totalDubbers,
-  totalSubLines
+  totalSubLines,
 }) => {
-  // Individual check states
-  const [scanMissingLines, setScanMissingLines] = useState<boolean>(initialOptions?.scanMissingLines ?? true);
-  const [scanUnwantedSpeech, setScanUnwantedSpeech] = useState<boolean>(initialOptions?.scanUnwantedSpeech ?? true);
-  const [scanCollisions, setScanCollisions] = useState<boolean>(initialOptions?.scanCollisions ?? true);
-  const [scanOverlaps, setScanOverlaps] = useState<boolean>(initialOptions?.scanOverlaps ?? true);
-  const [scanTimingMismatches, setScanTimingMismatches] = useState<boolean>(initialOptions?.scanTimingMismatches ?? true);
-  const [scanArtifacts, setScanArtifacts] = useState<boolean>(initialOptions?.scanArtifacts ?? true);
-  const [scanWhisperText, setScanWhisperText] = useState<boolean>(initialOptions?.scanWhisperText ?? false);
+  const [settings, setSettings] = useState<QADetectionSettings>(() => ({
+    ...DEFAULT_QA_DETECTION_SETTINGS,
+    ...initialOptions,
+  }));
+  const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
-  // Whisper model choice
-  const [whisperModel, setWhisperModel] = useState<string>(initialOptions?.whisperModel || 'small');
-
-  // Whisper system readiness state
+  // Whisper readiness
   const [whisperReadiness, setWhisperReadiness] = useState<WhisperReadinessResult & { loading: boolean; checked: boolean }>({
     loading: false,
     checked: false,
     isReady: true,
     canLoadModel: true,
     availableModels: ['small', 'base', 'tiny'],
-    activeModel: initialOptions?.whisperModel || 'small',
-    statusText: 'Готова к проверке (модель Whisper будет загружена при старте)',
-    details: 'Служба Whisper ожидает запуска'
+    activeModel: settings.whisperModel || 'small',
+    statusText: 'Готова к проверке',
+    details: 'Служба Whisper ожидает запуска',
   });
 
-  const refreshWhisperReadiness = async (modelToProbe = whisperModel) => {
-    setWhisperReadiness(prev => ({ ...prev, loading: true }));
+  // Acting AI models readiness
+  const [actingStatus, setActingStatus] = useState<(ActingModelsStatus & { loading?: boolean }) | null>(null);
+  const [isDownloadingModels, setIsDownloadingModels] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<{ percent: number; message: string } | null>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSettings({
+        ...DEFAULT_QA_DETECTION_SETTINGS,
+        ...initialOptions,
+      });
+    }
+  }, [isOpen, initialOptions]);
+
+  const refreshWhisperReadiness = useCallback(async (modelToProbe: string) => {
+    setWhisperReadiness((prev) => ({ ...prev, loading: true }));
     try {
       const result = await checkWhisperSystemReadiness(modelToProbe);
       setWhisperReadiness({
         ...result,
         loading: false,
-        checked: true
+        checked: true,
       });
     } catch (e: any) {
       setWhisperReadiness({
@@ -160,414 +300,1084 @@ export const QAScanConfigModal: React.FC<QAScanConfigModalProps> = ({
         activeModel: modelToProbe,
         statusText: 'Сбой проверки доступности Whisper',
         errorMessage: e?.message || 'Не удалось связаться со службой Whisper',
-        details: String(e)
+        details: String(e),
       });
     }
-  };
+  }, []);
+
+  const refreshActingModels = useCallback(async (profile: ActingResourceProfile) => {
+    setActingStatus((prev) => ({
+      profile,
+      ready: prev?.ready ?? false,
+      missingCount: prev?.missingCount ?? 0,
+      totalMissingMb: prev?.totalMissingMb ?? 0,
+      models: prev?.models ?? [],
+      loading: true,
+    }));
+    try {
+      const res = await qaActingService.checkModels(profile);
+      setActingStatus({ ...res, loading: false });
+    } catch (e: any) {
+      setActingStatus({
+        profile,
+        ready: false,
+        missingCount: 0,
+        totalMissingMb: 0,
+        models: [],
+        error: e?.message || String(e),
+        loading: false,
+      });
+    }
+  }, []);
 
   useEffect(() => {
     if (isOpen) {
-      refreshWhisperReadiness(whisperModel);
+      refreshWhisperReadiness(settings.whisperModel);
     }
-  }, [isOpen, whisperModel]);
+  }, [isOpen, settings.whisperModel, refreshWhisperReadiness]);
 
-  // Sensitivity threshold (speech dynamic delta)
-  const [sensitivityDb, setSensitivityDb] = useState<number>(initialOptions?.speechDynamicThresholdDb ?? 3.0);
+  useEffect(() => {
+    if (isOpen) {
+      refreshActingModels(settings.actingResourceProfile);
+    }
+  }, [isOpen, settings.actingResourceProfile, refreshActingModels]);
 
   if (!isOpen) return null;
 
-  const stateMap: Record<string, [boolean, (val: boolean) => void]> = {
-    scanMissingLines: [scanMissingLines, setScanMissingLines],
-    scanUnwantedSpeech: [scanUnwantedSpeech, setScanUnwantedSpeech],
-    scanCollisions: [scanCollisions, setScanCollisions],
-    scanOverlaps: [scanOverlaps, setScanOverlaps],
-    scanTimingMismatches: [scanTimingMismatches, setScanTimingMismatches],
-    scanArtifacts: [scanArtifacts, setScanArtifacts],
-    scanWhisperText: [scanWhisperText, setScanWhisperText]
+  const updateField = <K extends keyof QADetectionSettings>(key: K, val: QADetectionSettings[K], markCustom = true) => {
+    setSettings((prev) => ({
+      ...prev,
+      [key]: val,
+      presetId: markCustom && key !== 'presetId' ? 'custom' : prev.presetId,
+    }));
   };
 
-  const selectedCount = Object.values(stateMap).filter(([val]) => val).length;
+  const applyPreset = (presetId: Exclude<QAPresetId, 'custom'>) => {
+    const base =
+      presetId === 'soft'
+        ? QA_PRESET_SOFT
+        : presetId === 'strict'
+        ? QA_PRESET_STRICT
+        : QA_PRESET_STANDARD;
+    setSettings({ ...base });
+  };
 
   const handleSelectAll = () => {
-    Object.values(stateMap).forEach(([, setter]) => setter(true));
+    setSettings((prev) => ({
+      ...prev,
+      scanMissingLines: true,
+      scanUnwantedSpeech: true,
+      scanCollisions: true,
+      scanOverlaps: true,
+      scanTimingMismatches: true,
+      scanArtifacts: true,
+      scanWhisperText: true,
+      scanSpeechDisfluencies: true,
+      scanDictionClarity: true,
+      scanEmotionMismatch: true,
+      scanStressErrors: true,
+      scanPersonaMismatch: true,
+    }));
   };
 
   const handleResetDefaults = () => {
-    setScanMissingLines(true);
-    setScanUnwantedSpeech(true);
-    setScanCollisions(true);
-    setScanOverlaps(true);
-    setScanTimingMismatches(true);
-    setScanArtifacts(true);
-    setScanWhisperText(false);
-    setWhisperModel('small');
-    setSensitivityDb(3.0);
+    setSettings({ ...DEFAULT_QA_DETECTION_SETTINGS });
+    toast.info('Настройки QA сброшены к стандартным');
   };
 
-  const handleStart = () => {
-    onStartScan({
-      scanMissingLines,
-      scanUnwantedSpeech,
-      scanCollisions,
-      scanOverlaps,
-      scanTimingMismatches,
-      scanArtifacts,
-      scanWhisperText,
-      whisperModel,
-      speechDynamicThresholdDb: sensitivityDb,
-      silencePeakThresholdDb: -52,
-      silenceRmsThresholdDb: -60,
-      shortLineThresholdPercent: 30,
-      longLineThresholdPercent: 40
+  const handleDownloadModels = async () => {
+    setIsDownloadingModels(true);
+    setDownloadProgress({ percent: 0, message: 'Запуск загрузки локальных моделей AI_env...' });
+    const unsub = qaActingService.subscribeProgress((prog) => {
+      if (prog.stage === 'models') {
+        setDownloadProgress({ percent: prog.percent, message: prog.message });
+      }
     });
+    try {
+      const res = await qaActingService.downloadModels(settings.actingResourceProfile);
+      setActingStatus({ ...res, loading: false });
+      if (res.ready) {
+        toast.success('Все локальные модели актёрского QA загружены!');
+      } else {
+        toast.warning(res.error || 'Некоторые модели не загрузились');
+      }
+    } catch (e: any) {
+      toast.error(`Ошибка загрузки моделей: ${e?.message || e}`);
+    } finally {
+      unsub();
+      setIsDownloadingModels(false);
+      setDownloadProgress(null);
+    }
+  };
+
+  const handleSaveOnly = async () => {
+    setIsSaving(true);
+    try {
+      await qaActingService.saveDetectionSettings(settings);
+      onSaveOptions?.(settings);
+      toast.success('Параметры QA сохранены');
+      onClose();
+    } catch (e: any) {
+      toast.error(`Ошибка сохранения параметров: ${e?.message || e}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleStart = async () => {
+    try {
+      await qaActingService.saveDetectionSettings(settings);
+    } catch {}
+    onSaveOptions?.(settings);
+    onStartScan(settings);
     onClose();
   };
 
+  const selectedCount = QA_CHECK_ITEMS.filter((item) => Boolean(settings[item.key])).length;
+  const anyActingSelected =
+    settings.scanSpeechDisfluencies ||
+    settings.scanDictionClarity ||
+    settings.scanEmotionMismatch ||
+    settings.scanStressErrors ||
+    settings.scanPersonaMismatch;
+
+  const renderCategoryParams = (key: keyof QADetectionSettings) => {
+    switch (key) {
+      case 'scanMissingLines':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Порог динамического перепада речи (VAD)"
+              hint="Минимальный перепад RMS внутри фразы для отделения речи от статичного шума"
+              value={settings.speechDynamicThresholdDb}
+              min={1.0}
+              max={10.0}
+              step={0.5}
+              unit="дБ"
+              onChange={(v) => updateField('speechDynamicThresholdDb', v)}
+            />
+            <NumberParamRow
+              label="Порог пика тишины"
+              hint="Ниже этого уровня фрагмент считается полностью пустым"
+              value={settings.silencePeakThresholdDb}
+              min={-75}
+              max={-25}
+              step={1}
+              unit="дБ"
+              onChange={(v) => updateField('silencePeakThresholdDb', v)}
+            />
+            <NumberParamRow
+              label="Порог RMS тишины"
+              hint="Средняя энергия сигнала, ниже которой речи точно нет"
+              value={settings.silenceRmsThresholdDb}
+              min={-80}
+              max={-35}
+              step={1}
+              unit="дБ"
+              onChange={(v) => updateField('silenceRmsThresholdDb', v)}
+            />
+            <NumberParamRow
+              label="Мин. длительность реплики субтитра"
+              hint="Более короткие субтитры (вздохи/знаки) игнорируются"
+              value={settings.minDurationSec}
+              min={0.05}
+              max={1.0}
+              step={0.05}
+              unit="с"
+              onChange={(v) => updateField('minDurationSec', v)}
+            />
+            <NumberParamRow
+              label="Макс. разброс шума (StdDev)"
+              hint="Если StdDev громкости ниже порога и нет пиков — считается монотонным шумом"
+              value={settings.stationaryNoiseStdDevDb}
+              min={0.3}
+              max={4.0}
+              step={0.1}
+              unit="дБ"
+              onChange={(v) => updateField('stationaryNoiseStdDevDb', v)}
+            />
+            <NumberParamRow
+              label="Макс. пик стационарного шума"
+              hint="Выше этого пика звук считается громким сигналом, а не фоновым шумом"
+              value={settings.stationaryNoisePeakDb}
+              min={-45}
+              max={-10}
+              step={1}
+              unit="дБ"
+              onChange={(v) => updateField('stationaryNoisePeakDb', v)}
+            />
+          </div>
+        );
+
+      case 'scanUnwantedSpeech':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Защитный допуск ДО своей реплики"
+              value={settings.unwantedOwnSubPreMarginSec}
+              min={0.2}
+              max={5.0}
+              step={0.1}
+              unit="с"
+              onChange={(v) => updateField('unwantedOwnSubPreMarginSec', v)}
+            />
+            <NumberParamRow
+              label="Защитный допуск ПОСЛЕ своей реплики"
+              value={settings.unwantedOwnSubPostMarginSec}
+              min={0.2}
+              max={5.0}
+              step={0.1}
+              unit="с"
+              onChange={(v) => updateField('unwantedOwnSubPostMarginSec', v)}
+            />
+            <NumberParamRow
+              label="Защитный допуск ДО чужой реплики"
+              value={settings.unwantedOtherSubPreMarginSec}
+              min={0.2}
+              max={4.0}
+              step={0.1}
+              unit="с"
+              onChange={(v) => updateField('unwantedOtherSubPreMarginSec', v)}
+            />
+            <NumberParamRow
+              label="Защитный допуск ПОСЛЕ чужой реплики"
+              value={settings.unwantedOtherSubPostMarginSec}
+              min={0.2}
+              max={4.0}
+              step={0.1}
+              unit="с"
+              onChange={(v) => updateField('unwantedOtherSubPostMarginSec', v)}
+            />
+            <NumberParamRow
+              label="Мин. длительность лишней речи"
+              value={settings.unwantedMinBurstSec}
+              min={0.15}
+              max={2.0}
+              step={0.05}
+              unit="с"
+              onChange={(v) => updateField('unwantedMinBurstSec', v)}
+            />
+            <NumberParamRow
+              label="Мин. пик лишней речи"
+              value={settings.unwantedPeakThresholdDb}
+              min={-55}
+              max={-18}
+              step={1}
+              unit="дБ"
+              onChange={(v) => updateField('unwantedPeakThresholdDb', v)}
+            />
+            <NumberParamRow
+              label="Мин. RMS лишней речи"
+              value={settings.unwantedRmsThresholdDb}
+              min={-65}
+              max={-25}
+              step={1}
+              unit="дБ"
+              onChange={(v) => updateField('unwantedRmsThresholdDb', v)}
+            />
+          </div>
+        );
+
+      case 'scanCollisions':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Мин. доля перекрытия фразы (0.1 – 1.0)"
+              hint="Какую долю субтитра должны говорить оба дабера, чтобы засчитать конфликт"
+              value={settings.collisionMinCoverageRatio}
+              min={0.15}
+              max={0.95}
+              step={0.05}
+              onChange={(v) => updateField('collisionMinCoverageRatio', v)}
+            />
+            <NumberParamRow
+              label="Мин. пик речи для участия в конфликте"
+              value={settings.collisionPeakThresholdDb}
+              min={-55}
+              max={-18}
+              step={1}
+              unit="дБ"
+              onChange={(v) => updateField('collisionPeakThresholdDb', v)}
+            />
+            <NumberParamRow
+              label="Допуск параллельных субтитров"
+              hint="Игнорировать конфликт, если в сабах реально прописан синхронный диалог"
+              value={settings.collisionParallelSubToleranceSec}
+              min={0.0}
+              max={0.5}
+              step={0.02}
+              unit="с"
+              onChange={(v) => updateField('collisionParallelSubToleranceSec', v)}
+            />
+          </div>
+        );
+
+      case 'scanOverlaps':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Мин. наезд хвоста фраз"
+              hint="Минимальное пересечение аудиодорожек двух даберов на стыке"
+              value={settings.overlapMinSec}
+              min={0.04}
+              max={1.0}
+              step={0.02}
+              unit="с"
+              onChange={(v) => updateField('overlapMinSec', v)}
+            />
+            <NumberParamRow
+              label="Разрешённый наезд в сабах"
+              value={settings.overlapAllowedSubOverlapSec}
+              min={0.0}
+              max={0.5}
+              step={0.02}
+              unit="с"
+              onChange={(v) => updateField('overlapAllowedSubOverlapSec', v)}
+            />
+            <NumberParamRow
+              label="Мин. выход речи за границу своего саба"
+              value={settings.overlapMinSubBoundaryOverrunSec}
+              min={0.05}
+              max={1.0}
+              step={0.05}
+              unit="с"
+              onChange={(v) => updateField('overlapMinSubBoundaryOverrunSec', v)}
+            />
+          </div>
+        );
+
+      case 'scanTimingMismatches':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Порог недобора (короче саба на %)"
+              value={settings.shortLineThresholdPercent}
+              min={10}
+              max={75}
+              step={1}
+              unit="%"
+              onChange={(v) => updateField('shortLineThresholdPercent', v)}
+            />
+            <NumberParamRow
+              label="Мин. разница при недоборе"
+              value={settings.shortLineMinDiffSec}
+              min={0.1}
+              max={2.0}
+              step={0.05}
+              unit="с"
+              onChange={(v) => updateField('shortLineMinDiffSec', v)}
+            />
+            <NumberParamRow
+              label="Мин. висящий хвост оригинала"
+              value={settings.shortLineMinTailSec}
+              min={0.1}
+              max={1.5}
+              step={0.02}
+              unit="с"
+              onChange={(v) => updateField('shortLineMinTailSec', v)}
+            />
+            <NumberParamRow
+              label="Порог перебора / вылета (длиннее саба на %)"
+              value={settings.longLineThresholdPercent}
+              min={10}
+              max={100}
+              step={1}
+              unit="%"
+              onChange={(v) => updateField('longLineThresholdPercent', v)}
+            />
+            <NumberParamRow
+              label="Мин. вылет за конец саба"
+              value={settings.longLineMinOverflowSec}
+              min={0.1}
+              max={2.0}
+              step={0.05}
+              unit="с"
+              onChange={(v) => updateField('longLineMinOverflowSec', v)}
+            />
+          </div>
+        );
+
+      case 'scanArtifacts':
+        return (
+          <div className="space-y-2.5 text-xs">
+            <div className="space-y-1 border-b border-neutral-800/70 pb-2">
+              <label className="flex items-center gap-2 font-semibold text-neutral-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.detectClipping}
+                  onChange={(e) => updateField('detectClipping', e.target.checked)}
+                  className="accent-amber-500"
+                />
+                <span>Клиппинг / Перегруз</span>
+              </label>
+              {settings.detectClipping && (
+                <>
+                  <NumberParamRow
+                    label="Мин. сэмплов перегруза подряд"
+                    value={settings.clipMinConsecutive}
+                    min={1}
+                    max={12}
+                    step={1}
+                    onChange={(v) => updateField('clipMinConsecutive', v)}
+                  />
+                  <NumberParamRow
+                    label="Порог клиппинга (0.900 – 1.000)"
+                    value={settings.clipThresholdLinear}
+                    min={0.9}
+                    max={1.0}
+                    step={0.0005}
+                    onChange={(v) => updateField('clipThresholdLinear', v)}
+                  />
+                </>
+              )}
+            </div>
+
+            <div className="space-y-1 border-b border-neutral-800/70 pb-2">
+              <label className="flex items-center gap-2 font-semibold text-neutral-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.detectClicks}
+                  onChange={(e) => updateField('detectClicks', e.target.checked)}
+                  className="accent-amber-500"
+                />
+                <span>Щелчки мыши / цифровые клики</span>
+              </label>
+              {settings.detectClicks && (
+                <>
+                  <NumberParamRow
+                    label="Отношение скачка (Click Ratio)"
+                    value={settings.clickRatioThreshold}
+                    min={8}
+                    max={40}
+                    step={0.5}
+                    onChange={(v) => updateField('clickRatioThreshold', v)}
+                  />
+                  <NumberParamRow
+                    label="Мин. амплитуда скачка (0.02 – 0.30)"
+                    value={settings.clickMinDiff}
+                    min={0.02}
+                    max={0.3}
+                    step={0.01}
+                    onChange={(v) => updateField('clickMinDiff', v)}
+                  />
+                </>
+              )}
+            </div>
+
+            <div className="space-y-1 border-b border-neutral-800/70 pb-2">
+              <label className="flex items-center gap-2 font-semibold text-neutral-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.detectPlosives}
+                  onChange={(e) => updateField('detectPlosives', e.target.checked)}
+                  className="accent-amber-500"
+                />
+                <span>Задувы микрофона (П/Б)</span>
+              </label>
+              {settings.detectPlosives && (
+                <>
+                  <NumberParamRow
+                    label="Порог низких частот задува"
+                    value={settings.plosiveLowDbThreshold}
+                    min={-35}
+                    max={-8}
+                    step={1}
+                    unit="дБ"
+                    onChange={(v) => updateField('plosiveLowDbThreshold', v)}
+                  />
+                  <NumberParamRow
+                    label="Перепад НЧ/СЧ (Plosive Delta)"
+                    value={settings.plosiveDeltaDbThreshold}
+                    min={-8}
+                    max={6}
+                    step={0.5}
+                    unit="дБ"
+                    onChange={(v) => updateField('plosiveDeltaDbThreshold', v)}
+                  />
+                </>
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label className="flex items-center gap-2 font-semibold text-neutral-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={settings.detectSwallowed}
+                  onChange={(e) => updateField('detectSwallowed', e.target.checked)}
+                  className="accent-amber-500"
+                />
+                <span>Обрывы гейтом / съеденные гласные</span>
+              </label>
+              {settings.detectSwallowed && (
+                <>
+                  <NumberParamRow
+                    label="Резкое падение уровня (Cutoff Drop)"
+                    value={settings.cutoffDropDbThreshold}
+                    min={12}
+                    max={40}
+                    step={1}
+                    unit="дБ"
+                    onChange={(v) => updateField('cutoffDropDbThreshold', v)}
+                  />
+                  <NumberParamRow
+                    label="Мин. длительность саба для проверки обрыва"
+                    value={settings.cutoffMinSubDurationSec}
+                    min={0.5}
+                    max={4.0}
+                    step={0.1}
+                    unit="с"
+                    onChange={(v) => updateField('cutoffMinSubDurationSec', v)}
+                  />
+                </>
+              )}
+            </div>
+          </div>
+        );
+
+      case 'scanWhisperText':
+        return (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs">
+                {whisperReadiness.loading ? (
+                  <span className="text-neutral-400 inline-flex items-center gap-1.5">
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Проверка службы Whisper...
+                  </span>
+                ) : whisperReadiness.isReady && whisperReadiness.canLoadModel ? (
+                  <span className="text-emerald-400 inline-flex items-center gap-1.5 font-medium">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> {whisperReadiness.statusText}
+                  </span>
+                ) : (
+                  <span className="text-rose-400 inline-flex items-center gap-1.5 font-medium">
+                    <AlertTriangle className="w-3.5 h-3.5" /> {whisperReadiness.statusText}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => refreshWhisperReadiness(settings.whisperModel)}
+                disabled={whisperReadiness.loading}
+                className="px-2.5 py-1 rounded border border-neutral-700 bg-neutral-800 text-[11px] text-neutral-200 hover:bg-neutral-700 inline-flex items-center gap-1 whitespace-nowrap"
+              >
+                <RefreshCw className={`w-3 h-3 ${whisperReadiness.loading ? 'animate-spin' : ''}`} />
+                Проверить
+              </button>
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { id: 'small', desc: 'Точный RU (~460 МБ)' },
+                { id: 'base', desc: 'Баланс (~140 МБ)' },
+                { id: 'tiny', desc: 'Быстрый (~75 МБ)' },
+              ].map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => updateField('whisperModel', m.id)}
+                  className={`px-3 py-2 rounded-lg border text-left text-xs transition-colors ${
+                    settings.whisperModel === m.id
+                      ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-200 font-semibold'
+                      : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  <div className="font-mono">{m.id}</div>
+                  <div className="text-[10px] text-neutral-400 mt-0.5">{m.desc}</div>
+                </button>
+              ))}
+            </div>
+
+            <NumberParamRow
+              label="Мин. порог сходства текста с сабами"
+              hint="Если сходство распознанной речи с субтитром ниже порога — фиксируется расхождение"
+              value={settings.whisperSimilarityThresholdPercent}
+              min={55}
+              max={98}
+              step={1}
+              unit="%"
+              onChange={(v) => updateField('whisperSimilarityThresholdPercent', v)}
+            />
+          </div>
+        );
+
+      case 'scanSpeechDisfluencies':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Макс. пауза внутри одной фразы"
+              hint="Паузы длиннее этого порога внутри одной реплики отмечаются как заминка/сбивка"
+              value={settings.disfluencyMaxPauseSec}
+              min={0.2}
+              max={1.5}
+              step={0.05}
+              unit="с"
+              onChange={(v) => updateField('disfluencyMaxPauseSec', v)}
+            />
+            <NumberParamRow
+              label="Чувствительность детектора кашля/вздохов (AST)"
+              hint="Ниже значение — чувствительнее срабатывание на кашель, смех и придыхания"
+              value={settings.disfluencyEventsThreshold}
+              min={0.15}
+              max={0.85}
+              step={0.05}
+              onChange={(v) => updateField('disfluencyEventsThreshold', v)}
+            />
+            <label className="flex items-center justify-between pt-2 text-xs text-neutral-200 cursor-pointer">
+              <div>
+                <div className="font-medium">Кросс-чек с оригиналом (японский стем)</div>
+                <div className="text-[11px] text-neutral-500">
+                  Не помечать кашель/вздох/смешок как брак, если он есть у персонажа в оригинале
+                </div>
+              </div>
+              <input
+                type="checkbox"
+                checked={settings.disfluencyCrossCheckOriginal}
+                onChange={(e) => updateField('disfluencyCrossCheckOriginal', e.target.checked)}
+                className="accent-amber-500 w-4 h-4 shrink-0"
+              />
+            </label>
+          </div>
+        );
+
+      case 'scanDictionClarity':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Мин. индекс чёткости дикции (GOP, 0.2 – 0.9)"
+              hint="Ниже порога — слова скомканы или проглочены"
+              value={settings.dictionMinGopScore}
+              min={0.2}
+              max={0.9}
+              step={0.02}
+              onChange={(v) => updateField('dictionMinGopScore', v)}
+            />
+            <NumberParamRow
+              label="Макс. отличие темпа речи от оригинала"
+              hint="Отклонение скорости в слогах/сек относительно японского вокала или нормы"
+              value={settings.dictionMaxRateDeltaPercent}
+              min={15}
+              max={70}
+              step={5}
+              unit="%"
+              onChange={(v) => updateField('dictionMaxRateDeltaPercent', v)}
+            />
+          </div>
+        );
+
+      case 'scanEmotionMismatch':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Макс. просадка энергетики / эмоций (Arousal Delta)"
+              hint="Допустимая разница интенсивности подачи по сравнению с оригиналом"
+              value={settings.emotionMaxArousalDelta}
+              min={0.12}
+              max={0.65}
+              step={0.02}
+              onChange={(v) => updateField('emotionMaxArousalDelta', v)}
+            />
+            <NumberParamRow
+              label="Порог монотонности (F0 Ratio, 0.25 – 0.85)"
+              hint="Выше порог — строже требование к выразительности интонации по сравнению с оригиналом"
+              value={settings.emotionMaxPitchMonotonyRatio}
+              min={0.25}
+              max={0.85}
+              step={0.05}
+              onChange={(v) => updateField('emotionMaxPitchMonotonyRatio', v)}
+            />
+          </div>
+        );
+
+      case 'scanStressErrors':
+        return (
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="text-neutral-300 font-medium">Режим проверки ударений:</span>
+              <div className="flex items-center gap-1.5">
+                {[
+                  { id: 'dictionary_and_text' as StressCheckMode, label: 'Словарь + Весь текст (RUAccent)' },
+                  { id: 'dictionary_only' as StressCheckMode, label: 'Только словарь ударений' },
+                ].map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => updateField('stressCheckMode', opt.id)}
+                    className={`px-2.5 py-1 rounded border text-[11px] font-medium whitespace-nowrap transition-colors ${
+                      settings.stressCheckMode === opt.id
+                        ? 'bg-amber-500/20 border-amber-500/60 text-amber-200'
+                        : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-neutral-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <NumberParamRow
+              label="Порог акустического контраста слогов"
+              hint="Минимальное превосходство ударного гласного по энергии/тону над остальными слогами"
+              value={settings.stressContrastThresholdDb}
+              min={1.0}
+              max={6.0}
+              step={0.2}
+              unit="дБ"
+              onChange={(v) => updateField('stressContrastThresholdDb', v)}
+            />
+          </div>
+        );
+
+      case 'scanPersonaMismatch':
+        return (
+          <div className="space-y-1 divide-y divide-neutral-800/70">
+            <NumberParamRow
+              label="Мин. сходство тембра с эталоном (ECAPA, 0.35 – 0.90)"
+              value={settings.personaMinVoiceSimilarity}
+              min={0.35}
+              max={0.9}
+              step={0.02}
+              onChange={(v) => updateField('personaMinVoiceSimilarity', v)}
+            />
+            <NumberParamRow
+              label="Макс. расхождение по возрасту с профилем"
+              value={settings.personaMaxAgeDeltaYears}
+              min={5}
+              max={30}
+              step={1}
+              unit="лет"
+              onChange={(v) => updateField('personaMaxAgeDeltaYears', v)}
+            />
+          </div>
+        );
+
+      default:
+        return null;
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div 
-        className="relative w-full max-w-3xl bg-neutral-900 border border-neutral-800 rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden"
+    <div className="fixed inset-0 z-[130] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+      <div
+        className="relative w-full max-w-4xl bg-neutral-900 border border-neutral-800 rounded-xl flex flex-col max-h-[92vh] overflow-hidden text-neutral-200"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-neutral-800 bg-neutral-900/90 sticky top-0 z-10">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shadow-inner">
-              <Sliders className="w-5 h-5" />
+        <div className="flex items-center justify-between px-5 py-3.5 border-b border-neutral-800 bg-neutral-900 shrink-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-lg bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+              <Sliders className="w-4 h-4" />
             </div>
-            <div>
-              <h2 className="text-lg font-semibold text-neutral-100 flex items-center gap-2">
-                Настройка проверок качества озвучки
-                <span className="text-xs px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 border border-neutral-700 font-normal">
-                  {totalDubbers} даб. / {totalSubLines} саб.
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold text-neutral-100 flex items-center gap-2 flex-wrap">
+                <span>Настройки QA и детекторов качества</span>
+                <span className="text-xs font-mono tabular-nums text-neutral-400">
+                  {totalDubbers} даб. · {totalSubLines} саб.
                 </span>
               </h2>
-              <p className="text-xs text-neutral-400">
-                Отметьте детекторы для анализа дорожек перед запуском сканирования
+              <p className="text-xs text-neutral-400 truncate">
+                Пресеты, пороги технических проверок, выделение японского стема и локальный актёрский анализ
               </p>
             </div>
           </div>
           <button
+            type="button"
             onClick={onClose}
-            className="p-2 text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded-lg transition-colors"
-            title="Закрыть"
+            className="p-1.5 text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded-lg transition-colors shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Body Content */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* Quick select bar */}
-          <div className="flex items-center justify-between pb-2 border-b border-neutral-800/60">
-            <span className="text-xs font-medium text-neutral-400">
-              Выбрано проверок: <strong className="text-neutral-200">{selectedCount} из {QA_CHECK_ITEMS.length}</strong>
-            </span>
-            <div className="flex items-center gap-3 text-xs">
+        {/* Presets & Quick Bar */}
+        <div className="px-5 py-2.5 border-b border-neutral-800 bg-neutral-950/60 flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs text-neutral-400 mr-1">Профиль порогов:</span>
+            {[
+              { id: 'soft' as const, label: 'Мягкий' },
+              { id: 'standard' as const, label: 'Стандарт' },
+              { id: 'strict' as const, label: 'Строгий' },
+            ].map((p) => (
               <button
+                key={p.id}
                 type="button"
-                onClick={handleSelectAll}
-                className="text-amber-400 hover:text-amber-300 font-medium transition-colors"
+                onClick={() => applyPreset(p.id)}
+                className={`px-2.5 py-1 rounded-md text-xs font-medium border whitespace-nowrap transition-colors ${
+                  settings.presetId === p.id
+                    ? 'bg-amber-500 text-neutral-950 border-amber-400 font-semibold'
+                    : 'bg-neutral-900 text-neutral-300 border-neutral-800 hover:border-neutral-700'
+                }`}
               >
-                Выбрать все
+                {p.label}
               </button>
-              <span className="text-neutral-700">|</span>
-              <button
-                type="button"
-                onClick={handleResetDefaults}
-                className="text-neutral-400 hover:text-neutral-300 transition-colors"
-              >
-                По умолчанию
-              </button>
-            </div>
+            ))}
+            {settings.presetId === 'custom' && (
+              <span className="px-2.5 py-1 rounded-md text-xs font-medium bg-neutral-800 text-amber-300 border border-amber-500/40 whitespace-nowrap">
+                Свой
+              </span>
+            )}
           </div>
 
-          {/* Checklist of detectors */}
-          <div className="space-y-2.5">
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-neutral-400 font-mono tabular-nums">
+              {selectedCount}/{QA_CHECK_ITEMS.length} активны
+            </span>
+            <button
+              type="button"
+              onClick={handleSelectAll}
+              className="text-amber-400 hover:text-amber-300 font-medium whitespace-nowrap"
+            >
+              Выбрать все
+            </button>
+            <button
+              type="button"
+              onClick={handleResetDefaults}
+              className="text-neutral-400 hover:text-neutral-200 inline-flex items-center gap-1 whitespace-nowrap"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Сбросить по умолчанию
+            </button>
+          </div>
+        </div>
+
+        {/* Scrollable Body */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-5 space-y-4 custom-scrollbar">
+          {/* Stage 0 Stems & Acting Profile Panel */}
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/60 p-4 space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Stage 0 Original Stem Strategy */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
+                  <Cpu className="w-3.5 h-3.5 text-amber-400" />
+                  Этап 0: Выделение вокального стема оригинала
+                </label>
+                <select
+                  value={settings.originalStemMode}
+                  onChange={(e) => updateField('originalStemMode', e.target.value as OriginalStemMode)}
+                  className="w-full bg-neutral-900 border border-neutral-700 rounded-lg px-2.5 py-1.5 text-xs text-neutral-100 focus:outline-none focus:border-amber-500"
+                >
+                  <option value="full_cached">Полный стем с кэшем (рекомендуется для Тайминга/Сведения)</option>
+                  <option value="dialogue_windows">Быстро только по окнам реплик (без кэша серии)</option>
+                  <option value="none">Не разделять (сверка по общему звуку видео)</option>
+                </select>
+                {settings.originalStemMode !== 'none' && (
+                  <div className="flex items-center gap-2 pt-1 text-[11px] text-neutral-400">
+                    <span>Модель разделения:</span>
+                    {(['htdemucs', 'uvr_mdx_voc_ft'] as OriginalStemModel[]).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => updateField('originalStemModel', m)}
+                        className={`px-2 py-0.5 rounded border font-mono ${
+                          settings.originalStemModel === m
+                            ? 'bg-amber-500/20 border-amber-500/50 text-amber-200'
+                            : 'bg-neutral-900 border-neutral-800 text-neutral-400'
+                        }`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Acting AI Resource Profile */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-neutral-200 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  Профиль моделей актёрского QA (100% локально в AI_env)
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { id: 'fast_diction' as ActingResourceProfile, title: 'Быстрый (Дикция)', desc: 'Дикция + ударения (~720 МБ)' },
+                    { id: 'full_acting' as ActingResourceProfile, title: 'Полный (Актёрка)', desc: 'Все 5 моделей (~2.8 ГБ)' },
+                  ].map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => updateField('actingResourceProfile', p.id)}
+                      className={`px-2.5 py-1.5 rounded-lg border text-left text-xs transition-colors ${
+                        settings.actingResourceProfile === p.id
+                          ? 'bg-cyan-500/15 border-cyan-500/50 text-cyan-200 font-semibold'
+                          : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-neutral-200'
+                      }`}
+                    >
+                      <div>{p.title}</div>
+                      <div className="text-[10px] text-neutral-400 font-normal">{p.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Acting AI Models Readiness Status */}
+            {anyActingSelected && (
+              <div className="pt-2.5 border-t border-neutral-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 min-w-0">
+                  {actingStatus?.loading ? (
+                    <span className="text-neutral-400 inline-flex items-center gap-1.5">
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" /> Проверка кэша моделей AI_env...
+                    </span>
+                  ) : actingStatus?.ready ? (
+                    <span className="text-emerald-400 inline-flex items-center gap-1.5 font-medium">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      Локальные модели ({settings.actingResourceProfile}) готовы на диске
+                    </span>
+                  ) : (
+                    <span className="text-amber-300 inline-flex items-center gap-1.5 font-medium">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      {actingStatus?.error
+                        ? `Проверка моделей: ${actingStatus.error}`
+                        : `Необходимо докачать ${actingStatus?.missingCount || 0} мод. (~${actingStatus?.totalMissingMb || 0} МБ)`}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => refreshActingModels(settings.actingResourceProfile)}
+                    disabled={actingStatus?.loading || isDownloadingModels}
+                    className="px-2.5 py-1 rounded border border-neutral-700 bg-neutral-900 text-neutral-300 hover:text-white text-[11px] inline-flex items-center gap-1 whitespace-nowrap"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${actingStatus?.loading ? 'animate-spin' : ''}`} />
+                    Проверить кэш
+                  </button>
+
+                  {actingStatus && !actingStatus.ready && (
+                    <button
+                      type="button"
+                      onClick={handleDownloadModels}
+                      disabled={isDownloadingModels}
+                      className="px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-semibold inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>
+                        {isDownloadingModels
+                          ? `Загрузка ${downloadProgress?.percent ?? 0}%...`
+                          : `Скачать модели (~${actingStatus.totalMissingMb || 0} МБ)`}
+                      </span>
+                    </button>
+                  )}
+                </div>
+
+                {downloadProgress && (
+                  <div className="w-full space-y-1">
+                    <div className="flex justify-between text-[11px] text-cyan-300">
+                      <span>{downloadProgress.message}</span>
+                      <span className="font-mono tabular-nums">{downloadProgress.percent}%</span>
+                    </div>
+                    <div className="w-full h-1.5 rounded-full bg-neutral-800 overflow-hidden">
+                      <div
+                        className="h-full bg-cyan-500 transition-all duration-300"
+                        style={{ width: `${downloadProgress.percent}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* All 12 Detectors Checklist + Expandable Per-Detector Thresholds */}
+          <div className="space-y-2">
             {QA_CHECK_ITEMS.map((item) => {
-              const [checked, setter] = stateMap[item.key] || [false, () => {}];
+              const checked = Boolean(settings[item.key]);
+              const isExpanded = expandedKey === item.key;
               const IconComp = item.icon;
 
               return (
                 <div
                   key={item.key}
-                  onClick={() => setter(!checked)}
-                  className={`flex items-start gap-3.5 p-3.5 rounded-xl border transition-all cursor-pointer select-none ${
+                  className={`rounded-xl border transition-colors ${
                     checked
-                      ? 'bg-neutral-800/60 border-neutral-700 shadow-sm'
-                      : 'bg-neutral-900/40 border-neutral-800/60 opacity-60 hover:opacity-90 hover:bg-neutral-800/30'
+                      ? 'bg-neutral-900/90 border-neutral-700/80'
+                      : 'bg-neutral-950/50 border-neutral-800/70 opacity-75'
                   }`}
                 >
-                  <button
-                    type="button"
-                    className="mt-0.5 text-neutral-400 hover:text-neutral-200 focus:outline-none"
-                  >
-                    {checked ? (
-                      <CheckSquare className="w-5 h-5 text-amber-400" />
-                    ) : (
-                      <Square className="w-5 h-5 text-neutral-500" />
-                    )}
-                  </button>
-
-                  <div className={`p-2 rounded-lg border ${item.color} shrink-0 mt-0.5`}>
-                    <IconComp className="w-4 h-4" />
-                  </div>
-
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-sm font-medium text-neutral-200">
-                        {item.title}
-                      </span>
-                      {item.badge && (
-                        <span className="text-[10px] uppercase font-semibold tracking-wider px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                          {item.badge}
-                        </span>
+                  <div className="flex items-start gap-3 p-3">
+                    <button
+                      type="button"
+                      onClick={() => updateField(item.key, !checked as any, false)}
+                      className="mt-0.5 text-neutral-400 hover:text-neutral-100 focus:outline-none shrink-0"
+                    >
+                      {checked ? (
+                        <CheckSquare className="w-5 h-5 text-amber-400" />
+                      ) : (
+                        <Square className="w-5 h-5 text-neutral-600" />
                       )}
-                      {item.key === 'scanWhisperText' && (
-                        <div className="ml-auto flex items-center gap-1">
-                          {whisperReadiness.loading ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-neutral-800 text-neutral-400 border border-neutral-700">
-                              <RefreshCw className="w-3 h-3 animate-spin text-neutral-400" />
-                              Опрос готовности...
-                            </span>
-                          ) : whisperReadiness.isReady && whisperReadiness.canLoadModel ? (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-emerald-950/70 text-emerald-300 border border-emerald-500/40 font-medium">
-                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                              Готова к загрузке
-                            </span>
-                          ) : (
-                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-rose-950/70 text-rose-300 border border-rose-500/40 font-medium">
-                              <AlertTriangle className="w-3 h-3 text-rose-400" />
-                              Не готова
-                            </span>
-                          )}
-                        </div>
-                      )}
+                    </button>
+
+                    <div className={`p-1.5 rounded-lg border ${item.color} shrink-0 mt-0.5`}>
+                      <IconComp className="w-4 h-4" />
                     </div>
-                    <p className="text-xs text-neutral-400 mt-0.5 leading-relaxed">
-                      {item.subtitle}
-                    </p>
+
+                    <div
+                      className="flex-1 min-w-0 cursor-pointer"
+                      onClick={() => updateField(item.key, !checked as any, false)}
+                    >
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium text-neutral-100">{item.title}</span>
+                        {item.badge && (
+                          <span className="text-[10px] font-mono text-neutral-400">[{item.badge}]</span>
+                        )}
+                      </div>
+                      <p className="text-xs text-neutral-400 mt-0.5 leading-snug">{item.subtitle}</p>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setExpandedKey(isExpanded ? null : item.key)}
+                      className="px-2.5 py-1 rounded-md border border-neutral-800 bg-neutral-950 hover:border-neutral-700 text-[11px] font-medium text-neutral-300 hover:text-white inline-flex items-center gap-1 shrink-0 whitespace-nowrap"
+                    >
+                      <span>Параметры</span>
+                      {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+                    </button>
                   </div>
+
+                  {isExpanded && (
+                    <div className="px-4 pb-3.5 pt-2 border-t border-neutral-800/80 bg-neutral-950/60">
+                      {renderCategoryParams(item.key)}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
-
-          {/* Whisper Options Details (when scanWhisperText is selected) */}
-          {scanWhisperText && (
-            <div className="p-4 rounded-xl bg-emerald-950/20 border border-emerald-500/30 space-y-3 animate-in fade-in duration-200">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 text-emerald-400 text-sm font-semibold">
-                  <Sparkles className="w-4 h-4" />
-                  <span>Параметры сверки текста через Whisper</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => refreshWhisperReadiness(whisperModel)}
-                  disabled={whisperReadiness.loading}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-neutral-700 bg-neutral-800/80 text-xs text-neutral-300 hover:text-neutral-100 hover:bg-neutral-700 transition-colors"
-                  title="Повторить опрос готовности службы Whisper"
-                >
-                  <RefreshCw className={`w-3 h-3 ${whisperReadiness.loading ? 'animate-spin' : ''}`} />
-                  <span>Проверить готовность</span>
-                </button>
-              </div>
-
-              {/* Explicit Whisper System Readiness Status Box */}
-              <div className={`p-3 rounded-lg border text-xs transition-all ${
-                whisperReadiness.loading
-                  ? 'bg-neutral-800/40 border-neutral-700 text-neutral-300'
-                  : whisperReadiness.isReady && whisperReadiness.canLoadModel
-                  ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
-                  : 'bg-rose-950/30 border-rose-500/40 text-rose-200'
-              }`}>
-                <div className="flex items-start gap-2.5">
-                  <div className={`p-1 rounded-md border mt-0.5 shrink-0 ${
-                    whisperReadiness.loading
-                      ? 'bg-neutral-800 border-neutral-700 text-neutral-400'
-                      : whisperReadiness.isReady && whisperReadiness.canLoadModel
-                      ? 'bg-emerald-900/50 border-emerald-500/40 text-emerald-400'
-                      : 'bg-rose-900/50 border-rose-500/40 text-rose-400'
-                  }`}>
-                    {whisperReadiness.loading ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    ) : whisperReadiness.isReady && whisperReadiness.canLoadModel ? (
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                    ) : (
-                      <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                    )}
-                  </div>
-
-                  <div className="flex-1 space-y-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-neutral-100">
-                        {whisperReadiness.loading
-                          ? 'Опрос доступности Whisper...'
-                          : whisperReadiness.isReady && whisperReadiness.canLoadModel
-                          ? `Система Whisper готова к загрузке модели «${whisperModel}»`
-                          : `Система Whisper не готова к загрузке модели`}
-                      </span>
-
-                      {whisperReadiness.backendType && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700 font-mono">
-                          {whisperReadiness.backendType}
-                        </span>
-                      )}
-
-                      {whisperReadiness.isModelDownloaded !== undefined && (
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${
-                          whisperReadiness.isModelDownloaded
-                            ? 'bg-emerald-900/40 text-emerald-300 border-emerald-700'
-                            : 'bg-amber-900/40 text-amber-300 border-amber-700'
-                        }`}>
-                          {whisperReadiness.isModelDownloaded ? 'Веса модели на диске' : 'Потребуется загрузка'}
-                        </span>
-                      )}
-                    </div>
-
-                    <p className="opacity-90 leading-relaxed">
-                      {whisperReadiness.statusText}
-                    </p>
-
-                    {whisperReadiness.details && (
-                      <p className="text-[11px] text-neutral-400 font-mono">
-                        {whisperReadiness.details}
-                      </p>
-                    )}
-
-                    {!whisperReadiness.loading && (!whisperReadiness.isReady || !whisperReadiness.canLoadModel) && (
-                      <div className="text-[11px] text-rose-300 mt-1 flex items-center gap-1.5 bg-rose-950/60 p-1.5 rounded border border-rose-500/30">
-                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
-                        <span>Если запустить сканирование сейчас, проверка текста по Whisper не произойдет и в результатах будет статус «проверка неудачна».</span>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <p className="text-xs text-neutral-300 leading-relaxed">
-                Модель Whisper расшифрует произнесённые фрагменты речи с передачей субтитров в качестве подсказок (<code className="px-1 py-0.5 rounded bg-neutral-800 text-neutral-200">prompt context</code>), что гарантирует безошибочное распознавание японских имён, приёмов и терминов.
-              </p>
-
-              <div className="space-y-1.5 pt-1">
-                <label className="text-xs font-medium text-neutral-300 flex items-center gap-1.5">
-                  <Cpu className="w-3.5 h-3.5 text-neutral-400" />
-                  Модель распознавания:
-                </label>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setWhisperModel('small')}
-                    className={`px-3 py-2 rounded-lg border text-left text-xs transition-all ${
-                      whisperModel === 'small'
-                        ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200 font-medium shadow-sm'
-                        : 'bg-neutral-800/60 border-neutral-700 text-neutral-400 hover:bg-neutral-800'
-                    }`}
-                  >
-                    <div className="font-semibold text-neutral-100 flex items-center justify-between">
-                      <span>small</span>
-                      <span className="text-[10px] text-emerald-400 font-normal">Рекомендуется</span>
-                    </div>
-                    <div className="text-[11px] text-neutral-400 mt-0.5">
-                      Высокая точность русского языка (~460 МБ)
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setWhisperModel('base')}
-                    className={`px-3 py-2 rounded-lg border text-left text-xs transition-all ${
-                      whisperModel === 'base'
-                        ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200 font-medium shadow-sm'
-                        : 'bg-neutral-800/60 border-neutral-700 text-neutral-400 hover:bg-neutral-800'
-                    }`}
-                  >
-                    <div className="font-semibold text-neutral-100">base</div>
-                    <div className="text-[11px] text-neutral-400 mt-0.5">
-                      Быстрое распознавание (~140 МБ)
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setWhisperModel('tiny')}
-                    className={`px-3 py-2 rounded-lg border text-left text-xs transition-all ${
-                      whisperModel === 'tiny'
-                        ? 'bg-emerald-600/30 border-emerald-500 text-emerald-200 font-medium shadow-sm'
-                        : 'bg-neutral-800/60 border-neutral-700 text-neutral-400 hover:bg-neutral-800'
-                    }`}
-                  >
-                    <div className="font-semibold text-neutral-100">tiny</div>
-                    <div className="text-[11px] text-neutral-400 mt-0.5">
-                      Мгновенный черновой ASR (~75 МБ)
-                    </div>
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Voice Activity Detection Sensitivity */}
-          <div className="p-4 rounded-xl bg-neutral-800/40 border border-neutral-800 space-y-2">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-medium text-neutral-300 flex items-center gap-1.5">
-                <Sliders className="w-3.5 h-3.5 text-neutral-400" />
-                Порог динамического перепада речи (VAD)
-              </label>
-              <span className="text-xs font-semibold text-amber-400">
-                {sensitivityDb.toFixed(1)} дБ
-              </span>
-            </div>
-            <p className="text-[11px] text-neutral-400 leading-normal">
-              Минимальный разбег RMS внутри фразы для отделения речи от шума микрофона.
-            </p>
-            <div className="grid grid-cols-3 gap-2 pt-1">
-              {[
-                { db: 2.0, label: 'Высокая (2.0 дБ)', desc: 'Ловит даже тихий шёпот' },
-                { db: 3.0, label: 'Стандарт (3.0 дБ)', desc: 'Оптимально для аниме' },
-                { db: 4.5, label: 'Низкая (4.5 дБ)', desc: 'Для зашумлённых дорожек' }
-              ].map(opt => (
-                <button
-                  key={opt.db}
-                  type="button"
-                  onClick={() => setSensitivityDb(opt.db)}
-                  className={`p-2 rounded-lg border text-left text-xs transition-all ${
-                    Math.abs(sensitivityDb - opt.db) < 0.1
-                      ? 'bg-amber-500/20 border-amber-500/60 text-amber-200 font-medium'
-                      : 'bg-neutral-800/40 border-neutral-700/60 text-neutral-400 hover:bg-neutral-800'
-                  }`}
-                >
-                  <div className="font-medium text-neutral-200">{opt.label}</div>
-                  <div className="text-[10px] text-neutral-400 mt-0.5">{opt.desc}</div>
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
 
-        {/* Footer Buttons */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-neutral-800 bg-neutral-900/90 sticky bottom-0 z-10">
+        {/* Footer */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-3.5 border-t border-neutral-800 bg-neutral-900 shrink-0">
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-2 text-xs font-medium text-neutral-400 hover:text-neutral-200 hover:bg-neutral-800 rounded-lg transition-colors"
+            className="px-4 py-2 text-xs font-medium text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800 rounded-lg transition-colors whitespace-nowrap"
           >
             Отмена
           </button>
 
-          <button
-            type="button"
-            onClick={handleStart}
-            disabled={selectedCount === 0}
-            className={`px-5 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-2 shadow-lg transition-all ${
-              selectedCount === 0
-                ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed'
-                : 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-neutral-950 font-bold shadow-amber-500/20'
-            }`}
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>Начать проверку ({selectedCount} {selectedCount === 1 ? 'проверка' : selectedCount < 5 ? 'проверки' : 'проверок'})</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleSaveOnly}
+              disabled={isSaving}
+              className="px-4 py-2 rounded-lg text-xs font-medium border border-neutral-700 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 inline-flex items-center gap-1.5 whitespace-nowrap disabled:opacity-50"
+            >
+              <Save className="w-3.5 h-3.5 text-neutral-300" />
+              <span>{isSaving ? 'Сохранение...' : 'Сохранить настройки'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleStart}
+              disabled={selectedCount === 0}
+              className={`px-5 py-2 rounded-lg text-xs font-bold inline-flex items-center gap-2 whitespace-nowrap transition-colors ${
+                selectedCount === 0
+                  ? 'bg-neutral-800 text-neutral-500 cursor-not-allowed'
+                  : 'bg-amber-500 hover:bg-amber-400 text-neutral-950'
+              }`}
+            >
+              <Sparkles className="w-4 h-4" />
+              <span>Начать проверку ({selectedCount})</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

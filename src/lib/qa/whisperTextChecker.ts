@@ -127,12 +127,13 @@ export function computeWordDiff(expectedText: string, recognizedText: string): {
 export function classifyDiscrepancy(
   expectedText: string,
   recognizedText: string,
-  lineIndex: number
+  lineIndex: number,
+  similarityThresholdPercent: number = 88
 ): WhisperTextComparisonResult {
   const { diffs, similarity, missingWords, addedWords } = computeWordDiff(expectedText, recognizedText);
 
-  // If match is high (>= 90%) and no missing words, it's considered valid
-  if (similarity >= 90 && missingWords.length === 0 && addedWords.length === 0) {
+  // If match is high and no missing/extra words, it's considered valid
+  if (similarity >= Math.max(similarityThresholdPercent, 90) && missingWords.length === 0 && addedWords.length === 0) {
     return {
       lineIndex,
       expectedText,
@@ -158,8 +159,7 @@ export function classifyDiscrepancy(
     summary = `Изменение текста / отсебятина (сходство ${similarity}%)`;
   }
 
-  // Threshold: if similarity < 85% or there are missing/extra words, flag it!
-  const isDiscrepancy = similarity < 88 || missingWords.length > 0 || addedWords.length > 0;
+  const isDiscrepancy = similarity < similarityThresholdPercent || missingWords.length > 0 || addedWords.length > 0;
 
   return {
     lineIndex,
@@ -259,7 +259,8 @@ export async function checkTrackTextWithWhisper(
   lines: LineToCheck[],
   modelName: string = 'small',
   onProgress?: (current: number, total: number, msg: string) => void,
-  onLog?: (msg: string, level: 'info' | 'warn' | 'error' | 'success') => void
+  onLog?: (msg: string, level: 'info' | 'warn' | 'error' | 'success') => void,
+  similarityThresholdPercent: number = 88
 ): Promise<TrackWhisperExecutionResult> {
   const logs: string[] = [];
   const logHelper = (msg: string, level: 'info' | 'warn' | 'error' | 'success' = 'info') => {
@@ -317,7 +318,7 @@ export async function checkTrackTextWithWhisper(
 
       let discrepanciesCount = 0;
       const results = ipcResponse.results.map((r: any) => {
-        const comp = classifyDiscrepancy(r.expectedText, r.recognizedText, r.lineIndex);
+        const comp = classifyDiscrepancy(r.expectedText, r.recognizedText, r.lineIndex, similarityThresholdPercent);
         if (comp.isDiscrepancy) {
           discrepanciesCount++;
           logHelper(`[Whisper ASR] ⚠️ Расхождение в реплике #${r.lineIndex}: "${r.expectedText.slice(0, 30)}..." → сказано: "${r.recognizedText.slice(0, 30)}..." (${comp.summaryDescription})`, 'warn');

@@ -65,6 +65,8 @@ const HEAVY_CHANNELS: Record<string, number> = {
   'transcribe-whisper-snippet': 30000,
   'timing-whisper-transcribe-clips': 60000,
   'qa-whisper-check-lines': 60000,
+  'qa-acting-analyze-episode': 300000,
+  'qa-acting-download-models': 300000,
   'run-diarization': 120000,
   'load-local-translate-model': 45000,
   'translate-local': 30000,

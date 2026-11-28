@@ -348,6 +348,22 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
     });
   });
 
+  const DICTION_TAGS = ['[Сбивка/Оговорка]', '[Дикция/Темп]', '[Ударение]'];
+  const ACTING_TAGS = ['[Эмоции/Подача]', '[Образ/Тембр]'];
+  const ALL_ACTING_SECTION_TAGS = [...DICTION_TAGS, ...ACTING_TAGS];
+
+  const formatCommentLine = (c: any) => {
+    const sec = typeof c.timestamp === 'number' ? c.timestamp : 0;
+    const hours = Math.floor(sec / 3600);
+    const mins = Math.floor((sec % 3600) / 60);
+    const secs = Math.floor(sec % 60);
+    const timeStr =
+      hours > 0
+        ? `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+        : `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    return `  • [${timeStr}] ${c.text}`;
+  };
+
   vars.dubberFixesSections =
     Object.keys(dubberFixes)
       .map(id => {
@@ -355,20 +371,37 @@ export const getTemplateVariables = (episode: Episode, participants: Participant
         const mention =
           dubber.telegram && dubber.telegram.startsWith('@') ? dubber.telegram : `@${dubber.telegram || dubber.nickname}`;
         const sortedComments = [...comments].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-        const fixesText = sortedComments
-          .map(c => {
-            const sec = typeof c.timestamp === 'number' ? c.timestamp : 0;
-            const hours = Math.floor(sec / 3600);
-            const mins = Math.floor((sec % 3600) / 60);
-            const secs = Math.floor(sec % 60);
-            const timeStr =
-              hours > 0
-                ? `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
-                : `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-            return `  • [${timeStr}] ${c.text}`;
-          })
-          .join('\n');
-        return `${dubber.nickname} (${mention}):\n${fixesText}`;
+        const hasActingTagged = sortedComments.some(c =>
+          ALL_ACTING_SECTION_TAGS.some(tag => String(c.text || '').includes(tag))
+        );
+
+        if (!hasActingTagged) {
+          const fixesText = sortedComments.map(formatCommentLine).join('\n');
+          return `${dubber.nickname} (${mention}):\n${fixesText}`;
+        }
+
+        const techComments = sortedComments.filter(
+          c => !ALL_ACTING_SECTION_TAGS.some(tag => String(c.text || '').includes(tag))
+        );
+        const dictionComments = sortedComments.filter(c =>
+          DICTION_TAGS.some(tag => String(c.text || '').includes(tag))
+        );
+        const actingComments = sortedComments.filter(c =>
+          ACTING_TAGS.some(tag => String(c.text || '').includes(tag))
+        );
+
+        const blocks: string[] = [];
+        if (techComments.length > 0) {
+          blocks.push(`  Технические / доозвучка:\n${techComments.map(formatCommentLine).join('\n')}`);
+        }
+        if (dictionComments.length > 0) {
+          blocks.push(`  Дикция, сбивки и ударения:\n${dictionComments.map(formatCommentLine).join('\n')}`);
+        }
+        if (actingComments.length > 0) {
+          blocks.push(`  Актёрская подача и образ:\n${actingComments.map(formatCommentLine).join('\n')}`);
+        }
+
+        return `${dubber.nickname} (${mention}):\n${blocks.join('\n')}`;
       })
       .join('\n\n') || '';
 

@@ -27,8 +27,8 @@ export interface MissingLinesLogAndReportModalsProps {
   isLogModalOpen: boolean;
   setIsLogModalOpen: (val: boolean) => void;
   activeReport?: QAScanReport;
-  logFilterStage: "all" | "whisper" | "error" | "audio";
-  setLogFilterStage: (val: "all" | "whisper" | "error" | "audio") => void;
+  logFilterStage: "all" | "whisper" | "error" | "audio" | "acting";
+  setLogFilterStage: (val: "all" | "whisper" | "error" | "audio" | "acting") => void;
   copiedLogs: boolean;
   setCopiedLogs: (val: boolean) => void;
 }
@@ -146,6 +146,7 @@ export const MissingLinesLogAndReportModals: React.FC<MissingLinesLogAndReportMo
                   {[
                     { id: 'all', label: 'Все записи' },
                     { id: 'whisper', label: 'Whisper AI' },
+                    { id: 'acting', label: 'Актёрский QA / Стемы' },
                     { id: 'audio', label: 'Детектор звука' },
                     { id: 'error', label: 'Ошибки' }
                   ].map(f => (
@@ -183,6 +184,7 @@ export const MissingLinesLogAndReportModals: React.FC<MissingLinesLogAndReportMo
               <div className="h-96 bg-neutral-950 border border-neutral-800 rounded-xl p-4 font-mono text-xs overflow-y-auto space-y-1.5 custom-scrollbar">
                 {(activeReport.logs || []).filter(l => {
                   if (logFilterStage === 'whisper') return l.stage === 'whisper';
+                  if (logFilterStage === 'acting') return l.stage === 'acting' || l.stage === 'stems';
                   if (logFilterStage === 'audio') return l.stage === 'audio' || l.stage === 'speech';
                   if (logFilterStage === 'error') return l.level === 'error' || l.level === 'warn';
                   return true;

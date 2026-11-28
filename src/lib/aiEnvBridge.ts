@@ -22,6 +22,8 @@ export const AI_ENV_REQUIRED_CHANNELS: Record<string, string> = {
   'transcribe-whisper': 'Распознавание речи (Whisper)',
   'transcribe-whisper-snippet': 'Распознавание фрагмента (Whisper)',
   'qa-whisper-check-lines': 'QA-проверка реплик (Whisper)',
+  'qa-acting-analyze-episode': 'Актёрский, дикционный и эмоциональный QA',
+  'qa-acting-download-models': 'Загрузка локальных моделей актёрского QA',
   'timing-whisper-transcribe-clips': 'Автотайминг по речи (Whisper)',
   'start-whisper-livekit-server': 'Локальный сервер Whisper LiveKit',
 };

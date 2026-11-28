@@ -59,12 +59,22 @@ class VoiceSignatureService {
   async runPythonMatcher(args) {
     const pythonPath = await this.getPythonPath();
     const scriptPath = path.join(__dirname, 'voice_matcher.py');
-    
+    const persistentModelsBase =
+      process.env.ADM_DATA_DIR ||
+      (typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd());
+
     return new Promise((resolve, reject) => {
       const fullArgs = [scriptPath, ...args];
       log.info(`[VoiceSignatureService] Running: python ${fullArgs.join(' ')}`);
-      
-      const child = spawn(pythonPath, fullArgs);
+
+      const child = spawn(pythonPath, fullArgs, {
+        env: {
+          ...process.env,
+          TORCH_HOME: process.env.TORCH_HOME || path.join(persistentModelsBase, 'models', 'torch'),
+          HF_HOME: process.env.HF_HOME || path.join(persistentModelsBase, 'models', 'huggingface'),
+        },
+        windowsHide: true,
+      });
       trackProcess(child);
       
       let stdout = '';
@@ -204,6 +214,8 @@ class VoiceSignatureService {
 
       // Extract and combine signatures
       const signatures = [];
+      const ecapaVectors = [];
+      const f0Values = [];
       for (const line of suitableLines) {
         const tempWav = path.join(os.tmpdir(), `temp_auto_train_${Date.now()}.wav`);
         const tempJson = path.join(os.tmpdir(), `temp_sig_${Date.now()}.json`);
@@ -212,6 +224,12 @@ class VoiceSignatureService {
           const res = await this.runPythonMatcher(['extract', tempWav, tempJson]);
           if (res.success && res.signature) {
             signatures.push(res.signature);
+          }
+          if (res.success && Array.isArray(res.ecapaEmbedding) && res.ecapaEmbedding.length > 0) {
+            ecapaVectors.push(res.ecapaEmbedding);
+          }
+          if (res.success && typeof res.f0MedianHz === 'number' && res.f0MedianHz > 0) {
+            f0Values.push(res.f0MedianHz);
           }
         } catch (err) {
           log.warn(`[VoiceSignatureService] Skipping line for ${charName} due to error:`, err.message);
@@ -222,25 +240,41 @@ class VoiceSignatureService {
       }
 
       if (signatures.length > 0) {
-        // Average all signatures to construct a representative profile
-        const numBins = signatures[0].length;
-        const avgSignature = Array(numBins).fill(0);
-        for (const sig of signatures) {
-          for (let b = 0; b < numBins; b++) {
-            avgSignature[b] += sig[b];
+        const averageVectors = (vecs) => {
+          const len = vecs[0].length;
+          const out = Array(len).fill(0);
+          for (const v of vecs) {
+            for (let b = 0; b < len; b++) {
+              out[b] += v[b];
+            }
           }
-        }
-        for (let b = 0; b < numBins; b++) {
-          avgSignature[b] /= signatures.length;
-        }
+          for (let b = 0; b < len; b++) {
+            out[b] /= vecs.length;
+          }
+          return out;
+        };
 
-        // Save averaged signature
+        const avgSignature = averageVectors(signatures);
+        const avgEcapa = ecapaVectors.length > 0 ? averageVectors(ecapaVectors) : null;
+        const avgF0 = f0Values.length > 0
+          ? Number((f0Values.reduce((s, v) => s + v, 0) / f0Values.length).toFixed(1))
+          : null;
+
+        const payload = {
+          version: 2,
+          fftSignature: avgSignature,
+          ecapaEmbedding: avgEcapa,
+          f0MedianHz: avgF0,
+          updatedAt: new Date().toISOString()
+        };
+
+        // Save averaged v2 signature
         const projectDbDir = await this.getVoiceBaseDir(projectName);
         const cleanCharName = this.sanitizeFolderName(charName);
         const voiceProfilePath = path.join(projectDbDir, `${cleanCharName}.voice.json`);
-        await fs.writeFile(voiceProfilePath, JSON.stringify(avgSignature), 'utf-8');
+        await fs.writeFile(voiceProfilePath, JSON.stringify(payload), 'utf-8');
         successCount++;
-        log.info(`[VoiceSignatureService] Saved auto-trained voice profile for ${charName}`);
+        log.info(`[VoiceSignatureService] Saved auto-trained v2 voice profile for ${charName}`);
       }
     }
 

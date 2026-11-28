@@ -18,6 +18,8 @@ import {
   checkWhisperSystemReadiness,
 } from './whisperTextChecker';
 
+import { qaActingService } from '../../services/qaActingService';
+
 import {
   QAScanLogEntry,
   WhisperScanStatus,
@@ -27,6 +29,8 @@ import {
   DefectResolution,
   MissingLineDetection,
   GapDetectionOptions,
+  QADetectionSettings,
+  DEFAULT_QA_DETECTION_SETTINGS,
   DecodedTrackContext,
   VoicedLineRecord,
   formatTimecode,
@@ -87,21 +91,22 @@ export async function detectEpisodeGaps(
   onProgress?: (current: number, total: number, message: string) => void,
   onLog?: (logEntry: QAScanLogEntry) => void
 ): Promise<MissingLineDetection[]> {
+  const cfg: QADetectionSettings = { ...DEFAULT_QA_DETECTION_SETTINGS, ...options };
   const {
-    speechDynamicThresholdDb = 3.0,
-    silencePeakThresholdDb = -52,
-    silenceRmsThresholdDb = -60,
-    minDurationSec = 0.15,
-    scanMissingLines = true,
-    scanUnwantedSpeech = true,
-    scanCollisions = true,
-    scanTimingMismatches = true,
-    scanOverlaps = true,
-    shortLineThresholdPercent = 30,
-    longLineThresholdPercent = 40,
-    scanWhisperText = false,
-    whisperModel = 'small'
-  } = options;
+    speechDynamicThresholdDb,
+    silencePeakThresholdDb,
+    silenceRmsThresholdDb,
+    minDurationSec,
+    scanMissingLines,
+    scanUnwantedSpeech,
+    scanCollisions,
+    scanTimingMismatches,
+    scanOverlaps,
+    shortLineThresholdPercent,
+    longLineThresholdPercent,
+    scanWhisperText,
+    whisperModel,
+  } = cfg;
 
   const scanLogs: QAScanLogEntry[] = [];
   const addLog = (
@@ -260,10 +265,15 @@ export async function detectEpisodeGaps(
     silencePeakThresholdDb,
     silenceRmsThresholdDb,
     speechDynamicThresholdDb,
+    stationaryNoiseStdDevDb: cfg.stationaryNoiseStdDevDb,
+    stationaryNoisePeakDb: cfg.stationaryNoisePeakDb,
     scanMissingLines,
     scanTimingMismatches,
     shortLineThresholdPercent,
+    shortLineMinDiffSec: cfg.shortLineMinDiffSec,
+    shortLineMinTailSec: cfg.shortLineMinTailSec,
     longLineThresholdPercent,
+    longLineMinOverflowSec: cfg.longLineMinOverflowSec,
     originalAudioBuffer,
   });
   results.push(...missingResults);
@@ -276,7 +286,16 @@ export async function detectEpisodeGaps(
       validSubLines,
       aliases,
       speechDynamicThresholdDb,
-      originalAudioBuffer
+      originalAudioBuffer,
+      {
+        ownSubPreMarginSec: cfg.unwantedOwnSubPreMarginSec,
+        ownSubPostMarginSec: cfg.unwantedOwnSubPostMarginSec,
+        otherSubPreMarginSec: cfg.unwantedOtherSubPreMarginSec,
+        otherSubPostMarginSec: cfg.unwantedOtherSubPostMarginSec,
+        minBurstSec: cfg.unwantedMinBurstSec,
+        peakThresholdDb: cfg.unwantedPeakThresholdDb,
+        rmsThresholdDb: cfg.unwantedRmsThresholdDb,
+      }
     );
     results.push(...unwantedResults);
   }
@@ -290,7 +309,12 @@ export async function detectEpisodeGaps(
       aliases,
       minDurationSec,
       speechDynamicThresholdDb,
-      originalAudioBuffer
+      originalAudioBuffer,
+      {
+        minCoverageRatio: cfg.collisionMinCoverageRatio,
+        peakThresholdDb: cfg.collisionPeakThresholdDb,
+        parallelSubToleranceSec: cfg.collisionParallelSubToleranceSec,
+      }
     );
     results.push(...collisionResults);
   }
@@ -301,7 +325,12 @@ export async function detectEpisodeGaps(
     const overlapResults = scanActorOverlaps(
       voicedLines,
       longTimingDetections,
-      originalAudioBuffer
+      originalAudioBuffer,
+      {
+        minSec: cfg.overlapMinSec,
+        allowedSubOverlapSec: cfg.overlapAllowedSubOverlapSec,
+        minSubBoundaryOverrunSec: cfg.overlapMinSubBoundaryOverrunSec,
+      }
     );
     results.push(...overlapResults);
   } else {
@@ -311,15 +340,23 @@ export async function detectEpisodeGaps(
   }
 
   // 5. SCAN FOR TECHNICAL ARTIFACTS
-  if (options.scanArtifacts !== false) {
+  if (cfg.scanArtifacts !== false) {
     onProgress?.(totalTracks, totalTracks, 'Сканирование технических артефактов (перегруз, клики, задувы)...');
     for (const trackCtx of decodedTracks) {
       const { track, audioBuffer, audioUrl } = trackCtx;
       const artifacts = scanTrackForArtifacts(audioBuffer, track, validSubLines, {
-        detectClipping: true,
-        detectClicks: true,
-        detectPlosives: true,
-        detectSwallowed: true
+        detectClipping: cfg.detectClipping,
+        clipMinConsecutive: cfg.clipMinConsecutive,
+        clipThresholdLinear: cfg.clipThresholdLinear,
+        detectClicks: cfg.detectClicks,
+        clickRatioThreshold: cfg.clickRatioThreshold,
+        clickMinDiff: cfg.clickMinDiff,
+        detectPlosives: cfg.detectPlosives,
+        plosiveLowDbThreshold: cfg.plosiveLowDbThreshold,
+        plosiveDeltaDbThreshold: cfg.plosiveDeltaDbThreshold,
+        detectSwallowed: cfg.detectSwallowed,
+        cutoffDropDbThreshold: cfg.cutoffDropDbThreshold,
+        cutoffMinSubDurationSec: cfg.cutoffMinSubDurationSec,
       });
 
       for (const art of artifacts) {
@@ -441,7 +478,8 @@ export async function detectEpisodeGaps(
           },
           (msg, level) => {
             addLog('whisper', level, msg);
-          }
+          },
+          cfg.whisperSimilarityThresholdPercent
         );
 
         if (!trackResult.success) {
@@ -520,6 +558,151 @@ export async function detectEpisodeGaps(
     }
   } else {
     addLog('whisper', 'info', 'Сверка текста через Whisper отключена в параметрах сканирования.');
+  }
+
+  // 7. LOCAL ACTING, DICTION, STRESS & PERSONA QA (Stage 0 original vocal stems + 4-stage AI_env pass)
+  const anyActingEnabled =
+    cfg.scanSpeechDisfluencies ||
+    cfg.scanDictionClarity ||
+    cfg.scanEmotionMismatch ||
+    cfg.scanStressErrors ||
+    cfg.scanPersonaMismatch;
+
+  if (anyActingEnabled && voicedLines.length > 0) {
+    addLog('acting', 'info', `Запуск локального анализа актёрской подачи и дикции (${cfg.actingResourceProfile}, оригинальный стем: ${cfg.originalStemMode})...`);
+    onProgress?.(totalTracks, totalTracks, 'Проверка дикции, эмоций, ударений и сбивок (AI_env)...');
+
+    const unsubProgress = qaActingService.subscribeProgress((prog) => {
+      onProgress?.(prog.percent, 100, prog.message);
+      addLog(prog.stage === 'stems' ? 'stems' : 'acting', 'info', prog.message);
+    });
+
+    try {
+      const trackPaths: Record<string, string> = {};
+      for (const t of dubberTracks) {
+        const sortedFiles = [...t.files].sort((a, b) => (b.size || 0) - (a.size || 0));
+        const mainFile = sortedFiles[0] || t.files.find(f => f.id === t.selectedFileId) || t.files[0];
+        if (mainFile?.path) trackPaths[t.id] = mainFile.path;
+      }
+
+      const payloadLines = voicedLines.map((v) => ({
+        id: `${v.track.id}_${v.lineIndex}_${v.subStartSec.toFixed(2)}`,
+        character: v.resolvedCharName || v.track.character || '',
+        dubberId: v.track.id,
+        trackId: v.track.id,
+        text: v.cleanedText,
+        startSec: v.speechStartSec,
+        endSec: v.speechEndSec,
+        trackFilePath: trackPaths[v.track.id],
+      }));
+
+      const actingRes = await qaActingService.analyzeEpisode({
+        projectId: episode.projectId,
+        projectTitle: episode.project?.title,
+        episodeId: episode.id,
+        episode,
+        videoPath: rawFile || undefined,
+        lines: payloadLines,
+        trackPaths,
+        settings: cfg,
+      });
+
+      let origVocalsBuffer = originalAudioBuffer;
+      const origVocalsUrl = actingRes.originalVocalsPath ? resolveAudioUrl(actingRes.originalVocalsPath) : undefined;
+      if (origVocalsUrl) {
+        try {
+          origVocalsBuffer = await decodeAudioFile(origVocalsUrl);
+        } catch {}
+      }
+
+      const voicedLookup = new Map<string, VoicedLineRecord>();
+      voicedLines.forEach((v) => {
+        voicedLookup.set(`${v.track.id}_${v.lineIndex}_${v.subStartSec.toFixed(2)}`, v);
+      });
+
+      const actingTypeLabels: Record<string, string> = {
+        speech_disfluency: '🗣 Оговорка / кашель / пауза',
+        diction_clarity: '👄 Дикция и темп речи',
+        emotion_mismatch: '🎭 Эмоции и энергетика',
+        stress_error: '❗ Ошибка ударения',
+        persona_mismatch: '👤 Образ / возраст / тембр',
+      };
+
+      const actingTags: Record<string, string> = {
+        speech_disfluency: '[Сбивка/Оговорка]',
+        diction_clarity: '[Дикция/Темп]',
+        emotion_mismatch: '[Эмоции/Подача]',
+        stress_error: '[Ударение]',
+        persona_mismatch: '[Образ/Тембр]',
+      };
+
+      for (const issue of actingRes.issues || []) {
+        const v = voicedLookup.get(issue.lineId);
+        if (!v) continue;
+
+        const matchingDecoded = decodedTracks.find((d) => d.track.id === v.track.id);
+        const startSec = Math.max(0, v.speechStartSec + (issue.eventOffsetSec || 0));
+        const endSec = Math.max(startSec + 0.35, v.speechEndSec);
+
+        results.push({
+          id: `acting_${issue.type}_${v.track.id}_${v.lineIndex}_${Math.random().toString(36).slice(2, 6)}`,
+          defectCategory: issue.type,
+          type: issue.type,
+          typeLabel: actingTypeLabels[issue.type] || issue.title,
+          trackId: v.track.id,
+          dubberName: v.track.participant,
+          characterName: v.resolvedCharName || v.track.character,
+          assignmentId: v.matchingAssignmentId,
+          lineIndex: v.lineIndex,
+          subId: v.subId,
+          startSec: v.speechStartSec,
+          endSec: v.speechEndSec,
+          startFormatted: formatTimecode(v.speechStartSec),
+          endFormatted: formatTimecode(v.speechEndSec),
+          durationSec: Math.round((v.speechEndSec - v.speechStartSec) * 10) / 10,
+          text: v.cleanedText,
+          peakDb: v.metrics.peakDb,
+          rmsDb: v.metrics.rmsDb,
+          dynamicRangeDb: v.metrics.dynamicRangeDb,
+          selected: true,
+          resolutionAction: 'request_dubber_fix',
+          comment: `${actingTags[issue.type] || '[Правка]'} [${formatTimecode(v.speechStartSec)}] ${issue.title}: ${issue.description}`,
+          audioUrl: matchingDecoded?.audioUrl || v.audioUrl,
+          audioBuffer: matchingDecoded?.audioBuffer || v.audioBuffer,
+          originalAudioBuffer: origVocalsBuffer,
+          originalVocalsUrl: origVocalsUrl,
+          artifactTitle: issue.title,
+          artifactDescription: issue.description,
+          disfluencySubtype: issue.disfluencySubtype,
+          disfluencyDetails: issue.disfluencyDetails,
+          gopScore: issue.gopScore,
+          speechRateSyllablesPerSec: issue.speechRateSyllablesPerSec,
+          originalSpeechRateSyllablesPerSec: issue.originalSpeechRateSyllablesPerSec,
+          emotionDubberArousal: issue.emotionDubberArousal,
+          emotionOrigArousal: issue.emotionOrigArousal,
+          emotionDubberValence: issue.emotionDubberValence,
+          emotionOrigValence: issue.emotionOrigValence,
+          f0StdHz: issue.f0StdHz,
+          stressWord: issue.stressWord,
+          stressExpectedIndex: issue.stressExpectedIndex,
+          stressActualIndex: issue.stressActualIndex,
+          stressExpectedMarked: issue.stressExpectedMarked,
+          stressActualMarked: issue.stressActualMarked,
+          stressRuleSource: issue.stressRuleSource,
+          personaExpectedAgeGroup: issue.personaExpectedAgeGroup,
+          personaDetectedAgeYears: issue.personaDetectedAgeYears,
+          personaDetectedGender: issue.personaDetectedGender,
+          personaVoiceSimilarity: issue.personaVoiceSimilarity,
+          nearestSubtitleText: v.cleanedText,
+        });
+      }
+
+      addLog('acting', 'success', `Актёрский/дикционный QA завершён: проверено ${actingRes.analyzedLines} реплик, выявлено замечаний: ${(actingRes.issues || []).length}.`);
+    } catch (actingErr: any) {
+      addLog('acting', 'warn', `Актёрский анализ пропущен или завершился с предупреждением: ${actingErr?.message || actingErr}`);
+    } finally {
+      unsubProgress();
+    }
   }
 
   results.sort((a, b) => a.startSec - b.startSec);

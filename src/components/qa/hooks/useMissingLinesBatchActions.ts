@@ -36,7 +36,7 @@ export function useMissingLinesBatchActions({
   const [searchQuery, setSearchQuery] = useState('');
 
   const [isLogModalOpen, setIsLogModalOpen] = useState(false);
-  const [logFilterStage, setLogFilterStage] = useState<'all' | 'whisper' | 'error' | 'audio'>('all');
+  const [logFilterStage, setLogFilterStage] = useState<'all' | 'whisper' | 'error' | 'audio' | 'acting'>('all');
   const [copiedLogs, setCopiedLogs] = useState(false);
 
   const [soundEngineerModalOpen, setSoundEngineerModalOpen] = useState(false);
@@ -60,6 +60,11 @@ export function useMissingLinesBatchActions({
   const plosivesCount = gaps.filter(g => g.defectCategory === 'audio_artifact' && (g.artifactType === 'plosive' || g.type === 'plosive')).length;
   const cutoffsCount = gaps.filter(g => g.defectCategory === 'audio_artifact' && (g.artifactType === 'swallowed_vowel' || g.type === 'swallowed_vowel')).length;
   const textMismatchCount = gaps.filter(g => g.defectCategory === 'text_mismatch').length;
+  const disfluencyCount = gaps.filter(g => g.defectCategory === 'speech_disfluency').length;
+  const dictionCount = gaps.filter(g => g.defectCategory === 'diction_clarity').length;
+  const emotionCount = gaps.filter(g => g.defectCategory === 'emotion_mismatch').length;
+  const stressCount = gaps.filter(g => g.defectCategory === 'stress_error').length;
+  const personaCount = gaps.filter(g => g.defectCategory === 'persona_mismatch').length;
 
   const dubbers = useMemo(() => {
     return Array.from(new Set(
@@ -140,13 +145,22 @@ export function useMissingLinesBatchActions({
     g.defectCategory === 'text_mismatch' && g.resolutionAction === 'actor_better_than_sub'
   ).length;
 
+  const actingDubberFixesCount = selectedGaps.filter(g =>
+    (g.defectCategory === 'speech_disfluency' ||
+      g.defectCategory === 'diction_clarity' ||
+      g.defectCategory === 'emotion_mismatch' ||
+      g.defectCategory === 'stress_error' ||
+      g.defectCategory === 'persona_mismatch') &&
+    (g.resolutionAction === 'request_dubber_fix' || !g.resolutionAction)
+  ).length;
+
+  const stressDictAddedCount = selectedGaps.filter(g =>
+    g.defectCategory === 'stress_error' && g.resolutionAction === 'add_to_stress_dictionary'
+  ).length;
+
   const handleToggleSelectAll = (select: boolean) => {
-    updateGaps(prev => prev.map(g => {
-      const cat = g.defectCategory || 'missing_line';
-      const matchesCategory = selectedCategoryTab === 'all' || cat === selectedCategoryTab || (selectedCategoryTab === 'timing_too_long' && g.isTimingTooLongMerged);
-      const matchesDubber = selectedDubberFilter === 'all' || g.dubberName === selectedDubberFilter || g.secondDubberName === selectedDubberFilter;
-      return (matchesCategory && matchesDubber) ? { ...g, selected: select } : g;
-    }));
+    const filteredIds = new Set(filteredGaps.map(fg => fg.id));
+    updateGaps(prev => prev.map(g => filteredIds.has(g.id) ? { ...g, selected: select } : g));
   };
 
   const handleToggleSingle = (id: string) => {
@@ -252,6 +266,11 @@ export function useMissingLinesBatchActions({
     plosivesCount,
     cutoffsCount,
     textMismatchCount,
+    disfluencyCount,
+    dictionCount,
+    emotionCount,
+    stressCount,
+    personaCount,
     dubbers,
     filteredGaps,
     selectedGaps,
@@ -265,6 +284,8 @@ export function useMissingLinesBatchActions({
     soundEngineerArtifactsCount,
     textMismatchFixCount,
     textMismatchActorBetterCount,
+    actingDubberFixesCount,
+    stressDictAddedCount,
     handleToggleSelectAll,
     handleToggleSingle,
     handleCommentChange,

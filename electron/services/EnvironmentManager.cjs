@@ -1073,10 +1073,16 @@ amp = _Amp()
           const line = rawLine.trim();
           if (!line) continue;
           if (line.startsWith('PROGRESS:')) {
-            const numStr = line.replace('PROGRESS:', '').trim();
-            const pct = parseFloat(numStr);
+            const payloadStr = line.slice('PROGRESS:'.length).trim();
+            const colonIdx = payloadStr.indexOf(':');
+            const numPart = colonIdx !== -1 ? payloadStr.slice(0, colonIdx).trim() : payloadStr;
+            const msgPart = colonIdx !== -1 ? payloadStr.slice(colonIdx + 1).trim() : '';
+            const pct = parseFloat(numPart);
             if (!isNaN(pct) && onProgress) {
-              onProgress({ percent: Math.round(pct), message: `${operationName}: ${Math.round(pct)}%` });
+              onProgress({
+                percent: Math.round(pct),
+                message: msgPart || `${operationName}: ${Math.round(pct)}%`
+              });
             }
           } else if (line.startsWith('LOG:') && onLog) {
             onLog(line.replace('LOG:', '').trim(), 'info');

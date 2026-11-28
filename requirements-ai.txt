@@ -20,6 +20,15 @@ huggingface-hub>=0.20.0
 voicefixer>=0.1.3
 aeneas>=1.7.3
 
+# Local Acting, Diction, Stress & Persona QA Stack (100% offline inside AI_env)
+transformers==4.40.0
+faster-whisper==1.2.1
+ctranslate2>=4.0.0,<5.0.0
+ruaccent>=1.5.7,<1.7.0
+speechbrain==1.0.2
+sentencepiece>=0.1.99
+python-crfsuite>=0.9.9
+
 # System dependencies for Aeneas forced alignment (eSpeak / eSpeak-NG TTS & C-extensions):
 # Linux (Debian/Ubuntu): sudo apt-get install -y espeak espeak-ng ffmpeg libcew-dev
 # macOS (Homebrew): brew install espeak ffmpeg

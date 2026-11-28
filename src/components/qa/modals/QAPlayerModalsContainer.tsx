@@ -14,6 +14,7 @@ import { safeCopyToClipboard } from '../../../lib/clipboard';
 import { Episode, Participant, Track, SubtitleLine } from '../../../types';
 import { MissingLineDetection, GapDetectionOptions, QAScanReport } from '../../../lib/qa/missingLinesDetector';
 import { QAScanConfigModal } from '../QAScanConfigModal';
+import { QADictionaryAndProfilesDrawer } from '../QADictionaryAndProfilesDrawer';
 import { MissingLinesModal } from '../MissingLinesModal';
 import { ExportModal } from '../../ExportModal';
 import { ConfirmModal } from '../../ui/ConfirmModal';
@@ -42,6 +43,8 @@ export interface QAPlayerModalsContainerProps {
   availableDubbers: Array<{ id: string; name: string; roles: string; trackId?: string }>;
   isScanConfigModalOpen: boolean;
   setIsScanConfigModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  isDictionaryDrawerOpen?: boolean;
+  setIsDictionaryDrawerOpen?: React.Dispatch<React.SetStateAction<boolean>>;
   gapScanOptions: GapDetectionOptions;
   setGapScanOptions: React.Dispatch<React.SetStateAction<GapDetectionOptions>>;
   handleExecuteGapDetection: (overrideOptions?: GapDetectionOptions) => Promise<void>;
@@ -111,6 +114,8 @@ export const QAPlayerModalsContainer: React.FC<QAPlayerModalsContainerProps> = (
   availableDubbers,
   isScanConfigModalOpen,
   setIsScanConfigModalOpen,
+  isDictionaryDrawerOpen = false,
+  setIsDictionaryDrawerOpen,
   gapScanOptions,
   setGapScanOptions,
   handleExecuteGapDetection,
@@ -290,6 +295,7 @@ export const QAPlayerModalsContainer: React.FC<QAPlayerModalsContainerProps> = (
         <QAScanConfigModal
           isOpen={isScanConfigModalOpen}
           onClose={() => setIsScanConfigModalOpen(false)}
+          onSaveOptions={(options) => setGapScanOptions(options)}
           onStartScan={(options) => {
             setGapScanOptions(options);
             setIsScanConfigModalOpen(false);
@@ -321,6 +327,7 @@ export const QAPlayerModalsContainer: React.FC<QAPlayerModalsContainerProps> = (
           isApplying={isApplyingGapFixes}
           onReAnalyze={handleRunGapDetection}
           onOpenScanConfig={() => setIsScanConfigModalOpen(true)}
+          onOpenDictionaryDrawer={setIsDictionaryDrawerOpen ? () => setIsDictionaryDrawerOpen(true) : undefined}
           isAnalyzing={isAnalyzingGaps}
           currentThreshold={gapSensitivityThreshold}
           scanReport={qaScanReport || (detectedGaps as any)?.scanReport}
@@ -329,6 +336,16 @@ export const QAPlayerModalsContainer: React.FC<QAPlayerModalsContainerProps> = (
           onUpdateSubLine={handleUpdateSubLineFromModal}
           onExportSubtitles={handleExportSubtitlesFromModal}
           onSaveGaps={handleSaveDetectedGaps}
+        />
+      )}
+
+      {/* Stress Dictionary & Character Profiles Drawer */}
+      {setIsDictionaryDrawerOpen && (
+        <QADictionaryAndProfilesDrawer
+          isOpen={isDictionaryDrawerOpen}
+          onClose={() => setIsDictionaryDrawerOpen(false)}
+          episode={currentEpisode}
+          subLines={subLines}
         />
       )}
 

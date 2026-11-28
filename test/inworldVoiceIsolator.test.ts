@@ -87,7 +87,7 @@ describe('Inworld Voice Isolator v1 Integration & Safe Python AI Environment', (
     expect(content).toContain('"safetensors==0.4.3"');
     expect(content).toContain('"--no-deps", "inworld-voice-isolation"');
     expect(content).toContain("'inworld', 'safetensors'");
-    expect(content).toContain('"inworld_voice_isolator": true');
+    expect(content).toMatch(/"inworld_voice_isolator":\s*(?:true|True)/);
 
     // Strictly preserved core pins so existing neural models never break
     expect(content).toContain('torch==2.2.2');

@@ -21,6 +21,8 @@ import { MissingLinesDefectCard } from "./MissingLinesDefectCard";
 import { MissingLinesPlayerAndModals } from "./MissingLinesPlayerAndModals";
 import { useMissingLinesBatchActions } from './hooks/useMissingLinesBatchActions';
 import { MissingLinesFilterToolbar } from './missingLines/MissingLinesFilterToolbar';
+import { QADictionaryAndProfilesDrawer } from './QADictionaryAndProfilesDrawer';
+import { qaActingService } from '../../services/qaActingService';
 
 interface MissingLinesModalProps {
   isOpen: boolean;
@@ -38,6 +40,7 @@ interface MissingLinesModalProps {
   onOpenTimingPanel?: () => void;
   onGenerateSoundEngineerMessage?: () => void;
   onOpenScanConfig?: () => void;
+  onOpenDictionaryDrawer?: () => void;
   scanReport?: QAScanReport;
   videoUrl?: string;
   subLines?: SubtitleLine[];
@@ -62,6 +65,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   onOpenTimingPanel,
   onGenerateSoundEngineerMessage,
   onOpenScanConfig,
+  onOpenDictionaryDrawer,
   scanReport,
   videoUrl,
   subLines = [],
@@ -92,6 +96,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
   const [playingSnippetId, setPlayingSnippetId] = useState<string | null>(null);
   const [activeReassignGapId, setActiveReassignGapId] = useState<string | null>(null);
   const [customCharInput, setCustomCharInput] = useState<Record<string, string>>({});
+  const [localDictDrawerOpen, setLocalDictDrawerOpen] = useState(false);
 
   const updateGaps = useCallback((updater: (prev: MissingLineDetection[]) => MissingLineDetection[]) => {
     setGaps(prev => {
@@ -342,6 +347,30 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
     }
   };
 
+  const handleAcceptStressToDictionary = useCallback(async (gap: MissingLineDetection) => {
+    const word = (gap.stressWord || '').trim();
+    if (!word) return;
+    const stressedForm = (gap.stressActualMarked || word).trim();
+    try {
+      await qaActingService.saveStressEntry({
+        word: word.toLowerCase(),
+        stressedForm,
+        scope: 'project',
+        projectId: episode?.projectId || null,
+        notes: 'Принято из центра QA',
+      });
+      updateGaps(prev => prev.map(g => g.id === gap.id ? {
+        ...g,
+        selected: true,
+        resolutionAction: 'add_to_stress_dictionary',
+        comment: `Ударение «${stressedForm}» добавлено в словарь проекта (без замечания даберу)`
+      } : g));
+      toast.success(`Ударение «${stressedForm}» добавлено в словарь`);
+    } catch (e: any) {
+      toast.error(`Не удалось сохранить в словарь: ${e?.message || e}`);
+    }
+  }, [episode?.projectId, updateGaps]);
+
   const handleRemoveGap = (id: string) => {
     if (playingSnippetId?.startsWith(id)) {
       SnippetAudioPlayer.stop();
@@ -428,6 +457,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
           handleSaveToTiming={batchActions.handleSaveToTiming}
           isSavingToTiming={batchActions.isSavingToTiming}
           onOpenScanConfig={onOpenScanConfig}
+          onOpenDictionaryDrawer={onOpenDictionaryDrawer || (() => setLocalDictDrawerOpen(true))}
           activeReport={activeReport}
           setIsLogModalOpen={batchActions.setIsLogModalOpen}
           onClose={onClose}
@@ -455,6 +485,11 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
           plosivesCount={batchActions.plosivesCount}
           cutoffsCount={batchActions.cutoffsCount}
           textMismatchCount={batchActions.textMismatchCount}
+          disfluencyCount={batchActions.disfluencyCount}
+          dictionCount={batchActions.dictionCount}
+          emotionCount={batchActions.emotionCount}
+          stressCount={batchActions.stressCount}
+          personaCount={batchActions.personaCount}
         />
 
         {/* Content Body */}
@@ -493,6 +528,7 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
                   handleResolutionChange={batchActions.handleResolutionChange}
                   handleCommentChange={batchActions.handleCommentChange}
                   updateGaps={updateGaps}
+                  onAcceptStressToDictionary={handleAcceptStressToDictionary}
                 />
               ))
             )}
@@ -543,6 +579,8 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
               soundEngineerArtifactsCount={batchActions.soundEngineerArtifactsCount}
               textMismatchFixCount={batchActions.textMismatchFixCount}
               textMismatchActorBetterCount={batchActions.textMismatchActorBetterCount}
+              actingDubberFixesCount={batchActions.actingDubberFixesCount}
+              stressDictAddedCount={batchActions.stressDictAddedCount}
               episode={episode}
               isSavingToTiming={batchActions.isSavingToTiming}
               handleSaveToTiming={batchActions.handleSaveToTiming}
@@ -568,6 +606,15 @@ export const MissingLinesModal: React.FC<MissingLinesModalProps> = ({
           </div>
         </div>
       </div>
+
+      {!onOpenDictionaryDrawer && (
+        <QADictionaryAndProfilesDrawer
+          isOpen={localDictDrawerOpen}
+          onClose={() => setLocalDictDrawerOpen(false)}
+          episode={episode}
+          subLines={subLines}
+        />
+      )}
     </div>
   );
 };

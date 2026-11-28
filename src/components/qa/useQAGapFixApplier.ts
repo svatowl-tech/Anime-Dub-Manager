@@ -12,6 +12,7 @@ import {
 import { generateStatusMessage, generateSoundEngineerQAReport } from "../../lib/templates";
 import { saveQAGapsToTimingProject } from "../../lib/qa/timingSyncService";
 import { normalizeKey } from "../../lib/qaTimingHelper";
+import { qaActingService } from "../../services/qaActingService";
 
 export interface UseQAGapFixApplierParams {
   currentEpisode: Episode | null;
@@ -80,7 +81,7 @@ export function useQAGapFixApplier({
         return fl?.path || null;
       };
 
-      selectedGaps.forEach(gap => {
+      for (const gap of selectedGaps) {
         const category = gap.defectCategory || 'missing_line';
 
         // 1. Missing line handling
@@ -136,7 +137,7 @@ export function useQAGapFixApplier({
 
             // Notice: The previous dubber (gap.trackId / gap.assignmentId) gets NO fix or penalty,
             // because they rightly didn't voice someone else's line!
-            return;
+            continue;
           }
 
           const comment: Comment = {
@@ -438,7 +439,83 @@ export function useQAGapFixApplier({
             }
           }
         }
-      });
+
+        // 7. Timing Too Short -> request dubber fix (if chosen instead of sound engineer)
+        else if (category === 'timing_too_short') {
+          if (gap.resolutionAction === 'request_dubber_fix') {
+            const comment: Comment = {
+              id: Math.random().toString(36).substr(2, 9),
+              text: gap.comment || `[Тайминг / Коротко] Реплика короче саба [${gap.startFormatted}]: "${gap.text}". Переозвучьте шире под длительность оригинала.`,
+              timestamp: gap.startSec,
+              author: 'Куратор (Тайминг)',
+              subId: gap.subId
+            };
+            if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+            commentsByTrackId[gap.trackId].push(comment);
+            if (gap.assignmentId) {
+              if (!commentsByAssignmentId[gap.assignmentId]) commentsByAssignmentId[gap.assignmentId] = [];
+              commentsByAssignmentId[gap.assignmentId].push(comment);
+            }
+          }
+        }
+
+        // 8. Acting, Diction, Stress & Persona Defects
+        else if (
+          category === 'speech_disfluency' ||
+          category === 'diction_clarity' ||
+          category === 'emotion_mismatch' ||
+          category === 'stress_error' ||
+          category === 'persona_mismatch'
+        ) {
+          if (gap.resolutionAction === 'add_to_stress_dictionary' && gap.stressWord) {
+            try {
+              await qaActingService.saveStressEntry({
+                word: gap.stressWord.trim().toLowerCase(),
+                stressedForm: (gap.stressActualMarked || gap.stressWord).trim(),
+                scope: 'project',
+                projectId: currentEpisode.projectId || null,
+                notes: 'Принято при выписке фиксов',
+              });
+            } catch (dictErr) {
+              console.warn('Could not persist stress word to dictionary:', dictErr);
+            }
+            continue;
+          }
+
+          if (gap.resolutionAction === 'accept_as_acting' || gap.resolutionAction === 'ignore') {
+            continue;
+          }
+
+          const actingTagMap: Record<string, string> = {
+            speech_disfluency: '[Сбивка/Оговорка]',
+            diction_clarity: '[Дикция/Темп]',
+            emotion_mismatch: '[Эмоции/Подача]',
+            stress_error: '[Ударение]',
+            persona_mismatch: '[Образ/Тембр]',
+          };
+          const tag = actingTagMap[category] || '[Правка]';
+          const commentText =
+            gap.comment && gap.comment.trim().length > 0
+              ? gap.comment
+              : `${tag} [${gap.startFormatted}] ${gap.artifactTitle || gap.typeLabel}: ${gap.artifactDescription || gap.text}`;
+
+          const comment: Comment = {
+            id: Math.random().toString(36).substr(2, 9),
+            text: commentText,
+            timestamp: gap.startSec,
+            author: 'Куратор (Актёрский QA)',
+            subId: gap.subId
+          };
+
+          if (!commentsByTrackId[gap.trackId]) commentsByTrackId[gap.trackId] = [];
+          commentsByTrackId[gap.trackId].push(comment);
+
+          if (gap.assignmentId) {
+            if (!commentsByAssignmentId[gap.assignmentId]) commentsByAssignmentId[gap.assignmentId] = [];
+            commentsByAssignmentId[gap.assignmentId].push(comment);
+          }
+        }
+      }
 
       // Execute audio silencing on physical files in Electron (always expanded to natural silence)
       for (const [filePath, intervals] of Object.entries(intervalsToSilenceByFilePath)) {

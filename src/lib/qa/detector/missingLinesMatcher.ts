@@ -20,10 +20,15 @@ export interface ScanMissingAndTimingOptions {
   silencePeakThresholdDb: number;
   silenceRmsThresholdDb: number;
   speechDynamicThresholdDb: number;
+  stationaryNoiseStdDevDb?: number;
+  stationaryNoisePeakDb?: number;
   scanMissingLines: boolean;
   scanTimingMismatches: boolean;
   shortLineThresholdPercent: number;
+  shortLineMinDiffSec?: number;
+  shortLineMinTailSec?: number;
   longLineThresholdPercent: number;
+  longLineMinOverflowSec?: number;
   originalAudioBuffer: AudioBuffer | null;
 }
 
@@ -36,10 +41,15 @@ export function scanSubtitlesForMissingAndTiming({
   silencePeakThresholdDb,
   silenceRmsThresholdDb,
   speechDynamicThresholdDb,
+  stationaryNoiseStdDevDb = 1.0,
+  stationaryNoisePeakDb = -24,
   scanMissingLines,
   scanTimingMismatches,
   shortLineThresholdPercent,
+  shortLineMinDiffSec = 0.35,
+  shortLineMinTailSec = 0.28,
   longLineThresholdPercent,
+  longLineMinOverflowSec = 0.35,
   originalAudioBuffer,
 }: ScanMissingAndTimingOptions): {
   results: MissingLineDetection[];
@@ -97,11 +107,11 @@ export function scanSubtitlesForMissingAndTiming({
         if (fixDur >= minDurationSec) {
           const fixMetrics = analyzeSegmentDynamics(fixBuffer, startSec, fixEndSec);
           const fixSilence = fixMetrics.peakDb <= silencePeakThresholdDb || fixMetrics.rmsDb <= silenceRmsThresholdDb;
-          const fixStationary = 
+          const fixStationary =
             fixMetrics.dynamicRangeDb < speechDynamicThresholdDb &&
             fixMetrics.peakToMinDb < (speechDynamicThresholdDb + 1.2) &&
-            fixMetrics.stdDevDb < 1.0 &&
-            fixMetrics.peakDb < -24;
+            fixMetrics.stdDevDb < stationaryNoiseStdDevDb &&
+            fixMetrics.peakDb < stationaryNoisePeakDb;
           if (!fixSilence && !fixStationary) {
             return {
               ctx: { ...ctx, audioBuffer: fixBuffer, audioUrl: ctx.fixAudioUrl || ctx.audioUrl },
@@ -126,11 +136,11 @@ export function scanSubtitlesForMissingAndTiming({
 
       const metrics = analyzeSegmentDynamics(audioBuffer, startSec, endSec);
       const isAbsoluteSilence = metrics.peakDb <= silencePeakThresholdDb || metrics.rmsDb <= silenceRmsThresholdDb;
-      const isStationaryNoise = 
+      const isStationaryNoise =
         metrics.dynamicRangeDb < speechDynamicThresholdDb &&
         metrics.peakToMinDb < (speechDynamicThresholdDb + 1.2) &&
-        metrics.stdDevDb < 1.0 &&
-        metrics.peakDb < -24;
+        metrics.stdDevDb < stationaryNoiseStdDevDb &&
+        metrics.peakDb < stationaryNoisePeakDb;
 
       const isVoiced = !isAbsoluteSilence && !isStationaryNoise;
       return { ctx, isVoiced, isAbsoluteSilence, isStationaryNoise, metrics, durationSec, startSec, endSec };
@@ -187,7 +197,11 @@ export function scanSubtitlesForMissingAndTiming({
           const shortThreshold = (shortLineThresholdPercent || 30) / 100;
           const tailSec = Math.max(0, calcEnd - boundaries.speechEndSec);
 
-          if (shortRatio > shortThreshold && (subDur - speechDur) >= 0.35 && (tailSec >= 0.28 || shortRatio >= 0.30)) {
+          if (
+            shortRatio > shortThreshold &&
+            (subDur - speechDur) >= shortLineMinDiffSec &&
+            (tailSec >= shortLineMinTailSec || shortRatio >= shortThreshold)
+          ) {
             const timingDeltaPercent = -Math.round(shortRatio * 100);
             const tailDurationSec = Math.round(tailSec * 10) / 10;
 
@@ -210,7 +224,7 @@ export function scanSubtitlesForMissingAndTiming({
               rmsDb: boundaries.rmsDb,
               dynamicRangeDb: metrics!.dynamicRangeDb,
               type: 'timing_too_short',
-              typeLabel: `⏱ Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (>30%)`,
+              typeLabel: `⏱ Фраза короче саба на ${Math.abs(timingDeltaPercent)}% (>${shortLineThresholdPercent || 30}%)`,
               selected: true,
               actualSpeechStartSec: boundaries.speechStartSec,
               actualSpeechEndSec: boundaries.speechEndSec,
@@ -231,7 +245,7 @@ export function scanSubtitlesForMissingAndTiming({
           const longThreshold = (longLineThresholdPercent || 40) / 100;
           const overflowSec = Math.max(0, boundaries.speechEndSec - calcEnd);
 
-          if (longRatio > longThreshold && (speechDur - subDur) >= 0.35) {
+          if (longRatio > longThreshold && (speechDur - subDur) >= longLineMinOverflowSec) {
             const timingDeltaPercent = Math.round(longRatio * 100);
             const overflowDurationSec = Math.round(overflowSec * 10) / 10;
             const expandedEnd = Math.max(calcEnd, boundaries.speechEndSec);
@@ -256,7 +270,7 @@ export function scanSubtitlesForMissingAndTiming({
               rmsDb: boundaries.rmsDb,
               dynamicRangeDb: metrics!.dynamicRangeDb,
               type: 'timing_too_long',
-              typeLabel: `⏱ Фраза длиннее саба на +${timingDeltaPercent}% (>40%)`,
+              typeLabel: `⏱ Фраза длиннее саба на +${timingDeltaPercent}% (>${longLineThresholdPercent || 40}%)`,
               selected: true,
               actualSpeechStartSec: boundaries.speechStartSec,
               actualSpeechEndSec: boundaries.speechEndSec,
@@ -326,13 +340,33 @@ export function scanSubtitlesForMissingAndTiming({
   return { results, voicedLines, longTimingDetections };
 }
 
+export interface UnwantedSpeechParams {
+  ownSubPreMarginSec?: number;
+  ownSubPostMarginSec?: number;
+  otherSubPreMarginSec?: number;
+  otherSubPostMarginSec?: number;
+  minBurstSec?: number;
+  peakThresholdDb?: number;
+  rmsThresholdDb?: number;
+}
+
 export function scanUnwantedSpeechGaps(
   decodedTracks: DecodedTrackContext[],
   validSubLines: SubtitleLine[],
   aliases: Record<string, string>,
   speechDynamicThresholdDb: number,
-  originalAudioBuffer: AudioBuffer | null
+  originalAudioBuffer: AudioBuffer | null,
+  params: UnwantedSpeechParams = {}
 ): MissingLineDetection[] {
+  const {
+    ownSubPreMarginSec = 2.0,
+    ownSubPostMarginSec = 2.5,
+    otherSubPreMarginSec = 1.2,
+    otherSubPostMarginSec = 1.5,
+    minBurstSec = 0.35,
+    peakThresholdDb = -36,
+    rmsThresholdDb = -46,
+  } = params;
   const results: MissingLineDetection[] = [];
 
   for (const trackCtx of decodedTracks) {
@@ -348,8 +382,8 @@ export function scanUnwantedSpeechGaps(
       const isThisChar = assignedCharacters.has(rawCharName.toLowerCase()) || 
                          assignedCharacters.has(resolvedCharName.toLowerCase());
 
-      const marginPre = isThisChar ? 2.0 : 1.2;
-      const marginPost = isThisChar ? 2.5 : 1.5;
+      const marginPre = isThisChar ? ownSubPreMarginSec : otherSubPreMarginSec;
+      const marginPost = isThisChar ? ownSubPostMarginSec : otherSubPostMarginSec;
 
       protectedIntervals.push({
         start: Math.max(0, line.startSec - marginPre),
@@ -396,7 +430,7 @@ export function scanUnwantedSpeechGaps(
 
       for (let t = gap.start; t + windowSizeSec <= gap.end; t += hopSec) {
         const wMetrics = analyzeSegmentDynamics(audioBuffer, t, t + windowSizeSec);
-        const isVoiced = wMetrics.peakDb > -36 && wMetrics.rmsDb > -46 && wMetrics.dynamicRangeDb >= (speechDynamicThresholdDb - 0.4);
+        const isVoiced = wMetrics.peakDb > peakThresholdDb && wMetrics.rmsDb > rmsThresholdDb && wMetrics.dynamicRangeDb >= (speechDynamicThresholdDb - 0.4);
 
         if (isVoiced) {
           if (!speechActive) {
@@ -409,9 +443,9 @@ export function scanUnwantedSpeechGaps(
         } else {
           if (speechActive) {
             const burstDuration = speechEnd - speechStart;
-            if (burstDuration >= 0.35) {
+            if (burstDuration >= minBurstSec) {
               const burstMetrics = analyzeSegmentDynamics(audioBuffer, speechStart, speechEnd);
-              if (burstMetrics.dynamicRangeDb >= speechDynamicThresholdDb && burstMetrics.peakDb > -36) {
+              if (burstMetrics.dynamicRangeDb >= speechDynamicThresholdDb && burstMetrics.peakDb > peakThresholdDb) {
                 let prevSub: SubtitleLine | undefined;
                 let nextSub: SubtitleLine | undefined;
 
@@ -478,14 +512,26 @@ export function scanUnwantedSpeechGaps(
   return results;
 }
 
+export interface CollisionParams {
+  minCoverageRatio?: number;
+  peakThresholdDb?: number;
+  parallelSubToleranceSec?: number;
+}
+
 export function scanDubberCollisions(
   decodedTracks: DecodedTrackContext[],
   validSubLines: SubtitleLine[],
   aliases: Record<string, string>,
   minDurationSec: number,
   speechDynamicThresholdDb: number,
-  originalAudioBuffer: AudioBuffer | null
+  originalAudioBuffer: AudioBuffer | null,
+  params: CollisionParams = {}
 ): MissingLineDetection[] {
+  const {
+    minCoverageRatio = 0.45,
+    peakThresholdDb = -38,
+    parallelSubToleranceSec = 0.08,
+  } = params;
   const results: MissingLineDetection[] = [];
 
   for (let lineIdx = 0; lineIdx < validSubLines.length; lineIdx++) {
@@ -510,7 +556,7 @@ export function scanDubberCollisions(
     ]);
 
     for (const otherSub of validSubLines) {
-      if (Math.abs(otherSub.startSec - lineStart) <= 0.08) {
+      if (Math.abs(otherSub.startSec - lineStart) <= parallelSubToleranceSec) {
         const otherCleaned = (otherSub.text || '').replace(/\{[^}]+\}/g, '').replace(/\\N/gi, ' ').trim().toLowerCase();
         if (otherCleaned && otherCleaned === cleanedLineText) {
           const oRaw = (otherSub.name || '').trim();
@@ -549,12 +595,12 @@ export function scanDubberCollisions(
       const voicedDurationInSub = Math.max(0, voicedEndInSub - voicedStartInSub);
       const subCoverageRatio = voicedDurationInSub / Math.max(0.1, lineDuration);
 
-      const isTrueVoiceAcrossSub = 
-        subCoverageRatio >= 0.45 &&
-        voicedDurationInSub >= Math.min(0.45, lineDuration * 0.45) &&
-        boundaries.speechStartSec <= lineStart + Math.max(0.6, lineDuration * 0.45) &&
-        boundaries.speechEndSec >= lineEnd - Math.max(0.6, lineDuration * 0.45) &&
-        boundaries.peakDb > -38;
+      const isTrueVoiceAcrossSub =
+        subCoverageRatio >= minCoverageRatio &&
+        voicedDurationInSub >= Math.min(minCoverageRatio, lineDuration * minCoverageRatio) &&
+        boundaries.speechStartSec <= lineStart + Math.max(0.6, lineDuration * minCoverageRatio) &&
+        boundaries.speechEndSec >= lineEnd - Math.max(0.6, lineDuration * minCoverageRatio) &&
+        boundaries.peakDb > peakThresholdDb;
 
       if (isTrueVoiceAcrossSub) {
         let isAssigned = false;
@@ -650,11 +696,23 @@ export function scanDubberCollisions(
   return results;
 }
 
+export interface OverlapParams {
+  minSec?: number;
+  allowedSubOverlapSec?: number;
+  minSubBoundaryOverrunSec?: number;
+}
+
 export function scanActorOverlaps(
   voicedLines: VoicedLineRecord[],
   longTimingDetections: Map<string, MissingLineDetection>,
-  originalAudioBuffer: AudioBuffer | null
+  originalAudioBuffer: AudioBuffer | null,
+  params: OverlapParams = {}
 ): MissingLineDetection[] {
+  const {
+    minSec = 0.12,
+    allowedSubOverlapSec = 0.08,
+    minSubBoundaryOverrunSec = 0.15,
+  } = params;
   const results: MissingLineDetection[] = [];
   const sortedVoiced = [...voicedLines].sort((a, b) => a.speechStartSec - b.speechStartSec);
 
@@ -675,7 +733,7 @@ export function scanActorOverlaps(
       const subOverlapStart = Math.max(itemA.subStartSec, itemB.subStartSec);
       const subOverlapEnd = Math.min(itemA.subEndSec, itemB.subEndSec);
       const subOverlapDuration = subOverlapEnd - subOverlapStart;
-      if (subOverlapDuration > 0.08) {
+      if (subOverlapDuration > allowedSubOverlapSec) {
         continue;
       }
 
@@ -686,10 +744,10 @@ export function scanActorOverlaps(
       const subBoundaryOverrun = itemA.speechEndSec - itemB.subStartSec;
       const overlapDuration = Math.max(
         speechOverlapDuration,
-        (speechOverlapDuration > 0 || subBoundaryOverrun >= 0.15) ? subBoundaryOverrun : 0
+        (speechOverlapDuration > 0 || subBoundaryOverrun >= minSubBoundaryOverrunSec) ? subBoundaryOverrun : 0
       );
 
-      if (overlapDuration >= 0.12) {
+      if (overlapDuration >= minSec) {
         const overlapSecRounded = Math.round(overlapDuration * 100) / 100;
         const collisionStart = Math.max(0, overlapStart - 0.25);
         const collisionEnd = overlapEnd + 0.25;

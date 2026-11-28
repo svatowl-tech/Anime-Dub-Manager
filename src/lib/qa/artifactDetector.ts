@@ -46,6 +46,14 @@ export interface ArtifactDetectionOptions {
   detectPlosives?: boolean;
   detectSwallowed?: boolean;
   minClipSamples?: number;
+  clipMinConsecutive?: number;
+  clipThresholdLinear?: number;
+  clickRatioThreshold?: number;
+  clickMinDiff?: number;
+  plosiveLowDbThreshold?: number;
+  plosiveDeltaDbThreshold?: number;
+  cutoffDropDbThreshold?: number;
+  cutoffMinSubDurationSec?: number;
 }
 
 function formatTimecode(seconds: number): string {
@@ -62,7 +70,7 @@ function formatTimecode(seconds: number): string {
 export function detectClippingArtifacts(
   audioBuffer: AudioBuffer,
   track: Track,
-  options: { minConsecutive?: number; clusterThresholdSec?: number } = {}
+  options: { minConsecutive?: number; clusterThresholdSec?: number; clipThresholdLinear?: number } = {}
 ): Omit<AudioArtifact, 'id' | 'selected'>[] {
   const minConsecutive = options.minConsecutive ?? 2;
   const clusterThresholdSec = options.clusterThresholdSec ?? 0.45;
@@ -70,7 +78,7 @@ export function detectClippingArtifacts(
   const channelData = audioBuffer.getChannelData(0); // Primary channel
   const totalSamples = channelData.length;
 
-  const clipThreshold = 0.9985; // -0.013 dBFS
+  const clipThreshold = options.clipThresholdLinear ?? 0.9985; // -0.013 dBFS
   const results: Omit<AudioArtifact, 'id' | 'selected'>[] = [];
 
   interface ClipEvent {
@@ -194,9 +202,11 @@ export function detectClippingArtifacts(
 export function detectClickArtifacts(
   audioBuffer: AudioBuffer,
   track: Track,
-  options: { clusterThresholdSec?: number } = {}
+  options: { clusterThresholdSec?: number; clickRatioThreshold?: number; clickMinDiff?: number } = {}
 ): Omit<AudioArtifact, 'id' | 'selected'>[] {
   const clusterThresholdSec = options.clusterThresholdSec ?? 0.3;
+  const clickRatioThreshold = options.clickRatioThreshold ?? 17.5;
+  const clickMinDiff = options.clickMinDiff ?? 0.07;
   const sampleRate = audioBuffer.sampleRate;
   const channelData = audioBuffer.getChannelData(0);
   const totalSamples = channelData.length;
@@ -242,7 +252,7 @@ export function detectClickArtifacts(
 
     const ratio = maxDiff / (localRms + 1e-4);
     // Sharp click has high derivative spike compared to local smooth speech waveform
-    if (ratio > 17.5 && maxDiff > 0.07) {
+    if (ratio > clickRatioThreshold && maxDiff > clickMinDiff) {
       rawClicks.push({ sampleIndex: maxDiffIdx, ratio, diffPeak: maxDiff });
     }
   }
@@ -314,9 +324,11 @@ export function detectClickArtifacts(
 export function detectPlosiveArtifacts(
   audioBuffer: AudioBuffer,
   track: Track,
-  options: { clusterThresholdSec?: number } = {}
+  options: { clusterThresholdSec?: number; plosiveLowDbThreshold?: number; plosiveDeltaDbThreshold?: number } = {}
 ): Omit<AudioArtifact, 'id' | 'selected'>[] {
   const clusterThresholdSec = options.clusterThresholdSec ?? 0.4;
+  const plosiveLowDbThreshold = options.plosiveLowDbThreshold ?? -22;
+  const plosiveDeltaDbThreshold = options.plosiveDeltaDbThreshold ?? -2.0;
   const sampleRate = audioBuffer.sampleRate;
   const channelData = audioBuffer.getChannelData(0);
   const totalSamples = channelData.length;
@@ -372,8 +384,8 @@ export function detectPlosiveArtifacts(
       const lowDb = 20 * Math.log10(lowRms + 1e-6);
       const deltaDb = lowDb - fullDb; // In normal speech, 20-110Hz is -15 to -25 dB relative to vocal formants
 
-      // Plosive condition: low frequency energy dominates (> -18 dBFS sub-bass and delta > -1.5 dB or positive)
-      if (lowDb > -22 && deltaDb > -2.0) {
+      // Plosive condition: low frequency energy dominates
+      if (lowDb > plosiveLowDbThreshold && deltaDb > plosiveDeltaDbThreshold) {
         rawPlosives.push({
           sampleIndex: i + Math.floor(windowSize / 2),
           subBassDb: lowDb,
@@ -448,8 +460,11 @@ export function detectSwallowedOrCutoffArtifacts(
   audioBuffer: AudioBuffer,
   track: Track,
   subLines: SubtitleLine[],
-  assignedCharacters: Set<string>
+  assignedCharacters: Set<string>,
+  options: { cutoffDropDbThreshold?: number; cutoffMinSubDurationSec?: number } = {}
 ): Omit<AudioArtifact, 'id' | 'selected'>[] {
+  const cutoffDropDbThreshold = options.cutoffDropDbThreshold ?? 24;
+  const cutoffMinSubDurationSec = options.cutoffMinSubDurationSec ?? 1.4;
   const sampleRate = audioBuffer.sampleRate;
   const channelData = audioBuffer.getChannelData(0);
   const results: Omit<AudioArtifact, 'id' | 'selected'>[] = [];
@@ -462,7 +477,7 @@ export function detectSwallowedOrCutoffArtifacts(
     const startSec = Math.max(0, line.startSec);
     const endSec = Math.min(audioBuffer.duration, line.endSec);
     const subDuration = endSec - startSec;
-    if (subDuration < 1.4) continue; // Only check substantial lines
+    if (subDuration < cutoffMinSubDurationSec) continue; // Only check substantial lines
 
     const cleanedText = line.text.replace(/\{[^}]+\}/g, '').trim();
     const wordCount = cleanedText.split(/\s+/).filter(Boolean).length;
@@ -505,7 +520,7 @@ export function detectSwallowedOrCutoffArtifacts(
       const prevDb = 20 * Math.log10(prevVal + 1e-5);
       const currDb = 20 * Math.log10(currVal + 1e-5);
 
-      if (prevDb > -22 && currDb < -46 && (prevDb - currDb) > 24) {
+      if (prevDb > -22 && currDb < -46 && (prevDb - currDb) > cutoffDropDbThreshold) {
         foundGateCutoff = true;
         cutoffSec = startSec + (f * 0.015);
         break;
@@ -564,7 +579,10 @@ export function scanTrackForArtifacts(
 
   // 1. Clipping
   if (options.detectClipping !== false) {
-    const clips = detectClippingArtifacts(audioBuffer, track);
+    const clips = detectClippingArtifacts(audioBuffer, track, {
+      minConsecutive: options.clipMinConsecutive ?? options.minClipSamples ?? 2,
+      clipThresholdLinear: options.clipThresholdLinear ?? 0.9985,
+    });
     for (const c of clips) {
       artifacts.push({
         ...c,
@@ -576,7 +594,10 @@ export function scanTrackForArtifacts(
 
   // 2. Clicks & Transients
   if (options.detectClicks !== false) {
-    const clicks = detectClickArtifacts(audioBuffer, track);
+    const clicks = detectClickArtifacts(audioBuffer, track, {
+      clickRatioThreshold: options.clickRatioThreshold ?? 17.5,
+      clickMinDiff: options.clickMinDiff ?? 0.07,
+    });
     for (const clk of clicks) {
       artifacts.push({
         ...clk,
@@ -588,7 +609,10 @@ export function scanTrackForArtifacts(
 
   // 3. Plosives
   if (options.detectPlosives !== false) {
-    const plosives = detectPlosiveArtifacts(audioBuffer, track);
+    const plosives = detectPlosiveArtifacts(audioBuffer, track, {
+      plosiveLowDbThreshold: options.plosiveLowDbThreshold ?? -22,
+      plosiveDeltaDbThreshold: options.plosiveDeltaDbThreshold ?? -2.0,
+    });
     for (const p of plosives) {
       artifacts.push({
         ...p,
@@ -600,7 +624,10 @@ export function scanTrackForArtifacts(
 
   // 4. Swallowed / Gate Cutoffs
   if (options.detectSwallowed !== false && subLines.length > 0) {
-    const swallowed = detectSwallowedOrCutoffArtifacts(audioBuffer, track, subLines, assignedCharacters);
+    const swallowed = detectSwallowedOrCutoffArtifacts(audioBuffer, track, subLines, assignedCharacters, {
+      cutoffDropDbThreshold: options.cutoffDropDbThreshold ?? 24,
+      cutoffMinSubDurationSec: options.cutoffMinSubDurationSec ?? 1.4,
+    });
     for (const s of swallowed) {
       artifacts.push({
         ...s,

@@ -25,6 +25,7 @@ import {
 } from "../../lib/qa/missingLinesDetector";
 import { MissingLinesArtifactAndWhisperSection } from "./MissingLinesArtifactAndWhisperSection";
 import { MissingLinesCollisionSection } from "./missingLines/MissingLinesCollisionSection";
+import { MissingLinesActingSection } from "./MissingLinesActingSection";
 
 export interface MissingLinesDefectCardProps {
   gap: MissingLineDetection;
@@ -46,6 +47,7 @@ export interface MissingLinesDefectCardProps {
   handleResolutionChange: (id: string, resolution: DefectResolution, characterForSub?: string) => void;
   handleCommentChange: (id: string, newComment: string) => void;
   updateGaps: (updater: (prev: MissingLineDetection[]) => MissingLineDetection[]) => void;
+  onAcceptStressToDictionary?: (gap: MissingLineDetection) => Promise<void> | void;
 }
 
 export const MissingLinesDefectCard: React.FC<MissingLinesDefectCardProps> = ({
@@ -67,7 +69,8 @@ export const MissingLinesDefectCard: React.FC<MissingLinesDefectCardProps> = ({
   handleReassignGapCharacter,
   handleResolutionChange,
   handleCommentChange,
-  updateGaps
+  updateGaps,
+  onAcceptStressToDictionary
 }) => {
   const category = gap.defectCategory || 'missing_line';
   const isPlayingPrimary = playingSnippetId === `${gap.id}_primary`;
@@ -120,6 +123,11 @@ export const MissingLinesDefectCard: React.FC<MissingLinesDefectCardProps> = ({
                 category === 'timing_too_short' ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' :
                 category === 'timing_too_long' ? 'bg-purple-500/15 text-purple-300 border-purple-500/30' :
                 category === 'audio_artifact' ? 'bg-rose-500/15 text-rose-300 border-rose-500/30' :
+                category === 'speech_disfluency' ? 'bg-amber-500/15 text-amber-300 border-amber-500/30' :
+                category === 'diction_clarity' ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30' :
+                category === 'emotion_mismatch' ? 'bg-rose-500/15 text-rose-300 border-rose-500/30' :
+                category === 'stress_error' ? 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30' :
+                category === 'persona_mismatch' ? 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30' :
                 'bg-purple-500/15 text-purple-300 border-purple-500/30'
               }`}>
                 {gap.typeLabel || 'Замечание'}
@@ -565,6 +573,19 @@ export const MissingLinesDefectCard: React.FC<MissingLinesDefectCardProps> = ({
               </div>
             </div>
           )}
+
+          <MissingLinesActingSection
+            gap={gap}
+            category={category}
+            isPlayingPrimary={isPlayingPrimary}
+            isPlayingOriginal={isPlayingOriginal}
+            isPlayingMix={isPlayingMix}
+            handlePlaySnippet={handlePlaySnippet}
+            onSeekMainPlayer={onSeekMainPlayer}
+            handleResolutionChange={handleResolutionChange}
+            updateGaps={updateGaps}
+            onAcceptStressToDictionary={onAcceptStressToDictionary}
+          />
 
           <MissingLinesArtifactAndWhisperSection
             gap={gap}

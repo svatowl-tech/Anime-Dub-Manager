@@ -126,16 +126,80 @@ def calculate_cosine_similarity(vec1, vec2):
             return dot_product / (norm_a * norm_b)
         return 0.0
 
+def get_ecapa_embedding(samples, sample_rate):
+    """
+    Extracts 192-d SpeechBrain ECAPA-TDNN speaker embedding when speechbrain/torch is installed & cached.
+    Returns None cleanly if offline/unavailable so FFT fallback remains intact.
+    """
+    if len(samples) < 4000:
+        return None
+    try:
+        import torch
+        import numpy as np
+        from pathlib import Path
+        from speechbrain.inference.speaker import EncoderClassifier
+
+        hf_home = os.environ.get("HF_HOME")
+        cache_base = Path(hf_home) if hf_home else (Path.home() / ".cache" / "huggingface")
+        sb_dir = cache_base / "speechbrain_ecapa"
+        if not (sb_dir.exists() and any(sb_dir.glob("*.ckpt"))):
+            return None
+
+        sig = np.array(samples, dtype=np.float32)
+        if sample_rate != 16000:
+            import librosa
+            sig = librosa.resample(sig, orig_sr=sample_rate, target_sr=16000).astype(np.float32)
+
+        cls = EncoderClassifier.from_hparams(source=str(sb_dir), savedir=str(sb_dir))
+        with torch.no_grad():
+            wav_t = torch.from_numpy(sig).unsqueeze(0)
+            emb = cls.encode_batch(wav_t).squeeze().cpu().numpy()
+        return [float(x) for x in emb.tolist()]
+    except Exception:
+        return None
+
+
+def get_f0_median(samples, sample_rate):
+    if len(samples) < 2400:
+        return None
+    try:
+        import numpy as np
+        import librosa
+        sig = np.array(samples, dtype=np.float32)
+        f0 = librosa.yin(sig, fmin=65.0, fmax=520.0, sr=sample_rate)
+        voiced = f0[(f0 > 70.0) & (f0 < 500.0)]
+        if len(voiced) < 4:
+            return None
+        return float(np.median(voiced))
+    except Exception:
+        return None
+
+
 def cmd_extract(input_path, output_path):
     samples, sr = read_wav(input_path)
     if not samples:
         print(json.dumps({"success": False, "error": "Empty audio samples"}))
         return
-    signature = get_fft_spectrum(samples, sr)
+    fft_sig = get_fft_spectrum(samples, sr)
+    ecapa_emb = get_ecapa_embedding(samples, sr)
+    f0_med = get_f0_median(samples, sr)
+
+    payload = {
+        "version": 2,
+        "fftSignature": fft_sig,
+        "ecapaEmbedding": ecapa_emb,
+        "f0MedianHz": f0_med,
+    }
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(signature, f)
-        print(json.dumps({"success": True, "signature": signature}))
+            json.dump(payload, f)
+        print(json.dumps({
+            "success": True,
+            "signature": fft_sig,
+            "ecapaEmbedding": ecapa_emb,
+            "f0MedianHz": f0_med,
+            "profile": payload
+        }))
     except Exception as e:
         print(json.dumps({"success": False, "error": str(e)}))
 
@@ -144,7 +208,8 @@ def cmd_compare(input_path, db_dir):
     if not samples:
         print(json.dumps({"success": False, "error": "Empty audio samples"}))
         return
-    target_sig = get_fft_spectrum(samples, sr)
+    target_fft = get_fft_spectrum(samples, sr)
+    target_ecapa = get_ecapa_embedding(samples, sr)
     
     if not os.path.exists(db_dir):
         print(json.dumps({"success": True, "matches": []}))
@@ -153,18 +218,28 @@ def cmd_compare(input_path, db_dir):
     matches = []
     try:
         for file in os.listdir(db_dir):
-            if file.endsWith('.json') or file.endswith('.voice.json'):
+            if file.endswith('.json') or file.endswith('.voice.json'):
                 ref_path = os.path.join(db_dir, file)
                 char_name = file.replace('.voice.json', '').replace('.json', '')
                 try:
                     with open(ref_path, 'r', encoding='utf-8') as f:
-                        ref_sig = json.load(f)
-                    similarity = calculate_cosine_similarity(target_sig, ref_sig)
+                        ref_data = json.load(f)
+                    if isinstance(ref_data, list):
+                        similarity = calculate_cosine_similarity(target_fft, ref_data)
+                    elif isinstance(ref_data, dict):
+                        ref_ecapa = ref_data.get("ecapaEmbedding")
+                        ref_fft = ref_data.get("fftSignature") or []
+                        if target_ecapa and isinstance(ref_ecapa, list) and len(ref_ecapa) == len(target_ecapa):
+                            similarity = calculate_cosine_similarity(target_ecapa, ref_ecapa)
+                        else:
+                            similarity = calculate_cosine_similarity(target_fft, ref_fft)
+                    else:
+                        continue
                     matches.append({
                         "character": char_name,
                         "similarity": similarity
                     })
-                except Exception as e:
+                except Exception:
                     # Skip corrupt profiles
                     pass
                     

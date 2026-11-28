@@ -76,6 +76,8 @@ export interface QAPlayerAndModalsViewProps {
   wavesurferRef: React.MutableRefObject<WaveSurfer | null>;
   isScanConfigModalOpen: boolean;
   setIsScanConfigModalOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  isDictionaryDrawerOpen?: boolean;
+  setIsDictionaryDrawerOpen?: React.Dispatch<React.SetStateAction<boolean>>;
   gapScanOptions: GapDetectionOptions;
   setGapScanOptions: React.Dispatch<React.SetStateAction<GapDetectionOptions>>;
   handleExecuteGapDetection: (overrideOptions?: GapDetectionOptions) => Promise<void>;
@@ -178,6 +180,8 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
   wavesurferRef,
   isScanConfigModalOpen,
   setIsScanConfigModalOpen,
+  isDictionaryDrawerOpen,
+  setIsDictionaryDrawerOpen,
   gapScanOptions,
   setGapScanOptions,
   handleExecuteGapDetection,
@@ -570,6 +574,8 @@ export const QAPlayerAndModalsView: React.FC<QAPlayerAndModalsViewProps> = ({
         availableDubbers={availableDubbers}
         isScanConfigModalOpen={isScanConfigModalOpen}
         setIsScanConfigModalOpen={setIsScanConfigModalOpen}
+        isDictionaryDrawerOpen={isDictionaryDrawerOpen}
+        setIsDictionaryDrawerOpen={setIsDictionaryDrawerOpen}
         gapScanOptions={gapScanOptions}
         setGapScanOptions={setGapScanOptions}
         handleExecuteGapDetection={handleExecuteGapDetection}

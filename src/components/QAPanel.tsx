@@ -6,6 +6,8 @@ import { generateFixesIssuedMessage } from '../lib/templates';
 import { getParticipants } from '../services/dbService';
 import { NormalizationMetrics } from '../lib/qa/audioNormalizer';
 import { detectEpisodeGaps, MissingLineDetection, GapDetectionOptions, QAScanReport } from '../lib/qa/missingLinesDetector';
+import { DEFAULT_QA_DETECTION_SETTINGS } from '../lib/qa/detector/missingLinesTypes';
+import { qaActingService } from '../services/qaActingService';
 import { saveQAGapsToTimingProject } from '../lib/qa/timingSyncService';
 
 import { useQAGapFixApplier } from "./qa/useQAGapFixApplier";
@@ -48,19 +50,12 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
   const [qaScanReport, setQaScanReport] = useState<QAScanReport | null>(null);
   const [isGapModalOpen, setIsGapModalOpen] = useState(false);
   const [isScanConfigModalOpen, setIsScanConfigModalOpen] = useState(false);
+  const [isDictionaryDrawerOpen, setIsDictionaryDrawerOpen] = useState(false);
   const [isAnalyzingGaps, setIsAnalyzingGaps] = useState(false);
   const [isApplyingGapFixes, setIsApplyingGapFixes] = useState(false);
   const [gapSensitivityThreshold, setGapSensitivityThreshold] = useState<number>(3.0);
   const [gapScanOptions, setGapScanOptions] = useState<GapDetectionOptions>({
-    speechDynamicThresholdDb: 3.0,
-    scanMissingLines: true,
-    scanUnwantedSpeech: true,
-    scanCollisions: true,
-    scanOverlaps: true,
-    scanTimingMismatches: true,
-    scanArtifacts: true,
-    scanWhisperText: false,
-    whisperModel: 'small'
+    ...DEFAULT_QA_DETECTION_SETTINGS,
   });
 
   const [isManualDubberOverride, setIsManualDubberOverride] = useState(false);
@@ -103,6 +98,12 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
 
   useEffect(() => {
     getParticipants().then(p => setParticipants(p));
+    qaActingService.getDetectionSettings().then((saved) => {
+      setGapScanOptions(saved);
+      if (typeof saved.speechDynamicThresholdDb === 'number') {
+        setGapSensitivityThreshold(saved.speechDynamicThresholdDb);
+      }
+    }).catch(() => {});
   }, []);
 
   // Restore persisted QA results for current episode
@@ -295,6 +296,15 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       if (optionsToUse.scanTimingMismatches) activeModes.push('тайминги');
       if (optionsToUse.scanArtifacts) activeModes.push('артефакты');
       if (optionsToUse.scanWhisperText) activeModes.push(`Whisper (${optionsToUse.whisperModel || 'small'})`);
+      if (
+        optionsToUse.scanSpeechDisfluencies ||
+        optionsToUse.scanDictionClarity ||
+        optionsToUse.scanEmotionMismatch ||
+        optionsToUse.scanStressErrors ||
+        optionsToUse.scanPersonaMismatch
+      ) {
+        activeModes.push('актёрский QA');
+      }
 
       toast.info(`Запуск QA анализа [${activeModes.join(', ')}]...`);
       const gaps = await detectEpisodeGaps(
@@ -329,6 +339,13 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
       const overlaps = gaps.filter(g => g.defectCategory === 'actor_overlap').length;
       const artifacts = gaps.filter(g => g.defectCategory === 'audio_artifact').length;
       const textMismatches = gaps.filter(g => g.defectCategory === 'text_mismatch').length;
+      const actingCount = gaps.filter(g =>
+        g.defectCategory === 'speech_disfluency' ||
+        g.defectCategory === 'diction_clarity' ||
+        g.defectCategory === 'emotion_mismatch' ||
+        g.defectCategory === 'stress_error' ||
+        g.defectCategory === 'persona_mismatch'
+      ).length;
 
       if (gaps.length === 0) {
         toast.success('✨ Замечаний не обнаружено! Все реплики озвучены корректно.');
@@ -339,7 +356,8 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
           (collisions ? ` • Конфликтов: ${collisions}` : '') +
           (overlaps ? ` • Наездов: ${overlaps}` : '') +
           (artifacts ? ` • Артефактов: ${artifacts}` : '') +
-          (textMismatches ? ` • Расхождений текста: ${textMismatches}` : '')
+          (textMismatches ? ` • Расхождений текста: ${textMismatches}` : '') +
+          (actingCount ? ` • Дикция/Подача: ${actingCount}` : '')
         );
       }
     } catch (e: any) {
@@ -437,6 +455,8 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         onToggleAutoNormalize={toggleAutoNormalize}
         normalizationMetrics={normalizationMetrics}
         onOpenGapDetection={handleOpenScanConfig}
+        onOpenScanConfig={() => setIsScanConfigModalOpen(true)}
+        onOpenDictionaryDrawer={() => setIsDictionaryDrawerOpen(true)}
         isAnalyzingGaps={isAnalyzingGaps}
         detectedGapsCount={detectedGaps.length}
         gapsByTrack={gapsByTrack}
@@ -501,6 +521,8 @@ export default function QAPanel({ currentEpisode, onRefresh, onNavigate }: QAPan
         wavesurferRef={wavesurferRef}
         isScanConfigModalOpen={isScanConfigModalOpen}
         setIsScanConfigModalOpen={setIsScanConfigModalOpen}
+        isDictionaryDrawerOpen={isDictionaryDrawerOpen}
+        setIsDictionaryDrawerOpen={setIsDictionaryDrawerOpen}
         gapScanOptions={gapScanOptions}
         setGapScanOptions={setGapScanOptions}
         handleExecuteGapDetection={handleExecuteGapDetection}

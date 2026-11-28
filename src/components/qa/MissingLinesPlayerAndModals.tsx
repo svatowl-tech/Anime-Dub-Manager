@@ -18,7 +18,8 @@ import {
   Video,
   Save,
   FileCheck,
-  Edit3
+  Edit3,
+  BookOpen
 } from "lucide-react";
 import {
   MissingLineDetection,
@@ -70,6 +71,8 @@ export interface MissingLinesPlayerAndModalsProps {
   soundEngineerArtifactsCount: number;
   textMismatchFixCount: number;
   textMismatchActorBetterCount: number;
+  actingDubberFixesCount?: number;
+  stressDictAddedCount?: number;
   episode?: Episode | null;
   isSavingToTiming: boolean;
   handleSaveToTiming: (navigateToTiming?: boolean) => Promise<void>;
@@ -87,8 +90,8 @@ export interface MissingLinesPlayerAndModalsProps {
   isLogModalOpen: boolean;
   setIsLogModalOpen: (val: boolean) => void;
   activeReport?: QAScanReport;
-  logFilterStage: "all" | "whisper" | "error" | "audio";
-  setLogFilterStage: (val: "all" | "whisper" | "error" | "audio") => void;
+  logFilterStage: "all" | "whisper" | "error" | "audio" | "acting";
+  setLogFilterStage: (val: "all" | "whisper" | "error" | "audio" | "acting") => void;
   copiedLogs: boolean;
   setCopiedLogs: (val: boolean) => void;
 }
@@ -136,6 +139,8 @@ export const MissingLinesPlayerAndModals: React.FC<MissingLinesPlayerAndModalsPr
   soundEngineerArtifactsCount,
   textMismatchFixCount,
   textMismatchActorBetterCount,
+  actingDubberFixesCount = 0,
+  stressDictAddedCount = 0,
   episode,
   isSavingToTiming,
   handleSaveToTiming,
@@ -410,7 +415,27 @@ export const MissingLinesPlayerAndModals: React.FC<MissingLinesPlayerAndModalsPr
                   <Headphones className="w-3.5 h-3.5 text-indigo-400" />
                   В записку звукорежиссеру (стыки/клиппинг):
                 </span>
-                <span className="font-mono font-bold">{soundEngineerArtifactsCount}</span>
+                <span className="font-mono font-bold tabular-nums">{soundEngineerArtifactsCount}</span>
+              </div>
+            )}
+
+            {actingDubberFixesCount > 0 && (
+              <div className="flex items-center justify-between p-2 rounded-lg bg-rose-950/30 border border-rose-500/30 text-rose-200">
+                <span className="flex items-center gap-1.5">
+                  <Mic className="w-3.5 h-3.5 text-rose-400" />
+                  Замечания по дикции/подаче/ударениям дабберам:
+                </span>
+                <span className="font-mono font-bold tabular-nums">{actingDubberFixesCount}</span>
+              </div>
+            )}
+
+            {stressDictAddedCount > 0 && (
+              <div className="flex items-center justify-between p-2 rounded-lg bg-emerald-950/30 border border-emerald-500/30 text-emerald-200">
+                <span className="flex items-center gap-1.5">
+                  <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
+                  Принять в словарь ударений (без штрафа):
+                </span>
+                <span className="font-mono font-bold tabular-nums">{stressDictAddedCount}</span>
               </div>
             )}
 
