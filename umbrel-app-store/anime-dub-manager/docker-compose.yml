@@ -5,7 +5,7 @@ services:
       APP_PORT: 3000
 
   web:
-    image: ghcr.io/svatowl/anime-dub-manager:latest
+    image: ghcr.io/svatowl-tech/anime-dub-manager:latest
     restart: on-failure
     init: true
     environment:

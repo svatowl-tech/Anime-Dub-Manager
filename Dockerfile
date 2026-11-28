@@ -36,10 +36,18 @@ RUN python3 scripts/build-ai-env.py --install-dir /opt/ai_env --skip-zip --skip-
 FROM node:22-bookworm-slim AS node_builder
 
 WORKDIR /app
-ENV YOUTUBE_DL_SKIP_DOWNLOAD=true
+ENV YOUTUBE_DL_SKIP_DOWNLOAD=true \
+    ELECTRON_SKIP_BINARY_DOWNLOAD=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --no-audit --no-fund
 
 COPY . .
 RUN npm run build && npm prune --omit=dev

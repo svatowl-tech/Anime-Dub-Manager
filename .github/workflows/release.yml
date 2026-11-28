@@ -84,7 +84,7 @@ jobs:
             - **macOS (Intel x64)**: `ai_env_macos_x64.zip`
             - **Linux (x64)**: `ai_env_linux_x64.zip`
             - **Linux (ARM64)**: `ai_env_linux_arm64.zip`
-            - **Umbrel OS / Docker (amd64 + arm64)**: `ghcr.io/svatowl/anime-dub-manager:latest`
+            - **Umbrel OS / Docker (amd64 + arm64)**: `ghcr.io/${{ github.repository_owner }}/anime-dub-manager:latest`
             
             *Включает DeepFilterNet3, Inworld Voice Isolator v1, Demucs v4 (htdemucs/htdemucs_ft), PyTorch и аудио-процессоры.*
             

@@ -12,10 +12,10 @@ description: >-
   Включает встроенный MCP-сервер (/mcp, /sse), REST API (/api/v1), CLI и Входящие куратора
   с двусторонним Telegram-ботом для работы с локальными AI-агентами.
 developer: SvatOwl
-website: https://github.com/SvatOwl/anime-dub-manager
+website: https://github.com/svatowl-tech/Anime-Dub-Manager
 dependencies: []
-repo: https://github.com/SvatOwl/anime-dub-manager
-support: https://github.com/SvatOwl/anime-dub-manager/issues
+repo: https://github.com/svatowl-tech/Anime-Dub-Manager
+support: https://github.com/svatowl-tech/Anime-Dub-Manager/issues
 port: 3000
 gallery: []
 path: ""
@@ -24,4 +24,4 @@ defaultPassword: ""
 permissions:
   - STORAGE
 submitter: SvatOwl
-submission: https://github.com/SvatOwl/anime-dub-manager
+submission: https://github.com/svatowl-tech/Anime-Dub-Manager

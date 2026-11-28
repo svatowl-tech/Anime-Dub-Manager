@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ghcr.io/svatowl/anime-dub-manager:latest
+    image: ghcr.io/svatowl-tech/anime-dub-manager:latest
     container_name: anime-dub-manager
     restart: unless-stopped
     init: true

@@ -3,10 +3,10 @@
 <div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Version](https://img.shields.io/badge/version-1.2.0-purple.svg)](https://github.com/SvatOwl/anime-dub-manager/releases)
+[![Version](https://img.shields.io/badge/version-1.2.0-purple.svg)](https://github.com/svatowl-tech/Anime-Dub-Manager/releases)
 [![Umbrel OS](https://img.shields.io/badge/Umbrel%20OS-amd64%20%7C%20arm64-6366f1.svg)](./umbrel-app-store/anime-dub-manager/umbrel-app.yml)
 [![MCP Ready](https://img.shields.io/badge/AI%20Agent-MCP%20%7C%20REST%20%7C%20CLI-10b981.svg)](./docs/AI_AGENT_PLAYBOOK.md)
-[![CI/CD Release](https://github.com/SvatOwl/anime-dub-manager/actions/workflows/release.yml/badge.svg)](https://github.com/SvatOwl/anime-dub-manager/actions/workflows/release.yml)
+[![CI/CD Release](https://github.com/svatowl-tech/Anime-Dub-Manager/actions/workflows/release.yml/badge.svg)](https://github.com/svatowl-tech/Anime-Dub-Manager/actions/workflows/release.yml)
 
 **Anime Dub Manager** — полноценная студия для озвучки и фандаба в одном приложении: от поиска серии и подготовки субтитров до нейросетевой очистки голоса, автотайминга, сведения и выпуска готового релиза.
 
@@ -64,7 +64,7 @@
 
 Подходит, если вы работаете на одном компьютере:
 
-1. Перейдите в раздел [**GitHub Releases**](https://github.com/SvatOwl/anime-dub-manager/releases).
+1. Перейдите в раздел [**GitHub Releases**](https://github.com/svatowl-tech/Anime-Dub-Manager/releases).
 2. Скачайте пакет под вашу систему:
    - **Windows**: `Anime Dub Manager Setup ... .exe` (установщик) или `Portable .exe`
    - **macOS**: `.dmg` (Apple Silicon / Intel) или `.zip`
@@ -82,7 +82,7 @@
 2. Нажмите на меню (три точки справа вверху) → **Community App Stores**.
 3. Добавьте URL этого репозитория:
    ```text
-   https://github.com/SvatOwl/anime-dub-manager
+   https://github.com/svatowl-tech/Anime-Dub-Manager
    ```
 4. Найдите **Anime Dub Manager** в магазине и нажмите **Install**.
 5. Откройте приложение (по умолчанию порт `3000`) и при первом запуске выберите режим доступа: **с паролем** (рекомендуется при доступе с телефона или через Tailscale) или **открытый доступ в локальной сети**.
@@ -93,7 +93,7 @@
 
 ```bash
 # 1. Клонируйте репозиторий (или скопируйте docker-compose.yml и .env.example)
-git clone https://github.com/SvatOwl/anime-dub-manager.git
+git clone https://github.com/svatowl-tech/Anime-Dub-Manager.git
 cd anime-dub-manager
 
 # 2. Создайте файл .env на основе примера (при желании задайте токены доступа и Telegram-бота)
@@ -115,7 +115,7 @@ docker compose up -d
 
 ```bash
 # 1. Клонируйте репозиторий и установите зависимости
-git clone https://github.com/SvatOwl/anime-dub-manager.git
+git clone https://github.com/svatowl-tech/Anime-Dub-Manager.git
 cd anime-dub-manager
 npm install
 
