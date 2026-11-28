@@ -111,7 +111,7 @@ jobs:
             targetTag = `v${targetVer}`;
 
             if (needCommit) {
-              execFileSync('npm', ['version', targetVer, '--no-git-tag-version'], { stdio: 'inherit' });
+              execFileSync('npm', ['version', targetVer, '--no-git-tag-version', '--allow-same-version'], { stdio: 'inherit' });
               const ymlPath = 'umbrel-app-store/anime-dub-manager/umbrel-app.yml';
               if (fs.existsSync(ymlPath)) {
                 const yml = fs.readFileSync(ymlPath, 'utf8');
@@ -121,10 +121,16 @@ jobs:
 
               execFileSync('git', ['config', 'user.name', 'github-actions[bot]'], { stdio: 'inherit' });
               execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { stdio: 'inherit' });
-              execFileSync('git', ['add', 'package.json', 'package-lock.json', ymlPath].filter(f => fs.existsSync(f)), { stdio: 'inherit' });
-              execFileSync('git', ['commit', '-m', `chore(release): ${targetTag} [skip ci]`], { stdio: 'inherit' });
-              const branch = refName || 'main';
-              execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { stdio: 'inherit' });
+              const filesToAdd = ['package.json', 'package-lock.json', ymlPath].filter(f => fs.existsSync(f));
+              if (filesToAdd.length > 0) {
+                execFileSync('git', ['add', ...filesToAdd], { stdio: 'inherit' });
+                const statusOut = run('git status --porcelain');
+                if (statusOut) {
+                  execFileSync('git', ['commit', '-m', `chore(release): ${targetTag} [skip ci]`], { stdio: 'inherit' });
+                  const branch = ref.startsWith('refs/heads/') ? ref.slice('refs/heads/'.length) : (refName || 'main');
+                  execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { stdio: 'inherit' });
+                }
+              }
             }
 
             try {
@@ -213,6 +219,20 @@ jobs:
             );
           })();
           NODE
+
+      - name: Ensure evergreen ai-env-runtime Release exists (prevents parallel upload race)
+        if: ${{ steps.ai_env_check.outputs.ai_env_changed == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ai-env-runtime
+          name: "AI_env Portable Runtimes"
+          draft: false
+          prerelease: false
+          make_latest: false
+          body: |
+            Портативные сборки Python `AI_env` для Windows, macOS и Linux (пересобираются автоматически только при изменении зависимостей AI).
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create or update GitHub Release
         id: create_release
@@ -364,7 +384,7 @@ jobs:
   finalize_ai_env_manifest:
     name: Finalize AI_env Runtime Manifest
     needs: [prepare_release, build_ai_env]
-    if: ${{ !cancelled() && (needs.build_ai_env.result == 'success' || needs.build_ai_env.result == 'skipped') }}
+    if: ${{ needs.prepare_release.result == 'success' && (needs.build_ai_env.result == 'success' || needs.build_ai_env.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -392,7 +412,7 @@ jobs:
           const hash = '${{ needs.prepare_release.outputs.ai_env_hash }}';
           const rebuilt = '${{ needs.prepare_release.outputs.ai_env_changed }}' === 'true';
 
-          function getRaw(url) {
+          function getRaw(url, allow404 = false) {
             return new Promise((resolve, reject) => {
               https.get(url, {
                 headers: {
@@ -403,13 +423,14 @@ jobs:
               }, (res) => {
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                   res.resume();
-                  getRaw(res.headers.location).then(resolve, reject);
+                  getRaw(res.headers.location, allow404).then(resolve, reject);
                   return;
                 }
                 let body = '';
                 res.on('data', c => body += c);
                 res.on('end', () => {
                   if (res.statusCode >= 200 && res.statusCode < 300) resolve(body);
+                  else if (allow404 && res.statusCode === 404) resolve(null);
                   else reject(new Error(`HTTP ${res.statusCode} for ${url}`));
                 });
               }).on('error', reject);
@@ -418,7 +439,8 @@ jobs:
 
           (async () => {
             fs.mkdirSync('out', { recursive: true });
-            const rel = JSON.parse(await getRaw(`https://api.github.com/repos/${repo}/releases/tags/ai-env-runtime`));
+            const relRaw = await getRaw(`https://api.github.com/repos/${repo}/releases/tags/ai-env-runtime`, true);
+            const rel = relRaw ? JSON.parse(relRaw) : { assets: [] };
             const assets = rel.assets || [];
 
             if (!rebuilt) {
