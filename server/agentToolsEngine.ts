@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { createRequire } from 'module';
 import type { CuratorInboxService } from './curatorInboxService.ts';
 import type { ServerRuntimeConfig } from './serverConfig.ts';
+import type { ServerUpdateService } from './serverUpdateService.ts';
 import { resolveConfinedPath } from './authMiddleware.ts';
 
 const require = createRequire(import.meta.url);
@@ -19,6 +20,7 @@ export interface AgentToolsDependencies {
   taskQueue: any;
   inboxService: CuratorInboxService;
   getTelegramService: () => any;
+  updateService?: ServerUpdateService;
 }
 
 export class AgentToolsEngine {
@@ -587,6 +589,20 @@ export class AgentToolsEngine {
 
   async invokeIpcRaw(channel: string, args: any[] = []) {
     return await this.unwrapIpc(channel, ...args);
+  }
+
+  async checkSystemUpdates() {
+    if (!this.deps.updateService) {
+      throw new Error('ServerUpdateService недоступен в текущем окружении');
+    }
+    return await this.deps.updateService.checkForUpdates({ notifyInbox: false });
+  }
+
+  async applySystemUpdate(force = false) {
+    if (!this.deps.updateService) {
+      throw new Error('ServerUpdateService недоступен в текущем окружении');
+    }
+    return await this.deps.updateService.applyUpdate({ force });
   }
 
   getCuratorPlaybookMarkdown(): string {

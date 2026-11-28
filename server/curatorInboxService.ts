@@ -89,6 +89,7 @@ export class CuratorInboxService {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private lastUpdateOffset = 0;
   private isPolling = false;
+  private onItemResponded?: (item: CuratorInboxItem) => void | Promise<void>;
 
   constructor(options: {
     getData: (filename: string) => Promise<any>;
@@ -96,12 +97,18 @@ export class CuratorInboxService {
     broadcast: (channel: string, data: any) => void;
     getTelegramService: () => any;
     defaultCuratorChatId?: string;
+    onItemResponded?: (item: CuratorInboxItem) => void | Promise<void>;
   }) {
     this.getData = options.getData;
     this.saveData = options.saveData;
     this.broadcast = options.broadcast;
     this.getTelegramService = options.getTelegramService;
     this.defaultCuratorChatId = options.defaultCuratorChatId || '';
+    this.onItemResponded = options.onItemResponded;
+  }
+
+  setOnItemResponded(cb: (item: CuratorInboxItem) => void | Promise<void>): void {
+    this.onItemResponded = cb;
   }
 
   private async readAll(): Promise<CuratorInboxItem[]> {
@@ -220,6 +227,11 @@ export class CuratorInboxService {
 
     items[idx] = updated;
     await this.writeAll(items);
+    if (this.onItemResponded) {
+      Promise.resolve(this.onItemResponded(updated)).catch((err) => {
+        console.warn('[CuratorInbox] onItemResponded callback failed:', err?.message || err);
+      });
+    }
     return updated;
   }
 

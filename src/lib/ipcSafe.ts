@@ -1,7 +1,50 @@
 import { ipcRenderer } from './ipc';
 import { appLogger } from './appLogger';
+import {
+  AI_ENV_REQUIRED_CHANNELS,
+  isAiEnvModalMounted,
+  isMissingAiEnvError,
+  requestAiEnvInstallation,
+} from './aiEnvBridge';
 
 export const isWeb = typeof window !== 'undefined' && !(window as any).electronAPI;
+
+let cachedAiEnvReadyAt = 0;
+let cachedAiEnvReady = false;
+const AI_ENV_READY_CACHE_MS = 15000;
+
+async function ensureDesktopAiEnvReady(channel: string): Promise<void> {
+  if (isWeb || !AI_ENV_REQUIRED_CHANNELS[channel]) return;
+  if (!isAiEnvModalMounted()) return;
+
+  const now = Date.now();
+  if (cachedAiEnvReady && now - cachedAiEnvReadyAt < AI_ENV_READY_CACHE_MS) {
+    return;
+  }
+
+  let status: any = null;
+  try {
+    const raw = await ipcRenderer.invoke('get-ai-env-status', { checkRemote: false });
+    status = raw && typeof raw === 'object' && 'success' in raw ? raw.data : raw;
+  } catch {
+    return;
+  }
+
+  if (status && status.ready) {
+    cachedAiEnvReady = true;
+    cachedAiEnvReadyAt = Date.now();
+    return;
+  }
+
+  cachedAiEnvReady = false;
+  const featureName = AI_ENV_REQUIRED_CHANNELS[channel];
+  const installed = await requestAiEnvInstallation(featureName, 'install');
+  if (!installed) {
+    throw new Error(`Для функции «${featureName}» требуется установка AI-окружения.`);
+  }
+  cachedAiEnvReady = true;
+  cachedAiEnvReadyAt = Date.now();
+}
 
 // Тяжелые фоновые операции: инференс AI, транскодирование, рендеринг, большие скачивания
 // Для них расчетные таймауты устанавливаются адаптивно, чтобы не генерировать ложные ошибки зависания
@@ -113,18 +156,42 @@ export const ipcSafe = {
     );
 
     try {
-      const invokePromise = ipcRenderer.invoke(channel, ...args);
-      const response = hardTimeoutMs
-        ? await Promise.race([
-            invokePromise,
-            new Promise((_, reject) =>
-              setTimeout(
-                () => reject(new Error(`Превышен лимит ожидания ответа от модуля (${channel}, ${hardTimeoutMs / 1000}с)`)),
-                hardTimeoutMs
+      await ensureDesktopAiEnvReady(channel);
+
+      const invokeWithTimeout = async () => {
+        const p = ipcRenderer.invoke(channel, ...args);
+        return hardTimeoutMs
+          ? await Promise.race([
+              p,
+              new Promise((_, reject) =>
+                setTimeout(
+                  () => reject(new Error(`Превышен лимит ожидания ответа от модуля (${channel}, ${hardTimeoutMs / 1000}с)`)),
+                  hardTimeoutMs
+                )
               )
-            )
-          ])
-        : await invokePromise;
+            ])
+          : await p;
+      };
+
+      let response = await invokeWithTimeout();
+
+      if (
+        !isWeb &&
+        AI_ENV_REQUIRED_CHANNELS[channel] &&
+        isAiEnvModalMounted() &&
+        response &&
+        typeof response === 'object' &&
+        response.success === false &&
+        isMissingAiEnvError(response.error)
+      ) {
+        cachedAiEnvReady = false;
+        const installed = await requestAiEnvInstallation(AI_ENV_REQUIRED_CHANNELS[channel], 'install');
+        if (installed) {
+          cachedAiEnvReady = true;
+          cachedAiEnvReadyAt = Date.now();
+          response = await invokeWithTimeout();
+        }
+      }
       
       // If the response is the standardized format { success: boolean, data?: any, error?: string }
       if (response && typeof response === 'object' && 'success' in response) {

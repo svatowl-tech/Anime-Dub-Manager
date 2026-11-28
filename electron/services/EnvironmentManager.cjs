@@ -5,13 +5,212 @@ const fsPromises = fs.promises;
 const log = require('electron-log');
 
 class EnvironmentManager {
+  constructor() {
+    this._manifestCache = null;
+    this._manifestFetchedAt = 0;
+    this._installPromise = null;
+  }
+
+  getPlatformAssetTag() {
+    const isMac = process.platform === 'darwin';
+    const isLinux = process.platform === 'linux';
+    const isArm = process.arch === 'arm64';
+    if (isMac) return isArm ? 'macos_arm64' : 'macos_x64';
+    if (isLinux) return isArm ? 'linux_arm64' : 'linux_x64';
+    return 'windows_x64';
+  }
+
+  getTargetDir() {
+    const userDataPath =
+      process.env.ADM_DATA_DIR ||
+      (typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd());
+    return process.env.ADM_AI_ENV_DIR || path.join(userDataPath, 'ai_env');
+  }
+
+  getExpectedAiEnvDepsHash() {
+    try {
+      const candidates = [
+        path.resolve(__dirname, '..', '..', 'scripts', 'compute-ai-env-hash.cjs'),
+        typeof app !== 'undefined' && app.getAppPath
+          ? path.join(app.getAppPath(), 'scripts', 'compute-ai-env-hash.cjs')
+          : null,
+      ].filter(Boolean);
+      for (const c of candidates) {
+        if (fs.existsSync(c)) {
+          const { computeAiEnvDepsHash } = require(c);
+          const rootDir = path.resolve(path.dirname(c), '..');
+          const hash = computeAiEnvDepsHash(rootDir);
+          if (hash) return hash;
+        }
+      }
+    } catch {}
+
+    try {
+      const metaCandidates = [
+        path.resolve(__dirname, '..', '..', 'src', 'build-metadata.json'),
+        typeof app !== 'undefined' && app.getAppPath
+          ? path.join(app.getAppPath(), 'src', 'build-metadata.json')
+          : null,
+      ].filter(Boolean);
+      for (const m of metaCandidates) {
+        if (fs.existsSync(m)) {
+          const parsed = JSON.parse(fs.readFileSync(m, 'utf8'));
+          if (parsed?.aiEnvDepsHash) return parsed.aiEnvDepsHash;
+        }
+      }
+    } catch {}
+
+    return null;
+  }
+
+  readEnvInfo(dir) {
+    if (!dir) return null;
+    const candidates = [
+      path.join(dir, 'env_info.json'),
+      path.join(dir, 'ai_env', 'env_info.json'),
+    ];
+    for (const c of candidates) {
+      try {
+        if (fs.existsSync(c)) {
+          return JSON.parse(fs.readFileSync(c, 'utf8'));
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  _resolvePythonInDir(dir) {
+    if (!dir || !fs.existsSync(dir)) return null;
+    const isWin = process.platform === 'win32';
+    const candidates = isWin
+      ? [
+          path.join(dir, 'python_env', 'Scripts', 'python.exe'),
+          path.join(dir, 'python_env', 'python.exe'),
+          path.join(dir, 'Scripts', 'python.exe'),
+          path.join(dir, 'python.exe'),
+          path.join(dir, 'ai_env', 'python_env', 'Scripts', 'python.exe'),
+          path.join(dir, 'ai_env', 'python_env', 'python.exe'),
+        ]
+      : [
+          path.join(dir, 'python_env', 'bin', 'python'),
+          path.join(dir, 'python_env', 'bin', 'python3'),
+          path.join(dir, 'bin', 'python'),
+          path.join(dir, 'bin', 'python3'),
+          path.join(dir, 'python'),
+          path.join(dir, 'ai_env', 'python_env', 'bin', 'python'),
+          path.join(dir, 'ai_env', 'python_env', 'bin', 'python3'),
+        ];
+
+    for (const cand of candidates) {
+      if (fs.existsSync(cand)) {
+        return cand;
+      }
+    }
+    return null;
+  }
+
+  getActiveAiEnvDir() {
+    const dirsToCheck = [];
+    if (process.env.ADM_AI_ENV_DIR) dirsToCheck.push(process.env.ADM_AI_ENV_DIR);
+    if (process.platform !== 'win32' && fs.existsSync('/opt/ai_env')) dirsToCheck.push('/opt/ai_env');
+    if (process.env.ADM_DATA_DIR) dirsToCheck.push(path.join(process.env.ADM_DATA_DIR, 'ai_env'));
+    if (typeof app !== 'undefined' && app.getPath) {
+      try {
+        dirsToCheck.push(path.join(app.getPath('userData'), 'ai_env'));
+      } catch {}
+    }
+    dirsToCheck.push(path.join(process.cwd(), 'ai_env'));
+
+    for (const d of dirsToCheck) {
+      const py = this._resolvePythonInDir(d);
+      if (py) return d;
+    }
+    return this.getTargetDir();
+  }
+
+  async _verifyZipSha256(filePath, expectedSha256) {
+    if (!expectedSha256) return true;
+    const crypto = require('crypto');
+    const cleanExpected = String(expectedSha256).trim().split(/\s+/)[0].toLowerCase();
+    if (!/^[a-f0-9]{64}$/.test(cleanExpected)) return true;
+
+    const hash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(filePath);
+      stream.on('data', (chunk) => hash.update(chunk));
+      stream.on('end', resolve);
+      stream.on('error', reject);
+    });
+    const actual = hash.digest('hex').toLowerCase();
+    if (actual !== cleanExpected) {
+      throw new Error(`Контрольная сумма AI_env не совпала (ожидалось ${cleanExpected.slice(0, 12)}, получено ${actual.slice(0, 12)})`);
+    }
+    return true;
+  }
+
+  async _flattenExtractedAiEnvDir(stagingDir) {
+    const nestedDir = path.join(stagingDir, 'ai_env');
+    if (!fs.existsSync(nestedDir)) return;
+    let stat;
+    try {
+      stat = await fsPromises.stat(nestedDir);
+    } catch {
+      return;
+    }
+    if (!stat.isDirectory()) return;
+
+    const nestedHasPython =
+      fs.existsSync(path.join(nestedDir, 'python_env')) ||
+      fs.existsSync(path.join(nestedDir, 'env_info.json'));
+    if (!nestedHasPython) return;
+
+    const tempMove = path.join(path.dirname(stagingDir), `_ai_env_flat_${Date.now()}`);
+    await fsPromises.rename(nestedDir, tempMove);
+    const entries = await fsPromises.readdir(tempMove);
+    for (const entry of entries) {
+      const src = path.join(tempMove, entry);
+      const dst = path.join(stagingDir, entry);
+      if (fs.existsSync(dst)) {
+        await fsPromises.rm(dst, { recursive: true, force: true });
+      }
+      await fsPromises.rename(src, dst);
+    }
+    await fsPromises.rm(tempMove, { recursive: true, force: true });
+  }
+
+  async _moveDirectorySafe(srcDir, dstDir) {
+    try {
+      await fsPromises.rename(srcDir, dstDir);
+    } catch (err) {
+      if (err && (err.code === 'EXDEV' || err.code === 'EPERM' || err.code === 'EACCES')) {
+        await fsPromises.cp(srcDir, dstDir, { recursive: true });
+        await fsPromises.rm(srcDir, { recursive: true, force: true });
+      } else {
+        throw err;
+      }
+    }
+  }
+
   /**
-   * Запускает процесс скачивания и установки портативной среды (Python + DeepFilterNet3 + Demucs v4 + WhisperX).
-   * 
+   * Запускает процесс скачивания и установки портативной среды (Python + DeepFilterNet3 + Demucs v4 + WhisperX)
+   * с проверкой SHA-256, распаковкой в staging и атомарной заменой с автооткатом при сбое.
+   *
    * @param {string} url URL-адрес для скачивания архива
    * @param {Object} window Объект окна Electron (BrowserWindow), содержащий webContents
+   * @param {Object} [options] Дополнительные параметры ({ expectedSha256, preserveBackupDir })
    */
-  async downloadAndInstall(url, window) {
+  async downloadAndInstall(url, window, options = {}) {
+    if (this._installPromise) {
+      return this._installPromise;
+    }
+
+    this._installPromise = this._performDownloadAndInstall(url, window, options).finally(() => {
+      this._installPromise = null;
+    });
+    return this._installPromise;
+  }
+
+  async _performDownloadAndInstall(url, window, options = {}) {
     let axios;
     let extract;
     try {
@@ -23,67 +222,74 @@ class EnvironmentManager {
       throw reqErr;
     }
 
-    // Получаем защищенную директорию пользователя и определяем целевую папку
-    const userDataPath = process.env.ADM_DATA_DIR || (typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd());
-    const targetDir = process.env.ADM_AI_ENV_DIR || path.join(userDataPath, 'ai_env');
+    const userDataPath =
+      process.env.ADM_DATA_DIR ||
+      (typeof app !== 'undefined' && app.getPath ? app.getPath('userData') : process.cwd());
+    const targetDir = options.targetDir || this.getTargetDir();
+    const targetParent = path.dirname(targetDir);
+    const stagingDir = path.join(targetParent, `_ai_env_staging_${Date.now()}`);
+    const backupDir = options.preserveBackupDir || path.join(targetParent, `_ai_env_prev_${Date.now()}`);
     const zipPath = path.join(userDataPath, 'ai_env_temp.zip');
 
     try {
-      // Отправляем начальный статус
-      this._sendProgress(window, { status: 'downloading', percent: 0, message: 'Инициализация загрузки AI среды...' });
+      this._sendProgress(window, { status: 'downloading', percent: 0, message: 'Инициализация загрузки AI-окружения...' });
 
-      // Очищаем предыдущие неудачные попытки скачивания (если файл остался)
+      await fsPromises.mkdir(userDataPath, { recursive: true });
+      await fsPromises.mkdir(targetParent, { recursive: true });
+
       if (fs.existsSync(zipPath)) {
         await fsPromises.rm(zipPath, { force: true });
       }
-
-      // Создаем целевую директорию, если она не существует
-      await fsPromises.mkdir(targetDir, { recursive: true });
+      if (fs.existsSync(stagingDir)) {
+        await fsPromises.rm(stagingDir, { recursive: true, force: true });
+      }
 
       log.info(`[EnvironmentManager] Начинаем скачивание из ${url} в ${zipPath}`);
 
-      // Запрашиваем файл в виде потока (stream), чтобы не загружать весь файл в RAM
       const response = await axios({
         method: 'GET',
         url: url,
         responseType: 'stream',
+        maxRedirects: 8,
+        timeout: 60000,
         headers: {
-          'User-Agent': 'AnimeDubManager-Desktop'
+          'User-Agent': 'AnimeDubManager-Updater'
         }
       });
 
-      // Пытаемся получить общий размер файла из заголовков ответа для расчета процентов
       const totalLength = parseInt(response.headers['content-length'], 10);
       let downloadedLength = 0;
+      let lastSentAt = 0;
 
-      // Создаем поток записи на диск
       const writer = fs.createWriteStream(zipPath);
 
-      // Оборачиваем скачивание в Promise для удобного отслеживания завершения
       await new Promise((resolve, reject) => {
         response.data.on('data', (chunk) => {
           downloadedLength += chunk.length;
+          const now = Date.now();
+          if (now - lastSentAt < 250 && (!totalLength || downloadedLength < totalLength)) return;
+          lastSentAt = now;
 
-          // Рассчитываем процент, если общий размер известен
           if (totalLength && totalLength > 0) {
-            const percent = Math.min(100, Math.round((downloadedLength / totalLength) * 100));
-            this._sendProgress(window, { 
-              status: 'downloading', 
-              percent, 
-              message: `Скачивание нейросетевой среды: ${percent}%` 
+            const percent = Math.min(99, Math.round((downloadedLength / totalLength) * 100));
+            this._sendProgress(window, {
+              status: 'downloading',
+              percent,
+              downloadedBytes: downloadedLength,
+              totalBytes: totalLength,
+              message: `Скачивание AI-окружения: ${percent}%`
             });
           } else {
-            // Если сервер не отдал content-length, просто показываем объем скачанного
             const mb = (downloadedLength / (1024 * 1024)).toFixed(1);
-            this._sendProgress(window, { 
-              status: 'downloading', 
-              percent: 0, 
-              message: `Скачивание: ${mb} MB` 
+            this._sendProgress(window, {
+              status: 'downloading',
+              percent: 0,
+              downloadedBytes: downloadedLength,
+              message: `Скачивание AI-окружения: ${mb} MB`
             });
           }
         });
 
-        // Перенаправляем (pipe) получаемые данные прямо в файловый поток записи
         response.data.pipe(writer);
 
         writer.on('finish', () => resolve());
@@ -91,40 +297,73 @@ class EnvironmentManager {
         response.data.on('error', (err) => reject(err));
       });
 
-      log.info(`[EnvironmentManager] Скачивание завершено. Начинаем распаковку в ${targetDir}`);
-      this._sendProgress(window, { status: 'extracting', percent: 0, message: 'Распаковка и настройка нейросетевой среды...' });
+      if (options.expectedSha256) {
+        this._sendProgress(window, { status: 'verifying', percent: 100, message: 'Проверка контрольной суммы SHA-256...' });
+        await this._verifyZipSha256(zipPath, options.expectedSha256);
+      }
 
-      // Распаковываем архив
+      log.info(`[EnvironmentManager] Скачивание завершено. Начинаем распаковку в staging: ${stagingDir}`);
+      this._sendProgress(window, { status: 'extracting', percent: 0, message: 'Распаковка и настройка AI-окружения...' });
+
+      await fsPromises.mkdir(stagingDir, { recursive: true });
       try {
-        await extract(zipPath, { dir: targetDir });
+        await extract(zipPath, { dir: stagingDir });
+        await this._flattenExtractedAiEnvDir(stagingDir);
       } catch (extractError) {
         log.error('[EnvironmentManager] Ошибка при распаковке:', extractError);
-        if (fs.existsSync(targetDir)) {
-          await fsPromises.rm(targetDir, { recursive: true, force: true });
-        }
+        await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
         throw new Error(`Ошибка распаковки: ${extractError.message}`);
       }
 
-      // Настройка прав исполнения на Unix (Linux / macOS)
       if (process.platform !== 'win32') {
-        this._fixPosixPermissions(targetDir);
+        this._fixPosixPermissions(stagingDir);
+      }
+
+      const stagingPython = this._resolvePythonInDir(stagingDir);
+      if (stagingPython) {
+        const pyEnvDir = path.dirname(path.dirname(stagingPython));
+        this._autoRepairPyvenvCfg(pyEnvDir);
+      }
+
+      // Atomic swap with rollback safety
+      this._sendProgress(window, { status: 'verifying', percent: 95, message: 'Активация и проверка Python AI-окружения...' });
+      let hadPrevious = false;
+      if (fs.existsSync(targetDir)) {
+        if (fs.existsSync(backupDir)) {
+          await fsPromises.rm(backupDir, { recursive: true, force: true });
+        }
+        await this._moveDirectorySafe(targetDir, backupDir);
+        hadPrevious = true;
+      }
+
+      try {
+        await this._moveDirectorySafe(stagingDir, targetDir);
+        const installedPy = this._resolvePythonInDir(targetDir);
+        const works = installedPy ? this._isPythonExecutableWorking(installedPy) : false;
+        if (!works) {
+          throw new Error('Установленный Python-интерпретатор не прошёл проверку запуска');
+        }
+      } catch (swapErr) {
+        log.error('[EnvironmentManager] Ошибка при активации нового AI_env, выполняем откат:', swapErr);
+        await fsPromises.rm(targetDir, { recursive: true, force: true }).catch(() => {});
+        if (hadPrevious && fs.existsSync(backupDir)) {
+          await this._moveDirectorySafe(backupDir, targetDir).catch(() => {});
+        }
+        throw swapErr;
+      }
+
+      if (hadPrevious && !options.preserveBackupDir && fs.existsSync(backupDir)) {
+        await fsPromises.rm(backupDir, { recursive: true, force: true }).catch(() => {});
       }
 
       log.info(`[EnvironmentManager] Среда AI_env успешно установлена в ${targetDir}`);
-      this._sendProgress(window, { status: 'ready', percent: 100, message: 'Среда AI_env готова к работе' });
-
+      this._sendProgress(window, { status: 'ready', percent: 100, message: 'AI-окружение готово к работе' });
+      return { success: true, targetDir, envInfo: this.readEnvInfo(targetDir) };
     } catch (error) {
       log.error('[EnvironmentManager] Ошибка загрузки/установки среды:', error);
       this._sendProgress(window, { status: 'error', percent: 0, message: error.message || 'Неизвестная ошибка' });
-
-      // Очистка частично скачанного архива при сбое
-      if (fs.existsSync(zipPath)) {
-         try {
-           await fsPromises.rm(zipPath, { force: true });
-         } catch (rmError) {
-           log.error('[EnvironmentManager] Не удалось удалить временный архив:', rmError);
-         }
-      }
+      await fsPromises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
     } finally {
       if (fs.existsSync(zipPath)) {
         try {
@@ -882,8 +1121,101 @@ amp = _Amp()
   }
 
   async isEnvironmentReady() {
-    const pythonPath = this.getPythonPath();
-    return this._isPythonExecutableWorking(pythonPath);
+    const activeDir = this.getActiveAiEnvDir();
+    const portablePy = this._resolvePythonInDir(activeDir);
+    if (!portablePy) {
+      return false;
+    }
+    return this._isPythonExecutableWorking(portablePy);
+  }
+
+  async fetchLatestAiEnvManifest(force = false) {
+    const now = Date.now();
+    if (!force && this._manifestCache && now - this._manifestFetchedAt < 5 * 60 * 1000) {
+      return this._manifestCache;
+    }
+    const axios = require('axios');
+    const manifestUrl =
+      process.env.ADM_AI_ENV_MANIFEST_URL ||
+      'https://github.com/svatowl-tech/Anime-Dub-Manager/releases/download/ai-env-runtime/ai_env_manifest.json';
+
+    try {
+      const res = await axios.get(manifestUrl, {
+        timeout: 12000,
+        maxRedirects: 5,
+        headers: { 'User-Agent': 'AnimeDubManager-Updater' }
+      });
+      if (res.data && typeof res.data === 'object') {
+        this._manifestCache = res.data;
+        this._manifestFetchedAt = now;
+        return res.data;
+      }
+    } catch (err) {
+      log.warn('[EnvironmentManager] Не удалось получить ai_env_manifest.json:', err?.message || err);
+    }
+    return this._manifestCache;
+  }
+
+  async getAiEnvStatus(checkRemote = false) {
+    const platformTag = this.getPlatformAssetTag();
+    const activeDir = this.getActiveAiEnvDir();
+    const portablePy = this._resolvePythonInDir(activeDir);
+    const ready = portablePy ? this._isPythonExecutableWorking(portablePy) : false;
+    const installedInfo = this.readEnvInfo(activeDir);
+    const expectedHash = this.getExpectedAiEnvDepsHash();
+    const installedHash = installedInfo?.aiEnvDepsHash || null;
+
+    let remoteManifest = null;
+    if (checkRemote) {
+      remoteManifest = await this.fetchLatestAiEnvManifest(true);
+    } else if (this._manifestCache) {
+      remoteManifest = this._manifestCache;
+    }
+
+    const remoteAsset = remoteManifest?.assets?.[platformTag] || null;
+    const fallbackUrl = `https://github.com/svatowl-tech/Anime-Dub-Manager/releases/download/ai-env-runtime/ai_env_${platformTag}.zip`;
+    const remoteAssetUrl = remoteAsset?.url || fallbackUrl;
+    const remoteHash = remoteManifest?.aiEnvDepsHash || null;
+    const targetHash = remoteHash || expectedHash;
+
+    const hashMismatch = Boolean(ready && targetHash && installedHash && installedHash !== targetHash);
+    const updateAvailable = Boolean(
+      ready &&
+        remoteHash &&
+        (!installedHash || installedHash !== remoteHash)
+    );
+
+    return {
+      installed: Boolean(portablePy),
+      ready,
+      installing: Boolean(this._installPromise),
+      platformTag,
+      activeDir,
+      pythonPath: portablePy || null,
+      installedInfo,
+      installedHash,
+      expectedHash,
+      remoteHash,
+      remoteAssetUrl,
+      remoteSha256: remoteAsset?.sha256 || null,
+      remoteSize: remoteAsset?.size || null,
+      needsInstall: !ready,
+      updateAvailable,
+      hashMismatch,
+    };
+  }
+
+  async installOrUpdateFromManifest(window, { customUrl = null, force = false } = {}) {
+    const status = await this.getAiEnvStatus(!customUrl);
+    if (!force && status.ready && !status.updateAvailable && !status.hashMismatch && !customUrl) {
+      return status;
+    }
+
+    const url = customUrl || status.remoteAssetUrl;
+    const expectedSha256 = !customUrl ? status.remoteSha256 : null;
+
+    await this.downloadAndInstall(url, window, { expectedSha256 });
+    return await this.getAiEnvStatus(false);
   }
 
   /**

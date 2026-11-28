@@ -15,6 +15,8 @@ import { createWebFilesRouter } from './server/webFilesRouter.ts';
 import { AgentToolsEngine } from './server/agentToolsEngine.ts';
 import { createInboxRouter, createRestAgentRouter } from './server/restAgentRouter.ts';
 import { mountMcpRoutes } from './server/mcpServer.ts';
+import { ServerUpdateService } from './server/serverUpdateService.ts';
+import { createUpdatesRouter } from './server/updatesRouter.ts';
 
 dotenv.config();
 
@@ -227,8 +229,20 @@ async function startServer() {
     defaultCuratorChatId: runtimeConfig.curatorTelegramChatId,
   });
 
+  const updateService = new ServerUpdateService({
+    config: runtimeConfig,
+    inboxService,
+    broadcast: broadcastIpcEvent,
+    taskQueue,
+  });
+
+  inboxService.setOnItemResponded(async (item) => {
+    await updateService.handleInboxDecision(item);
+  });
+
   if (runtimeConfig.isServerMode) {
     inboxService.startTelegramBotPoller();
+    updateService.startScheduler();
   }
 
   const invokeIpc = async (channel: string, ...args: any[]) => {
@@ -255,6 +269,7 @@ async function startServer() {
     taskQueue,
     inboxService,
     getTelegramService,
+    updateService,
   });
 
   console.log(`[IPC Server] Registered ${mockIpcHandlers.size} handlers.`);
@@ -382,6 +397,9 @@ async function startServer() {
 
   // Curator Web Inbox routes (/api/inbox/*)
   app.use('/api/inbox', createInboxRouter({ authManager, inboxService }));
+
+  // Self-Update & AI_env Hot-Swap routes (/api/updates/*)
+  app.use('/api/updates', createUpdatesRouter({ authManager, updateService }));
 
   // REST + OpenAPI v3.1 Agent API (/api/v1/*)
   app.use('/api/v1', createRestAgentRouter({ config: runtimeConfig, authManager, toolsEngine }));
@@ -648,6 +666,7 @@ async function startServer() {
 
   const shutdown = () => {
     inboxService.stopTelegramBotPoller();
+    updateService.stopScheduler();
     killAllTrackedProcesses();
     process.exit(0);
   };
@@ -655,6 +674,7 @@ async function startServer() {
   process.on('SIGTERM', shutdown);
   process.on('exit', () => {
     inboxService.stopTelegramBotPoller();
+    updateService.stopScheduler();
     killAllTrackedProcesses();
   });
 
@@ -668,6 +688,7 @@ async function startServer() {
     if (runtimeConfig.isServerMode) {
       console.log(`[Umbrel Mode] MCP Streamable HTTP: http://localhost:${PORT}/mcp | SSE: /sse | REST: /api/v1`);
     }
+    void updateService.clearBootPendingOnHealthyStartup();
   });
 }
 

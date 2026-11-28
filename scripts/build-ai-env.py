@@ -8,12 +8,15 @@ and packages it into lightweight cross-platform zip archives for GitHub Releases
 import os
 import sys
 import re
+import json
+import hashlib
 import struct
 import shutil
 import zipfile
 import platform
 import subprocess
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure UTF-8 stdout/stderr on Windows runners to prevent cp1252 encoding errors
@@ -867,9 +870,34 @@ except Exception as e:
     print(f"  [OK] Airwindows VST3 directory initialized at {airwindows_base}")
 
     # 9. Create portable launcher / environment marker
+    def _compute_ai_env_deps_hash(repo_root: Path) -> str:
+        hasher = hashlib.sha256()
+        for rel in ("scripts/build-ai-env.py", "requirements-ai.txt"):
+            hasher.update(f"FILE:{rel}\n".encode("utf-8"))
+            fpath = repo_root / rel
+            if fpath.exists():
+                text = fpath.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n")
+                hasher.update(text.encode("utf-8"))
+            else:
+                hasher.update(b"MISSING")
+            hasher.update(b"\n")
+        return hasher.hexdigest()
+
+    ai_env_deps_hash = os.environ.get("ADM_AI_ENV_HASH") or _compute_ai_env_deps_hash(root_dir)
+    env_info_payload = {
+        "platform": tag,
+        "python_version": platform.python_version(),
+        "numpy_version": "1.26.4",
+        "aiEnvDepsHash": ai_env_deps_hash,
+        "builtAt": datetime.now(timezone.utc).isoformat(),
+        "deepfilternet": True,
+        "demucs": True,
+        "inworld_voice_isolator": True,
+    }
     version_info_path = build_temp_dir / "env_info.json"
     with open(version_info_path, "w", encoding="utf-8") as f:
-        f.write(f'{{\n  "platform": "{tag}",\n  "python_version": "{platform.python_version()}",\n  "numpy_version": "1.26.4",\n  "deepfilternet": true,\n  "demucs": true,\n  "inworld_voice_isolator": true\n}}\n')
+        f.write(json.dumps(env_info_payload, indent=2) + "\n")
+    print(f"  [OK] env_info.json written (aiEnvDepsHash={ai_env_deps_hash[:12]}...)")
 
     # 10. Prune bloat
     prune_unneeded_files(build_temp_dir, strip_cuda=(use_cpu_wheels and (is_win or is_linux)))

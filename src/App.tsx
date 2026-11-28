@@ -44,6 +44,8 @@ import { ServerAuthGate } from './components/auth/ServerAuthGate';
 import { ServerFilePickerModal } from './components/files/ServerFilePickerModal';
 import { requestServerFilePicker } from './components/files/serverFilePickerBridge';
 import { CuratorInboxPanel } from './components/inbox/CuratorInboxPanel';
+import { UpdateBanner } from './components/updates/UpdateBanner';
+import { AiEnvInstallModal } from './components/updates/AiEnvInstallModal';
 import { Project, Episode } from './types';
 import { ipcSafe, isWeb } from './lib/ipcSafe';
 import { fetchCuratorInbox, probeServerCapabilities } from './lib/serverClient';
@@ -754,6 +756,10 @@ function AppContent() {
 
       {/* Main Content */}
       <main className={`flex-1 min-h-0 bg-neutral-950 flex flex-col ${['subtitles', 'qa', 'timing', 'mixing', 'telegram', 'inbox'].includes(activeTab) ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+        <UpdateBanner
+          onOpenSettings={() => handleNavigate('settings')}
+          onOpenInbox={() => handleNavigate('inbox')}
+        />
         {activeTab === 'dashboard' && (
           <Dashboard 
             onNavigate={handleNavigate} 
@@ -963,6 +969,7 @@ export default function App() {
         <AppContent />
       </ServerAuthGate>
       <ServerFilePickerModal />
+      <AiEnvInstallModal />
     </VideoProvider>
   );
 }

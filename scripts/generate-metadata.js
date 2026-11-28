@@ -1,8 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const { computeAiEnvDepsHash, computePackageLockHash } = require('./compute-ai-env-hash.cjs');
 
 const metadataPath = path.join(process.cwd(), 'src', 'build-metadata.json');
+const pkgJson = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf8'));
 
 let commitHash = 'unknown';
 try {
@@ -14,7 +19,9 @@ try {
 const metadata = {
   buildDate: new Date().toISOString(),
   commitHash: commitHash,
-  version: process.env.npm_package_version || '1.2.0'
+  version: pkgJson.version || process.env.npm_package_version || '1.2.0',
+  aiEnvDepsHash: computeAiEnvDepsHash(process.cwd()),
+  packageLockHash: computePackageLockHash(process.cwd()),
 };
 
 fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2));

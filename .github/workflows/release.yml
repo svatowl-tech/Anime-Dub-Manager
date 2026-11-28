@@ -1,4 +1,4 @@
-name: Build & Release Desktop App & AI Runtime
+name: Build & Release Desktop App, Server Bundle & AI Runtime
 
 on:
   push:
@@ -12,7 +12,12 @@ on:
       release_notes:
         description: 'Custom Release Notes'
         required: false
-        default: 'Automated release build with full AI environment.'
+        default: 'Automated release build.'
+      rebuild_ai_env:
+        description: 'Force rebuild portable AI_env runtime archives'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -25,14 +30,17 @@ env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 jobs:
-  # 1. Job to prepare or ensure the release exists and obtain version info
+  # 1. Auto-bump patch version (if needed), tag release, and check whether AI_env actually changed
   prepare_release:
-    name: Prepare GitHub Release
+    name: Prepare GitHub Release & Check AI_env
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      version: ${{ steps.get_version.outputs.version }}
-      tag_name: ${{ steps.get_version.outputs.tag_name }}
+      version: ${{ steps.versioning.outputs.version }}
+      tag_name: ${{ steps.versioning.outputs.tag_name }}
+      ai_env_hash: ${{ steps.ai_env_check.outputs.ai_env_hash }}
+      ai_env_changed: ${{ steps.ai_env_check.outputs.ai_env_changed }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -45,58 +53,200 @@ jobs:
             !*.avi
           sparse-checkout-cone-mode: false
 
-      - name: Extract version from package.json
-        id: get_version
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Auto-bump patch version & create release tag
+        id: versioning
         run: |
-          VERSION=$(node -p "require('./package.json').version")
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            TAG_NAME="${{ github.ref_name }}"
-          else
-            TAG_NAME="v${VERSION}"
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
-          echo "Target Version: ${VERSION}, Tag: ${TAG_NAME}"
+          node - <<'NODE'
+          const fs = require('fs');
+          const { execFileSync, execSync } = require('child_process');
+
+          const run = (cmd) => execSync(cmd, { encoding: 'utf8' }).trim();
+          const cmpSemver = (a, b) => {
+            const parse = (v) => String(v || '0.0.0').replace(/^v/i, '').split('-')[0].split('.').map(n => parseInt(n, 10) || 0);
+            const pa = parse(a);
+            const pb = parse(b);
+            for (let i = 0; i < 3; i++) {
+              if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+              if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+            }
+            return 0;
+          };
+          const bumpPatch = (v) => {
+            const p = String(v || '1.0.0').replace(/^v/i, '').split('-')[0].split('.').map(n => parseInt(n, 10) || 0);
+            return `${p[0] || 1}.${p[1] || 0}.${(p[2] || 0) + 1}`;
+          };
+
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const pkgVer = pkg.version || '1.2.0';
+          const ref = process.env.GITHUB_REF || '';
+          const refName = process.env.GITHUB_REF_NAME || '';
+
+          let targetVer = pkgVer;
+          let targetTag = `v${targetVer}`;
+          let needCommit = false;
+
+          if (ref.startsWith('refs/tags/v')) {
+            targetTag = refName;
+            targetVer = refName.replace(/^v/i, '');
+          } else {
+            let latestTagVer = '0.0.0';
+            try {
+              const tags = run("git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname");
+              const first = tags.split('\n').find(Boolean);
+              if (first) latestTagVer = first.replace(/^v/i, '');
+            } catch {}
+
+            if (cmpSemver(pkgVer, latestTagVer) > 0) {
+              targetVer = pkgVer;
+            } else {
+              const baseVer = cmpSemver(latestTagVer, pkgVer) >= 0 ? latestTagVer : pkgVer;
+              targetVer = bumpPatch(baseVer);
+              needCommit = true;
+            }
+            targetTag = `v${targetVer}`;
+
+            if (needCommit) {
+              execFileSync('npm', ['version', targetVer, '--no-git-tag-version'], { stdio: 'inherit' });
+              const ymlPath = 'umbrel-app-store/anime-dub-manager/umbrel-app.yml';
+              if (fs.existsSync(ymlPath)) {
+                const yml = fs.readFileSync(ymlPath, 'utf8');
+                const nextYml = yml.replace(/^version:\s*["']?[^"'\n]+["']?/m, `version: "${targetVer}"`);
+                fs.writeFileSync(ymlPath, nextYml, 'utf8');
+              }
+
+              execFileSync('git', ['config', 'user.name', 'github-actions[bot]'], { stdio: 'inherit' });
+              execFileSync('git', ['config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { stdio: 'inherit' });
+              execFileSync('git', ['add', 'package.json', 'package-lock.json', ymlPath].filter(f => fs.existsSync(f)), { stdio: 'inherit' });
+              execFileSync('git', ['commit', '-m', `chore(release): ${targetTag} [skip ci]`], { stdio: 'inherit' });
+              const branch = refName || 'main';
+              execFileSync('git', ['push', 'origin', `HEAD:${branch}`], { stdio: 'inherit' });
+            }
+
+            try {
+              execFileSync('git', ['tag', '-f', targetTag], { stdio: 'inherit' });
+              execFileSync('git', ['push', 'origin', targetTag, '--force'], { stdio: 'inherit' });
+            } catch (err) {
+              console.warn('Tag push warning:', err.message);
+            }
+          }
+
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${targetVer}\ntag_name=${targetTag}\n`);
+          console.log(`Resolved Release Version: ${targetVer} (${targetTag})`);
+          NODE
+
+      - name: Compute AI_env dependency hash & compare against ai-env-runtime
+        id: ai_env_check
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const https = require('https');
+          const { computeAiEnvDepsHash } = require('./scripts/compute-ai-env-hash.cjs');
+
+          const hash = computeAiEnvDepsHash(process.cwd());
+          const forceRebuild = '${{ inputs.rebuild_ai_env }}' === 'true';
+          const repo = process.env.GITHUB_REPOSITORY;
+          const token = process.env.GITHUB_TOKEN;
+
+          function getJson(url) {
+            return new Promise((resolve) => {
+              const req = https.get(url, {
+                headers: {
+                  'User-Agent': 'ADM-Release-Check',
+                  'Accept': 'application/vnd.github+json',
+                  ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                }
+              }, (res) => {
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                  res.resume();
+                  getJson(res.headers.location).then(resolve);
+                  return;
+                }
+                let body = '';
+                res.on('data', (c) => body += c);
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    try { resolve(JSON.parse(body)); } catch { resolve(null); }
+                  } else {
+                    resolve(null);
+                  }
+                });
+              });
+              req.on('error', () => resolve(null));
+            });
+          }
+
+          (async () => {
+            let changed = true;
+            if (!forceRebuild) {
+              const rel = await getJson(`https://api.github.com/repos/${repo}/releases/tags/ai-env-runtime`);
+              const expectedAssets = [
+                'ai_env_windows_x64.zip',
+                'ai_env_macos_arm64.zip',
+                'ai_env_macos_x64.zip',
+                'ai_env_linux_x64.zip',
+                'ai_env_linux_arm64.zip',
+                'ai_env_manifest.json',
+              ];
+              const existingNames = new Set((rel?.assets || []).map(a => a.name));
+              const hasAllAssets = expectedAssets.every(name => existingNames.has(name));
+              const manifestAsset = (rel?.assets || []).find(a => a.name === 'ai_env_manifest.json');
+              let manifest = null;
+              if (manifestAsset?.browser_download_url) {
+                manifest = await getJson(manifestAsset.browser_download_url);
+              }
+              if (hasAllAssets && manifest?.aiEnvDepsHash === hash) {
+                changed = false;
+              }
+              console.log(`ai-env-runtime check: hasAllAssets=${hasAllAssets}, remoteHash=${manifest?.aiEnvDepsHash || 'none'}, localHash=${hash}`);
+            } else {
+              console.log('Force rebuild of AI_env requested via workflow_dispatch.');
+            }
+
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              `ai_env_hash=${hash}\nai_env_changed=${changed ? 'true' : 'false'}\n`
+            );
+          })();
+          NODE
 
       - name: Create or update GitHub Release
         id: create_release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.get_version.outputs.tag_name }}
-          name: "Anime Dub Manager ${{ steps.get_version.outputs.tag_name }}"
+          tag_name: ${{ steps.versioning.outputs.tag_name }}
+          name: "Anime Dub Manager ${{ steps.versioning.outputs.tag_name }}"
           draft: false
           prerelease: false
           generate_release_notes: true
           make_latest: true
           body: |
-            ## 🎙️ Anime Dub Manager ${{ steps.get_version.outputs.tag_name }}
+            ## 🎙️ Anime Dub Manager ${{ steps.versioning.outputs.tag_name }}
             
-            Автоматическая сборка релиза приложения Anime Dub Manager и портативной нейросетевой среды `AI_env` для Windows, macOS и Linux.
+            ${{ inputs.release_notes || 'Автоматическая сборка релиза приложения Anime Dub Manager.' }}
             
-            ### 📦 Установочные пакеты приложения:
+            ### 📦 Установочные пакеты и обновления:
             - **Windows**: Инсталлятор `.exe` (NSIS) и Портативная версия `.exe` (x64)
-            - **macOS**: Образ `.dmg` и `.zip` архив (Universal / Apple Silicon / Intel)
-            - **Linux**: Универсальный пакет `.AppImage` и пакет `.deb` (Debian/Ubuntu)
+            - **macOS**: Образ `.dmg` и `.zip` архив (Apple Silicon / Intel)
+            - **Linux**: Универсальный пакет `.AppImage` и пакет `.deb`
+            - **Umbrel OS / Docker Server Hot-Swap**: `adm-server-bundle.tar.gz` + `adm-release-manifest.json`
+            - **Multi-Arch Docker**: `ghcr.io/${{ github.repository_owner }}/anime-dub-manager:${{ steps.versioning.outputs.tag_name }}`
             
-            ### 🧠 Портативные нейросетевые среды (AI_env):
-            - **Windows (x64)**: `ai_env_windows_x64.zip` (и `ai_env.zip`)
-            - **macOS (Apple Silicon)**: `ai_env_macos_arm64.zip`
-            - **macOS (Intel x64)**: `ai_env_macos_x64.zip`
-            - **Linux (x64)**: `ai_env_linux_x64.zip`
-            - **Linux (ARM64)**: `ai_env_linux_arm64.zip`
-            - **Umbrel OS / Docker (amd64 + arm64)**: `ghcr.io/${{ github.repository_owner }}/anime-dub-manager:latest`
-            
-            *Включает DeepFilterNet3, Inworld Voice Isolator v1, Demucs v4 (htdemucs/htdemucs_ft), PyTorch и аудио-процессоры.*
-            
-            ---
-            *Собрано автоматически через GitHub Actions CI/CD.*
+            ### 🧠 AI_env Runtime:
+            - **Статус в этом релизе**: `${{ steps.ai_env_check.outputs.ai_env_changed == 'true' && 'Обновлён (пересобран)' || 'Без изменений (используется актуальный ai-env-runtime)' }}`
+            - **Hash**: `${{ steps.ai_env_check.outputs.ai_env_hash }}`
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # 2. Build AI Environment (AI_env) for Windows, macOS, and Linux
+  # 2. Rebuild portable AI_env ONLY when scripts/build-ai-env.py or requirements-ai.txt changed (or missing)
   build_ai_env:
     name: Build AI Environment (${{ matrix.platform.name }})
     needs: prepare_release
+    if: ${{ needs.prepare_release.outputs.ai_env_changed == 'true' }}
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 60
     strategy:
@@ -108,6 +258,7 @@ jobs:
             tag: windows_x64
             release_files: |
               out/ai_env_windows_x64.zip
+              out/ai_env_windows_x64.zip.sha256
               out/ai_env.zip
             artifact_name: AI_env-Windows-x64
           - name: macOS (Apple Silicon arm64)
@@ -115,36 +266,41 @@ jobs:
             tag: macos_arm64
             release_files: |
               out/ai_env_macos_arm64.zip
+              out/ai_env_macos_arm64.zip.sha256
             artifact_name: AI_env-macOS-arm64
           - name: macOS (Intel x64)
             os: macos-15-intel
             tag: macos_x64
             release_files: |
               out/ai_env_macos_x64.zip
+              out/ai_env_macos_x64.zip.sha256
             artifact_name: AI_env-macOS-x64
           - name: Linux (x64)
             os: ubuntu-latest
             tag: linux_x64
             release_files: |
               out/ai_env_linux_x64.zip
+              out/ai_env_linux_x64.zip.sha256
             artifact_name: AI_env-Linux-x64
           - name: Linux (ARM64)
             os: ubuntu-24.04-arm
             tag: linux_arm64
             release_files: |
               out/ai_env_linux_arm64.zip
+              out/ai_env_linux_arm64.zip.sha256
             artifact_name: AI_env-Linux-arm64
 
     steps:
-      - name: Configure Git for Windows (support special characters and long paths)
+      - name: Configure Git for Windows
         if: runner.os == 'Windows'
         run: |
           git config --system core.protectNTFS false
           git config --system core.longpaths true
 
-      - name: Checkout repository
+      - name: Checkout release commit
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare_release.outputs.tag_name }}
           sparse-checkout: |
             /*
             !*.mp4
@@ -157,32 +313,231 @@ jobs:
         with:
           python-version: '3.10'
 
+      - name: Setup Node.js 22 (for SHA-256 helper)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Build Portable AI Environment
         run: python scripts/build-ai-env.py --tag ${{ matrix.platform.tag }}
         env:
           PYTHONIOENCODING: "utf-8"
           PYTHONUTF8: "1"
           AENEAS_WITH_CEW: "False"
+          ADM_AI_ENV_HASH: ${{ needs.prepare_release.outputs.ai_env_hash }}
 
-      - name: Upload AI_env to GitHub Release
+      - name: Compute SHA-256 Checksum
+        run: |
+          node -e "
+            const fs = require('fs');
+            const path = require('path');
+            const { computeFileSha256 } = require('./scripts/compute-ai-env-hash.cjs');
+            const name = 'ai_env_${{ matrix.platform.tag }}.zip';
+            const zipPath = path.join('out', name);
+            if (fs.existsSync(zipPath)) {
+              const sha = computeFileSha256(zipPath);
+              fs.writeFileSync(zipPath + '.sha256', sha + '  ' + name + '\n', 'utf8');
+            }
+          "
+
+      - name: Upload AI_env to evergreen ai-env-runtime Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.prepare_release.outputs.tag_name }}
+          tag_name: ai-env-runtime
+          name: "AI_env Portable Runtimes"
+          draft: false
+          prerelease: false
+          make_latest: false
           files: ${{ matrix.platform.release_files }}
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload AI_env Artifact to CI Workflow
+      - name: Upload AI_env Artifact Backup
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform.artifact_name }}
-          path: out/ai_env*.zip
+          path: out/ai_env*.zip*
           if-no-files-found: warn
 
-  # 3. Build Desktop Application Binaries for Windows, macOS, and Linux
+  # 3. Publish/export consolidated ai_env_manifest.json for Desktop & Server updaters
+  finalize_ai_env_manifest:
+    name: Finalize AI_env Runtime Manifest
+    needs: [prepare_release, build_ai_env]
+    if: ${{ !cancelled() && (needs.build_ai_env.result == 'success' || needs.build_ai_env.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare_release.outputs.tag_name }}
+          sparse-checkout: |
+            scripts/*
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build or fetch ai_env_manifest.json
+        run: |
+          node - <<'NODE'
+          const fs = require('fs');
+          const https = require('https');
+
+          const repo = process.env.GITHUB_REPOSITORY;
+          const token = process.env.GITHUB_TOKEN;
+          const hash = '${{ needs.prepare_release.outputs.ai_env_hash }}';
+          const rebuilt = '${{ needs.prepare_release.outputs.ai_env_changed }}' === 'true';
+
+          function getRaw(url) {
+            return new Promise((resolve, reject) => {
+              https.get(url, {
+                headers: {
+                  'User-Agent': 'ADM-Manifest-Builder',
+                  'Accept': 'application/vnd.github+json',
+                  ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+                }
+              }, (res) => {
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                  res.resume();
+                  getRaw(res.headers.location).then(resolve, reject);
+                  return;
+                }
+                let body = '';
+                res.on('data', c => body += c);
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) resolve(body);
+                  else reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+                });
+              }).on('error', reject);
+            });
+          }
+
+          (async () => {
+            fs.mkdirSync('out', { recursive: true });
+            const rel = JSON.parse(await getRaw(`https://api.github.com/repos/${repo}/releases/tags/ai-env-runtime`));
+            const assets = rel.assets || [];
+
+            if (!rebuilt) {
+              const existingManifest = assets.find(a => a.name === 'ai_env_manifest.json');
+              if (existingManifest?.browser_download_url) {
+                const raw = await getRaw(existingManifest.browser_download_url);
+                fs.writeFileSync('out/ai_env_manifest.json', raw, 'utf8');
+                console.log('Reused existing ai_env_manifest.json from ai-env-runtime.');
+                return;
+              }
+            }
+
+            const tags = ['windows_x64', 'macos_arm64', 'macos_x64', 'linux_x64', 'linux_arm64'];
+            const map = {};
+            for (const tag of tags) {
+              const zipAsset = assets.find(a => a.name === `ai_env_${tag}.zip`);
+              if (!zipAsset) continue;
+              let sha256 = null;
+              const shaAsset = assets.find(a => a.name === `ai_env_${tag}.zip.sha256`);
+              if (shaAsset?.browser_download_url) {
+                try {
+                  const shaText = await getRaw(shaAsset.browser_download_url);
+                  sha256 = shaText.trim().split(/\s+/)[0].toLowerCase();
+                } catch {}
+              }
+              map[tag] = {
+                url: zipAsset.browser_download_url,
+                size: zipAsset.size,
+                sha256,
+              };
+            }
+
+            const manifest = {
+              schemaVersion: 1,
+              releaseTag: 'ai-env-runtime',
+              aiEnvDepsHash: hash,
+              builtAt: new Date().toISOString(),
+              assets: map,
+            };
+            fs.writeFileSync('out/ai_env_manifest.json', JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+            console.log('Generated new ai_env_manifest.json:', Object.keys(map));
+          })();
+          NODE
+
+      - name: Upload ai_env_manifest.json to ai-env-runtime
+        if: ${{ needs.prepare_release.outputs.ai_env_changed == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ai-env-runtime
+          draft: false
+          prerelease: false
+          make_latest: false
+          files: out/ai_env_manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Share manifest artifact with Server Bundle job
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-env-manifest
+          path: out/ai_env_manifest.json
+
+  # 4. Build Lightweight Server Hot-Swap Bundle (adm-server-bundle.tar.gz + adm-release-manifest.json)
+  build_server_bundle:
+    name: Build Lightweight Server Bundle
+    needs: [prepare_release, finalize_ai_env_manifest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout release commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare_release.outputs.tag_name }}
+          sparse-checkout: |
+            /*
+            !*.mp4
+            !*.mkv
+            !*.avi
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Node.js 22 (LTS)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Download ai-env-manifest artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-env-manifest
+          path: out
+
+      - name: Install npm dependencies
+        run: npm ci
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          YOUTUBE_DL_SKIP_DOWNLOAD: "true"
+
+      - name: Build Web Frontend & Metadata
+        run: npm run build
+
+      - name: Package Lightweight Server Bundle
+        run: node scripts/package-server-bundle.cjs --tag ${{ needs.prepare_release.outputs.tag_name }} --ai-env-manifest out/ai_env_manifest.json
+
+      - name: Upload Server Bundle to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare_release.outputs.tag_name }}
+          files: |
+            out/server-bundle/adm-server-bundle.tar.gz
+            out/server-bundle/adm-server-bundle.tar.gz.sha256
+            out/server-bundle/adm-release-manifest.json
+            out/ai_env_manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 5. Build Desktop Application Binaries for Windows, macOS, and Linux
   build_binaries:
-    name: Build (${{ matrix.platform.name }})
+    name: Build Desktop (${{ matrix.platform.name }})
     needs: prepare_release
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 60
@@ -194,6 +549,7 @@ jobs:
             os: windows-latest
             release_files: |
               out/*.exe
+              out/*.blockmap
               out/latest.yml
             artifact_name: AnimeDubManager-Windows-binaries
           - name: macOS (x64 / Universal)
@@ -201,6 +557,7 @@ jobs:
             release_files: |
               out/*.dmg
               out/*.zip
+              out/*.blockmap
               out/latest-mac.yml
             artifact_name: AnimeDubManager-macOS-binaries
           - name: Linux (AppImage / DEB)
@@ -208,19 +565,21 @@ jobs:
             release_files: |
               out/*.AppImage
               out/*.deb
+              out/*.blockmap
               out/latest-linux.yml
             artifact_name: AnimeDubManager-Linux-binaries
 
     steps:
-      - name: Configure Git for Windows (support special characters and long paths)
+      - name: Configure Git for Windows
         if: runner.os == 'Windows'
         run: |
           git config --system core.protectNTFS false
           git config --system core.longpaths true
 
-      - name: Checkout repository
+      - name: Checkout release commit
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare_release.outputs.tag_name }}
           sparse-checkout: |
             /*
             !*.mp4
@@ -299,7 +658,7 @@ jobs:
             out/*.deb
           if-no-files-found: warn
 
-  # 4. Build & Push Multi-Arch Docker Image (amd64 + arm64) to GHCR for Umbrel OS
+  # 6. Build & Push Multi-Arch Docker Image (amd64 + arm64) to GHCR for Umbrel OS
   build_umbrel_docker:
     name: Build Umbrel Docker Image (amd64 + arm64)
     needs: prepare_release
@@ -309,9 +668,10 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Checkout repository
+      - name: Checkout release commit
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare_release.outputs.tag_name }}
           sparse-checkout: |
             /*
             !*.mp4
@@ -350,4 +710,3 @@ jobs:
             ${{ steps.repo_meta.outputs.image }}:${{ needs.prepare_release.outputs.tag_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-

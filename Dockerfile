@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY scripts/build-ai-env.py ./scripts/build-ai-env.py
+COPY requirements-ai.txt ./requirements-ai.txt
 COPY electron/sidecars/audio_ai_processor.py ./electron/sidecars/audio_ai_processor.py
 
 RUN python3 scripts/build-ai-env.py --install-dir /opt/ai_env --skip-zip --skip-system-deps
@@ -97,11 +98,16 @@ COPY --from=ai_env_builder /opt/ai_env /opt/ai_env
 COPY --from=node_builder /app/node_modules ./node_modules
 COPY --from=node_builder /app/dist ./dist
 COPY --from=node_builder /app/package.json ./package.json
+COPY --from=node_builder /app/package-lock.json ./package-lock.json
 COPY --from=node_builder /app/tsconfig.json ./tsconfig.json
 COPY --from=node_builder /app/server.ts ./server.ts
 COPY --from=node_builder /app/server ./server
 COPY --from=node_builder /app/electron ./electron
 COPY --from=node_builder /app/docs ./docs
+COPY --from=node_builder /app/src/build-metadata.json ./src/build-metadata.json
+COPY --from=node_builder /app/scripts/bootstrap.mjs ./scripts/bootstrap.mjs
+COPY --from=node_builder /app/scripts/compute-ai-env-hash.cjs ./scripts/compute-ai-env-hash.cjs
+COPY --from=node_builder /app/scripts/generate-metadata.js ./scripts/generate-metadata.js
 
 RUN mkdir -p /data /app/assets/bin \
     && ln -sf /usr/local/bin/yt-dlp /app/assets/bin/yt-dlp
@@ -113,4 +119,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:3000/api/health || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["tsx", "server.ts", "--server", "--prod"]
+CMD ["node", "scripts/bootstrap.mjs", "--server", "--prod"]

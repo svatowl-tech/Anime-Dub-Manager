@@ -33,6 +33,7 @@ import {
 } from '../lib/serverClient';
 import { requestServerFilePicker } from './files/serverFilePickerBridge';
 import { TelegramClientPanel } from './TelegramClientPanel';
+import { SystemUpdatesCard } from './updates/SystemUpdatesCard';
 import { Project } from '../types';
 
 export default function SettingsPanel() {
@@ -839,6 +840,8 @@ export default function SettingsPanel() {
             )}
           </div>
         </section>
+
+        <SystemUpdatesCard />
 
         <button 
           onClick={handleSave}

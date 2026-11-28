@@ -20,7 +20,7 @@ const fs = require('fs/promises');
 const fsSync = require('fs');
 const { exec } = require('child_process');
 const log = require('electron-log');
-const { autoUpdater } = require('electron-updater');
+const DesktopUpdaterService = require('./services/DesktopUpdaterService.cjs');
 
 // Safe IPC handler registration helper: prevents "Attempted to register a second handler" crashes
 function safeHandle(channel, handler) {
@@ -60,11 +60,7 @@ log.info(`Anime Dub Manager v${app.getVersion()} starting...`);
 log.info(`Packaged: ${app.isPackaged}, Platform: ${process.platform}, Arch: ${process.arch}`);
 log.info('=============================================');
 
-// Auto-updater logging
-try {
-  autoUpdater.logger = log;
-  autoUpdater.logger.transports.file.level = 'info';
-} catch (e) {}
+// Auto-updater initialized via DesktopUpdaterService after app ready
 
 process.on('uncaughtException', (error) => {
   log.error('Uncaught Exception in Main Process:', error);
@@ -346,35 +342,7 @@ app.on('child-process-gone', (event, details) => {
   log.warn(`[Electron] Child process gone: type=${details.type}, reason=${details.reason}, exitCode=${details.exitCode}`);
 });
 
-// Auto-updater handlers
-autoUpdater.on('checking-for-update', () => {
-  log.info('Checking for update...');
-});
-autoUpdater.on('update-available', (info) => {
-  log.info('Update available.');
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update-available', info);
-  }
-});
-autoUpdater.on('update-not-available', () => {
-  log.info('Update not available.');
-});
-autoUpdater.on('error', (err) => {
-  log.error('Error in auto-updater: ' + err);
-});
-autoUpdater.on('download-progress', (progressObj) => {
-  log.info(`Update download: ${progressObj.percent?.toFixed(1)}% (${progressObj.bytesPerSecond} B/s)`);
-});
-autoUpdater.on('update-downloaded', () => {
-  log.info('Update downloaded.');
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('update-downloaded');
-  }
-});
-
-safeHandle('install-update', () => {
-  autoUpdater.quitAndInstall();
-});
+// DesktopUpdaterService handles update events & IPC channels
 
 // Main App Initialization
 app.whenReady().then(async () => {
@@ -742,9 +710,19 @@ app.whenReady().then(async () => {
     }
 
     try {
+      DesktopUpdaterService.init({
+        app,
+        getMainWindow: () => mainWindow,
+        safeHandle,
+      });
+    } catch (initUpErr) {
+      log.error('Failed to initialize DesktopUpdaterService:', initUpErr);
+    }
+
+    try {
       if (process.env.NODE_ENV !== 'development' && app.isPackaged) {
-        autoUpdater.checkForUpdatesAndNotify().catch((uErr) => {
-          log.warn('AutoUpdater check error:', uErr.message);
+        DesktopUpdaterService.checkForUpdates().catch((uErr) => {
+          log.warn('DesktopUpdater check error:', uErr.message);
         });
       }
     } catch (updaterErr) {

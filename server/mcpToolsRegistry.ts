@@ -55,6 +55,8 @@ export const ADM_TOOL_CATALOG: ToolSummaryItem[] = [
   { name: 'list_curator_inbox', description: 'Просмотреть уведомления, запросы на подтверждение и заметки куратора.' },
   { name: 'get_inbox_item', description: 'Получить конкретную запись Curator Inbox вместе с вердиктом и заметкой куратора.' },
   { name: 'respond_curator_inbox', description: 'Обновить статус или добавить заметку к записи Curator Inbox.' },
+  { name: 'check_system_updates', description: 'Проверить наличие новых релизов сервера и обновлений AI_env на GitHub Releases.' },
+  { name: 'apply_system_update', description: 'Установить доступное обновление сервера (adm-server-bundle и при необходимости AI_env) с перезапуском.' },
   { name: 'invoke_ipc_raw', description: 'Расширенный вызов любого зарегистрированного IPC-канала бэкенда.' },
 ];
 
@@ -99,6 +101,8 @@ export function createDirectToolExecutor(engine: AgentToolsEngine): ToolExecutor
     list_curator_inbox: (a) => engine.listCuratorInbox(a),
     get_inbox_item: (a) => engine.getInboxItem(a.id),
     respond_curator_inbox: (a) => engine.respondCuratorInbox(a),
+    check_system_updates: () => engine.checkSystemUpdates(),
+    apply_system_update: (a) => engine.applySystemUpdate(Boolean(a?.force)),
     invoke_ipc_raw: (a) => engine.invokeIpcRaw(a.channel, a.args),
   };
 
@@ -359,6 +363,12 @@ export function createAdmMcpServer(executor: ToolExecutor): McpServer {
     id: z.string(),
     status: z.enum(['approved', 'rejected', 'noted', 'resolved', 'pending']).optional(),
     curatorNote: z.string().optional(),
+  });
+
+  reg('check_system_updates', 'Проверить наличие новых релизов сервера и обновлений AI_env на GitHub Releases.', {});
+
+  reg('apply_system_update', 'Установить доступное обновление сервера (adm-server-bundle и при необходимости AI_env) с перезапуском.', {
+    force: z.boolean().optional().default(false),
   });
 
   reg('invoke_ipc_raw', 'Расширенный вызов любого зарегистрированного IPC-канала бэкенда.', {
