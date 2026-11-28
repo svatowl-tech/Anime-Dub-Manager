@@ -2,7 +2,7 @@ manifestVersion: 1
 id: anime-dub-manager
 category: Media
 name: Anime Dub Manager
-version: "1.2.0"
+version: "1.2.1"
 tagline: Серверная студия фандаба с AI-агентом и мобильным управлением
 description: >-
   Полнофункциональный сервер для студии озвучки и фандаба на базе Umbrel OS.
